@@ -1,0 +1,6 @@
+module.exports = {
+  APP_SECRET: process.env.META_APP_SECRET,
+  VERIFY_TOKEN: process.env.META_VERIFY_TOKEN,
+  PAGE_ACCESS_TOKEN: process.env.META_PAGE_ACCESS_TOKEN,
+  GRAPH_API_VERSION: process.env.META_GRAPH_API_VERSION || "v19.0",
+};
