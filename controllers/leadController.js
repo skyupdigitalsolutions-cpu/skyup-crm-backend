@@ -26,6 +26,27 @@ const getLead = async (req, res) => {
   }
 };
 
+// ── Admin fetches leads for a specific campaign (used in Campaigns → LeadDrawer)
+const getLeadsByCampaign = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { campaign } = req.query;
+
+    if (!campaign) {
+      return res.status(400).json({ message: "campaign query param is required" });
+    }
+
+    const leads = await Lead.find({
+      company:  companyId,
+      campaign: campaign,
+    }).populate("user", "name email");
+
+    res.status(200).json(leads);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const createLead = async (req, res) => {
   try {
     const lead = await Lead.create({
@@ -40,11 +61,8 @@ const createLead = async (req, res) => {
 };
 
 // ── Admin OR SuperAdmin creates a lead from the dashboard ───────────────────
-// protectAdmin sets req.admin (has company); protectSuperAdmin sets req.superAdmin (no company)
-// For superadmin: companyId must be sent in the request body
 const adminCreateLead = async (req, res) => {
   try {
-    // Resolve companyId — admin has it on their profile, superadmin passes it in body
     const companyId = req.admin
       ? (req.admin.company._id || req.admin.company)
       : req.body.companyId;
@@ -53,7 +71,6 @@ const adminCreateLead = async (req, res) => {
       return res.status(400).json({ message: "companyId is required." });
     }
 
-    // If a specific user (agent) _id was passed, use it; otherwise find first user in company
     let assignedUser = req.body.user || null;
     if (!assignedUser) {
       const fallback = await User.findOne({ company: companyId }).select("_id").lean();
@@ -110,4 +127,4 @@ const updateLead = async (req, res) => {
   }
 };
 
-module.exports = { getLead, getLeads, createLead, adminCreateLead, updateLead, deleteLead };
+module.exports = { getLead, getLeads, getLeadsByCampaign, createLead, adminCreateLead, updateLead, deleteLead };
