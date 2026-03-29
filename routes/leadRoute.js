@@ -10,7 +10,7 @@ router.get("/:id", protect, getLead);
 
 router.get("/", protect, getLeads);
 
-// Regular user creating their own lead
+// Regular user creating their own leads
 router.post("/", protect, createLead);
 
 // Admin creating a lead for their company
