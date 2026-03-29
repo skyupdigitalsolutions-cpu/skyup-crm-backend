@@ -4,12 +4,12 @@ const leadSchema = mongoose.Schema(
   {
     leadgenId: { type: String, default: null, unique: true, sparse: true }, // Meta lead ID for duplicate check
     name: { type: String, required: true, trim: true },
-    mobile: { type: Number, required: true },
+    mobile: { type: String, required: true },
     source: { type: String, required: true, trim: true },
     campaign: { type: String, required: false, default: null },
     status: { type: String, required: true, trim: true },
     date: { type: Date, required: true },
-    remark: { type: String, required: true, trim: true },
+    remark: { type: String, required: true, trim: true }, 
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
