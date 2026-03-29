@@ -1,9 +1,10 @@
 const MetaConfig = require("../models/MetaConfig");
 
-// GET - All campaign connections (token hidden)
+// GET - All campaign connections for the admin's company (token hidden)
 const getAllConfigs = async (req, res) => {
   try {
-    const configs = await MetaConfig.find()
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const configs = await MetaConfig.find({ company: companyId })
       .populate("company", "name")
       .select("-pageAccessToken");
     res.json({ success: true, data: configs });
@@ -26,6 +27,7 @@ const getConfigById = async (req, res) => {
 };
 
 // POST - Connect a new Meta campaign
+// company is always derived from the authenticated admin — never trusted from the client
 const addConfig = async (req, res) => {
   try {
     const {
@@ -33,29 +35,24 @@ const addConfig = async (req, res) => {
       pageId,
       pageAccessToken,
       formIds,
-      company,       // accepts 24-char ObjectId string OR plain company name
       defaultStatus,
       defaultRemark,
+      graphApiVersion,
     } = req.body;
 
-    if (!campaignName || !pageId || !pageAccessToken || !company) {
+    // Derive company from the JWT-authenticated admin
+    const companyId = req.admin?.company?._id || req.admin?.company;
+
+    if (!campaignName || !pageId || !pageAccessToken) {
       return res.status(400).json({
-        message: "campaignName, pageId, pageAccessToken, and company are required",
+        message: "campaignName, pageId, and pageAccessToken are required",
       });
     }
 
-    // Resolve company: ObjectId string OR name string
-    let companyId = company;
-    const isObjectId = /^[a-f\d]{24}$/i.test(company);
-    if (!isObjectId) {
-      const Company = require("../models/Company");
-      const found = await Company.findOne({
-        name: new RegExp(`^${company.trim()}$`, "i"),
+    if (!companyId) {
+      return res.status(400).json({
+        message: "Could not determine company from session — please re-login",
       });
-      if (!found) {
-        return res.status(400).json({ message: `Company "${company}" not found` });
-      }
-      companyId = found._id;
     }
 
     const existing = await MetaConfig.findOne({ pageId });
@@ -69,9 +66,10 @@ const addConfig = async (req, res) => {
       pageAccessToken,
       formIds:         formIds || [],
       company:         companyId,
-      roundRobinIndex: 0,                             // start at first user
+      roundRobinIndex: 0,
       defaultStatus:   defaultStatus || "New",
       defaultRemark:   defaultRemark || "Lead from Meta Campaign",
+      graphApiVersion: graphApiVersion || "v25.0",
     });
 
     res.status(201).json({ success: true, data: config });
@@ -85,6 +83,8 @@ const updateConfig = async (req, res) => {
   try {
     // Prevent accidental overwrite of round-robin pointer via PUT
     delete req.body.roundRobinIndex;
+    // Prevent changing company via PUT
+    delete req.body.company;
 
     const updated = await MetaConfig.findByIdAndUpdate(
       req.params.id,

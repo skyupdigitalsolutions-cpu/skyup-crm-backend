@@ -8,13 +8,14 @@ const {
   toggleConfig,
   deleteConfig,
 } = require("../controllers/metaConfigController");
+const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 
-// Auth temporarily removed — add back once confirmed
-router.get("/", getAllConfigs);
-router.get("/:id", getConfigById);
-router.post("/", addConfig);
-router.put("/:id", updateConfig);
-router.patch("/:id/toggle", toggleConfig);
-router.delete("/:id", deleteConfig);
+// All routes protected — company is derived from req.admin inside the controller
+router.get("/", protectAdmin, getAllConfigs);
+router.get("/:id", protectAdmin, getConfigById);
+router.post("/", protectAdmin, addConfig);
+router.put("/:id", protectAdmin, updateConfig);
+router.patch("/:id/toggle", protectAdmin, toggleConfig);
+router.delete("/:id", protectAdmin, deleteConfig);
 
 module.exports = router;
