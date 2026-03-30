@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 
 const leadSchema = mongoose.Schema(
   {
-    leadgenId: { type: String, default: null, unique: true, sparse: true }, // Meta lead ID for duplicate check
+    leadgenId: { type: String, unique: true, sparse: true }, // Meta lead ID for duplicate check (sparse = nulls/undefined are NOT indexed, so multiple manual leads are allowed)
     name: { type: String, required: true, trim: true },
     mobile: { type: String, required: true },
     source: { type: String, required: true, trim: true },

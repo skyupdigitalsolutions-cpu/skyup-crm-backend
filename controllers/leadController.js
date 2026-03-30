@@ -99,6 +99,73 @@ const adminCreateLead = async (req, res) => {
   }
 };
 
+// ── Admin OR SuperAdmin bulk-creates leads (up to 50 at a time) ─────────────
+const adminCreateLeadsBulk = async (req, res) => {
+  try {
+    const companyId = req.admin
+      ? (req.admin.company._id || req.admin.company)
+      : req.body.companyId;
+
+    if (!companyId) {
+      return res.status(400).json({ message: "companyId is required." });
+    }
+
+    const items = req.body.leads; // array of lead objects
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: "leads array is required and must not be empty." });
+    }
+    if (items.length > 50) {
+      return res.status(400).json({ message: "Maximum 50 leads per bulk request." });
+    }
+
+    // Resolve a fallback user once (round-robin not applied here – caller passes user per row)
+    const fallbackUser = await User.findOne({ company: companyId }).select("_id").lean();
+
+    const results   = [];
+    const errors    = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const row = items[i];
+      try {
+        const assignedUser = row.user || (fallbackUser ? fallbackUser._id : null);
+        if (!assignedUser) {
+          errors.push({ index: i, message: "No user found in this company to assign the lead." });
+          continue;
+        }
+
+        // leadgenId is intentionally omitted for manual leads so sparse index is not triggered
+        const lead = await Lead.create({
+          name:     row.name,
+          mobile:   row.mobile,
+          source:   row.source   || "Web Form",
+          campaign: row.campaign || null,
+          status:   row.status   || "New",
+          date:     row.date     || new Date(),
+          remark:   row.remark   || "Manually added",
+          user:     assignedUser,
+          company:  companyId,
+          // leadgenId deliberately absent — undefined is not indexed by sparse index
+        });
+
+        const populated = await Lead.findById(lead._id).populate("user", "name email");
+        results.push(populated);
+      } catch (err) {
+        errors.push({ index: i, message: err.message });
+      }
+    }
+
+    res.status(207).json({
+      saved:  results,
+      errors: errors,
+      total:  items.length,
+      savedCount:  results.length,
+      errorCount:  errors.length,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const deleteLead = async (req, res) => {
   try {
     const { id } = req.params;
@@ -127,4 +194,4 @@ const updateLead = async (req, res) => {
   }
 };
 
-module.exports = { getLead, getLeads, getLeadsByCampaign, createLead, adminCreateLead, updateLead, deleteLead };
+module.exports = { getLead, getLeads, getLeadsByCampaign, createLead, adminCreateLead, adminCreateLeadsBulk, updateLead, deleteLead };
