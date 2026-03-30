@@ -2,21 +2,6 @@ const Admin = require("../models/Admin");
 const User = require("../models/Users");
 const Lead = require("../models/Leads");
 
-// Get logged-in admin's company info (plan, etc.)
-const getMyCompany = async (req, res) => {
-  try {
-    res.status(200).json({
-      _id:      req.admin.company._id,
-      name:     req.admin.company.name,
-      email:    req.admin.company.email,
-      plan:     req.admin.company.plan,
-      isActive: req.admin.company.isActive,
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-};
-
 // Get all admins in same company only
 const getAdmins = async (req, res) => {
   try {
@@ -125,7 +110,6 @@ const getCompanyLeads = async (req, res) => {
 };
 
 module.exports = {
-  getMyCompany,
   getAdmin,
   getAdmins,
   createAdmin,
