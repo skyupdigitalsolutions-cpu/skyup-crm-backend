@@ -1,5 +1,6 @@
 const express = require("express");
 const router = express.Router();
+const adminController = require("../controllers/adminController");
 const {
   getMyCompany,
   getAdmin,
@@ -9,7 +10,7 @@ const {
   updateAdmin,
   getCompanyUsers,
   getCompanyLeads,
-} = require("../controllers/adminController");
+} = adminController;
 const {
   registerAdmin,
   loginAdmin,
@@ -22,7 +23,7 @@ router.post("/register", authLimiter, registerAdmin);
 router.post("/login", authLimiter, loginAdmin);
 
 // Company specific routes (must be before /:id to avoid conflict)
-router.get("/company/me",    protectAdmin, getMyCompany);
+router.get("/company/me",    protectAdmin, getMyCompany || ((req, res) => res.status(501).json({ message: "Not implemented" })));
 router.get("/company/users", protectAdmin, getCompanyUsers);
 router.get("/company/leads", protectAdmin, getCompanyLeads);
 
