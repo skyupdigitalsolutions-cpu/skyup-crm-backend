@@ -1,32 +1,24 @@
 const rateLimit = require("express-rate-limit");
 
-// General rate limiter — by IP
+// ── Dummy pass-through middleware (no limiting) ────────────────────────────
+const noLimit = (req, res, next) => next();
+
+// General rate limiter
 const generalLimiter = rateLimit({
-  windowMs: 40 * 60 * 1000,
-  max: 200,
-  message: {
-    message: "Too many requests, please try again after 15 minutes"
-  },
+  windowMs: 15 * 60 * 1000,
+  max: 10000,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: () => true, // ✅ skip ALL requests — effectively disabled
 });
 
-// Auth rate limiter — by EMAIL
+// Auth rate limiter
 const authLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 20,
-  message: {
-    message: "Too many login attempts, please try again after 1 hour"
-  },
+  windowMs: 15 * 60 * 1000,
+  max: 10000,
   standardHeaders: true,
   legacyHeaders: false,
-
-  // Fixed — IPv6 safe fallback
-  keyGenerator: (req, res) => {
-    const email = req.body?.email?.toLowerCase();
-    if (email) return email;
-    return rateLimit.ipKeyGenerator(req, res);
-  },
+  skip: () => true, // ✅ skip ALL requests — effectively disabled
 });
 
 module.exports = { generalLimiter, authLimiter };
