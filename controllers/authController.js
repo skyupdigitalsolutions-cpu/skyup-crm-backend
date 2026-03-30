@@ -25,7 +25,7 @@ const register = async (req, res) => {
       email,
       password,
       company: companyId,
-      role: "user",           // ✅ fixed
+      role: "user",
     });
 
     res.status(201).json({
@@ -33,8 +33,8 @@ const register = async (req, res) => {
       name: user.name,
       email: user.email,
       company: user.company,
-      role: user.role,        // ✅ added
-      token: generateToken(user._id),
+      role: user.role,
+      token: generateToken(user._id, "user"),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -58,8 +58,8 @@ const login = async (req, res) => {
         name: user.name,
         email: user.email,
         company: user.company._id,
-        role: user.role,      // ✅ added
-        token: generateToken(user._id),
+        role: user.role,
+        token: generateToken(user._id, "user"),
       });
     } else {
       res.status(401).json({ message: "Invalid email or password" });

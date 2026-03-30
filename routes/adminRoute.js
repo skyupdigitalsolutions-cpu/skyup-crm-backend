@@ -10,6 +10,7 @@ const {
   updateAdmin,
   getCompanyUsers,
   getCompanyLeads,
+  deleteCompanyUser,
 } = adminController;
 const {
   registerAdmin,
@@ -29,8 +30,12 @@ router.get("/company/leads", protectAdmin, getCompanyLeads);
 
 // Admin CRUD (protected)
 router.get("/", protectAdmin, getAdmins);
-router.get("/:id", protectAdmin, getAdmin);
 router.post("/", protectAdmin, createAdmin);
+
+// User delete — must be before /:id to avoid conflict
+router.delete("/user/:id", protectAdmin, deleteCompanyUser);
+
+router.get("/:id", protectAdmin, getAdmin);
 router.delete("/:id", protectAdmin, deleteAdmin);
 router.put("/:id", protectAdmin, updateAdmin);
 

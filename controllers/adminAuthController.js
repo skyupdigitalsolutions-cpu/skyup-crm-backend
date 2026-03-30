@@ -1,4 +1,3 @@
-// controllers/adminAuthController.js
 const Admin = require("../models/Admin");
 const Company = require("../models/Company");
 const generateToken = require("../utils/generateToken");
@@ -8,13 +7,11 @@ const registerAdmin = async (req, res) => {
   try {
     const { name, email, password, companyId } = req.body;
 
-    // Check company exists
     const company = await Company.findById(companyId);
     if (!company) {
       return res.status(404).json({ message: "Company not found" });
     }
 
-    // Check company is active
     if (!company.isActive) {
       return res.status(403).json({ message: "Company is not active" });
     }
@@ -36,7 +33,8 @@ const registerAdmin = async (req, res) => {
       name: admin.name,
       email: admin.email,
       company: admin.company,
-      token: generateToken(admin._id),
+      role: "admin",
+      token: generateToken(admin._id, "admin"),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -51,7 +49,6 @@ const loginAdmin = async (req, res) => {
     const admin = await Admin.findOne({ email }).populate("company");
     if (admin && (await admin.matchPassword(password))) {
 
-      // Check company is active
       if (!admin.company.isActive) {
         return res.status(403).json({ message: "Your company is deactivated" });
       }
@@ -61,7 +58,8 @@ const loginAdmin = async (req, res) => {
         name: admin.name,
         email: admin.email,
         company: admin.company._id,
-        token: generateToken(admin._id),
+        role: "admin",
+        token: generateToken(admin._id, "admin"),
       });
     } else {
       res.status(401).json({ message: "Invalid email or password" });

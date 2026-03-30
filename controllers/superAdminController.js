@@ -1,4 +1,3 @@
-// controllers/superAdminController.js
 const SuperAdmin = require("../models/SuperAdmin");
 const Company = require("../models/Company");
 const Admin = require("../models/Admin");
@@ -23,7 +22,8 @@ const registerSuperAdmin = async (req, res) => {
       _id: superAdmin._id,
       name: superAdmin.name,
       email: superAdmin.email,
-      token: generateToken(superAdmin._id),
+      role: "superadmin",
+      token: generateToken(superAdmin._id, "superadmin"),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -42,7 +42,7 @@ const loginSuperAdmin = async (req, res) => {
         name: superAdmin.name,
         email: superAdmin.email,
         role: superAdmin.role,
-        token: generateToken(superAdmin._id),
+        token: generateToken(superAdmin._id, "superadmin"),
       });
     } else {
       res.status(401).json({ message: "Invalid email or password" });
@@ -54,7 +54,6 @@ const loginSuperAdmin = async (req, res) => {
 
 // ─── Company Management ───────────────────────────
 
-// Create a new company
 const createCompany = async (req, res) => {
   try {
     const { name, email, phone, plan } = req.body;
@@ -71,7 +70,6 @@ const createCompany = async (req, res) => {
   }
 };
 
-// Get all companies
 const getCompanies = async (req, res) => {
   try {
     const companies = await Company.find({});
@@ -81,7 +79,6 @@ const getCompanies = async (req, res) => {
   }
 };
 
-// Get single company with its admins, users, leads
 const getCompany = async (req, res) => {
   try {
     const { id } = req.params;
@@ -100,7 +97,6 @@ const getCompany = async (req, res) => {
   }
 };
 
-// Activate or Deactivate a company
 const toggleCompany = async (req, res) => {
   try {
     const { id } = req.params;
@@ -109,7 +105,7 @@ const toggleCompany = async (req, res) => {
       return res.status(404).json({ message: "Company not found" });
     }
 
-    company.isActive = !company.isActive; // ✅ Toggle active status
+    company.isActive = !company.isActive;
     await company.save();
 
     res.status(200).json({
@@ -121,7 +117,6 @@ const toggleCompany = async (req, res) => {
   }
 };
 
-// Delete a company and all its data
 const deleteCompany = async (req, res) => {
   try {
     const { id } = req.params;
@@ -130,7 +125,6 @@ const deleteCompany = async (req, res) => {
       return res.status(404).json({ message: "Company not found" });
     }
 
-    // ✅ Delete all related data
     await Admin.deleteMany({ company: id });
     await User.deleteMany({ company: id });
     await Lead.deleteMany({ company: id });
@@ -142,14 +136,13 @@ const deleteCompany = async (req, res) => {
   }
 };
 
-// Get dashboard stats across all companies
 const getDashboardStats = async (req, res) => {
   try {
-    const totalCompanies = await Company.countDocuments();
+    const totalCompanies  = await Company.countDocuments();
     const activeCompanies = await Company.countDocuments({ isActive: true });
-    const totalAdmins = await Admin.countDocuments();
-    const totalUsers = await User.countDocuments();
-    const totalLeads = await Lead.countDocuments();
+    const totalAdmins     = await Admin.countDocuments();
+    const totalUsers      = await User.countDocuments();
+    const totalLeads      = await Lead.countDocuments();
 
     res.status(200).json({
       totalCompanies,

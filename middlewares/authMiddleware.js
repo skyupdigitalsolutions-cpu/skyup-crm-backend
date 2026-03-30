@@ -1,4 +1,3 @@
-// middleware/authMiddleware.js
 const jwt = require("jsonwebtoken");
 const User = require("../models/Users");
 
@@ -10,16 +9,25 @@ const protect = async (req, res, next) => {
       token = req.headers.authorization.split(" ")[1];
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = await User.findById(decoded.id).select("-password");
 
-      return next(); // ✅ return stops execution here
+      // Reject if token was issued for a different role
+      if (decoded.role && decoded.role !== "user") {
+        return res.status(403).json({ message: "Access denied: not a user token" });
+      }
+
+      req.user = await User.findById(decoded.id).select("-password");
+      if (!req.user) {
+        return res.status(401).json({ message: "User not found" });
+      }
+
+      return next();
     } catch (error) {
-      return res.status(401).json({ message: "Not authorized, invalid token" }); // ✅ return stops execution here
+      return res.status(401).json({ message: "Not authorized, invalid token" });
     }
   }
 
   if (!token) {
-    return res.status(401).json({ message: "Not authorized, no token" }); // ✅ return stops execution here
+    return res.status(401).json({ message: "Not authorized, no token" });
   }
 };
 

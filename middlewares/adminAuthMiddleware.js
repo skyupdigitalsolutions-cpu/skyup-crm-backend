@@ -9,6 +9,12 @@ const protectAdmin = async (req, res, next) => {
       token = req.headers.authorization.split(" ")[1];
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+      // Reject if token was issued for a different role
+      if (decoded.role && decoded.role !== "admin") {
+        return res.status(403).json({ message: "Access denied: not an admin token" });
+      }
+
       req.admin = await Admin.findById(decoded.id)
         .select("-password")
         .populate("company");

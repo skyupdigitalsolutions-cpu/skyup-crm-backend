@@ -1,6 +1,7 @@
 const Admin = require("../models/Admin");
 const User = require("../models/Users");
 const Lead = require("../models/Leads");
+const generateToken = require("../utils/generateToken");
 
 // Get logged-in admin's company info (plan, etc.)
 const getMyCompany = async (req, res) => {
@@ -57,21 +58,22 @@ const createAdmin = async (req, res) => {
       name,
       email,
       password,
-      company: req.admin.company._id, //auto attach from logged-in admin
+      company: req.admin.company._id,
     });
 
     res.status(201).json({
-      _id: admin._id,
-      name: admin.name,
-      email: admin.email,
+      _id:     admin._id,
+      name:    admin.name,
+      email:   admin.email,
       company: admin.company,
+      role:    "admin",
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-//Delete admin — company check + return on 404
+// Delete admin — company check
 const deleteAdmin = async (req, res) => {
   try {
     const { id } = req.params;
@@ -86,7 +88,7 @@ const deleteAdmin = async (req, res) => {
   }
 };
 
-// Update admin — company check + return on 404
+// Update admin — company check
 const updateAdmin = async (req, res) => {
   try {
     const { id } = req.params;
@@ -124,6 +126,21 @@ const getCompanyLeads = async (req, res) => {
   }
 };
 
+// Delete a user (agent) — company check to prevent cross-company deletes
+const deleteCompanyUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await User.findOne({ _id: id, company: req.admin.company._id });
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    await User.findByIdAndDelete(id);
+    return res.status(200).json({ message: "User deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -133,4 +150,5 @@ module.exports = {
   updateAdmin,
   getCompanyUsers,
   getCompanyLeads,
+  deleteCompanyUser,
 };
