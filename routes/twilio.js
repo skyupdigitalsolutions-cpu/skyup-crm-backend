@@ -2,6 +2,7 @@
 const express  = require('express');
 const router   = express.Router();
 const twilio   = require('twilio');
+const axios    = require('axios');
 const Call     = require('../models/Call');
 const Lead     = require('../models/Leads');
 
@@ -27,8 +28,7 @@ router.get('/token', (req, res) => {
 
 // ── 2. TwiML voice handler ────────────────────────────────────────────────────
 router.post('/voice', async (req, res) => {
-  const twiml  = new twilio.twiml.VoiceResponse();
-  // FIX #3: Twilio auto-injects CallSid — log it so we can verify matching later
+  const twiml = new twilio.twiml.VoiceResponse();
   const { To, LeadId, CallSid, Caller } = req.body;
 
   console.log('[/voice] incoming:', { To, LeadId, CallSid, Caller });
@@ -52,7 +52,6 @@ router.post('/voice', async (req, res) => {
 
     const dial = twiml.dial({
       callerId: process.env.TWILIO_PHONE_NUMBER,
-      // FIX #1: 'record-from-answer-dual' captures both caller + callee audio
       record:   'record-from-answer-dual',
       recordingStatusCallback:       `${process.env.SERVER_URL}/api/twilio/recording-status`,
       recordingStatusCallbackMethod: 'POST',
@@ -71,17 +70,13 @@ router.post('/voice', async (req, res) => {
 router.post('/recording-status', async (req, res) => {
   const { CallSid, ParentCallSid, RecordingSid, RecordingUrl, RecordingDuration, RecordingStatus } = req.body;
 
-  // FIX #2 + #3: Log every webhook hit so you can confirm Render is awake
-  // and verify which CallSid Twilio is sending back
   console.log('[/recording-status] received:', { CallSid, ParentCallSid, RecordingSid, RecordingStatus, RecordingDuration });
 
-  // Only save when recording is actually complete
   if (RecordingStatus !== 'completed') {
     return res.sendStatus(200);
   }
 
   try {
-    // FIX #3: Twilio may send the child leg's CallSid — try both child + parent
     let result = await Call.findOneAndUpdate(
       { callSid: CallSid },
       {
@@ -94,7 +89,6 @@ router.post('/recording-status', async (req, res) => {
       { new: true }
     );
 
-    // If no match on child CallSid, try the parent CallSid
     if (!result && ParentCallSid) {
       console.log('[/recording-status] No match on CallSid, trying ParentCallSid:', ParentCallSid);
       result = await Call.findOneAndUpdate(
@@ -134,32 +128,27 @@ router.get('/admin/recordings', async (req, res) => {
   }
 });
 
-// ── 5. Stream recording audio (proxies Twilio auth so browser can play it) ───
+// ── 5. Stream recording audio (proxied via axios so browser can play it) ──────
 router.get('/recording/:recordingSid/audio', async (req, res) => {
   try {
     const { recordingSid } = req.params;
     const url = `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Recordings/${recordingSid}.mp3`;
 
-    const response = await fetch(url, {
-      headers: {
-        Authorization: 'Basic ' + Buffer.from(
-          `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
-        ).toString('base64'),
+    const response = await axios.get(url, {
+      responseType: 'stream',
+      auth: {
+        username: process.env.TWILIO_ACCOUNT_SID,
+        password: process.env.TWILIO_AUTH_TOKEN,
       },
     });
-
-    if (!response.ok) {
-      console.error('[/recording/audio] Twilio returned:', response.status);
-      return res.status(response.status).send('Could not fetch recording');
-    }
 
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'private, max-age=3600');
-    response.body.pipe(res);
+    response.data.pipe(res);
   } catch (err) {
-    console.error('Audio proxy error:', err);
-    res.status(500).send('Server error');
+    console.error('Audio proxy error:', err?.response?.status, err.message);
+    res.status(err?.response?.status || 500).send('Could not fetch recording');
   }
 });
 
