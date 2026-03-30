@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const {
+  getMyCompany,
   getAdmin,
   getAdmins,
   createAdmin,
@@ -21,6 +22,7 @@ router.post("/register", authLimiter, registerAdmin);
 router.post("/login", authLimiter, loginAdmin);
 
 // Company specific routes (must be before /:id to avoid conflict)
+router.get("/company/me",    protectAdmin, getMyCompany);
 router.get("/company/users", protectAdmin, getCompanyUsers);
 router.get("/company/leads", protectAdmin, getCompanyLeads);
 
