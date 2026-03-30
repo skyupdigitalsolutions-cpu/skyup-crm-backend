@@ -194,4 +194,48 @@ const updateLead = async (req, res) => {
   }
 };
 
-module.exports = { getLead, getLeads, getLeadsByCampaign, createLead, adminCreateLead, adminCreateLeadsBulk, updateLead, deleteLead };
+// ── Admin / SuperAdmin update a lead ────────────────────────────────────────
+const adminUpdateLead = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const companyId = req.admin
+      ? (req.admin.company._id || req.admin.company)
+      : req.body.companyId;
+
+    const lead = await Lead.findOne({ _id: id, company: companyId });
+    if (!lead) {
+      return res.status(404).json({ message: "Lead Not Found!.." });
+    }
+
+    // Strip fields that should never be overwritten via this route
+    const { company, user, leadgenId, ...safeBody } = req.body;
+
+    const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, { new: true })
+      .populate("user", "name email");
+    return res.status(200).json(updatedLead);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── Admin / SuperAdmin delete a lead ────────────────────────────────────────
+const adminDeleteLead = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const companyId = req.admin
+      ? (req.admin.company._id || req.admin.company)
+      : null;
+
+    const query = companyId ? { _id: id, company: companyId } : { _id: id };
+    const lead = await Lead.findOne(query);
+    if (!lead) {
+      return res.status(404).json({ message: "Lead Not Found!.." });
+    }
+    await Lead.findByIdAndDelete(id);
+    return res.status(200).json({ message: "Deleted the Lead Successfully!.." });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = { getLead, getLeads, getLeadsByCampaign, createLead, adminCreateLead, adminCreateLeadsBulk, updateLead, deleteLead, adminUpdateLead, adminDeleteLead };

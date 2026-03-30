@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { getLead, getLeads, getLeadsByCampaign, createLead, updateLead, deleteLead, adminCreateLead, adminCreateLeadsBulk } = require("../controllers/leadController");
+const { getLead, getLeads, getLeadsByCampaign, createLead, updateLead, deleteLead, adminCreateLead, adminCreateLeadsBulk, adminUpdateLead, adminDeleteLead } = require("../controllers/leadController");
 const { protect } = require("../middlewares/authMiddleware");
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 const { protectSuperAdmin } = require("../middlewares/superAdminMiddleware");
@@ -30,5 +30,11 @@ router.post("/superadmin/create", protectSuperAdmin, adminCreateLead);
 
 router.delete("/:id", protect, deleteLead);
 router.put("/:id", protect, updateLead);
+
+// Admin / SuperAdmin update and delete (used from the Report Page dashboard)
+router.put("/admin/:id", protectAdmin, adminUpdateLead);
+router.delete("/admin/:id", protectAdmin, adminDeleteLead);
+router.put("/superadmin/:id", protectSuperAdmin, adminUpdateLead);
+router.delete("/superadmin/:id", protectSuperAdmin, adminDeleteLead);
 
 module.exports = router;
