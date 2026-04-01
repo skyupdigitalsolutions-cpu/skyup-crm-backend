@@ -1,51 +1,57 @@
-const crypto    = require("crypto");
-const { APP_SECRET } = require("../config/meta");
-
-// BUG FIX: Look up the per-campaign appSecret from MetaConfig using the pageId
-// embedded in the webhook body. Fall back to the global .env APP_SECRET.
-// This allows multiple Facebook Pages (different apps) to each have their own secret.
-const getAppSecret = async (reqBody) => {
-  try {
-    const MetaConfig = require("../models/MetaConfig");
-    const pageId = reqBody?.entry?.[0]?.id;
-    if (pageId) {
-      const config = await MetaConfig.findOne({ pageId, isActive: true }).select("appSecret").lean();
-      if (config?.appSecret) return config.appSecret;
-    }
-  } catch (_) { /* ignore — fall through to env */ }
-  return APP_SECRET;
-};
+const crypto = require("crypto");
 
 const verifyMetaSignature = async (req, res, next) => {
-  // If APP_SECRET not configured at all, let request through with a warning
-  const secret = await getAppSecret(req.body);
-
-  if (!secret) {
-    console.warn("⚠️  META_APP_SECRET is not set — skipping signature verification. Set it in .env for security.");
-    return next();
-  }
-
   try {
-    const signature = req.headers["x-hub-signature-256"];
+    // ── Resolve the correct App Secret ───────────────────────────────────────
+    // Priority: per-campaign appSecret in DB → META_APP_SECRET env var
+    // If neither is set (or is still the placeholder), SKIP verification with warning.
+    let secret = null;
 
+    try {
+      const MetaConfig = require("../models/MetaConfig");
+      const pageId = req.body?.entry?.[0]?.id;
+      if (pageId) {
+        const config = await MetaConfig.findOne({ pageId }).select("appSecret").lean();
+        if (config?.appSecret && config.appSecret.trim() !== "") {
+          secret = config.appSecret.trim();
+        }
+      }
+    } catch (_) { /* DB lookup failed — fall through */ }
+
+    // Fall back to env var — but reject placeholder value
+    if (!secret) {
+      const envSecret = process.env.META_APP_SECRET;
+      const isPlaceholder = !envSecret ||
+        envSecret === "your_meta_app_secret" ||
+        envSecret.startsWith("your_");
+      if (!isPlaceholder) {
+        secret = envSecret;
+      }
+    }
+
+    // No valid secret found — skip verification, log warning, allow through
+    if (!secret) {
+      console.warn("⚠️  META_APP_SECRET not configured — skipping signature check. Set a real App Secret in .env or per-campaign config.");
+      return next();
+    }
+
+    // ── Verify HMAC-SHA256 signature ─────────────────────────────────────────
+    const signature = req.headers["x-hub-signature-256"];
     if (!signature) {
-      console.warn("Missing Meta signature header");
+      console.warn("❌ Missing x-hub-signature-256 header from Meta");
       return res.sendStatus(403);
     }
 
-    // BUG FIX: req.rawBody may be undefined if the raw-body capture middleware
-    // did not run (e.g. non-JSON content-type). Fall back to a serialised body.
     const bodyBuffer = req.rawBody || Buffer.from(JSON.stringify(req.body));
-
-    const expected =
-      "sha256=" +
-      crypto
-        .createHmac("sha256", secret)
-        .update(bodyBuffer)
-        .digest("hex");
+    const expected = "sha256=" + crypto
+      .createHmac("sha256", secret)
+      .update(bodyBuffer)
+      .digest("hex");
 
     if (signature !== expected) {
-      console.warn("Invalid Meta signature");
+      console.warn("❌ Invalid Meta signature — check that META_APP_SECRET matches your Meta App's App Secret exactly.");
+      console.warn(`   Received:  ${signature}`);
+      console.warn(`   Computed:  ${expected}`);
       return res.sendStatus(403);
     }
 

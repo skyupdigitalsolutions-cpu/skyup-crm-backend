@@ -10,85 +10,132 @@ const { VERIFY_TOKEN } = require("../config/meta");
 
 // GET - Meta webhook verification handshake
 const verifyWebhook = (req, res) => {
-  const {
-    "hub.mode":         mode,
-    "hub.verify_token": token,
-    "hub.challenge":    challenge,
-  } = req.query;
+  const mode      = req.query["hub.mode"];
+  const token     = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  console.log(`🔐 Webhook verify attempt — mode: "${mode}", token: "${token}"`);
 
   if (mode === "subscribe") {
     if (!VERIFY_TOKEN || token === VERIFY_TOKEN) {
-      console.log("Meta webhook verified ✅");
+      console.log("✅ Meta webhook verified");
       return res.status(200).send(challenge);
     }
+    console.warn(`❌ Token mismatch — received: "${token}", expected: "${VERIFY_TOKEN}"`);
   }
-
-  console.warn(`Meta webhook verification failed ❌ — received: "${token}", expected: "${VERIFY_TOKEN}"`);
   res.sendStatus(403);
 };
 
 // POST - Receive lead events from Meta
 const receiveWebhook = async (req, res) => {
-  res.sendStatus(200); // respond immediately — Meta requires < 5 s
+  // CRITICAL: Always send 200 immediately — Meta marks as failed if > 5 seconds
+  res.sendStatus(200);
 
   try {
     const { object, entry } = req.body;
 
-    // BUG FIX: Full logging so every step is visible in Render logs
-    console.log(`📨 Webhook received — object: "${object}", entries: ${entry?.length || 0}`);
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log(`📨 Webhook received`);
+    console.log(`   object : "${object}"`);
+    console.log(`   entries: ${entry?.length || 0}`);
+    console.log(`   body   : ${JSON.stringify(req.body)}`);
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    if (!entry || entry.length === 0) {
+      console.warn("⚠️  No entries in webhook payload");
+      return;
+    }
 
     if (object !== "page") {
-      console.warn(`⚠️  Unexpected webhook object: "${object}" — expected "page". Check your Meta App webhook subscription.`);
+      console.warn(`⚠️  object is "${object}" — expected "page". Wrong webhook subscription type.`);
       return;
     }
 
     for (const e of entry) {
       const pageId = e.id;
-      console.log(`  → pageId: ${pageId}, changes: ${e.changes?.length || 0}`);
+      console.log(`\n🔍 Processing entry — pageId: "${pageId}"`);
 
-      const config = await MetaConfig.findOne({ pageId, isActive: true });
+      // ── Find matching MetaConfig ────────────────────────────────────────────
+      const config = await MetaConfig.findOne({ pageId });
+
       if (!config) {
-        // BUG FIX: Print ALL registered pageIds so you can spot the mismatch instantly
-        const allConfigs = await MetaConfig.find({}).select("pageId campaignName isActive").lean();
-        console.warn(`❌ No active MetaConfig for pageId: "${pageId}"`);
-        console.warn(`   Registered: ${JSON.stringify(allConfigs.map(c => ({ pageId: c.pageId, campaign: c.campaignName, active: c.isActive })))}`);
+        const all = await MetaConfig.find({}).select("pageId campaignName isActive").lean();
+        console.error(`❌ No MetaConfig found for pageId: "${pageId}"`);
+        console.error(`   All registered pageIds: ${JSON.stringify(all)}`);
+        console.error(`   👉 Fix: Make sure the pageId "${pageId}" is entered exactly in your CRM campaign settings.`);
         continue;
       }
 
+      if (!config.isActive) {
+        console.warn(`⚠️  MetaConfig for pageId "${pageId}" exists but is PAUSED — activate it in CRM.`);
+        continue;
+      }
+
+      // ── Check pageAccessToken is not a placeholder ──────────────────────────
+      if (!config.pageAccessToken || config.pageAccessToken.startsWith("your_") || config.pageAccessToken === "EAAxxxxxx") {
+        console.error(`❌ pageAccessToken for campaign "${config.campaignName}" is a placeholder — enter the real Page Access Token in CRM.`);
+        continue;
+      }
+
+      console.log(`✅ Config found — campaign: "${config.campaignName}", active: ${config.isActive}`);
+
       for (const change of e.changes) {
-        console.log(`  → change.field: "${change.field}"`);
-        if (change.field !== "leadgen") continue;
+        console.log(`   change.field: "${change.field}"`);
+
+        if (change.field !== "leadgen") {
+          console.log(`   ⏭ Skipping non-leadgen change: "${change.field}"`);
+          continue;
+        }
 
         const { leadgen_id, form_id } = change.value;
-        console.log(`  → leadgen_id: ${leadgen_id}, form_id: ${form_id}`);
+        console.log(`   leadgen_id: "${leadgen_id}"`);
+        console.log(`   form_id   : "${form_id}"`);
 
-        if (config.formIds.length > 0 && !config.formIds.includes(form_id)) {
-          console.log(`  → Form ${form_id} skipped — not in allowlist for: ${config.campaignName}`);
+        // ── Form filter ────────────────────────────────────────────────────────
+        if (config.formIds && config.formIds.length > 0 && !config.formIds.includes(form_id)) {
+          console.warn(`   ⏭ form_id "${form_id}" not in allowed list: [${config.formIds.join(", ")}]`);
           continue;
         }
 
+        // ── Deduplicate ────────────────────────────────────────────────────────
         const duplicate = await Lead.findOne({ leadgenId: leadgen_id });
         if (duplicate) {
-          console.log(`  → Duplicate skipped — leadgenId: ${leadgen_id}`);
+          console.log(`   ⏭ Duplicate — leadgenId "${leadgen_id}" already in DB`);
           continue;
         }
 
-        console.log(`  → Fetching from Meta Graph API (${config.graphApiVersion || "default"})...`);
-        const leadData     = await fetchLeadData(leadgen_id, config.pageAccessToken, config.graphApiVersion);
+        // ── Fetch lead details from Meta Graph API ─────────────────────────────
+        const apiVersion = config.graphApiVersion || process.env.META_GRAPH_API_VERSION || "v19.0";
+        console.log(`   📡 Fetching lead from Meta Graph API (${apiVersion})...`);
+
+        let leadData;
+        try {
+          leadData = await fetchLeadData(leadgen_id, config.pageAccessToken, apiVersion);
+          console.log(`   📋 field_data: ${JSON.stringify(leadData.field_data)}`);
+        } catch (fetchErr) {
+          console.error(`   ❌ Failed to fetch lead from Meta Graph API`);
+          console.error(`      Error: ${fetchErr?.response?.data?.error?.message || fetchErr.message}`);
+          console.error(`      👉 Fix: The pageAccessToken may be expired or invalid. Generate a new Long-Lived Page Access Token.`);
+          continue;
+        }
+
         const parsedFields = parseFieldData(leadData.field_data);
-        console.log(`  → Parsed fields: ${JSON.stringify(parsedFields)}`);
+        console.log(`   parsed: ${JSON.stringify(parsedFields)}`);
 
+        // ── Round-robin assign ─────────────────────────────────────────────────
         const assignedUserId = await getNextAssignedUser(config);
-        console.log(`  → Assigned to: ${assignedUserId || "unassigned (no users in company)"}`);
+        console.log(`   assigned user: ${assignedUserId || "unassigned"}`);
 
+        // ── Save lead ──────────────────────────────────────────────────────────
         const leadPayload = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
-        const newLead     = await Lead.create(leadPayload);
+        console.log(`   saving lead: ${JSON.stringify(leadPayload)}`);
 
-        console.log(`✅ Lead saved — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | user: ${assignedUserId || "unassigned"}`);
+        const newLead = await Lead.create(leadPayload);
+        console.log(`\n✅ LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`);
       }
     }
   } catch (err) {
-    console.error("❌ Webhook processing error:", err.message);
+    console.error("❌ WEBHOOK PROCESSING ERROR:", err.message);
     console.error(err.stack);
   }
 };

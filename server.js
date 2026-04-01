@@ -28,46 +28,44 @@ const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server, { cors: { origin: '*' } });
 
-// ── Middleware ───────────────────────────────────────────────────────────────
-// Raw body must be captured BEFORE express.json() for Meta signature verification
+// ── CRITICAL: Capture raw body for Meta HMAC signature verification ───────────
+// This MUST come before any other body parser
 app.use((req, res, next) => {
   express.json({
-    verify: (req, res, buf) => {
-      req.rawBody = buf;
-    },
+    verify: (req, res, buf) => { req.rawBody = buf; },
   })(req, res, next);
 });
 
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
 
-// ── Health Check ─────────────────────────────────────────────────────────────
+// ── Health Check ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send('Server is running'));
 
-// ── Meta Routes — registered BEFORE rate limiter so Meta IPs are never throttled
+// ── Meta Routes — BEFORE rate limiter so Meta webhook IPs are never throttled ─
 app.use('/meta',            metaWebhookRoute);
 app.use('/api/meta-config', metaConfigRoute);
 
-// Apply rate limiter to all other routes only
+// ── Rate limiter for all other routes ─────────────────────────────────────────
 app.use(generalLimiter);
 
-// ── CRM API Routes ───────────────────────────────────────────────────────────
+// ── CRM API Routes ────────────────────────────────────────────────────────────
 app.use('/api/superadmin', superAdminRoute);
 app.use('/api/admin',      adminRoute);
 app.use('/api/auth',       authRoute);
 app.use('/api/lead',       leadRoute);
 
-// ── Twilio Routes ────────────────────────────────────────────────────────────
-app.use('/api/twilio',     twilioRoutes);
+// ── Twilio Routes ─────────────────────────────────────────────────────────────
+app.use('/api/twilio', twilioRoutes);
 
-// ── Chat Engine Routes ───────────────────────────────────────────────────────
-app.use('/api/chat',       chatRoutes);
+// ── Chat Routes ───────────────────────────────────────────────────────────────
+app.use('/api/chat', chatRoutes);
 
-// ── Socket.IO ────────────────────────────────────────────────────────────────
+// ── Socket.IO ─────────────────────────────────────────────────────────────────
 initSocket(io);
 
-// ── Connect DB & Start Server ────────────────────────────────────────────────
+// ── Start Server ──────────────────────────────────────────────────────────────
 connectDB().then(() => {
   const PORT = process.env.PORT || 5000;
-  server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 });
