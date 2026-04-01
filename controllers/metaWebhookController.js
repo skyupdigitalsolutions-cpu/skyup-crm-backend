@@ -9,10 +9,6 @@ const {
 const { VERIFY_TOKEN } = require("../config/meta");
 
 // GET - Meta webhook verification handshake
-// BUG FIX: Meta sends the same verify_token that was entered when registering
-// the webhook in the App Dashboard. The global .env VERIFY_TOKEN is used for
-// the subscription, so we check against it. If it is blank we fall back to
-// accepting any token so the handshake still completes during development.
 const verifyWebhook = (req, res) => {
   const {
     "hub.mode":         mode,
@@ -21,14 +17,13 @@ const verifyWebhook = (req, res) => {
   } = req.query;
 
   if (mode === "subscribe") {
-    // Accept if it matches the env token OR if no env token is set (dev mode)
     if (!VERIFY_TOKEN || token === VERIFY_TOKEN) {
       console.log("Meta webhook verified ✅");
       return res.status(200).send(challenge);
     }
   }
 
-  console.warn(`Meta webhook verification failed ❌ — received token: "${token}", expected: "${VERIFY_TOKEN}"`);
+  console.warn(`Meta webhook verification failed ❌ — received: "${token}", expected: "${VERIFY_TOKEN}"`);
   res.sendStatus(403);
 };
 
@@ -38,53 +33,63 @@ const receiveWebhook = async (req, res) => {
 
   try {
     const { object, entry } = req.body;
-    if (object !== "page") return;
+
+    // BUG FIX: Full logging so every step is visible in Render logs
+    console.log(`📨 Webhook received — object: "${object}", entries: ${entry?.length || 0}`);
+
+    if (object !== "page") {
+      console.warn(`⚠️  Unexpected webhook object: "${object}" — expected "page". Check your Meta App webhook subscription.`);
+      return;
+    }
 
     for (const e of entry) {
       const pageId = e.id;
+      console.log(`  → pageId: ${pageId}, changes: ${e.changes?.length || 0}`);
 
       const config = await MetaConfig.findOne({ pageId, isActive: true });
       if (!config) {
-        console.warn(`No active Meta config found for pageId: ${pageId}`);
+        // BUG FIX: Print ALL registered pageIds so you can spot the mismatch instantly
+        const allConfigs = await MetaConfig.find({}).select("pageId campaignName isActive").lean();
+        console.warn(`❌ No active MetaConfig for pageId: "${pageId}"`);
+        console.warn(`   Registered: ${JSON.stringify(allConfigs.map(c => ({ pageId: c.pageId, campaign: c.campaignName, active: c.isActive })))}`);
         continue;
       }
 
       for (const change of e.changes) {
+        console.log(`  → change.field: "${change.field}"`);
         if (change.field !== "leadgen") continue;
 
         const { leadgen_id, form_id } = change.value;
+        console.log(`  → leadgen_id: ${leadgen_id}, form_id: ${form_id}`);
 
-        // Skip forms not in the allowed list (if a list was configured)
         if (config.formIds.length > 0 && !config.formIds.includes(form_id)) {
-          console.log(`Form ${form_id} skipped — not in allowed list for: ${config.campaignName}`);
+          console.log(`  → Form ${form_id} skipped — not in allowlist for: ${config.campaignName}`);
           continue;
         }
 
-        // Deduplicate
         const duplicate = await Lead.findOne({ leadgenId: leadgen_id });
         if (duplicate) {
-          console.log(`Duplicate lead skipped — leadgenId: ${leadgen_id}`);
+          console.log(`  → Duplicate skipped — leadgenId: ${leadgen_id}`);
           continue;
         }
 
-        // Fetch full lead data from Meta
+        console.log(`  → Fetching from Meta Graph API (${config.graphApiVersion || "default"})...`);
         const leadData     = await fetchLeadData(leadgen_id, config.pageAccessToken, config.graphApiVersion);
         const parsedFields = parseFieldData(leadData.field_data);
+        console.log(`  → Parsed fields: ${JSON.stringify(parsedFields)}`);
 
-        // ── Round-robin: pick next user for this company ──────────────────────
         const assignedUserId = await getNextAssignedUser(config);
+        console.log(`  → Assigned to: ${assignedUserId || "unassigned (no users in company)"}`);
 
-        // Build and save the lead
         const leadPayload = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
         const newLead     = await Lead.create(leadPayload);
 
-        console.log(
-          `✅ Lead saved — Name: ${newLead.name} | Campaign: ${config.campaignName} | Assigned to: ${assignedUserId || "unassigned"}`
-        );
+        console.log(`✅ Lead saved — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | user: ${assignedUserId || "unassigned"}`);
       }
     }
   } catch (err) {
-    console.error("Webhook processing error:", err);
+    console.error("❌ Webhook processing error:", err.message);
+    console.error(err.stack);
   }
 };
 

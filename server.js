@@ -40,10 +40,16 @@ app.use((req, res, next) => {
 
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
-app.use(generalLimiter);
 
 // ── Health Check ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send('Server is running'));
+
+// ── Meta Routes — registered BEFORE rate limiter so Meta IPs are never throttled
+app.use('/meta',            metaWebhookRoute);
+app.use('/api/meta-config', metaConfigRoute);
+
+// Apply rate limiter to all other routes only
+app.use(generalLimiter);
 
 // ── CRM API Routes ───────────────────────────────────────────────────────────
 app.use('/api/superadmin', superAdminRoute);
@@ -56,10 +62,6 @@ app.use('/api/twilio',     twilioRoutes);
 
 // ── Chat Engine Routes ───────────────────────────────────────────────────────
 app.use('/api/chat',       chatRoutes);
-
-// ── Meta Routes ──────────────────────────────────────────────────────────────
-app.use('/meta',            metaWebhookRoute);
-app.use('/api/meta-config', metaConfigRoute);
 
 // ── Socket.IO ────────────────────────────────────────────────────────────────
 initSocket(io);
