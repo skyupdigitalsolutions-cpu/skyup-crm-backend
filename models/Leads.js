@@ -5,6 +5,7 @@ const leadSchema = mongoose.Schema(
     leadgenId: { type: String, default: null, unique: true, sparse: true }, // Meta lead ID for duplicate check
     name: { type: String, required: true, trim: true },
     mobile: { type: String, required: true },
+    email:  { type: String, default: "", trim: true },   // ← ADDED: was missing, Meta always sends this
     source: { type: String, required: true, trim: true },
     campaign: { type: String, required: false, default: null },
     status: { type: String, required: true, trim: true },

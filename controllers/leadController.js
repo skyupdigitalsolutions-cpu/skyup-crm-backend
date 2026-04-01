@@ -3,10 +3,14 @@ const User = require("../models/Users");
 
 const getLeads = async (req, res) => {
   try {
+    // Return leads assigned to this user OR unassigned leads for the same company
     const leads = await Lead.find({
       company: req.user.company,
-      user: req.user._id,
-    });
+      $or: [
+        { user: req.user._id },
+        { user: null },
+      ],
+    }).populate("user", "name email");
     res.status(200).json(leads);
   } catch (error) {
     res.status(500).json({ message: error.message });

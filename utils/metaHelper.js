@@ -7,7 +7,7 @@ const fetchLeadData = async (leadgenId, pageAccessToken, graphApiVersion) => {
   try {
     const response = await axios.get(
       `https://graph.facebook.com/${version}/${leadgenId}`,
-      { params: { access_token: pageAccessToken } }
+      { params: { fields: "created_time,field_data", access_token: pageAccessToken } }
     );
     return response.data;
   } catch (err) {
@@ -55,6 +55,14 @@ const getNextAssignedUser = async (config) => {
 
 // ── Map Meta fields → Lead schema ─────────────────────────────────────────────
 const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
+  // Build a remark that captures the custom Meta form fields
+  const extraFields = [
+    parsedFields["what_type_of_business_do_you_run?"]      && `Business: ${parsedFields["what_type_of_business_do_you_run?"]}`,
+    parsedFields["what_service_are_you_interested_in?"]    && `Service: ${parsedFields["what_service_are_you_interested_in?"]}`,
+    parsedFields["what_is_your_monthly_marketing_budget?"] && `Budget: ${parsedFields["what_is_your_monthly_marketing_budget?"]}`,
+    parsedFields["what_is_the_best_time_for_our_team_to_contact_you?"] && `Best time: ${parsedFields["what_is_the_best_time_for_our_team_to_contact_you?"]}`,
+  ].filter(Boolean).join(" | ");
+
   return {
     leadgenId,
 
@@ -66,12 +74,14 @@ const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
 
     mobile: (parsedFields["phone_number"] || parsedFields["mobile"] || "").replace(/\D/g, ""),
 
+    email:  parsedFields["email"] || parsedFields["email_address"] || "",
+
     source:   "Meta",
     campaign: config.campaignName,
     status:   config.defaultStatus,
     date:     new Date(),
-    remark:   config.defaultRemark,
-    user:     assignedUserId,   // round-robin assigned user (may be null)
+    remark:   extraFields || config.defaultRemark,
+    user:     assignedUserId,
     company:  config.company,
   };
 };
