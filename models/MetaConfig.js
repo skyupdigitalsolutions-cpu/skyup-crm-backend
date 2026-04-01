@@ -20,8 +20,11 @@ const metaConfigSchema = new mongoose.Schema(
       default: 0, // pointer to the next user slot
     },
 
-    defaultStatus: { type: String, default: "New" },
-    defaultRemark: { type: String, default: "Lead from Meta Campaign" },
+    defaultStatus:   { type: String, default: "New" },
+    defaultRemark:   { type: String, default: "Lead from Meta Campaign" },
+    graphApiVersion: { type: String, default: "v21.0" }, // per-campaign API version
+    appSecret:       { type: String, default: "" },       // per-campaign App Secret for signature verification
+    verifyToken:     { type: String, default: "" },       // per-campaign verify token
   },
   { timestamps: true },
 );

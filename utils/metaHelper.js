@@ -1,12 +1,12 @@
 const axios  = require("axios");
 const User   = require("../models/Users");
-const { GRAPH_API_VERSION } = require("../config/meta");
 
 // ── Fetch lead data from Meta Graph API ───────────────────────────────────────
-const fetchLeadData = async (leadgenId, pageAccessToken) => {
+const fetchLeadData = async (leadgenId, pageAccessToken, graphApiVersion) => {
+  const version = graphApiVersion || process.env.META_GRAPH_API_VERSION || "v21.0";
   try {
     const response = await axios.get(
-      `https://graph.facebook.com/${GRAPH_API_VERSION}/${leadgenId}`,
+      `https://graph.facebook.com/${version}/${leadgenId}`,
       { params: { access_token: pageAccessToken } }
     );
     return response.data;
@@ -64,9 +64,7 @@ const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
         ? `${parsedFields["first_name"] || ""} ${parsedFields["last_name"] || ""}`.trim()
         : "Unknown"),
 
-    mobile: Number(
-      (parsedFields["phone_number"] || parsedFields["mobile"] || "0").replace(/\D/g, "")
-    ),
+    mobile: (parsedFields["phone_number"] || parsedFields["mobile"] || "").replace(/\D/g, ""),
 
     source:   "Meta",
     campaign: config.campaignName,

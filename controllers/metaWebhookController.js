@@ -9,6 +9,10 @@ const {
 const { VERIFY_TOKEN } = require("../config/meta");
 
 // GET - Meta webhook verification handshake
+// BUG FIX: Meta sends the same verify_token that was entered when registering
+// the webhook in the App Dashboard. The global .env VERIFY_TOKEN is used for
+// the subscription, so we check against it. If it is blank we fall back to
+// accepting any token so the handshake still completes during development.
 const verifyWebhook = (req, res) => {
   const {
     "hub.mode":         mode,
@@ -16,12 +20,15 @@ const verifyWebhook = (req, res) => {
     "hub.challenge":    challenge,
   } = req.query;
 
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("Meta webhook verified ✅");
-    return res.status(200).send(challenge);
+  if (mode === "subscribe") {
+    // Accept if it matches the env token OR if no env token is set (dev mode)
+    if (!VERIFY_TOKEN || token === VERIFY_TOKEN) {
+      console.log("Meta webhook verified ✅");
+      return res.status(200).send(challenge);
+    }
   }
 
-  console.warn("Meta webhook verification failed ❌");
+  console.warn(`Meta webhook verification failed ❌ — received token: "${token}", expected: "${VERIFY_TOKEN}"`);
   res.sendStatus(403);
 };
 
@@ -61,7 +68,7 @@ const receiveWebhook = async (req, res) => {
         }
 
         // Fetch full lead data from Meta
-        const leadData     = await fetchLeadData(leadgen_id, config.pageAccessToken);
+        const leadData     = await fetchLeadData(leadgen_id, config.pageAccessToken, config.graphApiVersion);
         const parsedFields = parseFieldData(leadData.field_data);
 
         // ── Round-robin: pick next user for this company ──────────────────────

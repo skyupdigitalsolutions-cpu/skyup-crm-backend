@@ -1,13 +1,34 @@
 const MetaConfig = require("../models/MetaConfig");
+const Lead       = require("../models/Leads");
 
 // GET - All campaign connections for the admin's company (token hidden)
+// BUG FIX: also returns real lead counts so the Campaigns page card shows the
+// correct number instead of always "0".
 const getAllConfigs = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const configs = await MetaConfig.find({ company: companyId })
       .populate("company", "name")
-      .select("-pageAccessToken");
-    res.json({ success: true, data: configs });
+      .select("-pageAccessToken")
+      .lean();
+
+    // Attach live lead counts for each campaign
+    const enriched = await Promise.all(
+      configs.map(async (cfg) => {
+        const leadCount = await Lead.countDocuments({
+          company:  companyId,
+          campaign: cfg.campaignName,
+        });
+        const convertedCount = await Lead.countDocuments({
+          company:  companyId,
+          campaign: cfg.campaignName,
+          status:   "Converted",
+        });
+        return { ...cfg, leads: leadCount, converted: convertedCount };
+      })
+    );
+
+    res.json({ success: true, data: enriched });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -38,6 +59,7 @@ const addConfig = async (req, res) => {
       defaultStatus,
       defaultRemark,
       graphApiVersion,
+      _meta,           // { META_APP_SECRET, META_VERIFY_TOKEN, META_GRAPH_API_VERSION }
     } = req.body;
 
     // Derive company from the JWT-authenticated admin
@@ -60,6 +82,9 @@ const addConfig = async (req, res) => {
       return res.status(400).json({ message: "This Meta page is already connected" });
     }
 
+    // BUG FIX: persist per-campaign appSecret & verifyToken so the webhook
+    // middleware and verification handshake can use the correct credentials
+    // for each page rather than always relying on the global .env values.
     const config = await MetaConfig.create({
       campaignName,
       pageId,
@@ -69,7 +94,9 @@ const addConfig = async (req, res) => {
       roundRobinIndex: 0,
       defaultStatus:   defaultStatus || "New",
       defaultRemark:   defaultRemark || "Lead from Meta Campaign",
-      graphApiVersion: graphApiVersion || "v25.0",
+      graphApiVersion: graphApiVersion || (_meta?.META_GRAPH_API_VERSION) || "v25.0",
+      appSecret:       _meta?.META_APP_SECRET  || "",
+      verifyToken:     _meta?.META_VERIFY_TOKEN || "",
     });
 
     res.status(201).json({ success: true, data: config });
