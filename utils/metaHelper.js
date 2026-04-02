@@ -72,7 +72,12 @@ const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
         ? `${parsedFields["first_name"] || ""} ${parsedFields["last_name"] || ""}`.trim()
         : "Unknown"),
 
-    mobile: (parsedFields["phone_number"] || parsedFields["mobile"] || "").replace(/\D/g, ""),
+    mobile: (() => {
+  const raw = parsedFields["phone_number"] || parsedFields["mobile"] || "";
+  const stripped = raw.replace(/\D/g, "");
+  return stripped || raw || "N/A";
+})(),
+    
 
     email:  parsedFields["email"] || parsedFields["email_address"] || "",
 
