@@ -6,24 +6,50 @@ const {
   mapToLeadSchema,
   getNextAssignedUser,
 } = require("../utils/metaHelper");
-const { VERIFY_TOKEN } = require("../config/meta");
 
 // GET - Meta webhook verification handshake
-const verifyWebhook = (req, res) => {
+const verifyWebhook = async (req, res) => {
   const mode      = req.query["hub.mode"];
   const token     = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   console.log(`🔐 Webhook verify attempt — mode: "${mode}", token: "${token}"`);
 
-  if (mode === "subscribe") {
-    if (!VERIFY_TOKEN || token === VERIFY_TOKEN) {
-      console.log("✅ Meta webhook verified");
+  if (mode !== "subscribe") {
+    console.warn(`❌ Unexpected mode: "${mode}"`);
+    return res.sendStatus(403);
+  }
+
+  // ── Step 1: Check global env token ─────────────────────────────────────────
+  const envToken = process.env.META_VERIFY_TOKEN;
+  if (envToken && envToken.trim() !== "" && token === envToken.trim()) {
+    console.log("✅ Meta webhook verified via ENV token");
+    return res.status(200).send(challenge);
+  }
+
+  // ── Step 2: Check per-campaign DB token ────────────────────────────────────
+  try {
+    const match = await MetaConfig.findOne({
+      verifyToken: token,
+      isActive: true,
+    });
+
+    if (match) {
+      console.log(`✅ Meta webhook verified via DB token — campaign: "${match.campaignName}"`);
       return res.status(200).send(challenge);
     }
-    console.warn(`❌ Token mismatch — received: "${token}", expected: "${VERIFY_TOKEN}"`);
+  } catch (err) {
+    console.error("❌ DB lookup failed during webhook verify:", err.message);
   }
-  res.sendStatus(403);
+
+  // ── Step 3: No match found ──────────────────────────────────────────────────
+  console.warn(`❌ Token mismatch — received: "${token}"`);
+  console.warn(`   ENV META_VERIFY_TOKEN: "${envToken || "not set"}"`);
+  console.warn(`   Also checked all active campaign verifyTokens in DB — none matched.`);
+  console.warn(`   👉 Fix: Make sure the Verify Token in Meta's App dashboard matches`);
+  console.warn(`      either META_VERIFY_TOKEN in your .env OR the verifyToken saved`);
+  console.warn(`      for the campaign in your CRM.`);
+  return res.sendStatus(403);
 };
 
 // POST - Receive lead events from Meta
