@@ -11,6 +11,11 @@ const leadSchema = mongoose.Schema(
     status: { type: String, required: true, trim: true },
     date: { type: Date, required: true },
     remark: { type: String, required: true, trim: true }, 
+    temperature: {
+      type: String,
+      enum: ["Hot", "Warm", "Cold", null],
+      default: null,
+    },
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

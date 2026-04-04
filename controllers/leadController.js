@@ -242,4 +242,73 @@ const adminDeleteLead = async (req, res) => {
   }
 };
 
-module.exports = { getLead, getLeads, getLeadsByCampaign, createLead, adminCreateLead, adminCreateLeadsBulk, updateLead, deleteLead, adminUpdateLead, adminDeleteLead };
+// ── User: fetch only leads assigned to themselves ────────────────────────────
+const getMyLeads = async (req, res) => {
+  try {
+    const leads = await Lead.find({
+      company: req.user.company,
+      user:    req.user._id,           // strictly only this user's leads
+    })
+      .sort({ createdAt: -1 })
+      .populate("user", "name email");
+    res.status(200).json(leads);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── User: PATCH status + remark on a lead (same as updateLead but PATCH verb) ─
+const patchLead = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const lead = await Lead.findOne({ _id: id, company: req.user.company });
+    if (!lead) {
+      return res.status(404).json({ message: "Lead Not Found!.." });
+    }
+
+    // Only allow safe fields — never let user overwrite company/user/leadgenId
+    const { status, remark } = req.body;
+    const update = {};
+    if (status !== undefined) update.status = status;
+    if (remark !== undefined) update.remark = remark;
+
+    const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
+    return res.status(200).json(updatedLead);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── User: PATCH temperature on a lead ───────────────────────────────────────
+const patchLeadTemperature = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { temperature } = req.body;
+
+    if (!["Hot", "Warm", "Cold"].includes(temperature)) {
+      return res.status(400).json({ message: "temperature must be Hot, Warm, or Cold" });
+    }
+
+    const lead = await Lead.findOne({ _id: id, company: req.user.company });
+    if (!lead) {
+      return res.status(404).json({ message: "Lead Not Found!.." });
+    }
+
+    const updatedLead = await Lead.findByIdAndUpdate(
+      id,
+      { temperature },
+      { new: true }
+    );
+    return res.status(200).json(updatedLead);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = {
+  getLead, getLeads, getLeadsByCampaign,
+  createLead, adminCreateLead, adminCreateLeadsBulk,
+  updateLead, patchLead, patchLeadTemperature,
+  deleteLead, adminUpdateLead, adminDeleteLead,
+  getMyLeads,
+};
