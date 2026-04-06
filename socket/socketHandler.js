@@ -8,7 +8,15 @@ const initSocket = (io) => {
   io.on('connection', (socket) => {
 
     // User joins
-    socket.on('user_join', async (username) => {
+    // FIX: frontend was sending { username } object — now accept both forms
+    socket.on('user_join', async (payload) => {
+      // Accept either a plain string ("alice") or an object ({ username: "alice" })
+      const username = typeof payload === 'object' && payload !== null
+        ? payload.username
+        : payload;
+
+      if (!username) return;
+
       onlineUsers[socket.id] = username;
 
       await ChatUser.findOneAndUpdate(
@@ -33,6 +41,8 @@ const initSocket = (io) => {
     // User sends message to admin
     socket.on('user_message', async ({ message }) => {
       const username = onlineUsers[socket.id];
+      if (!username) return;
+
       await Message.create({ from: username, to: 'admin', message });
 
       io.to('admin').emit('receive_user_message', {
@@ -65,7 +75,13 @@ const initSocket = (io) => {
     // Admin sends message to user
     socket.on('admin_message', async ({ toSocketId, toUsername, message }) => {
       await Message.create({ from: 'admin', to: toUsername, message });
-      io.to(toSocketId).emit('receive_admin_message', { message });
+
+      // FIX: also emit back to admin's own chat state
+      socket.emit('admin_message_sent', { toUsername, message });
+
+      if (toSocketId) {
+        io.to(toSocketId).emit('receive_admin_message', { message });
+      }
     });
 
     // Disconnect
