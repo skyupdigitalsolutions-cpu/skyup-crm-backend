@@ -1,3 +1,4 @@
+server.js
 require('dotenv').config();
 const express      = require('express');
 const http         = require('http');
@@ -21,6 +22,10 @@ const chatRoutes = require('./routes/chatRoutes');
 const metaWebhookRoute = require('./routes/metaWebhook');
 const metaConfigRoute  = require('./routes/metaConfig');
 
+// Google Ads Routes
+const googleWebhookRoutes   = require('./routes/googleWebhook');
+const googleAdsConfigRoutes = require('./routes/googleAdsConfig');
+
 // Twilio Routes
 const twilioRoutes = require('./routes/twilio');
 
@@ -28,8 +33,7 @@ const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server, { cors: { origin: '*' } });
 
-// ── CRITICAL: Capture raw body for Meta HMAC signature verification ───────────
-// This MUST come before any other body parser
+// ── CRITICAL: Raw body capture for Meta HMAC — must be before any other body parser
 app.use((req, res, next) => {
   express.json({
     verify: (req, res, buf) => { req.rawBody = buf; },
@@ -42,9 +46,11 @@ app.use(express.urlencoded({ extended: true }));
 // ── Health Check ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send('Server is running'));
 
-// ── Meta Routes — BEFORE rate limiter so Meta webhook IPs are never throttled ─
-app.use('/meta',            metaWebhookRoute);
-app.use('/api/meta-config', metaConfigRoute);
+// ── Webhook Routes — BEFORE rate limiter so external IPs are never throttled ──
+app.use('/meta',               metaWebhookRoute);
+app.use('/api/meta-config',    metaConfigRoute);
+app.use('/',                   googleWebhookRoutes);      // Google POSTs to /google-webhook
+app.use('/api/google-ads-config', googleAdsConfigRoutes); // fixed: added /api/ prefix
 
 // ── Rate limiter for all other routes ─────────────────────────────────────────
 app.use(generalLimiter);
