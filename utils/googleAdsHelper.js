@@ -9,7 +9,7 @@ const parseGoogleLeadData = (userColumnData = []) => {
   return result;
 };
 
-// Round-robin — same logic as your Meta helper
+// Round-robin — same logic as your Meta helper 
 const getNextAssignedUserGoogle = async (config) => {
   const GoogleAdsConfig = require("../models/GoogleAdsConfig");
 
