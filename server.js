@@ -27,6 +27,10 @@ const twilioRoutes = require('./routes/twilio');
 // Razorpay Routes
 const razorpayRoute = require('./routes/razorpayRoute');
 
+// Google Ads Routes
+const googleAdsConfigRoute = require('./routes/googleAdsConfig');
+const googleWebhookRoute   = require('./routes/googleWebhook');
+
 const app    = express();
 const server = http.createServer(app);
 // ✅ FIXED server.js
@@ -81,6 +85,10 @@ app.use('/api/twilio', twilioRoutes);
 
 // ── Razorpay Routes ───────────────────────────────────────────────────────────
 app.use('/api/razorpay', razorpayRoute);
+
+// ── Google Ads Routes ─────────────────────────────────────────────────────────
+app.use('/api/google-ads-config', googleAdsConfigRoute);
+app.use('/',                      googleWebhookRoute);
 
 // ── Chat Routes ───────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
