@@ -21,18 +21,35 @@ const chatRoutes = require('./routes/chatRoutes');
 const metaWebhookRoute = require('./routes/metaWebhook');
 const metaConfigRoute  = require('./routes/metaConfig');
 
-// Google Ads Routes
-const googleWebhookRoutes   = require('./routes/googleWebhook');
-const googleAdsConfigRoutes = require('./routes/googleAdsConfig');
-
 // Twilio Routes
 const twilioRoutes = require('./routes/twilio');
 
+// Razorpay Routes
+const razorpayRoute = require('./routes/razorpayRoute');
+
 const app    = express();
 const server = http.createServer(app);
-const io     = new Server(server, { cors: { origin: '*' } });
+// ✅ FIXED server.js
 
-// ── CRITICAL: Raw body capture for Meta HMAC — must be before any other body parser
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "https://skyup-crm-frontend.onrender.com", // add your real domain here
+];
+
+const corsOptions = {
+  origin: allowedOrigins,
+  credentials: true,
+};
+
+// Fix Socket.IO CORS
+const io = new Server(server, { cors: corsOptions });
+
+// Fix Express CORS (replace the existing app.use(cors()))
+app.use(cors(corsOptions));
+
+// ── CRITICAL: Capture raw body for Meta HMAC signature verification ───────────
+// This MUST come before any other body parser
 app.use((req, res, next) => {
   express.json({
     verify: (req, res, buf) => { req.rawBody = buf; },
@@ -41,15 +58,14 @@ app.use((req, res, next) => {
 
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
+app.use(express.text({ type: "text/plain", limit: "5mb" }));
 
 // ── Health Check ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send('Server is running'));
 
-// ── Webhook Routes — BEFORE rate limiter so external IPs are never throttled ──
-app.use('/meta',               metaWebhookRoute);
-app.use('/api/meta-config',    metaConfigRoute);
-app.use('/',                   googleWebhookRoutes);      // Google POSTs to /google-webhook
-app.use('/api/google-ads-config', googleAdsConfigRoutes); // fixed: added /api/ prefix
+// ── Meta Routes — BEFORE rate limiter so Meta webhook IPs are never throttled ─
+app.use('/meta',            metaWebhookRoute);
+app.use('/api/meta-config', metaConfigRoute);
 
 // ── Rate limiter for all other routes ─────────────────────────────────────────
 app.use(generalLimiter);
@@ -62,6 +78,9 @@ app.use('/api/lead',       leadRoute);
 
 // ── Twilio Routes ─────────────────────────────────────────────────────────────
 app.use('/api/twilio', twilioRoutes);
+
+// ── Razorpay Routes ───────────────────────────────────────────────────────────
+app.use('/api/razorpay', razorpayRoute);
 
 // ── Chat Routes ───────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
