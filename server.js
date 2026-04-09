@@ -31,6 +31,10 @@ const razorpayRoute = require('./routes/razorpayRoute');
 const googleAdsConfigRoute = require('./routes/googleAdsConfig');
 const googleWebhookRoute   = require('./routes/googleWebhook');
 
+// Website Contact Form Routes
+const websiteConfigRoute  = require('./routes/websiteConfig');
+const websiteWebhookRoute = require('./routes/websiteWebhook');
+
 const app    = express();
 const server = http.createServer(app);
 // ✅ FIXED server.js
@@ -89,6 +93,10 @@ app.use('/api/razorpay', razorpayRoute);
 // ── Google Ads Routes ─────────────────────────────────────────────────────────
 app.use('/api/google-ads-config', googleAdsConfigRoute);
 app.use('/',                      googleWebhookRoute);
+
+// ── Website Contact Form Routes ───────────────────────────────────────────────
+app.use('/api/website-config', websiteConfigRoute);
+app.use('/',                   websiteWebhookRoute);
 
 // ── Chat Routes ───────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
