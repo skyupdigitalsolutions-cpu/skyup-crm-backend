@@ -98,9 +98,6 @@ const io = new Server(server, {
   },
 });
 
-// ── Apply dynamic CORS to all Express routes ──────────────────────────────────
-app.use(cors(corsOptions));
-
 // ── CRITICAL: Capture raw body for Meta HMAC signature verification ───────────
 // This MUST come before any other body parser
 app.use((req, res, next) => {
@@ -119,52 +116,48 @@ app.get('/', (req, res) => res.send('Server is running'));
 app.use('/meta',            metaWebhookRoute);
 app.use('/api/meta-config', metaConfigRoute);
 
-// ── Website Webhook — BEFORE rate limiter, dynamic CORS per registered site ───
-// webhook_secret is the real auth — CORS is just the browser-level protection
-app.use('/website-webhook', async (req, res, next) => {
+// ── Website Webhook — BEFORE global CORS so preflight is never blocked ────────
+// webhook_secret is the real auth guard; CORS is just browser-level protection.
+// The OPTIONS preflight is answered immediately (no async DB call) so the
+// browser never sees a missing Access-Control-Allow-Origin header.
+app.use('/website-webhook', (req, res, next) => {
   const origin = req.headers.origin || '';
 
-  try {
-    if (!origin) {
-      // Server-to-server / GTM server-side — no CORS headers needed
-      return next();
-    }
+  // Set permissive CORS headers for every request on this path
+  res.header('Access-Control-Allow-Origin',  origin || '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Vary', 'Origin');
 
-    // Always set CORS headers for browser requests — webhook_secret is the guard
-    res.header('Access-Control-Allow-Origin',  origin);
-    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
-    res.header('Vary', 'Origin');
+  // ✅ Respond to preflight immediately — no async work needed here
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
 
-    if (req.method === 'OPTIONS') return res.sendStatus(200);
-
-    // Log which website is sending leads
-    try {
-      const WebsiteConfig = require('./models/WebsiteConfig');
-      const hostname = origin.replace(/^https?:\/\//, "").replace(/\/$/, "");
-      const config = await WebsiteConfig.findOne({
-        pageUrl:  { $regex: hostname, $options: "i" },
-        isActive: true,
-      });
-      if (config) {
-        console.log(`🌐 Website webhook from registered site: "${config.sourceName}" (${origin})`);
-      } else {
-        console.log(`⚠️  Website webhook from unregistered origin: ${origin} — secret will verify`);
+  // Fire-and-forget DB logging (does NOT block the request)
+  if (origin) {
+    (async () => {
+      try {
+        const WebsiteConfig = require('./models/WebsiteConfig');
+        const hostname = origin.replace(/^https?:\/\//, '').replace(/\/$/, '');
+        const config = await WebsiteConfig.findOne({
+          pageUrl:  { $regex: hostname, $options: 'i' },
+          isActive: true,
+        });
+        if (config) {
+          console.log(`🌐 Website webhook from registered site: "${config.sourceName}" (${origin})`);
+        } else {
+          console.log(`⚠️  Website webhook from unregistered origin: ${origin} — secret will verify`);
+        }
+      } catch (e) {
+        console.error('Website webhook DB log error:', e.message);
       }
-    } catch (e) { /* log only — don't block */ }
-
-    next();
-
-  } catch (err) {
-    console.error("Website webhook CORS middleware error:", err.message);
-    // On any error still allow — don't drop leads due to middleware crash
-    res.header('Access-Control-Allow-Origin',  origin || '*');
-    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
-    if (req.method === 'OPTIONS') return res.sendStatus(200);
-    next();
+    })();
   }
+
+  next();
 }, websiteWebhookRoute);
+
+// ── Apply dynamic CORS to all remaining Express routes ────────────────────────
+app.use(cors(corsOptions));
 
 // ── Rate limiter for all other routes ─────────────────────────────────────────
 app.use(generalLimiter);
