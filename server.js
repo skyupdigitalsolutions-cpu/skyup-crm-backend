@@ -37,23 +37,68 @@ const websiteWebhookRoute = require('./routes/websiteWebhook');
 
 const app    = express();
 const server = http.createServer(app);
-// ✅ FIXED server.js
 
-const allowedOrigins = [
+// ── Static origins always allowed (CRM frontend + local dev) ─────────────────
+const staticAllowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
-  "https://skyup-crm-frontend.onrender.com", // add your real domain here
+  "https://skyup-crm-frontend.onrender.com",
 ];
 
+// ── Dynamic CORS — checks WebsiteConfig collection for registered websites ────
 const corsOptions = {
-  origin: allowedOrigins,
+  origin: async (origin, callback) => {
+    // Allow requests with no origin (Postman, server-to-server, curl, mobile)
+    if (!origin) return callback(null, true);
+
+    // Always allow static CRM origins
+    if (staticAllowedOrigins.includes(origin)) return callback(null, true);
+
+    // Dynamically check if origin matches any active registered website
+    try {
+      const WebsiteConfig = require('./models/WebsiteConfig');
+      const hostname = origin.replace(/^https?:\/\//, "").replace(/\/$/, "");
+      const config = await WebsiteConfig.findOne({
+        pageUrl:  { $regex: hostname, $options: "i" },
+        isActive: true,
+      });
+      if (config) {
+        console.log(`✅ CORS allowed for registered website: ${origin}`);
+        return callback(null, true);
+      }
+    } catch (e) {
+      console.error("CORS DB check error:", e.message);
+      // On DB error fall through — don't crash the server
+    }
+
+    console.warn(`⚠️  CORS blocked unknown origin: ${origin}`);
+    callback(new Error(`CORS blocked: ${origin}`));
+  },
   credentials: true,
 };
 
-// Fix Socket.IO CORS
-const io = new Server(server, { cors: corsOptions });
+// ── Socket.IO with same dynamic CORS ─────────────────────────────────────────
+const io = new Server(server, {
+  cors: {
+    origin: async (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (staticAllowedOrigins.includes(origin)) return callback(null, true);
+      try {
+        const WebsiteConfig = require('./models/WebsiteConfig');
+        const hostname = origin.replace(/^https?:\/\//, "").replace(/\/$/, "");
+        const config = await WebsiteConfig.findOne({
+          pageUrl:  { $regex: hostname, $options: "i" },
+          isActive: true,
+        });
+        if (config) return callback(null, true);
+      } catch (e) { /* fall through */ }
+      callback(new Error(`CORS blocked: ${origin}`));
+    },
+    credentials: true,
+  },
+});
 
-// Fix Express CORS (replace the existing app.use(cors()))
+// ── Apply dynamic CORS to all Express routes ──────────────────────────────────
 app.use(cors(corsOptions));
 
 // ── CRITICAL: Capture raw body for Meta HMAC signature verification ───────────
@@ -64,7 +109,6 @@ app.use((req, res, next) => {
   })(req, res, next);
 });
 
-app.use(cors());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.text({ type: "text/plain", limit: "5mb" }));
 
@@ -74,6 +118,53 @@ app.get('/', (req, res) => res.send('Server is running'));
 // ── Meta Routes — BEFORE rate limiter so Meta webhook IPs are never throttled ─
 app.use('/meta',            metaWebhookRoute);
 app.use('/api/meta-config', metaConfigRoute);
+
+// ── Website Webhook — BEFORE rate limiter, dynamic CORS per registered site ───
+// webhook_secret is the real auth — CORS is just the browser-level protection
+app.use('/website-webhook', async (req, res, next) => {
+  const origin = req.headers.origin || '';
+
+  try {
+    if (!origin) {
+      // Server-to-server / GTM server-side — no CORS headers needed
+      return next();
+    }
+
+    // Always set CORS headers for browser requests — webhook_secret is the guard
+    res.header('Access-Control-Allow-Origin',  origin);
+    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    res.header('Vary', 'Origin');
+
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+
+    // Log which website is sending leads
+    try {
+      const WebsiteConfig = require('./models/WebsiteConfig');
+      const hostname = origin.replace(/^https?:\/\//, "").replace(/\/$/, "");
+      const config = await WebsiteConfig.findOne({
+        pageUrl:  { $regex: hostname, $options: "i" },
+        isActive: true,
+      });
+      if (config) {
+        console.log(`🌐 Website webhook from registered site: "${config.sourceName}" (${origin})`);
+      } else {
+        console.log(`⚠️  Website webhook from unregistered origin: ${origin} — secret will verify`);
+      }
+    } catch (e) { /* log only — don't block */ }
+
+    next();
+
+  } catch (err) {
+    console.error("Website webhook CORS middleware error:", err.message);
+    // On any error still allow — don't drop leads due to middleware crash
+    res.header('Access-Control-Allow-Origin',  origin || '*');
+    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    next();
+  }
+}, websiteWebhookRoute);
 
 // ── Rate limiter for all other routes ─────────────────────────────────────────
 app.use(generalLimiter);
@@ -94,9 +185,8 @@ app.use('/api/razorpay', razorpayRoute);
 app.use('/api/google-ads-config', googleAdsConfigRoute);
 app.use('/',                      googleWebhookRoute);
 
-// ── Website Contact Form Routes ───────────────────────────────────────────────
+// ── Website Config API Routes ─────────────────────────────────────────────────
 app.use('/api/website-config', websiteConfigRoute);
-app.use('/',                   websiteWebhookRoute);
 
 // ── Chat Routes ───────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
