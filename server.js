@@ -116,12 +116,12 @@ app.use(express.text({ type: "text/plain", limit: "5mb" }));
 // ── Health Check ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send('Server is running'));
 
-// ── Meta Routes — BEFORE rate limiter & CORS ─────────────────────────────────
+// ── Meta Webhook ONLY — BEFORE rate limiter & CORS ───────────────────────────
 // Meta webhook calls are server-to-server (no browser Origin header), so CORS
-// does not apply. They must be before the rate limiter so Meta's IPs are never
-// throttled and webhook delivery never fails.
-app.use('/meta',            metaWebhookRoute);
-app.use('/api/meta-config', metaConfigRoute);
+// does not apply. Must be before rate limiter so Meta's IPs are never throttled.
+// NOTE: /api/meta-config is the browser-facing API — it is mounted AFTER cors()
+// so the frontend's preflight OPTIONS request gets the correct headers.
+app.use('/meta', metaWebhookRoute);
 
 // ── Website Webhook — BEFORE global CORS so browser preflight always succeeds ─
 // The webhook_secret in the POST body is the real auth guard.
@@ -171,6 +171,9 @@ app.use(cors(corsOptions));
 
 // ── Rate limiter ──────────────────────────────────────────────────────────────
 app.use(generalLimiter);
+
+// ── Meta Config API — browser-facing, needs CORS ─────────────────────────────
+app.use('/api/meta-config', metaConfigRoute);
 
 // ── CRM API Routes ────────────────────────────────────────────────────────────
 app.use('/api/superadmin', superAdminRoute);
