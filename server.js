@@ -198,6 +198,10 @@ app.use('/api/website-config', websiteConfigRoute);
 // ── Chat Routes ───────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
 
+// ── Make io accessible to controllers (e.g. websiteWebhookController) ────────
+app.set("io", io);
+global._io = io;
+
 // ── Socket.IO ─────────────────────────────────────────────────────────────────
 initSocket(io);
 
