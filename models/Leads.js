@@ -26,7 +26,7 @@ const scheduledCallSchema = new mongoose.Schema(
 
 const leadSchema = mongoose.Schema(
   {
-    leadgenId: { type: String, default: null, unique: true, sparse: true },
+    leadgenId: { type: String, unique: true, sparse: true },
     name:      { type: String, required: true, trim: true },
     mobile:    { type: String, required: true },
     email:     { type: String, default: "", trim: true },
