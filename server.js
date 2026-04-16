@@ -39,7 +39,8 @@ const googleWebhookRoute   = require('./routes/googleWebhook');
 const websiteConfigRoute  = require('./routes/websiteConfig');
 const websiteWebhookRoute = require('./routes/websiteWebhook');
 
-const attendanceRoute = require('./routes/attendanceRoute');
+const attendanceRoute      = require('./routes/attendanceRoute');
+const emailCampaignRoute   = require('./routes/emailCampaign');
 
 const app    = express();
 const server = http.createServer(app);
@@ -156,6 +157,7 @@ app.use('/',                      googleWebhookRoute);
 
 app.use('/api/website-config', websiteConfigRoute);
 app.use('/api/chat', chatRoutes);
+app.use('/api/email-campaign', emailCampaignRoute);
 
 app.set("io", io);
 global._io = io;
