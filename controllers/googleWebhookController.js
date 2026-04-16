@@ -1,160 +1,101 @@
-// controllers/metaWebhookController.js
-const MetaConfig = require("../models/MetaConfig");
-const Lead       = require("../models/Leads");
-const { notifyAdmin } = require("../utils/notifyAdmin"); // ← ADD THIS
+// controllers/googleWebhookController.js
+const GoogleAdsConfig = require("../models/GoogleAdsConfig");
+const Lead            = require("../models/Leads");
+const { notifyAdmin } = require("../utils/notifyAdmin");
 const {
-  fetchLeadData,
-  parseFieldData,
-  mapToLeadSchema,
-  getNextAssignedUser,
-} = require("../utils/metaHelper");
+  parseGoogleLeadData,
+  getNextAssignedUserGoogle,
+  mapGoogleLeadToSchema,
+} = require("../utils/googleAdsHelper");
 
-// GET - Meta webhook verification handshake
-const verifyWebhook = async (req, res) => {
-  const mode      = req.query["hub.mode"];
-  const token     = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  console.log(`🔐 Webhook verify attempt — mode: "${mode}", token: "${token}"`);
-
-  if (mode !== "subscribe") {
-    console.warn(`❌ Unexpected mode: "${mode}"`);
-    return res.sendStatus(403);
-  }
-
-  // ── Step 1: Check global env token ─────────────────────────────────────────
-  const envToken = process.env.META_VERIFY_TOKEN;
-  if (envToken && envToken.trim() !== "" && token === envToken.trim()) {
-    console.log("✅ Meta webhook verified via ENV token");
-    return res.status(200).send(challenge);
-  }
-
-  // ── Step 2: Check per-campaign DB token ────────────────────────────────────
-  try {
-    const match = await MetaConfig.findOne({
-      verifyToken: token,
-      isActive: true,
-    });
-
-    if (match) {
-      console.log(`✅ Meta webhook verified via DB token — campaign: "${match.campaignName}"`);
-      return res.status(200).send(challenge);
-    }
-  } catch (err) {
-    console.error("❌ DB lookup failed during webhook verify:", err.message);
-  }
-
-  // ── Step 3: No match found ──────────────────────────────────────────────────
-  console.warn(`❌ Token mismatch — received: "${token}"`);
-  console.warn(`   ENV META_VERIFY_TOKEN: "${envToken || "not set"}"`);
-  console.warn(`   Also checked all active campaign verifyTokens in DB — none matched.`);
-  console.warn(`   👉 Fix: Make sure the Verify Token in Meta's App dashboard matches`);
-  console.warn(`      either META_VERIFY_TOKEN in your .env OR the verifyToken saved`);
-  console.warn(`      for the campaign in your CRM.`);
-  return res.sendStatus(403);
-};
-
-// POST - Receive lead events from Meta
-const receiveWebhook = async (req, res) => {
-  // CRITICAL: Always send 200 immediately — Meta marks as failed if > 5 seconds
+/**
+ * POST /google-webhook
+ *
+ * Google Ads Lead Form Extension sends a POST with a JSON body.
+ * Auth: Google includes a secret key in the payload or as a query param.
+ * We match it against GoogleAdsConfig.googleKey to identify the campaign.
+ */
+const receiveGoogleWebhook = async (req, res) => {
+  // Always respond 200 quickly so Google doesn't retry
   res.sendStatus(200);
 
   try {
-    const { object, entry } = req.body;
+    const body = req.body;
 
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log(`📨 Webhook received`);
-    console.log(`   object : "${object}"`);
-    console.log(`   entries: ${entry?.length || 0}`);
-    console.log(`   body   : ${JSON.stringify(req.body)}`);
+    console.log("📨 Google Ads webhook received");
+    console.log("   body:", JSON.stringify(body));
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    if (!entry || entry.length === 0) {
-      console.warn("⚠️  No entries in webhook payload");
+    // Google sends the secret key in the body as google_key (or via query param as a fallback)
+    const googleKey =
+      body.google_key ||
+      body.googleKey ||
+      req.query.key ||
+      req.query.google_key;
+
+    if (!googleKey) {
+      console.error("❌ No google_key found in request body or query params");
       return;
     }
 
-    if (object !== "page") {
-      console.warn(`⚠️  object is "${object}" — expected "page". Wrong webhook subscription type.`);
+    // Find matching campaign config
+    const config = await GoogleAdsConfig.findOne({ googleKey, isActive: true });
+
+    if (!config) {
+      console.error(`❌ No active GoogleAdsConfig found for key: "${googleKey}"`);
       return;
     }
 
-    for (const e of entry) {
-      const pageId = e.id;
-      console.log(`\n🔍 Processing entry — pageId: "${pageId}"`);
+    console.log(`✅ Config matched — campaign: "${config.campaignName}"`);
 
-      const config = await MetaConfig.findOne({ pageId });
+    // Extract lead id for deduplication
+    const googleLeadId =
+      body.lead_id ||
+      body.leadId ||
+      body.google_lead_id ||
+      null;
 
-      if (!config) {
-        const all = await MetaConfig.find({}).select("pageId campaignName isActive").lean();
-        console.error(`❌ No MetaConfig found for pageId: "${pageId}"`);
-        console.error(`   All registered pageIds: ${JSON.stringify(all)}`);
-        continue;
-      }
-
-      if (!config.isActive) {
-        console.warn(`⚠️  MetaConfig for pageId "${pageId}" exists but is PAUSED — activate it in CRM.`);
-        continue;
-      }
-
-      if (!config.pageAccessToken || config.pageAccessToken.startsWith("your_") || config.pageAccessToken === "EAAxxxxxx") {
-        console.error(`❌ pageAccessToken for campaign "${config.campaignName}" is a placeholder.`);
-        continue;
-      }
-
-      console.log(`✅ Config found — campaign: "${config.campaignName}", active: ${config.isActive}`);
-
-      for (const change of e.changes) {
-        console.log(`   change.field: "${change.field}"`);
-
-        if (change.field !== "leadgen") {
-          console.log(`   ⏭ Skipping non-leadgen change: "${change.field}"`);
-          continue;
-        }
-
-        const { leadgen_id, form_id } = change.value;
-        console.log(`   leadgen_id: "${leadgen_id}"`);
-        console.log(`   form_id   : "${form_id}"`);
-
-        if (config.formIds && config.formIds.length > 0 && !config.formIds.includes(form_id)) {
-          console.warn(`   ⏭ form_id "${form_id}" not in allowed list`);
-          continue;
-        }
-
-        const duplicate = await Lead.findOne({ leadgenId: leadgen_id });
-        if (duplicate) {
-          console.log(`   ⏭ Duplicate — leadgenId "${leadgen_id}" already in DB`);
-          continue;
-        }
-
-        const apiVersion = config.graphApiVersion || process.env.META_GRAPH_API_VERSION || "v19.0";
-        console.log(`   📡 Fetching lead from Meta Graph API (${apiVersion})...`);
-
-        let leadData;
-        try {
-          leadData = await fetchLeadData(leadgen_id, config.pageAccessToken, apiVersion);
-          console.log(`   📋 field_data: ${JSON.stringify(leadData.field_data)}`);
-        } catch (fetchErr) {
-          console.error(`   ❌ Failed to fetch lead from Meta Graph API`);
-          console.error(`      Error: ${fetchErr?.response?.data?.error?.message || fetchErr.message}`);
-          continue;
-        }
-
-        const parsedFields  = parseFieldData(leadData.field_data);
-        const assignedUserId = await getNextAssignedUser(config);
-        const leadPayload   = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
-
-        const newLead = await Lead.create(leadPayload);
-        console.log(`\n✅ META LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`);
-
-        // ── Notify admin on WhatsApp ──────────────────────────────────────────
-        notifyAdmin(newLead, config.campaignName).catch(e => console.error("Notify error:", e.message));
+    if (googleLeadId) {
+      const duplicate = await Lead.findOne({ leadgenId: googleLeadId });
+      if (duplicate) {
+        console.log(`⏭ Duplicate — leadId "${googleLeadId}" already in DB`);
+        return;
       }
     }
+
+    // Parse the user_column_data array
+    const userColumnData = body.user_column_data || [];
+    const parsedFields   = parseGoogleLeadData(userColumnData);
+
+    console.log("   parsedFields:", JSON.stringify(parsedFields));
+
+    if (
+      !parsedFields["first_name"] &&
+      !parsedFields["full_name"] &&
+      !parsedFields["phone_number"] &&
+      !parsedFields["phone"]
+    ) {
+      console.warn("⚠️  Payload appears empty — no recognisable lead fields found");
+      return;
+    }
+
+    const assignedUserId = await getNextAssignedUserGoogle(config);
+    const leadPayload    = mapGoogleLeadToSchema(parsedFields, config, googleLeadId, assignedUserId);
+
+    const newLead = await Lead.create(leadPayload);
+    console.log(
+      `\n✅ GOOGLE LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`
+    );
+
+    // Notify admin on WhatsApp
+    notifyAdmin(newLead, config.campaignName).catch((e) =>
+      console.error("Notify error:", e.message)
+    );
   } catch (err) {
-    console.error("❌ WEBHOOK PROCESSING ERROR:", err.message);
+    console.error("❌ GOOGLE WEBHOOK PROCESSING ERROR:", err.message);
     console.error(err.stack);
   }
 };
 
-module.exports = { verifyWebhook, receiveWebhook };
+module.exports = { receiveGoogleWebhook };
