@@ -35,6 +35,8 @@ const googleWebhookRoute   = require('./routes/googleWebhook');
 const websiteConfigRoute  = require('./routes/websiteConfig');
 const websiteWebhookRoute = require('./routes/websiteWebhook');
 
+const attendanceRoute = require('./routes/attendanceRoute');
+
 const app    = express();
 const server = http.createServer(app);
 
@@ -180,6 +182,8 @@ app.use('/api/superadmin', superAdminRoute);
 app.use('/api/admin',      adminRoute);
 app.use('/api/auth',       authRoute);
 app.use('/api/lead',       leadRoute);
+
+app.use('/api/attendance', attendanceRoute);
 
 // ── Twilio Routes ─────────────────────────────────────────────────────────────
 app.use('/api/twilio', twilioRoutes);
