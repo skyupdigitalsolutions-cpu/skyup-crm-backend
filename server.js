@@ -170,6 +170,6 @@ connectDB().then(() => {
     // ── Start WhatsApp client after DB is connected ───────────────────────────
     // QR code will appear in terminal on first run — scan with your WhatsApp.
     // Session is saved to .wwebjs_auth/ — no QR needed after first scan.
-    initWhatsApp();
+
   });
 });
