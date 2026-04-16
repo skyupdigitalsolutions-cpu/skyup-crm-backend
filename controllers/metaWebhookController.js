@@ -1,5 +1,7 @@
+// controllers/metaWebhookController.js
 const MetaConfig = require("../models/MetaConfig");
 const Lead       = require("../models/Leads");
+const { notifyAdmin } = require("../utils/notifyAdmin"); // ← ADD THIS
 const {
   fetchLeadData,
   parseFieldData,
@@ -81,14 +83,12 @@ const receiveWebhook = async (req, res) => {
       const pageId = e.id;
       console.log(`\n🔍 Processing entry — pageId: "${pageId}"`);
 
-      // ── Find matching MetaConfig ────────────────────────────────────────────
       const config = await MetaConfig.findOne({ pageId });
 
       if (!config) {
         const all = await MetaConfig.find({}).select("pageId campaignName isActive").lean();
         console.error(`❌ No MetaConfig found for pageId: "${pageId}"`);
         console.error(`   All registered pageIds: ${JSON.stringify(all)}`);
-        console.error(`   👉 Fix: Make sure the pageId "${pageId}" is entered exactly in your CRM campaign settings.`);
         continue;
       }
 
@@ -97,9 +97,8 @@ const receiveWebhook = async (req, res) => {
         continue;
       }
 
-      // ── Check pageAccessToken is not a placeholder ──────────────────────────
       if (!config.pageAccessToken || config.pageAccessToken.startsWith("your_") || config.pageAccessToken === "EAAxxxxxx") {
-        console.error(`❌ pageAccessToken for campaign "${config.campaignName}" is a placeholder — enter the real Page Access Token in CRM.`);
+        console.error(`❌ pageAccessToken for campaign "${config.campaignName}" is a placeholder.`);
         continue;
       }
 
@@ -117,20 +116,17 @@ const receiveWebhook = async (req, res) => {
         console.log(`   leadgen_id: "${leadgen_id}"`);
         console.log(`   form_id   : "${form_id}"`);
 
-        // ── Form filter ────────────────────────────────────────────────────────
         if (config.formIds && config.formIds.length > 0 && !config.formIds.includes(form_id)) {
-          console.warn(`   ⏭ form_id "${form_id}" not in allowed list: [${config.formIds.join(", ")}]`);
+          console.warn(`   ⏭ form_id "${form_id}" not in allowed list`);
           continue;
         }
 
-        // ── Deduplicate ────────────────────────────────────────────────────────
         const duplicate = await Lead.findOne({ leadgenId: leadgen_id });
         if (duplicate) {
           console.log(`   ⏭ Duplicate — leadgenId "${leadgen_id}" already in DB`);
           continue;
         }
 
-        // ── Fetch lead details from Meta Graph API ─────────────────────────────
         const apiVersion = config.graphApiVersion || process.env.META_GRAPH_API_VERSION || "v19.0";
         console.log(`   📡 Fetching lead from Meta Graph API (${apiVersion})...`);
 
@@ -141,23 +137,18 @@ const receiveWebhook = async (req, res) => {
         } catch (fetchErr) {
           console.error(`   ❌ Failed to fetch lead from Meta Graph API`);
           console.error(`      Error: ${fetchErr?.response?.data?.error?.message || fetchErr.message}`);
-          console.error(`      👉 Fix: The pageAccessToken may be expired or invalid. Generate a new Long-Lived Page Access Token.`);
           continue;
         }
 
-        const parsedFields = parseFieldData(leadData.field_data);
-        console.log(`   parsed: ${JSON.stringify(parsedFields)}`);
-
-        // ── Round-robin assign ─────────────────────────────────────────────────
+        const parsedFields  = parseFieldData(leadData.field_data);
         const assignedUserId = await getNextAssignedUser(config);
-        console.log(`   assigned user: ${assignedUserId || "unassigned"}`);
-
-        // ── Save lead ──────────────────────────────────────────────────────────
-        const leadPayload = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
-        console.log(`   saving lead: ${JSON.stringify(leadPayload)}`);
+        const leadPayload   = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
 
         const newLead = await Lead.create(leadPayload);
-        console.log(`\n✅ LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`);
+        console.log(`\n✅ META LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`);
+
+        // ── Notify admin on WhatsApp ──────────────────────────────────────────
+        notifyAdmin(newLead, config.campaignName).catch(e => console.error("Notify error:", e.message));
       }
     }
   } catch (err) {

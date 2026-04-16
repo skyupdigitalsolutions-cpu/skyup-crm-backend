@@ -1,5 +1,7 @@
+// controllers/leadController.js
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
+const { notifyAdmin } = require("../utils/notifyAdmin"); // ← ADD THIS
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
 async function getNextUser(companyId, excludeIds = []) {
@@ -63,6 +65,7 @@ const getLeadsByCampaign = async (req, res) => {
   }
 };
 
+// ── User creates a lead manually ──────────────────────────────────────────────
 const createLead = async (req, res) => {
   try {
     const lead = await Lead.create({
@@ -70,12 +73,17 @@ const createLead = async (req, res) => {
       user: req.body.user || req.user._id,
       company: req.user.company,
     });
+
+    // ── Notify admin on WhatsApp ──────────────────────────────────────────────
+    notifyAdmin(lead, "Manual").catch(e => console.error("Notify error:", e.message));
+
     res.status(201).json(lead);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
+// ── Admin creates a single lead ───────────────────────────────────────────────
 const adminCreateLead = async (req, res) => {
   try {
     const companyId = req.admin
@@ -97,12 +105,17 @@ const adminCreateLead = async (req, res) => {
       user: assignedUser, company: companyId,
     });
     const populated = await Lead.findById(lead._id).populate("user", "name email");
+
+    // ── Notify admin on WhatsApp ──────────────────────────────────────────────
+    notifyAdmin(lead, req.body.source || "Manual").catch(e => console.error("Notify error:", e.message));
+
     res.status(201).json(populated);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
+// ── Admin bulk create leads ───────────────────────────────────────────────────
 const adminCreateLeadsBulk = async (req, res) => {
   try {
     const companyId = req.admin
@@ -130,6 +143,10 @@ const adminCreateLeadsBulk = async (req, res) => {
           remark: row.remark || "Manually added",
           user: assignedUser, company: companyId,
         });
+
+        // ── Notify admin on WhatsApp ────────────────────────────────────────
+        notifyAdmin(lead, row.source || "Bulk Import").catch(e => console.error("Notify error:", e.message));
+
         results.push(await Lead.findById(lead._id).populate("user", "name email"));
       } catch (err) {
         errors.push({ index: i, message: err.message });
@@ -141,6 +158,7 @@ const adminCreateLeadsBulk = async (req, res) => {
   }
 };
 
+// ── Admin import CSV ──────────────────────────────────────────────────────────
 const adminImportCSV = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
@@ -164,7 +182,12 @@ const adminImportCSV = async (req, res) => {
         };
         if (row.leadgenId) adminDoc.leadgenId = row.leadgenId;
         const inserted = await Lead.collection.insertOne(adminDoc);
-        results.push(await Lead.findById(inserted.insertedId).populate("user", "name email"));
+        const savedLead = await Lead.findById(inserted.insertedId).populate("user", "name email");
+
+        // ── Notify admin on WhatsApp ────────────────────────────────────────
+        notifyAdmin(adminDoc, row.source || "CSV Import").catch(e => console.error("Notify error:", e.message));
+
+        results.push(savedLead);
       } catch (err) {
         errors.push({ index: i, row: row.name || i, message: err.message });
       }
@@ -175,6 +198,7 @@ const adminImportCSV = async (req, res) => {
   }
 };
 
+// ── User import CSV ───────────────────────────────────────────────────────────
 const userImportCSV = async (req, res) => {
   try {
     const rows = req.body.leads;
@@ -192,7 +216,12 @@ const userImportCSV = async (req, res) => {
           remark: row.remark || "Imported via CSV", user: req.user._id, company: req.user.company,
         };
         const lead = await Lead.collection.insertOne(userDoc);
-        results.push(await Lead.findById(lead.insertedId).populate("user", "name email"));
+        const savedLead = await Lead.findById(lead.insertedId).populate("user", "name email");
+
+        // ── Notify admin on WhatsApp ────────────────────────────────────────
+        notifyAdmin(userDoc, row.source || "CSV Import").catch(e => console.error("Notify error:", e.message));
+
+        results.push(savedLead);
       } catch (err) {
         errors.push({ index: i, row: row.name || i, message: err.message });
       }
@@ -255,9 +284,6 @@ const adminDeleteLead = async (req, res) => {
   }
 };
 
-// ── GET my leads — returns FULL documents including callHistory, scheduledCalls ──
-// FIX: Previous version stripped these fields; now the assigned agent can see
-//      the full call history summary and all scheduled follow-up calls.
 const getMyLeads = async (req, res) => {
   try {
     const leads = await Lead.find({ company: req.user.company, user: req.user._id })
@@ -279,14 +305,10 @@ const patchLead = async (req, res) => {
     if (status !== undefined) update.status = status;
     if (remark !== undefined) update.remark = remark;
 
-    // ── Schedule a follow-up call for every status except "Not Interested" ──
-    // "Not Interested" has its own dedicated endpoint with full reassign logic.
     if (status !== undefined && status !== "Not Interested") {
-      // Determine the follow-up date
       let scheduledAt;
       if (followUpDate) {
         const provided = new Date(followUpDate);
-        // Reject past dates (compare date only, not time)
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
         if (provided < todayStart) {
@@ -294,7 +316,6 @@ const patchLead = async (req, res) => {
         }
         scheduledAt = provided;
       } else {
-        // Default: next day at 9 AM
         const tomorrow = new Date();
         tomorrow.setDate(tomorrow.getDate() + 1);
         tomorrow.setHours(9, 0, 0, 0);
@@ -333,22 +354,6 @@ const patchLeadTemperature = async (req, res) => {
   }
 };
 
-// ── Mark Not Interested — Business logic ──────────────────────────────────────
-//
-//  1st time (reassignCount === 0):
-//    • Push remark to callHistory
-//    • Auto-assign to a different agent (round-robin, excluding previous agents)
-//    • Schedule 3 follow-up/verification calls (+3d, +7d, +30d)
-//    • Status stays "Not Interested"
-//
-//  2nd+ time (reassignCount >= 1):
-//    • Push remark to callHistory
-//    • NO further reassignment
-//    • Schedule 3 more follow-up/verification calls
-//    • Reset status to "New" so the lead is actionable after the calls become due
-//
-//  In both cases the newly assigned agent (or current agent) receives the
-//  full callHistory so they can see a summary of previous interactions.
 const markNotInterested = async (req, res) => {
   try {
     const { id } = req.params;
@@ -379,7 +384,6 @@ const markNotInterested = async (req, res) => {
       const excludeIds = [...(lead.previousAgents || []), req.user._id];
       nextUserId = await getNextUser(req.user.company, excludeIds);
     } else {
-      // 2nd+ NI: reset status so it's actionable after follow-up calls
       newStatus = "New";
     }
 
