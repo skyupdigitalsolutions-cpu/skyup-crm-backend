@@ -11,7 +11,6 @@ const initSocket          = require('./socket/socketHandler');
 // ── WhatsApp Notifier — init on server start ──────────────────────────────────
 // Connects to WhatsApp Web. On first run: shows QR in terminal — scan once.
 // After that, session is saved and reconnects automatically on restart.
-const { initWhatsApp } = require('./utils/notifyAdmin');
 
 // CRM Routes
 const superAdminRoute = require('./routes/superAdminRoute');
