@@ -1,7 +1,7 @@
 // controllers/leadController.js
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
-const { notifyAdmin } = require("../utils/notifyAdmin"); // ← ADD THIS
+const { notifyTelegram } = require("../utils/telegramNotifier");
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
 async function getNextUser(companyId, excludeIds = []) {
@@ -74,8 +74,7 @@ const createLead = async (req, res) => {
       company: req.user.company,
     });
 
-    // ── Notify admin on WhatsApp ──────────────────────────────────────────────
-    notifyAdmin(lead, "Manual").catch(e => console.error("Notify error:", e.message));
+   notifyTelegram(lead, "Manual").catch(e => console.error("Telegram error:", e.message));
 
     res.status(201).json(lead);
   } catch (error) {
@@ -107,7 +106,7 @@ const adminCreateLead = async (req, res) => {
     const populated = await Lead.findById(lead._id).populate("user", "name email");
 
     // ── Notify admin on WhatsApp ──────────────────────────────────────────────
-    notifyAdmin(lead, req.body.source || "Manual").catch(e => console.error("Notify error:", e.message));
+   notifyTelegram(lead, req.body.source || "Manual").catch(e => console.error("Telegram error:", e.message));
 
     res.status(201).json(populated);
   } catch (error) {
@@ -145,7 +144,7 @@ const adminCreateLeadsBulk = async (req, res) => {
         });
 
         // ── Notify admin on WhatsApp ────────────────────────────────────────
-        notifyAdmin(lead, row.source || "Bulk Import").catch(e => console.error("Notify error:", e.message));
+        notifyTelegram(lead, row.source || "Bulk Import").catch(e => console.error("Telegram error:", e.message));
 
         results.push(await Lead.findById(lead._id).populate("user", "name email"));
       } catch (err) {
@@ -185,8 +184,7 @@ const adminImportCSV = async (req, res) => {
         const savedLead = await Lead.findById(inserted.insertedId).populate("user", "name email");
 
         // ── Notify admin on WhatsApp ────────────────────────────────────────
-        notifyAdmin(adminDoc, row.source || "CSV Import").catch(e => console.error("Notify error:", e.message));
-
+        notifyTelegram(adminDoc, row.source || "CSV Import").catch(e => console.error("Telegram error:", e.message));
         results.push(savedLead);
       } catch (err) {
         errors.push({ index: i, row: row.name || i, message: err.message });
@@ -219,7 +217,7 @@ const userImportCSV = async (req, res) => {
         const savedLead = await Lead.findById(lead.insertedId).populate("user", "name email");
 
         // ── Notify admin on WhatsApp ────────────────────────────────────────
-        notifyAdmin(userDoc, row.source || "CSV Import").catch(e => console.error("Notify error:", e.message));
+        notifyTelegram(userDoc, row.source || "CSV Import").catch(e => console.error("Telegram error:", e.message));
 
         results.push(savedLead);
       } catch (err) {
@@ -423,6 +421,71 @@ const markNotInterested = async (req, res) => {
   }
 };
 
+// ── PATCH /api/lead/admin/update-email/:id ────────────────────────────────────
+// Admin updates email of a single lead
+const updateLeadEmail = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { email } = req.body;
+    if (!email || !email.trim())
+      return res.status(400).json({ message: "email is required" });
+
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const lead = await Lead.findOne({ _id: id, company: companyId });
+    if (!lead) return res.status(404).json({ message: "Lead Not Found" });
+
+    lead.email = email.trim().toLowerCase();
+    await lead.save();
+
+    return res.status(200).json({ message: "Email updated", lead });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── PATCH /api/lead/admin/bulk-update-emails ──────────────────────────────────
+// Body: { updates: [{ mobile, email }, ...] }
+// Matches leads by mobile number within company and sets their email
+const bulkUpdateEmails = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { updates } = req.body;
+
+    if (!Array.isArray(updates) || updates.length === 0)
+      return res.status(400).json({ message: "updates array is required" });
+
+    let matched = 0, notFound = 0;
+    const notFoundList = [];
+
+    for (const row of updates) {
+      const mobile = (row.mobile || "").replace(/\D/g, "");
+      const email  = (row.email  || "").trim().toLowerCase();
+      if (!mobile || !email) continue;
+
+      const result = await Lead.updateMany(
+        { company: companyId, mobile },
+        { $set: { email } }
+      );
+
+      if (result.matchedCount > 0) {
+        matched += result.matchedCount;
+      } else {
+        notFound++;
+        notFoundList.push(mobile);
+      }
+    }
+
+    res.json({
+      message: `${matched} lead(s) updated, ${notFound} mobile(s) not found`,
+      matched,
+      notFound,
+      notFoundList,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getLead, getLeads, getLeadsByCampaign,
   createLead, adminCreateLead, adminCreateLeadsBulk,
@@ -431,4 +494,5 @@ module.exports = {
   markNotInterested,
   deleteLead, adminUpdateLead, adminDeleteLead,
   getMyLeads,
+  updateLeadEmail, bulkUpdateEmails,
 };

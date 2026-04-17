@@ -1,8 +1,8 @@
 // controllers/websiteWebhookController.js
-const WebsiteConfig = require("../models/WebsiteConfig");
-const Lead          = require("../models/Leads");
-const User          = require("../models/Users");
-const { notifyAdmin } = require("../utils/notifyAdmin"); // ← ADD THIS
+const WebsiteConfig      = require("../models/WebsiteConfig");
+const Lead               = require("../models/Leads");
+const User               = require("../models/Users");
+const { notifyTelegram } = require("../utils/telegramNotifier");
 
 async function getNextAssignedUser(config) {
   const users = await User.find({
@@ -70,8 +70,9 @@ const receiveWebsiteWebhook = async (req, res) => {
 
     console.log(`✅ WEBSITE LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | source: "${config.sourceName}" | id: ${newLead._id}`);
 
-    // ── Notify admin on WhatsApp ────────────────────────────────────────────
-    notifyAdmin(newLead, config.sourceName).catch(e => console.error("Notify error:", e.message));
+    // ── Notify via Telegram ─────────────────────────────────────────────────
+    notifyTelegram(newLead, config.sourceName).catch(e => console.error("Telegram error:", e.message));
+
 
     // ── Emit real-time socket event ─────────────────────────────────────────
     try {

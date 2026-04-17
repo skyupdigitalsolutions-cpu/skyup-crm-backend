@@ -1,7 +1,7 @@
 // controllers/googleWebhookController.js
-const GoogleAdsConfig = require("../models/GoogleAdsConfig");
-const Lead            = require("../models/Leads");
-const { notifyAdmin } = require("../utils/notifyAdmin");
+const GoogleAdsConfig    = require("../models/GoogleAdsConfig");
+const Lead               = require("../models/Leads");
+const { notifyTelegram } = require("../utils/telegramNotifier");
 const {
   parseGoogleLeadData,
   getNextAssignedUserGoogle,
@@ -88,10 +88,11 @@ const receiveGoogleWebhook = async (req, res) => {
       `\n✅ GOOGLE LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`
     );
 
-    // Notify admin on WhatsApp
-    notifyAdmin(newLead, config.campaignName).catch((e) =>
-      console.error("Notify error:", e.message)
+    // ── Notify via Telegram ─────────────────────────────────────────────────
+    notifyTelegram(newLead, config.campaignName).catch((e) =>
+      console.error("Telegram error:", e.message)
     );
+
   } catch (err) {
     console.error("❌ GOOGLE WEBHOOK PROCESSING ERROR:", err.message);
     console.error(err.stack);

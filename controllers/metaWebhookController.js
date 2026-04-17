@@ -1,7 +1,7 @@
 // controllers/metaWebhookController.js
-const MetaConfig = require("../models/MetaConfig");
-const Lead       = require("../models/Leads");
-const { notifyAdmin } = require("../utils/notifyAdmin"); // ← ADD THIS
+const MetaConfig         = require("../models/MetaConfig");
+const Lead               = require("../models/Leads");
+const { notifyTelegram } = require("../utils/telegramNotifier");
 const {
   fetchLeadData,
   parseFieldData,
@@ -147,8 +147,9 @@ const receiveWebhook = async (req, res) => {
         const newLead = await Lead.create(leadPayload);
         console.log(`\n✅ META LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`);
 
-        // ── Notify admin on WhatsApp ──────────────────────────────────────────
-        notifyAdmin(newLead, config.campaignName).catch(e => console.error("Notify error:", e.message));
+        // ── Notify via Telegram ───────────────────────────────────────────────
+        notifyTelegram(newLead, config.campaignName).catch(e => console.error("Telegram error:", e.message));
+
       }
     }
   } catch (err) {

@@ -9,6 +9,7 @@ const {
   markNotInterested,
   deleteLead, adminUpdateLead, adminDeleteLead,
   getMyLeads,
+  updateLeadEmail, bulkUpdateEmails,
 } = require("../controllers/leadController");
 
 const { protect }           = require("../middlewares/authMiddleware");
@@ -28,6 +29,9 @@ router.get("/:id",         protect,      getLead);
 router.post("/admin/create",           protectAdmin,      adminCreateLead);
 router.post("/admin/bulk-create",      protectAdmin,      adminCreateLeadsBulk);
 router.post("/admin/import-csv",       protectAdmin,      adminImportCSV);
+// Admin: email update routes
+router.patch("/admin/bulk-update-emails", protectAdmin,   bulkUpdateEmails);
+router.patch("/admin/update-email/:id",   protectAdmin,   updateLeadEmail);
 // SuperAdmin equivalents
 router.post("/superadmin/create",      protectSuperAdmin, adminCreateLead);
 router.post("/superadmin/bulk-create", protectSuperAdmin, adminCreateLeadsBulk);
