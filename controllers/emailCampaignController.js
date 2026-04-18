@@ -5,18 +5,19 @@ const Lead = require("../models/Leads");
 // Uses Brevo API v3 — no SMTP, no nodemailer, just HTTP POST.
 // Set BREVO_API_KEY in your .env
 
-const sendViaBrevo = async ({ to, toName, subject, htmlContent, fromName, fromEmail }) => {
+const sendViaBrevo = async ({ to, subject, html, fromName }) => {
+  const fromEmail = process.env.BREVO_SENDER_EMAIL;
   await axios.post(
     "https://api.brevo.com/v3/smtp/email",
     {
       sender:      { name: fromName || "CRM", email: fromEmail },
-      to:          [{ email: to, name: toName }],
+      to,
       subject,
-      htmlContent,
+      htmlContent: html,
     },
     {
       headers: {
-        "api-key":     process.env.BREVO_API_KEY,
+        "api-key":      process.env.BREVO_API_KEY,
         "Content-Type": "application/json",
       },
     }
@@ -45,14 +46,13 @@ const sendBulkEmails = async (req, res) => {
       return res.status(404).json({ message: "No leads with email found for this campaign" });
     }
 
-    const fromEmail = process.env.BREVO_SENDER_EMAIL; // verified sender in Brevo
     let sent = 0;
     let failed = 0;
     const errors = [];
 
     for (const lead of leads) {
       // Personalise the template
-      const htmlContent = bodyTemplate
+      const html = bodyTemplate
         .replace(/{{name}}/g,     lead.name)
         .replace(/{{campaign}}/g, lead.campaign || "")
         .replace(/{{mobile}}/g,   lead.mobile)
@@ -60,12 +60,10 @@ const sendBulkEmails = async (req, res) => {
 
       try {
         await sendViaBrevo({
-          to:          lead.email,
-          toName:      lead.name,
+          to:       [{ email: lead.email, name: lead.name }],
           subject,
-          htmlContent,
-          fromName:    fromName || req.admin.company.name || "CRM",
-          fromEmail,
+          html,
+          fromName: fromName || req.admin.company.name || "CRM",
         });
         sent++;
       } catch (err) {
@@ -88,7 +86,7 @@ const sendBulkEmails = async (req, res) => {
 };
 
 // ── GET /api/email-campaign/preview ──────────────────────────────────────────
-// Body: { campaign } — returns lead count that will receive the email
+// Query: { campaign } — returns lead count that will receive the email
 const previewCampaign = async (req, res) => {
   try {
     const { campaign } = req.query;
@@ -106,4 +104,58 @@ const previewCampaign = async (req, res) => {
   }
 };
 
-module.exports = { sendBulkEmails, previewCampaign };
+// ── POST /api/email-campaign/send-single ─────────────────────────────────────
+// Body: { name, email, subject, bodyTemplate, fromName? }
+const sendSingleEmail = async (req, res) => {
+  const { name, email, subject, bodyTemplate, fromName } = req.body;
+
+  if (!email || !subject) {
+    return res.status(400).json({ message: "email and subject required" });
+  }
+
+  const html = bodyTemplate
+    .replace(/{{name}}/g,     name || "Friend")
+    .replace(/{{campaign}}/g, "")
+    .replace(/{{mobile}}/g,   "")
+    .replace(/{{email}}/g,    email);
+
+  try {
+    await sendViaBrevo({ to: [{ name, email }], subject, html, fromName });
+    res.json({ sent: 1, failed: 0, total: 1 });
+  } catch (err) {
+    res.json({ sent: 0, failed: 1, total: 1, errors: [{ email, error: err.message }] });
+  }
+};
+
+// ── POST /api/email-campaign/send-csv ────────────────────────────────────────
+// Body: { recipients: [{ name, email }], subject, bodyTemplate, fromName? }
+const sendCsvEmails = async (req, res) => {
+  const { recipients, subject, bodyTemplate, fromName } = req.body;
+
+  if (!recipients?.length || !subject) {
+    return res.status(400).json({ message: "recipients and subject required" });
+  }
+
+  let sent = 0, failed = 0;
+  const errors = [];
+
+  for (const { name, email } of recipients) {
+    const html = bodyTemplate
+      .replace(/{{name}}/g,     name || "Friend")
+      .replace(/{{campaign}}/g, "")
+      .replace(/{{mobile}}/g,   "")
+      .replace(/{{email}}/g,    email);
+
+    try {
+      await sendViaBrevo({ to: [{ name, email }], subject, html, fromName });
+      sent++;
+    } catch (err) {
+      failed++;
+      errors.push({ email, error: err.message });
+    }
+  }
+
+  res.json({ sent, failed, total: recipients.length, errors });
+};
+
+module.exports = { sendBulkEmails, previewCampaign, sendSingleEmail, sendCsvEmails };
