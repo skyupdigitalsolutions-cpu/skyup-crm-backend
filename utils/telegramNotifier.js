@@ -57,7 +57,28 @@ const notifyTelegram = async (lead, source = "", metaFields = null) => {
       `📧 <b>Email:</b>    ${escapeHtml(lead.email || "N/A")}\n` +
       `📢 <b>Campaign:</b> ${escapeHtml(campaignLabel)}\n` +
       `🌐 <b>Source:</b>   ${escapeHtml(sourceLabel)}\n` +
-      `🕐 <b>Time:</b>     ${time}`;
+      `💬 <b>Remark:</b>   ${escapeHtml(lead.remark || "N/A")}\n`;
+
+    // ── Meta form Q&A block ───────────────────────────────────────────────────
+    // Renders every custom question/answer from the Meta lead form.
+    // Standard identity fields (name, mobile, email) are skipped since
+    // they are already shown in the core block above.
+    if (metaFields && typeof metaFields === "object") {
+      const customEntries = Object.entries(metaFields).filter(
+        ([key]) => !STANDARD_META_FIELDS.has(key.toLowerCase())
+      );
+
+      if (customEntries.length > 0) {
+        message += `\n📋 <b>Form Responses:</b>\n`;
+        for (const [question, answer] of customEntries) {
+          const label = formatQuestion(question);
+          message += `  • <b>${escapeHtml(label)}:</b> ${escapeHtml(answer || "N/A")}\n`;
+        }
+      }
+    }
+
+    // ── Timestamp (always last) ───────────────────────────────────────────────
+    message += `\n🕐 <b>Time:</b>     ${time}`;
 
     await axios.post(
       `https://api.telegram.org/bot${botToken}/sendMessage`,
