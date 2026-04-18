@@ -8,7 +8,6 @@
 //   TELEGRAM_BOT_TOKEN  — from @BotFather  e.g.  7123456789:AAH...
 //   TELEGRAM_CHAT_ID    — your personal / group chat ID  e.g.  -1001234567890
 // ─────────────────────────────────────────────────────────────────────────────
-
 const axios = require("axios");
 
 /**
@@ -48,6 +47,7 @@ const notifyTelegram = async (lead, source = "") => {
       `📧 <b>Email:</b>    ${escapeHtml(lead.email || "N/A")}\n` +
       `📢 <b>Campaign:</b> ${escapeHtml(campaignLabel)}\n` +
       `🌐 <b>Source:</b>   ${escapeHtml(sourceLabel)}\n` +
+      `💬 <b>Remark:</b>   ${escapeHtml(lead.remark || "N/A")}\n` +
       `🕐 <b>Time:</b>     ${time}`;
 
     await axios.post(
