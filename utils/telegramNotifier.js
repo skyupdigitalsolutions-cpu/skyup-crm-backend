@@ -8,15 +8,25 @@
 //   TELEGRAM_BOT_TOKEN  — from @BotFather  e.g.  7123456789:AAH...
 //   TELEGRAM_CHAT_ID    — your personal / group chat ID  e.g.  -1001234567890
 // ─────────────────────────────────────────────────────────────────────────────
-
 const axios = require("axios");
+
+// ── Standard Meta fields already shown as dedicated lines ─────────────────────
+// Excluded from the "Form Q&A" block to avoid duplication.
+const STANDARD_META_FIELDS = new Set([
+  "full_name", "first_name", "last_name",
+  "phone_number", "mobile",
+  "email", "email_address",
+]);
 
 /**
  * notifyTelegram
- * @param {Object} lead   - Lead document (or plain object) just saved in the CRM
- * @param {string} source - Human-readable source label ("Meta", "Google Ads", "Manual", etc.)
+ * @param {Object} lead         - Lead document (or plain object) just saved in the CRM
+ * @param {string} source       - Human-readable source label ("Meta", "Google Ads", "Manual", etc.)
+ * @param {Object} [metaFields] - Raw parsed key-value object from Meta's field_data
+ *                                (all questions + answers submitted on the lead form).
+ *                                Only pass this for Meta leads.
  */
-const notifyTelegram = async (lead, source = "") => {
+const notifyTelegram = async (lead, source = "", metaFields = null) => {
   try {
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
     const chatId   = process.env.TELEGRAM_CHAT_ID;
@@ -36,19 +46,39 @@ const notifyTelegram = async (lead, source = "") => {
       minute:    "2-digit",
     });
 
-    // Build the message (Telegram supports MarkdownV2 — we use plain HTML instead
-    // so we don't have to escape every special character)
     const campaignLabel = lead.campaign || source || "N/A";
     const sourceLabel   = lead.source   || source || "N/A";
 
-    const message =
+    // ── Core lead fields ──────────────────────────────────────────────────────
+    let message =
       `🔔 <b>New Lead Alert!</b>\n\n` +
       `👤 <b>Name:</b>     ${escapeHtml(lead.name)}\n` +
       `📱 <b>Mobile:</b>   ${escapeHtml(lead.mobile)}\n` +
       `📧 <b>Email:</b>    ${escapeHtml(lead.email || "N/A")}\n` +
       `📢 <b>Campaign:</b> ${escapeHtml(campaignLabel)}\n` +
       `🌐 <b>Source:</b>   ${escapeHtml(sourceLabel)}\n` +
-      `🕐 <b>Time:</b>     ${time}`;
+      `💬 <b>Remark:</b>   ${escapeHtml(lead.remark || "N/A")}\n`;
+
+    // ── Meta form Q&A block ───────────────────────────────────────────────────
+    // Renders every custom question/answer from the Meta lead form.
+    // Standard identity fields (name, mobile, email) are skipped since
+    // they are already shown in the core block above.
+    if (metaFields && typeof metaFields === "object") {
+      const customEntries = Object.entries(metaFields).filter(
+        ([key]) => !STANDARD_META_FIELDS.has(key.toLowerCase())
+      );
+
+      if (customEntries.length > 0) {
+        message += `\n📋 <b>Form Responses:</b>\n`;
+        for (const [question, answer] of customEntries) {
+          const label = formatQuestion(question);
+          message += `  • <b>${escapeHtml(label)}:</b> ${escapeHtml(answer || "N/A")}\n`;
+        }
+      }
+    }
+
+    // ── Timestamp (always last) ───────────────────────────────────────────────
+    message += `\n🕐 <b>Time:</b>     ${time}`;
 
     await axios.post(
       `https://api.telegram.org/bot${botToken}/sendMessage`,
@@ -68,6 +98,18 @@ const notifyTelegram = async (lead, source = "") => {
     );
   }
 };
+
+/**
+ * Converts a snake_case / question-style Meta field key into a readable label.
+ * e.g. "what_is_your_monthly_marketing_budget?" → "What Is Your Monthly Marketing Budget"
+ */
+function formatQuestion(key) {
+  return key
+    .replace(/[_?]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 /** Minimal HTML-safe escaping for Telegram HTML parse mode */
 function escapeHtml(str) {

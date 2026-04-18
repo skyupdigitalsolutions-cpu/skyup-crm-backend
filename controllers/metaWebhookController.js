@@ -148,7 +148,8 @@ const receiveWebhook = async (req, res) => {
         console.log(`\n✅ META LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`);
 
         // ── Notify via Telegram ───────────────────────────────────────────────
-        notifyTelegram(newLead, config.campaignName).catch(e => console.error("Telegram error:", e.message));
+        // Pass parsedFields so the notifier can include all Meta form Q&A
+        notifyTelegram(newLead, config.campaignName, parsedFields).catch(e => console.error("Telegram error:", e.message));
 
       }
     }
