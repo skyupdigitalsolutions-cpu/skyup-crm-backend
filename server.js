@@ -95,7 +95,7 @@ const io = new Server(server, {
 app.use(cors(corsOptions));
 
 // ── Handle preflight OPTIONS for all routes ───────────────────────────────────
-app.options('*', cors(corsOptions));
+app.options('/(.*)', cors(corsOptions));
 
 // ── Body parsers ──────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
