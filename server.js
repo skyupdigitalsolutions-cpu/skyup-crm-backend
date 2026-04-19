@@ -8,10 +8,6 @@ const { generalLimiter } = require('./middlewares/rateLimiter');
 const connectDB           = require('./config/db');
 const initSocket          = require('./socket/socketHandler');
 
-// ── WhatsApp Notifier — init on server start ──────────────────────────────────
-// Connects to WhatsApp Web. On first run: shows QR in terminal — scan once.
-// After that, session is saved and reconnects automatically on restart.
-
 // CRM Routes
 const superAdminRoute = require('./routes/superAdminRoute');
 const adminRoute      = require('./routes/adminRoute');
@@ -45,7 +41,7 @@ const emailCampaignRoute   = require('./routes/emailCampaign');
 const app    = express();
 const server = http.createServer(app);
 
-// ── Static origins always allowed (CRM frontend + local dev) ─────────────────
+// ── Static origins always allowed ─────────────────────────────────────────────
 const staticAllowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
@@ -95,6 +91,13 @@ const io = new Server(server, {
   },
 });
 
+// ── ✅ CORS MUST be first — before any routes ─────────────────────────────────
+app.use(cors(corsOptions));
+
+// ── Handle preflight OPTIONS for all routes ───────────────────────────────────
+app.options('*', cors(corsOptions));
+
+// ── Body parsers ──────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   express.json({
     verify: (req, res, buf) => { req.rawBody = buf; },
@@ -104,8 +107,12 @@ app.use((req, res, next) => {
 app.use(express.urlencoded({ extended: true }));
 app.use(express.text({ type: "text/plain", limit: "5mb" }));
 
+app.use(generalLimiter);
+
+// ── Health check ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send('Server is running'));
 
+// ── Webhook routes (no auth CORS needed, handled manually) ────────────────────
 app.use('/meta', metaWebhookRoute);
 
 app.use('/website-webhook', (req, res, next) => {
@@ -137,28 +144,22 @@ app.use('/website-webhook', (req, res, next) => {
   next();
 }, websiteWebhookRoute);
 
-app.use(cors(corsOptions));
-app.use(generalLimiter);
-
-app.use('/api/meta-config', metaConfigRoute);
-
-app.use('/api/superadmin', superAdminRoute);
-app.use('/api/admin',      adminRoute);
-app.use('/api/auth',       authRoute);
-app.use('/api/lead',       leadRoute);
-
-app.use('/api/attendance', attendanceRoute);
-
-app.use('/api/twilio', twilioRoutes);
-app.use('/api/razorpay', razorpayRoute);
-
+// ── API Routes ────────────────────────────────────────────────────────────────
+app.use('/api/meta-config',       metaConfigRoute);
+app.use('/api/superadmin',        superAdminRoute);
+app.use('/api/admin',             adminRoute);
+app.use('/api/auth',              authRoute);
+app.use('/api/lead',              leadRoute);   // ⚠️ Check: error shows /api/leads — confirm your route
+app.use('/api/attendance',        attendanceRoute);
+app.use('/api/twilio',            twilioRoutes);
+app.use('/api/razorpay',          razorpayRoute);
 app.use('/api/google-ads-config', googleAdsConfigRoute);
 app.use('/',                      googleWebhookRoute);
+app.use('/api/website-config',    websiteConfigRoute);
+app.use('/api/chat',              chatRoutes);
+app.use('/api/email-campaign',    emailCampaignRoute);
 
-app.use('/api/website-config', websiteConfigRoute);
-app.use('/api/chat', chatRoutes);
-app.use('/api/email-campaign', emailCampaignRoute);
-
+// ── Socket & DB ───────────────────────────────────────────────────────────────
 app.set("io", io);
 global._io = io;
 
@@ -168,10 +169,5 @@ connectDB().then(() => {
   const PORT = process.env.PORT || 5000;
   server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-
-    // ── Start WhatsApp client after DB is connected ───────────────────────────
-    // QR code will appear in terminal on first run — scan with your WhatsApp.
-    // Session is saved to .wwebjs_auth/ — no QR needed after first scan.
-
   });
 });
