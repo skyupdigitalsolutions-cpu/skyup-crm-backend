@@ -42,6 +42,9 @@ const websiteWebhookRoute = require('./routes/websiteWebhook');
 const attendanceRoute      = require('./routes/attendanceRoute');
 const emailCampaignRoute   = require('./routes/emailCampaign');
 
+// Saanvi Voicebot Proxy (avoids CORS — browser calls CRM, CRM calls Saanvi)
+const saanviProxyRoute = require('./routes/saanviProxy');
+
 const app    = express();
 const server = http.createServer(app);
 
@@ -164,6 +167,9 @@ app.use('/',                      googleWebhookRoute);
 app.use('/api/website-config', websiteConfigRoute);
 app.use('/api/chat', chatRoutes);
 app.use('/api/email-campaign', emailCampaignRoute);
+
+// Saanvi Voicebot Proxy — browser → CRM backend → skyupdigitalsolutions.in
+app.use('/api/saanvi', saanviProxyRoute);
 
 app.set("io", io);
 global._io = io;
