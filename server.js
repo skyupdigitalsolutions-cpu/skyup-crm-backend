@@ -35,8 +35,8 @@ const googleWebhookRoute   = require('./routes/googleWebhook');
 const websiteConfigRoute  = require('./routes/websiteConfig');
 const websiteWebhookRoute = require('./routes/websiteWebhook');
 
-const attendanceRoute      = require('./routes/attendanceRoute');
-const emailCampaignRoute   = require('./routes/emailCampaign');
+const attendanceRoute    = require('./routes/attendanceRoute');
+const emailCampaignRoute = require('./routes/emailCampaign');
 
 const app    = express();
 const server = http.createServer(app);
@@ -63,6 +63,7 @@ async function isDynamicOriginAllowed(origin) {
   }
 }
 
+// ── CORS options — preflight handled automatically by cors() ──────────────────
 const corsOptions = {
   origin: async (origin, callback) => {
     if (!origin) return callback(null, true);
@@ -75,9 +76,12 @@ const corsOptions = {
     console.warn(`⚠️  CORS blocked unknown origin: ${origin}`);
     callback(new Error(`CORS blocked: ${origin}`));
   },
-  credentials: true,
+  credentials:         true,
+  preflightContinue:   false,   // ✅ cors middleware handles OPTIONS itself
+  optionsSuccessStatus: 204,    // ✅ returns 204 for preflight requests
 };
 
+// ── Socket.IO server ──────────────────────────────────────────────────────────
 const io = new Server(server, {
   cors: {
     origin: async (origin, callback) => {
@@ -91,11 +95,8 @@ const io = new Server(server, {
   },
 });
 
-// ── ✅ CORS MUST be first — before any routes ─────────────────────────────────
+// ── ✅ CORS first — before all routes, handles preflight automatically ─────────
 app.use(cors(corsOptions));
-
-// ── Handle preflight OPTIONS for all routes ───────────────────────────────────
-app.options('/(.*)', cors(corsOptions));
 
 // ── Body parsers ──────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -112,7 +113,7 @@ app.use(generalLimiter);
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send('Server is running'));
 
-// ── Webhook routes (no auth CORS needed, handled manually) ────────────────────
+// ── Webhook routes ────────────────────────────────────────────────────────────
 app.use('/meta', metaWebhookRoute);
 
 app.use('/website-webhook', (req, res, next) => {
@@ -149,7 +150,7 @@ app.use('/api/meta-config',       metaConfigRoute);
 app.use('/api/superadmin',        superAdminRoute);
 app.use('/api/admin',             adminRoute);
 app.use('/api/auth',              authRoute);
-app.use('/api/lead',              leadRoute);   // ⚠️ Check: error shows /api/leads — confirm your route
+app.use('/api/lead',              leadRoute);
 app.use('/api/attendance',        attendanceRoute);
 app.use('/api/twilio',            twilioRoutes);
 app.use('/api/razorpay',          razorpayRoute);
