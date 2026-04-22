@@ -10,6 +10,7 @@ const {
   deleteLead, adminUpdateLead, adminDeleteLead,
   getMyLeads,
   updateLeadEmail, bulkUpdateEmails,
+  adminGetAllLeads,
 } = require("../controllers/leadController");
 
 const { protect }           = require("../middlewares/authMiddleware");
@@ -19,6 +20,7 @@ const { protectSuperAdmin } = require("../middlewares/superAdminMiddleware");
 // ── RULE: All specific/named routes MUST come before wildcard /:id routes ─────
 
 // ── GET ───────────────────────────────────────────────────────────────────────
+router.get("/admin/all",   protectAdmin, adminGetAllLeads); // all company leads for admin
 router.get("/my-leads",    protect,      getMyLeads);
 router.get("/by-campaign", protectAdmin, getLeadsByCampaign);
 router.get("/",            protect,      getLeads);

@@ -486,6 +486,20 @@ const bulkUpdateEmails = async (req, res) => {
   }
 };
 
+// ── GET all leads for admin (every lead in the company) ──────────────────────
+const adminGetAllLeads = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    if (!companyId) return res.status(400).json({ message: "Company not found in token." });
+    const leads = await Lead.find({ company: companyId })
+      .sort({ createdAt: -1 })
+      .populate("user", "name email");
+    res.status(200).json(leads);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getLead, getLeads, getLeadsByCampaign,
   createLead, adminCreateLead, adminCreateLeadsBulk,
@@ -495,4 +509,5 @@ module.exports = {
   deleteLead, adminUpdateLead, adminDeleteLead,
   getMyLeads,
   updateLeadEmail, bulkUpdateEmails,
+  adminGetAllLeads,
 };
