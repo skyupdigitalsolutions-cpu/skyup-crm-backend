@@ -27,7 +27,7 @@ const protectAny = (req, res, next) => {
 // ── POST /api/saanvi/leads  →  POST skyupdigitalsolutions.in/api/leads ────────
 router.post('/leads', protectAny, async (req, res) => {
   try {
-    const { data } = await axios.post(`${getSaanviBase()}/api/leads`, req.body);
+    const { data } = await axios.post(`${getSaanviBase()}/api/leads`, req.body, { timeout: 10000 });
     res.json(data);
   } catch (err) {
     console.error('Saanvi proxy [POST /leads] error:', err.message);
@@ -41,7 +41,7 @@ router.post('/leads', protectAny, async (req, res) => {
 // ── GET /api/saanvi/leads/:id  →  GET skyupdigitalsolutions.in/api/leads/:id ──
 router.get('/leads/:id', protectAny, async (req, res) => {
   try {
-    const { data } = await axios.get(`${getSaanviBase()}/api/leads/${req.params.id}`);
+    const { data } = await axios.get(`${getSaanviBase()}/api/leads/${req.params.id}`, { timeout: 10000 });
     res.json(data);
   } catch (err) {
     console.error('Saanvi proxy [GET /leads/:id] error:', err.message);
@@ -55,7 +55,7 @@ router.get('/leads/:id', protectAny, async (req, res) => {
 // ── POST /api/saanvi/call-me  →  POST skyupdigitalsolutions.in/call-me ────────
 router.post('/call-me', protectAny, async (req, res) => {
   try {
-    const { data } = await axios.post(`${getSaanviBase()}/call-me`, req.body);
+    const { data } = await axios.post(`${getSaanviBase()}/call-me`, req.body, { timeout: 15000 });
     res.json(data);
   } catch (err) {
     console.error('Saanvi proxy [POST /call-me] error:', err.message);

@@ -350,7 +350,9 @@ const patchLeadTemperature = async (req, res) => {
     if (!["Hot", "Warm", "Cold"].includes(temperature))
       return res.status(400).json({ message: "temperature must be Hot, Warm, or Cold" });
 
-    const lead = await Lead.findOne({ _id: id, company: req.user.company });
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    if (!companyId) return res.status(400).json({ message: "Company not found in token." });
+    const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const update = { temperature };

@@ -43,7 +43,7 @@ router.post("/",                       protect,           createLead);
 
 // ── PATCH ─────────────────────────────────────────────────────────────────────
 router.patch("/:id/not-interested", protect, markNotInterested);   // NEW
-router.patch("/:id/temperature",    protect, patchLeadTemperature); // before /:id
+router.patch("/:id/temperature",    protectAdmin, patchLeadTemperature); // voicebot uses admin token
 router.patch("/:id",                protect, patchLead);
 
 // ── PUT ───────────────────────────────────────────────────────────────────────
@@ -55,5 +55,49 @@ router.put("/:id",            protect,           updateLead);
 router.delete("/admin/:id",      protectAdmin,      adminDeleteLead);
 router.delete("/superadmin/:id", protectSuperAdmin, adminDeleteLead);
 router.delete("/:id",            protect,           deleteLead);
+
+// ── PATCH /admin/:id/assign-roundrobin ───────────────────────────────────────
+// Called by useVoicebot after a Warm result — reassigns lead round-robin
+router.patch("/admin/:id/assign-roundrobin", protectAdmin, async (req, res) => {
+  try {
+    const Lead = require("../models/Leads");
+    const User = require("../models/Users");
+    const { id } = req.params;
+    const companyId = req.admin?.company?._id || req.admin?.company;
+
+    const lead = await Lead.findOne({ _id: id, company: companyId });
+    if (!lead) return res.status(404).json({ message: "Lead Not Found" });
+
+    const users = await User.find({ company: companyId }).select("_id").lean();
+    if (!users.length) return res.status(400).json({ message: "No users in company" });
+
+    const counts = await Promise.all(
+      users.map(u =>
+        Lead.countDocuments({ company: companyId, user: u._id, status: { $nin: ["Not Interested", "Converted"] } })
+          .then(c => ({ userId: u._id, count: c }))
+      )
+    );
+    counts.sort((a, b) => a.count - b.count);
+    const nextUser = counts[0].userId;
+
+    const updated = await Lead.findByIdAndUpdate(id, { user: nextUser }, { new: true })
+      .populate("user", "name email");
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ── POST /admin/notify-hot ────────────────────────────────────────────────────
+// Called by useVoicebot after a Hot result — log + optional notification
+router.post("/admin/notify-hot", protectAdmin, async (req, res) => {
+  try {
+    const { leadId, score, summary } = req.body;
+    console.log(`🔥 HOT LEAD ALERT: leadId=${leadId} | score=${score} | ${summary}`);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
 
 module.exports = router;
