@@ -340,12 +340,31 @@ const patchLead = async (req, res) => {
 const patchLeadTemperature = async (req, res) => {
   try {
     const { id } = req.params;
-    const { temperature } = req.body;
+    const {
+      temperature,
+      voiceBotSummary, voiceBotScore, voiceBotReason,
+      voiceBotNextAction, voiceBotService, voiceBotCallSid,
+      voiceBotDuration, voiceBotTranscript, lastCalledByBot,
+    } = req.body;
+
     if (!["Hot", "Warm", "Cold"].includes(temperature))
       return res.status(400).json({ message: "temperature must be Hot, Warm, or Cold" });
+
     const lead = await Lead.findOne({ _id: id, company: req.user.company });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    const updatedLead = await Lead.findByIdAndUpdate(id, { temperature }, { new: true });
+
+    const update = { temperature };
+    if (voiceBotSummary    !== undefined) update.voiceBotSummary    = voiceBotSummary;
+    if (voiceBotScore      !== undefined) update.voiceBotScore      = voiceBotScore;
+    if (voiceBotReason     !== undefined) update.voiceBotReason     = voiceBotReason;
+    if (voiceBotNextAction !== undefined) update.voiceBotNextAction = voiceBotNextAction;
+    if (voiceBotService    !== undefined) update.voiceBotService    = voiceBotService;
+    if (voiceBotCallSid    !== undefined) update.voiceBotCallSid    = voiceBotCallSid;
+    if (voiceBotDuration   !== undefined) update.voiceBotDuration   = voiceBotDuration;
+    if (voiceBotTranscript !== undefined) update.voiceBotTranscript = voiceBotTranscript;
+    if (lastCalledByBot    !== undefined) update.lastCalledByBot    = lastCalledByBot;
+
+    const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
     return res.status(200).json(updatedLead);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -486,7 +505,7 @@ const bulkUpdateEmails = async (req, res) => {
   }
 };
 
-// ── GET all leads for admin (every lead in the company) ──────────────────────
+// ── GET all leads for admin ───────────────────────────────────────────────────
 const adminGetAllLeads = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;

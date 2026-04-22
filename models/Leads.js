@@ -72,6 +72,17 @@ const leadSchema = mongoose.Schema(
 
     // ── Reassignment counter ─────────────────────────────────────────────────
     reassignCount: { type: Number, default: 0 },
+
+    // ── Saanvi Voicebot fields ────────────────────────────────────────────────
+    voiceBotSummary:    { type: String,  default: "" },
+    voiceBotScore:      { type: Number,  default: null },
+    voiceBotReason:     { type: String,  default: "" },
+    voiceBotNextAction: { type: String,  default: "" },
+    voiceBotService:    { type: String,  default: "" },
+    voiceBotCallSid:    { type: String,  default: "" },
+    voiceBotDuration:   { type: Number,  default: null },
+    voiceBotTranscript: { type: String,  default: "" },
+    lastCalledByBot:    { type: Date,    default: null },
   },
   { timestamps: true }
 );
