@@ -157,7 +157,7 @@ const sendCsvEmails = async (req, res) => {
 // ── GET /api/email/history ────────────────────────────────────────────────────
 const getEmailHistory = async (req, res) => {
   try {
-    const { page = 1, limit = 10, search = "", campaignId = "", sortOrder = "desc" } = req.query;
+    const { page = 1, limit = 10, search = "", campaignId = "", sortOrder = "desc", dateFrom = "", dateTo = "" } = req.query;
     const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
     const skip = (pageNum - 1) * limitNum;
@@ -165,6 +165,20 @@ const getEmailHistory = async (req, res) => {
     const filter = { company: req.admin.company._id };
     if (search.trim()) filter.to = { $regex: search.trim(), $options: "i" };
     if (campaignId.trim()) filter.campaignId = campaignId.trim();
+
+    // Date range filter on sentAt
+    if (dateFrom.trim() || dateTo.trim()) {
+      filter.sentAt = {};
+      if (dateFrom.trim()) {
+        filter.sentAt.$gte = new Date(dateFrom.trim());
+      }
+      if (dateTo.trim()) {
+        // Include the entire "to" day by going to end of that day
+        const endDate = new Date(dateTo.trim());
+        endDate.setHours(23, 59, 59, 999);
+        filter.sentAt.$lte = endDate;
+      }
+    }
 
     const sortDir = sortOrder === "asc" ? 1 : -1;
     const [logs, total] = await Promise.all([
