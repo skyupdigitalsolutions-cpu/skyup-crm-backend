@@ -8,16 +8,16 @@ const {
 } = require("../controllers/emailCampaignController");
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 
-// GET  /api/email-campaign/preview?campaign=XYZ  → shows how many leads will receive the email
+// GET  /api/email-campaign/preview?campaign=XYZ
 router.get("/preview", protectAdmin, previewCampaign);
 
-// POST /api/email-campaign/send                  → fires the bulk personalized emails (by campaign)
+// POST /api/email-campaign/send
 router.post("/send", protectAdmin, sendBulkEmails);
 
-// POST /api/email-campaign/send-single           → sends to a single lead
+// POST /api/email-campaign/send-single
 router.post("/send-single", protectAdmin, sendSingleEmail);
 
-// POST /api/email-campaign/send-csv              → sends to a list of recipients from CSV
+// POST /api/email-campaign/send-csv
 router.post("/send-csv", protectAdmin, sendCsvEmails);
 
 module.exports = router;
