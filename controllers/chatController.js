@@ -45,4 +45,64 @@ const getChatHistory = async (req, res) => {
   }
 };
 
-module.exports = { createOrFetchChatUser, getAllChatUsers, getChatHistory };
+// PUT /api/chat/message/:id — edit a message (sender or admin)
+const editMessage = async (req, res) => {
+  const { id } = req.params;
+  const { newText, requester } = req.body; // requester: username or 'admin'
+
+  if (!newText || !newText.trim())
+    return res.status(400).json({ error: 'New message text is required' });
+
+  try {
+    const msg = await Message.findById(id);
+    if (!msg) return res.status(404).json({ error: 'Message not found' });
+    if (msg.isDeleted) return res.status(400).json({ error: 'Cannot edit a deleted message' });
+
+    // Only the original sender or admin can edit
+    const isAdmin = requester === 'admin';
+    const isSender = msg.from === requester;
+    if (!isAdmin && !isSender)
+      return res.status(403).json({ error: 'Not authorised to edit this message' });
+
+    msg.message  = newText.trim();
+    msg.editedAt = new Date();
+    await msg.save();
+
+    res.json({ success: true, message: msg });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// DELETE /api/chat/message/:id — soft-delete a message (sender or admin)
+const deleteMessage = async (req, res) => {
+  const { id } = req.params;
+  const { requester } = req.body; // requester: username or 'admin'
+
+  try {
+    const msg = await Message.findById(id);
+    if (!msg) return res.status(404).json({ error: 'Message not found' });
+
+    // Only the original sender or admin can delete
+    const isAdmin = requester === 'admin';
+    const isSender = msg.from === requester;
+    if (!isAdmin && !isSender)
+      return res.status(403).json({ error: 'Not authorised to delete this message' });
+
+    msg.isDeleted = true;
+    msg.message   = 'This message was deleted';
+    await msg.save();
+
+    res.json({ success: true, message: msg });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+module.exports = {
+  createOrFetchChatUser,
+  getAllChatUsers,
+  getChatHistory,
+  editMessage,
+  deleteMessage,
+};

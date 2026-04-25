@@ -8,9 +8,7 @@ const initSocket = (io) => {
   io.on('connection', (socket) => {
 
     // User joins
-    // FIX: frontend was sending { username } object — now accept both forms
     socket.on('user_join', async (payload) => {
-      // Accept either a plain string ("alice") or an object ({ username: "alice" })
       const username = typeof payload === 'object' && payload !== null
         ? payload.username
         : payload;
@@ -27,7 +25,6 @@ const initSocket = (io) => {
 
       io.emit('users_list', onlineUsers);
 
-      // Send chat history to this user
       const history = await Message.find({
         $or: [
           { from: username, to: 'admin' },
@@ -43,13 +40,17 @@ const initSocket = (io) => {
       const username = onlineUsers[socket.id];
       if (!username) return;
 
-      await Message.create({ from: username, to: 'admin', message });
+      const saved = await Message.create({ from: username, to: 'admin', message });
 
       io.to('admin').emit('receive_user_message', {
         from: username,
         socketId: socket.id,
-        message
+        message,
+        _id: saved._id,
       });
+
+      // Echo back to user with the saved _id so they can edit/delete
+      socket.emit('message_saved', { _id: saved._id, message, from: username });
     });
 
     // Admin joins
@@ -74,13 +75,72 @@ const initSocket = (io) => {
 
     // Admin sends message to user
     socket.on('admin_message', async ({ toSocketId, toUsername, message }) => {
-      await Message.create({ from: 'admin', to: toUsername, message });
+      const saved = await Message.create({ from: 'admin', to: toUsername, message });
 
-      // FIX: also emit back to admin's own chat state
-      socket.emit('admin_message_sent', { toUsername, message });
+      socket.emit('admin_message_sent', { toUsername, message, _id: saved._id });
 
       if (toSocketId) {
-        io.to(toSocketId).emit('receive_admin_message', { message });
+        io.to(toSocketId).emit('receive_admin_message', { message, _id: saved._id });
+      }
+    });
+
+    // ── Edit message ─────────────────────────────────────────────────────────
+    // Payload: { _id, newText, requester }  (requester = username or 'admin')
+    socket.on('edit_message', async ({ _id, newText, requester }) => {
+      try {
+        const msg = await Message.findById(_id);
+        if (!msg || msg.isDeleted) return;
+
+        const isAdmin  = requester === 'admin';
+        const isSender = msg.from === requester;
+        if (!isAdmin && !isSender) return;
+
+        msg.message  = newText.trim();
+        msg.editedAt = new Date();
+        await msg.save();
+
+        const payload = { _id: msg._id.toString(), newText: msg.message, editedAt: msg.editedAt };
+
+        // Notify admin room
+        io.to('admin').emit('message_edited', payload);
+
+        // Notify the user whose conversation this belongs to
+        const targetUsername = msg.from === 'admin' ? msg.to : msg.from;
+        const targetSocketId = Object.entries(onlineUsers).find(([, n]) => n === targetUsername)?.[0];
+        if (targetSocketId) {
+          io.to(targetSocketId).emit('message_edited', payload);
+        }
+      } catch (err) {
+        console.error('edit_message error', err);
+      }
+    });
+
+    // ── Delete message ───────────────────────────────────────────────────────
+    // Payload: { _id, requester }
+    socket.on('delete_message', async ({ _id, requester }) => {
+      try {
+        const msg = await Message.findById(_id);
+        if (!msg) return;
+
+        const isAdmin  = requester === 'admin';
+        const isSender = msg.from === requester;
+        if (!isAdmin && !isSender) return;
+
+        msg.isDeleted = true;
+        msg.message   = 'This message was deleted';
+        await msg.save();
+
+        const payload = { _id: msg._id.toString() };
+
+        io.to('admin').emit('message_deleted', payload);
+
+        const targetUsername = msg.from === 'admin' ? msg.to : msg.from;
+        const targetSocketId = Object.entries(onlineUsers).find(([, n]) => n === targetUsername)?.[0];
+        if (targetSocketId) {
+          io.to(targetSocketId).emit('message_deleted', payload);
+        }
+      } catch (err) {
+        console.error('delete_message error', err);
       }
     });
 
