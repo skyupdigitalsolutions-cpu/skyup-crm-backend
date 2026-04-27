@@ -8,34 +8,34 @@ const { generalLimiter } = require('./middlewares/rateLimiter');
 const connectDB           = require('./config/db');
 const initSocket          = require('./socket/socketHandler');
 
-// ── WhatsApp Notifier — init on server start ──────────────────────────────────
-// Connects to WhatsApp Web. On first run: shows QR in terminal — scan once.
-// After that, session is saved and reconnects automatically on restart.
-
-// CRM Routes
+// ── CRM Routes ────────────────────────────────────────────────────────────────
 const superAdminRoute = require('./routes/superAdminRoute');
 const adminRoute      = require('./routes/adminRoute');
 const authRoute       = require('./routes/authRoutes');
 const leadRoute       = require('./routes/leadRoute');
 
-// Chat Engine Routes
+// ── Privacy & Subscription Routes (NEW) ──────────────────────────────────────
+const privacyRoute      = require('./routes/privacyRoute');
+const subscriptionRoute = require('./routes/subscriptionRoute');
+
+// ── Chat Engine Routes ─────────────────────────────────────────────────────────
 const chatRoutes = require('./routes/chatRoutes');
 
-// Meta Routes
+// ── Meta Routes ───────────────────────────────────────────────────────────────
 const metaWebhookRoute = require('./routes/metaWebhook');
 const metaConfigRoute  = require('./routes/metaConfig');
 
-// Twilio Routes
+// ── Twilio Routes ─────────────────────────────────────────────────────────────
 const twilioRoutes = require('./routes/twilio');
 
-// Razorpay Routes
+// ── Razorpay Routes ───────────────────────────────────────────────────────────
 const razorpayRoute = require('./routes/razorpayRoute');
 
-// Google Ads Routes
+// ── Google Ads Routes ─────────────────────────────────────────────────────────
 const googleAdsConfigRoute = require('./routes/googleAdsConfig');
 const googleWebhookRoute   = require('./routes/googleWebhook');
 
-// Website Contact Form Routes
+// ── Website Contact Form Routes ───────────────────────────────────────────────
 const websiteConfigRoute  = require('./routes/websiteConfig');
 const websiteWebhookRoute = require('./routes/websiteWebhook');
 
@@ -43,13 +43,13 @@ const attendanceRoute      = require('./routes/attendanceRoute');
 const emailCampaignRoute   = require('./routes/emailCampaign');
 const emailHistoryRoute    = require('./routes/emailHistory');
 
-// Saanvi Voicebot Proxy (avoids CORS — browser calls CRM, CRM calls Saanvi)
+// ── Saanvi Voicebot Proxy (avoids CORS) ──────────────────────────────────────
 const saanviProxyRoute = require('./routes/saanviProxy');
 
 const app    = express();
 const server = http.createServer(app);
 
-// ── Static origins always allowed (CRM frontend + local dev) ─────────────────
+// ── Static origins always allowed ─────────────────────────────────────────────
 const staticAllowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
@@ -99,8 +99,7 @@ const io = new Server(server, {
   },
 });
 
-// ── ✅ FIX: CORS must be registered FIRST — before any routes ─────────────────
-// This ensures the preflight OPTIONS request is handled correctly for ALL routes.
+// ── CORS must be first ────────────────────────────────────────────────────────
 app.use(cors(corsOptions));
 
 // ── Body parsers ──────────────────────────────────────────────────────────────
@@ -159,18 +158,22 @@ app.use('/api/lead',       leadRoute);
 
 app.use('/api/attendance', attendanceRoute);
 
-app.use('/api/twilio', twilioRoutes);
+app.use('/api/twilio',   twilioRoutes);
 app.use('/api/razorpay', razorpayRoute);
 
 app.use('/api/google-ads-config', googleAdsConfigRoute);
 app.use('/',                      googleWebhookRoute);
 
 app.use('/api/website-config', websiteConfigRoute);
-app.use('/api/chat', chatRoutes);
+app.use('/api/chat',           chatRoutes);
 app.use('/api/email-campaign', emailCampaignRoute);
-app.use('/api/email', emailHistoryRoute);
+app.use('/api/email',          emailHistoryRoute);
 
-// Saanvi Voicebot Proxy — browser → CRM backend → skyupdigitalsolutions.in
+// ── Privacy & Subscription (BIP39 zero-knowledge encryption) ─────────────────
+app.use('/api/privacy',      privacyRoute);
+app.use('/api/subscription', subscriptionRoute);
+
+// ── Saanvi Voicebot Proxy ─────────────────────────────────────────────────────
 app.use('/api/saanvi', saanviProxyRoute);
 
 app.set("io", io);
@@ -182,10 +185,8 @@ connectDB().then(() => {
   const PORT = process.env.PORT || 5000;
   server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-
-    // ── Start WhatsApp client after DB is connected ───────────────────────────
-    // QR code will appear in terminal on first run — scan with your WhatsApp.
-    // Session is saved to .wwebjs_auth/ — no QR needed after first scan.
-
+    console.log(`🔐 BIP39 zero-knowledge encryption: enabled`);
+    console.log(`📋 Privacy API:      /api/privacy`);
+    console.log(`💳 Subscription API: /api/subscription`);
   });
 });
