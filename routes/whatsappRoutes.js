@@ -16,7 +16,7 @@ const {
 
 // Import your existing auth middleware
 const { protect }      = require("../middlewares/authMiddleware");
-const { adminProtect } = require("../middlewares/adminAuthMiddleware");
+const { protectAdmin: adminProtect } = require("../middlewares/adminAuthMiddleware");
 
 // ─── Webhook (public — NO auth, Meta calls these directly) ──────────────────
 // Register these in Meta Developer Console as your callback URL:
