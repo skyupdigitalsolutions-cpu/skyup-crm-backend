@@ -46,6 +46,9 @@ const emailHistoryRoute    = require('./routes/emailHistory');
 // ── Saanvi Voicebot Proxy (avoids CORS) ──────────────────────────────────────
 const saanviProxyRoute = require('./routes/saanviProxy');
 
+// ── WhatsApp Routes ───────────────────────────────────────────────────────────
+const whatsappRoutes = require('./routes/whatsappRoutes');
+
 const app    = express();
 const server = http.createServer(app);
 
@@ -118,6 +121,7 @@ app.get('/', (req, res) => res.send('Server is running'));
 
 // ── Webhook Routes (public — no auth) ────────────────────────────────────────
 app.use('/meta', metaWebhookRoute);
+app.use('/wa-webhook', whatsappRoutes);
 
 app.use('/website-webhook', (req, res, next) => {
   const origin = req.headers.origin || '';
@@ -166,6 +170,7 @@ app.use('/',                      googleWebhookRoute);
 
 app.use('/api/website-config', websiteConfigRoute);
 app.use('/api/chat',           chatRoutes);
+app.use('/api/whatsapp',       whatsappRoutes);
 app.use('/api/email-campaign', emailCampaignRoute);
 app.use('/api/email',          emailHistoryRoute);
 

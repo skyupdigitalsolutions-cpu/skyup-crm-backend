@@ -61,6 +61,19 @@ const initSocket = (io) => {
       socket.emit('all_users_db', allUsers);
     });
 
+    // ── WhatsApp admin room (admin joins to see all WA chats) ──────────────────
+    socket.on('wa_admin_join', () => {
+      socket.join('wa_admin');
+      console.log(`👤 Admin joined WA room`);
+    });
+
+    // ── WhatsApp agent room (each agent joins their own room) ──────────────────
+    socket.on('wa_agent_join', ({ agentId }) => {
+      if (!agentId) return;
+      socket.join(`wa_agent_${agentId}`);
+      console.log(`👤 Agent ${agentId} joined WA room`);
+    });
+
     // Admin requests history for a specific user
     socket.on('admin_fetch_history', async ({ username }) => {
       const history = await Message.find({
