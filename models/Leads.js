@@ -5,9 +5,11 @@ const callHistorySchema = new mongoose.Schema(
   {
     userId:    { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     userName:  { type: String, default: "" },
-    remark:    { type: String, default: "" },
-    outcome:   { type: String, default: "" },
-    calledAt:  { type: Date, default: Date.now },
+    remark:        { type: String, default: "" },
+    outcome:       { type: String, default: "" },
+    calledAt:      { type: Date, default: Date.now },
+    recordingUrl:  { type: String, default: null },
+    recordingName: { type: String, default: null },
   },
   { _id: false }
 );

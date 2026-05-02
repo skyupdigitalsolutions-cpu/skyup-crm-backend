@@ -25,8 +25,7 @@ const chatRoutes = require('./routes/chatRoutes');
 const metaWebhookRoute = require('./routes/metaWebhook');
 const metaConfigRoute  = require('./routes/metaConfig');
 
-// ── Twilio Routes ─────────────────────────────────────────────────────────────
-const twilioRoutes = require('./routes/twilio');
+// Twilio removed — using mobile app native calls instead
 
 // ── Razorpay Routes ───────────────────────────────────────────────────────────
 const razorpayRoute = require('./routes/razorpayRoute');
@@ -161,7 +160,7 @@ app.use('/api/lead',       leadRoute);
 
 app.use('/api/attendance', attendanceRoute);
 
-app.use('/api/twilio',   twilioRoutes);
+// /api/twilio removed — mobile app uses native phone calls
 app.use('/api/razorpay', razorpayRoute);
 
 app.use('/api/google-ads-config', googleAdsConfigRoute);
