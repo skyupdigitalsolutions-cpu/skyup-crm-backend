@@ -1,15 +1,24 @@
 const User = require("../models/Users");
 
-// Google sends user_column_data as array of { column_name, string_value }
+/**
+ * Google sends user_column_data as:
+ *   [{ column_name: "FULL_NAME", string_value: "John Doe" }, ...]
+ *
+ * We normalise column_name to lowercase + underscores so lookups are consistent
+ * whether Google sends "phone number", "PHONE_NUMBER", or "phone_number".
+ */
 const parseGoogleLeadData = (userColumnData = []) => {
   const result = {};
   userColumnData.forEach(({ column_name, string_value }) => {
-    result[column_name.toLowerCase()] = string_value;
+    if (!column_name) return;
+    // Normalise: lowercase, replace spaces with underscores
+    const key = column_name.toLowerCase().replace(/\s+/g, "_");
+    result[key] = string_value || "";
   });
   return result;
 };
 
-// Round-robin — same logic as your Meta helper 
+// Round-robin assignment across active users of the company
 const getNextAssignedUserGoogle = async (config) => {
   const GoogleAdsConfig = require("../models/GoogleAdsConfig");
 
@@ -18,7 +27,7 @@ const getNextAssignedUserGoogle = async (config) => {
     .lean();
 
   if (!users || users.length === 0) {
-    console.warn(`No users for company ${config.company} — lead unassigned`);
+    console.warn(`⚠️  No active users for company ${config.company} — lead will be unassigned`);
     return null;
   }
 
@@ -32,16 +41,25 @@ const getNextAssignedUserGoogle = async (config) => {
   return users[index]._id;
 };
 
-// Map Google fields → your Lead schema
+// Map normalised Google fields → Lead schema
 const mapGoogleLeadToSchema = (parsed, config, googleLeadId, assignedUserId) => {
   const firstName = parsed["first_name"] || "";
   const lastName  = parsed["last_name"]  || "";
-  const fullName  = parsed["full_name"]  || `${firstName} ${lastName}`.trim() || "Unknown";
+  // Google may send full_name directly, or we build it from first+last
+  const fullName  =
+    parsed["full_name"] ||
+    `${firstName} ${lastName}`.trim() ||
+    "Unknown";
+
+  const mobile =
+    parsed["phone_number"] ||
+    parsed["phone"]        ||
+    "";
 
   return {
-    leadgenId: googleLeadId,   // reuse leadgenId field for deduplication
+    leadgenId: googleLeadId,
     name:      fullName,
-    mobile:    (parsed["phone_number"] || parsed["phone"] || "").replace(/\D/g, ""),
+    mobile:    mobile.replace(/\D/g, ""),   // digits only
     email:     parsed["email"] || "",
     source:    "Google Ads",
     campaign:  config.campaignName,

@@ -1,4 +1,4 @@
-// backend/controllers/mobileCallLogController.js
+// controllers/mobileCallLogController.js
 // CommonJS — matches the rest of the backend (no "type": "module" in package.json)
 
 const MobileCallLog = require('../models/MobileCallLog');
@@ -79,9 +79,17 @@ const syncCallLogs = async (req, res) => {
 
     const ops = docs.map(doc => ({
       updateOne: {
-        filter: { user: doc.user, phoneNumber: doc.phoneNumber, timestamp: doc.timestamp },
-        update:  { $setOnInsert: doc },
-        upsert:  true,
+        // ✅ FIX Bug #3: added callType to filter so two calls to the same number
+        // at the same second (different type e.g. incoming vs missed) are not
+        // collapsed into one document
+        filter: {
+          user:        doc.user,
+          phoneNumber: doc.phoneNumber,
+          timestamp:   doc.timestamp,
+          callType:    doc.callType,
+        },
+        update: { $setOnInsert: doc },
+        upsert: true,
       },
     }));
 
@@ -140,33 +148,100 @@ const matchPhone = async (req, res) => {
 };
 
 // ── POST /api/call-logs/recording ─────────────────────────────────────────────
+// Accepts: callLogId (preferred) OR phoneNumber + timestamp (fallback)
+// ✅ FIX Bug #1: was matching by phoneNumber alone — always hit the first call
+//    for that number instead of the specific call the recording belongs to.
+// ✅ FIX Bug #2: was using $set on a single String field — overwrote previous
+//    recording. Now uses $push into recordings[] array so all uploads are kept.
 const uploadRecording = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-    const { phoneNumber, timestamp } = req.body;
-    const fileUrl = `/recordings/${req.file.filename}`;
+    const { phoneNumber, timestamp, callLogId } = req.body;
 
-    const updated = await MobileCallLog.findOneAndUpdate(
-      {
+    // Build the filter — prefer _id match (most precise), fall back to
+    // phoneNumber + timestamp (both must be present)
+    let filter;
+    if (callLogId) {
+      filter = { _id: callLogId, user: req.user._id };
+    } else if (phoneNumber && timestamp) {
+      filter = {
         user:        req.user._id,
         phoneNumber: phoneNumber,
-        ...(timestamp && { timestamp: new Date(timestamp) }),
-      },
-      {
-        $set: {
-          recordingUrl:  fileUrl,
-          recordingName: req.file.originalname,
-          recordingSize: req.file.size,
-        },
-      },
-      { upsert: true, new: true },
+        timestamp:   new Date(parseInt(timestamp)),
+      };
+    } else {
+      // Clean up the uploaded file since we won't use it
+      fs.unlink(req.file.path, () => {});
+      return res.status(400).json({
+        message: 'Provide either callLogId or both phoneNumber and timestamp',
+      });
+    }
+
+    const newRecording = {
+      url:        `/recordings/${req.file.filename}`,
+      name:       req.file.originalname,
+      size:       req.file.size,
+      uploadedAt: new Date(),
+    };
+
+    // ✅ $push keeps all recordings — never overwrites an existing one
+    const updated = await MobileCallLog.findOneAndUpdate(
+      filter,
+      { $push: { recordings: newRecording } },
+      { new: true },  // do NOT upsert — recording must attach to existing call log
     );
 
-    res.json({ message: 'Recording uploaded', log: updated });
+    if (!updated) {
+      // Clean up orphaned file
+      fs.unlink(req.file.path, () => {});
+      return res.status(404).json({
+        message: 'Call log not found. Sync call logs first before uploading a recording.',
+      });
+    }
+
+    res.json({
+      message:       'Recording uploaded',
+      recordingId:   updated.recordings[updated.recordings.length - 1]._id,
+      totalRecordings: updated.recordings.length,
+      log:           updated,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-module.exports = { upload, syncCallLogs, getCallLogs, matchPhone, uploadRecording };
+// ── DELETE /api/call-logs/recording ──────────────────────────────────────────
+// Bonus: lets mobile app delete a specific recording by its _id
+const deleteRecording = async (req, res) => {
+  try {
+    const { callLogId, recordingId } = req.body;
+
+    if (!callLogId || !recordingId) {
+      return res.status(400).json({ message: 'callLogId and recordingId are required' });
+    }
+
+    const log = await MobileCallLog.findOne({ _id: callLogId, user: req.user._id });
+    if (!log) return res.status(404).json({ message: 'Call log not found' });
+
+    const recording = log.recordings.id(recordingId);
+    if (!recording) return res.status(404).json({ message: 'Recording not found' });
+
+    // Delete the physical file
+    const filePath = path.join(__dirname, '../uploads', recording.url);
+    fs.unlink(filePath, () => {});  // best-effort, don't block response
+
+    // Remove from array
+    await MobileCallLog.findByIdAndUpdate(
+      callLogId,
+      { $pull: { recordings: { _id: recordingId } } },
+      { new: true },
+    );
+
+    res.json({ message: 'Recording deleted' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = { upload, syncCallLogs, getCallLogs, matchPhone, uploadRecording, deleteRecording };
