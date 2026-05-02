@@ -1,7 +1,7 @@
 const Attendance = require("../models/Attendance");
 const User       = require("../models/Users");
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// Helpers
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -14,8 +14,7 @@ function calcBreakMinutes(breaks) {
   }, 0);
 }
 
-/** Determine CRM attendance status from a raw record.
- *  Present / Late / Half-day / Absent / Leave  */
+/** Determine CRM attendance status from a raw record.*  Present / Late / Half-day / Absent / Leave  */
 function deriveCrmStatus(rec) {
   if (!rec || !rec.loginTime) return "absent";
   const loginHour   = new Date(rec.loginTime).getHours();
@@ -27,7 +26,6 @@ function deriveCrmStatus(rec) {
 
   // Late threshold: 9:30 AM = 570 minutes
   if (totalMinutes > 570) return "late";
-  // Half-day: worked less than 4 hours
   if (workMins > 0 && workMins < 240) return "half_day";
   return "present";
 }
