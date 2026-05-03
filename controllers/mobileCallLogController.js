@@ -1,22 +1,26 @@
 // backend/controllers/mobileCallLogController.js
 const MobileCallLog = require('../models/MobileCallLog');
 const Lead          = require('../models/Leads');
-const path          = require('path');
-const fs            = require('fs');
 const multer        = require('multer');
 
-// ── Multer storage for recordings ─────────────────────────────────────────────
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = path.join(__dirname, '../uploads/recordings');
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const ts   = Date.now();
-    const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    cb(null, `${req.user._id}_${ts}_${safe}`);
-  },
+// ── Cloudinary storage — files survive Render redeploys (no ephemeral FS) ─────
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+const cloudinaryStorage = new CloudinaryStorage({
+  cloudinary,
+  params: async (req, file) => ({
+    folder:        'skyup-crm/recordings',
+    resource_type: 'video',   // Cloudinary uses 'video' for audio files
+    public_id:     `${req.user._id}_${Date.now()}`,
+    allowed_formats: ['mp3', 'm4a', 'aac', 'wav', 'amr', '3gp', 'ogg', 'opus'],
+  }),
 });
 
 const allowedMimes = [
@@ -25,7 +29,7 @@ const allowedMimes = [
 ];
 
 const upload = multer({
-  storage,
+  storage: cloudinaryStorage,
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (allowedMimes.includes(file.mimetype)) cb(null, true);
@@ -167,7 +171,8 @@ const uploadRecording = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
     const { phoneNumber, timestamp, remark, leadId } = req.body;
-    const fileUrl = `/recordings/${req.file.filename}`;
+    // Cloudinary returns the permanent URL in req.file.path
+    const fileUrl = req.file.path || req.file.secure_url || req.file.url;
     const ts = timestamp ? new Date(parseInt(timestamp)) : null;
 
     // If the mobile app sends a leadId directly, use it (more reliable than
@@ -178,19 +183,39 @@ const uploadRecording = async (req, res) => {
       if (lead) resolvedLeadId = lead._id;
     }
 
+    // Build the new recording sub-document
+    const newRecording = {
+      url:  fileUrl,
+      name: req.file.originalname,
+      size: req.file.size,
+      uploadedAt: new Date(),
+    };
+
     const updated = await MobileCallLog.findOneAndUpdate(
-      { user: req.user._id, phoneNumber, ...(ts && { timestamp: ts }) },
+      { user: req.user._id, company: req.user.company, phoneNumber },
       {
+        $push: { recordings: newRecording },
         $set: {
-          recordingUrl:  fileUrl,
-          recordingName: req.file.originalname,
-          recordingSize: req.file.size,
+          company:  req.user.company,
+          user:     req.user._id,
+          phoneNumber,
           ...(remark         ? { remark:      remark.trim()  } : {}),
           ...(resolvedLeadId ? { matchedLead: resolvedLeadId } : {}),
+        },
+        // Required fields provided on insert to satisfy schema validation
+        $setOnInsert: {
+          callType:  'outgoing',
+          timestamp: ts || new Date(),
+          duration:  0,
+          name:      '',
         },
       },
       { upsert: true, new: true, sort: { timestamp: -1 } },
     );
+
+    // Get the newly pushed recording's _id (last in array)
+    const savedRecording = updated.recordings[updated.recordings.length - 1];
+    const fileUrl_forHistory = savedRecording?.url || fileUrl;
 
     // Update matching lead callHistory entry with recording info
     const targetLeadId = resolvedLeadId || updated.matchedLead;
@@ -213,7 +238,7 @@ const uploadRecording = async (req, res) => {
           }
           if (idx >= 0) {
             if (remark?.trim()) lead.callHistory[idx].remark = remark.trim();
-            lead.callHistory[idx].recordingUrl  = fileUrl;
+            lead.callHistory[idx].recordingUrl  = fileUrl_forHistory;
             lead.callHistory[idx].recordingName = req.file.originalname;
             lead.markModified('callHistory');
             await lead.save();
@@ -238,11 +263,11 @@ const getCompanyRecordings = async (req, res) => {
     const company = req.callerCompany || req.user?.company;
     if (!company) return res.status(400).json({ message: 'Company not found in token' });
     const [recordings, total] = await Promise.all([
-      MobileCallLog.find({ company, recordingUrl: { $ne: null } })
+      MobileCallLog.find({ company, 'recordings.0': { $exists: true } })
         .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
         .populate('matchedLead', 'name mobile status')
         .populate('user', 'name email'),
-      MobileCallLog.countDocuments({ company, recordingUrl: { $ne: null } }),
+      MobileCallLog.countDocuments({ company, 'recordings.0': { $exists: true } }),
     ]);
     res.json({ recordings, total, page, totalPages: Math.ceil(total / limit) });
   } catch (error) {
