@@ -15,7 +15,7 @@
     "axios": "^1.13.6",
     "bcryptjs": "^3.0.3",
     "bip39": "^3.1.0",
-    "cloudinary": "^2.5.1",
+    "cloudinary": "^1.41.3",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
