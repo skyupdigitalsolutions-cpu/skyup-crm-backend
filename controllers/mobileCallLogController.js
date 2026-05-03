@@ -53,8 +53,6 @@ function callTypeToOutcome(callType) {
 }
 
 // ── POST /api/call-logs/sync ──────────────────────────────────────────────────
-// KEY FIX: Also pushes new call entries into lead.callHistory[] so the
-// Leads page and ReportPage reflect all mobile calls immediately.
 const syncCallLogs = async (req, res) => {
   try {
     const { logs } = req.body;
@@ -80,7 +78,6 @@ const syncCallLogs = async (req, res) => {
       }),
     );
 
-    // Upsert into MobileCallLog
     const ops = docs.map(({ _leadObj, ...doc }) => ({
       updateOne: {
         filter: { user: doc.user, phoneNumber: doc.phoneNumber, timestamp: doc.timestamp },
@@ -90,7 +87,6 @@ const syncCallLogs = async (req, res) => {
     }));
     const result = await MobileCallLog.bulkWrite(ops);
 
-    // Push new entries into lead.callHistory[] (deduped by timestamp)
     const leadUpdates = new Map();
     for (const doc of docs) {
       if (!doc._leadObj?._id) continue;
@@ -170,20 +166,37 @@ const matchPhone = async (req, res) => {
 const uploadRecording = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
-    const { phoneNumber, timestamp, remark } = req.body;
+    const { phoneNumber, timestamp, remark, leadId } = req.body;
     const fileUrl = `/recordings/${req.file.filename}`;
     const ts = timestamp ? new Date(parseInt(timestamp)) : null;
 
+    // If the mobile app sends a leadId directly, use it (more reliable than
+    // phone number matching). Otherwise fall back to the existing phone match.
+    let resolvedLeadId = null;
+    if (leadId) {
+      const lead = await Lead.findOne({ _id: leadId, company: req.user.company });
+      if (lead) resolvedLeadId = lead._id;
+    }
+
     const updated = await MobileCallLog.findOneAndUpdate(
       { user: req.user._id, phoneNumber, ...(ts && { timestamp: ts }) },
-      { $set: { recordingUrl: fileUrl, recordingName: req.file.originalname, recordingSize: req.file.size, ...(remark ? { remark: remark.trim() } : {}) } },
+      {
+        $set: {
+          recordingUrl:  fileUrl,
+          recordingName: req.file.originalname,
+          recordingSize: req.file.size,
+          ...(remark         ? { remark:      remark.trim()  } : {}),
+          ...(resolvedLeadId ? { matchedLead: resolvedLeadId } : {}),
+        },
+      },
       { upsert: true, new: true, sort: { timestamp: -1 } },
     );
 
     // Update matching lead callHistory entry with recording info
-    if (updated.matchedLead) {
+    const targetLeadId = resolvedLeadId || updated.matchedLead;
+    if (targetLeadId) {
       try {
-        const lead = await Lead.findById(updated.matchedLead);
+        const lead = await Lead.findById(targetLeadId);
         if (lead?.callHistory?.length > 0) {
           const refTime = updated.timestamp ? new Date(updated.timestamp).getTime() : null;
           let idx = -1;
@@ -238,7 +251,8 @@ const getCompanyRecordings = async (req, res) => {
 // All mobile call logs for a specific lead (for lead detail view)
 const getCallLogsForLead = async (req, res) => {
   try {
-    const logs = await MobileCallLog.find({ matchedLead: req.params.leadId, company: req.user.company })
+    const company = req.callerCompany || req.user?.company;
+    const logs = await MobileCallLog.find({ matchedLead: req.params.leadId, company })
       .sort({ timestamp: -1 }).populate('user', 'name email');
     res.json({ logs });
   } catch (error) {
