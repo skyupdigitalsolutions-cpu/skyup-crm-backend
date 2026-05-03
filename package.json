@@ -23,6 +23,7 @@
     "mongoose": "^9.3.1",
     "multer": "^2.1.1",
     "nodemon": "^3.1.14",
+    "openai": "^4.103.0",
     "qrcode-terminal": "^0.12.0",
     "razorpay": "^2.9.6",
     "socket.io": "^4.8.3",

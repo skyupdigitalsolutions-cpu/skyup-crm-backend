@@ -189,6 +189,10 @@ app.use('/api/saanvi', saanviProxyRoute);
 const mobileCallLogRoute = require('./routes/mobileCallLog');
 app.use('/api/call-logs', mobileCallLogRoute);
 
+// ── AI Transcription & Summarization ─────────────────────────────────────────
+const transcriptionRoute = require('./routes/transcription');
+app.use('/api/transcription', transcriptionRoute);
+
 app.set("io", io);
 global._io = io;
 
