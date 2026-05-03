@@ -298,10 +298,24 @@ const patchLead = async (req, res) => {
     const { id } = req.params;
     const lead = await Lead.findOne({ _id: id, company: req.user.company });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    const { status, remark, followUpDate } = req.body;
+    const { status, remark, outcome, followUpDate } = req.body;
     const update = {};
     if (status !== undefined) update.status = status;
     if (remark !== undefined) update.remark = remark;
+
+    // Push remark to callHistory so history is preserved, never overwritten
+    if (remark && remark.trim()) {
+      const historyEntry = {
+        userId:   req.user._id,
+        userName: req.user.name || "",
+        remark:   remark.trim(),
+        outcome:  outcome || "Call Back",
+        calledAt: new Date(),
+      };
+      update.$push = update.$push
+        ? { ...update.$push, callHistory: historyEntry }
+        : { callHistory: historyEntry };
+    }
 
     if (status !== undefined && status !== "Not Interested") {
       let scheduledAt;
