@@ -178,19 +178,32 @@ const uploadRecording = async (req, res) => {
       if (lead) resolvedLeadId = lead._id;
     }
 
+    // Build the new recording sub-document
+    const newRecording = {
+      url:  fileUrl,
+      name: req.file.originalname,
+      size: req.file.size,
+      uploadedAt: new Date(),
+    };
+
     const updated = await MobileCallLog.findOneAndUpdate(
-      { user: req.user._id, phoneNumber, ...(ts && { timestamp: ts }) },
+      { user: req.user._id, company: req.user.company, phoneNumber, ...(ts && { timestamp: ts }) },
       {
+        $push: { recordings: newRecording },
         $set: {
-          recordingUrl:  fileUrl,
-          recordingName: req.file.originalname,
-          recordingSize: req.file.size,
+          company:  req.user.company,
+          user:     req.user._id,
+          phoneNumber,
           ...(remark         ? { remark:      remark.trim()  } : {}),
           ...(resolvedLeadId ? { matchedLead: resolvedLeadId } : {}),
         },
       },
       { upsert: true, new: true, sort: { timestamp: -1 } },
     );
+
+    // Get the newly pushed recording's _id (last in array)
+    const savedRecording = updated.recordings[updated.recordings.length - 1];
+    const fileUrl_forHistory = savedRecording?.url || fileUrl;
 
     // Update matching lead callHistory entry with recording info
     const targetLeadId = resolvedLeadId || updated.matchedLead;
@@ -213,7 +226,7 @@ const uploadRecording = async (req, res) => {
           }
           if (idx >= 0) {
             if (remark?.trim()) lead.callHistory[idx].remark = remark.trim();
-            lead.callHistory[idx].recordingUrl  = fileUrl;
+            lead.callHistory[idx].recordingUrl  = fileUrl_forHistory;
             lead.callHistory[idx].recordingName = req.file.originalname;
             lead.markModified('callHistory');
             await lead.save();
@@ -238,11 +251,11 @@ const getCompanyRecordings = async (req, res) => {
     const company = req.callerCompany || req.user?.company;
     if (!company) return res.status(400).json({ message: 'Company not found in token' });
     const [recordings, total] = await Promise.all([
-      MobileCallLog.find({ company, recordingUrl: { $ne: null } })
+      MobileCallLog.find({ company, 'recordings.0': { $exists: true } })
         .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
         .populate('matchedLead', 'name mobile status')
         .populate('user', 'name email'),
-      MobileCallLog.countDocuments({ company, recordingUrl: { $ne: null } }),
+      MobileCallLog.countDocuments({ company, 'recordings.0': { $exists: true } }),
     ]);
     res.json({ recordings, total, page, totalPages: Math.ceil(total / limit) });
   } catch (error) {
