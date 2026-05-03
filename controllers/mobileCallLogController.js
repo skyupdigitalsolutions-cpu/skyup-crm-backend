@@ -232,14 +232,17 @@ const uploadRecording = async (req, res) => {
 // Admin: all recordings for the company (used by ReportPage)
 const getCompanyRecordings = async (req, res) => {
   try {
-    const page  = parseInt(req.query.page  || 1);
-    const limit = parseInt(req.query.limit || 100);
+    const page    = parseInt(req.query.page  || 1);
+    const limit   = parseInt(req.query.limit || 100);
+    // Works for both admin (req.callerCompany) and user (req.user.company)
+    const company = req.callerCompany || req.user?.company;
+    if (!company) return res.status(400).json({ message: 'Company not found in token' });
     const [recordings, total] = await Promise.all([
-      MobileCallLog.find({ company: req.user.company, recordingUrl: { $ne: null } })
+      MobileCallLog.find({ company, recordingUrl: { $ne: null } })
         .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
         .populate('matchedLead', 'name mobile status')
         .populate('user', 'name email'),
-      MobileCallLog.countDocuments({ company: req.user.company, recordingUrl: { $ne: null } }),
+      MobileCallLog.countDocuments({ company, recordingUrl: { $ne: null } }),
     ]);
     res.json({ recordings, total, page, totalPages: Math.ceil(total / limit) });
   } catch (error) {

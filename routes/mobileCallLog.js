@@ -13,7 +13,7 @@ router.get('/',                   protect,    getCallLogs);
 router.post('/sync',              protect,    syncCallLogs);
 router.post('/recording',         protect,    upload.single('recording'), uploadRecording);
 router.post('/remark',            protect,    saveRemark);
-router.get('/recordings',         protect,    getCompanyRecordings);
+router.get('/recordings',         protectAny, getCompanyRecordings);  // admin views all company recordings
 router.get('/lead/:leadId',       protectAny, getCallLogsForLead);  // ✅ accepts admin + user tokens
 
 module.exports = router;
