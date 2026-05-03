@@ -3,6 +3,7 @@ const express      = require('express');
 const http         = require('http');
 const { Server }   = require('socket.io');
 const cors         = require('cors');
+const path         = require('path');
 
 const { generalLimiter } = require('./middlewares/rateLimiter');
 const connectDB           = require('./config/db');
@@ -14,7 +15,7 @@ const adminRoute      = require('./routes/adminRoute');
 const authRoute       = require('./routes/authRoutes');
 const leadRoute       = require('./routes/leadRoute');
 
-// ── Privacy & Subscription Routes (NEW) ──────────────────────────────────────
+// ── Privacy & Subscription Routes ────────────────────────────────────────────
 const privacyRoute      = require('./routes/privacyRoute');
 const subscriptionRoute = require('./routes/subscriptionRoute');
 
@@ -113,6 +114,12 @@ app.use(express.text({ type: "text/plain", limit: "5mb" }));
 
 app.use(generalLimiter);
 
+// ── Serve call recording audio files (uploaded from mobile app) ───────────────
+// Files are stored at: uploads/recordings/<filename>
+// recordingUrl in DB is: /recordings/<filename>
+// This makes <audio src="https://backend/recordings/xxx.mp3"> work.
+app.use('/recordings', express.static(path.join(__dirname, 'uploads/recordings')));
+
 app.get('/', (req, res) => res.send('Server is running'));
 
 // ── Health check for mobile app connectivity test ─────────────────────────────
@@ -178,7 +185,7 @@ app.use('/api/subscription', subscriptionRoute);
 // ── Saanvi Voicebot Proxy ─────────────────────────────────────────────────────
 app.use('/api/saanvi', saanviProxyRoute);
 
-// ── Mobile App: Call Log Sync ─────────────────────────────────────────────────
+// ── Mobile App: Call Log Sync & Recordings ────────────────────────────────────
 const mobileCallLogRoute = require('./routes/mobileCallLog');
 app.use('/api/call-logs', mobileCallLogRoute);
 
@@ -191,6 +198,7 @@ connectDB().then(() => {
   const PORT = process.env.PORT || 5000;
   server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🎙️  Recordings served at: /recordings/`);
     console.log(`🔐 BIP39 zero-knowledge encryption: enabled`);
     console.log(`📋 Privacy API:      /api/privacy`);
     console.log(`💳 Subscription API: /api/subscription`);

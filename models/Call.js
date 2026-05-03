@@ -11,6 +11,15 @@ const callSchema = new mongoose.Schema({
   recordingUrl:      { type: String },
   recordingDuration: { type: String },
   recordedAt:        { type: Date },
+
+  // ── AI Transcription & Summary ────────────────────────────────────────────
+  transcript:       { type: String,  default: null },
+  summary:          { type: Object,  default: null }, // { summary, keyPoints[], sentiment, nextAction, suggestedTemp }
+  transcribeStatus: {
+    type:    String,
+    enum:    ['pending', 'processing', 'done', 'failed'],
+    default: 'pending',
+  },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Call', callSchema);
