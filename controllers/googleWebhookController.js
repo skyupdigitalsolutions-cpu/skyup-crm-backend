@@ -126,6 +126,11 @@ const receiveGoogleWebhook = async (req, res) => {
     const leadPayload    = mapGoogleLeadToSchema(parsedFields, config, googleLeadId, assignedUserId);
 
     const newLead = await Lead.create(leadPayload);
+
+    // ── FIX: Increment lead counter on the config (same as Meta webhook) ─────
+    // Without this the campaign card always shows "—" for Leads.
+    await GoogleAdsConfig.findByIdAndUpdate(config._id, { $inc: { leads: 1 } });
+
     console.log(
       `\n✅ GOOGLE LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`
     );
