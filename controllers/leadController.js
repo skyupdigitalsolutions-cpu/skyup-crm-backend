@@ -298,23 +298,27 @@ const patchLead = async (req, res) => {
     const { id } = req.params;
     const lead = await Lead.findOne({ _id: id, company: req.user.company });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    const { status, remark, outcome, followUpDate } = req.body;
+    const { status, remark, outcome, followUpDate, temperature, Quality } = req.body;
     const update = {};
-    if (status !== undefined) update.status = status;
-    if (remark !== undefined) update.remark = remark;
+    if (status      !== undefined) update.status = status;
+    if (remark      !== undefined) update.remark = remark;
+    // Accept temperature from both 'temperature' and 'Quality' field names
+    const temp = temperature || Quality;
+    if (temp && ["Hot","Warm","Cold"].includes(temp)) update.temperature = temp;
+
+    // Build $push ops in a single object — prevents the overwrite bug where
+    // the scheduledCalls assignment killed the callHistory assignment
+    const pushOps = {};
 
     // Push remark to callHistory so history is preserved, never overwritten
     if (remark && remark.trim()) {
-      const historyEntry = {
+      pushOps.callHistory = {
         userId:   req.user._id,
         userName: req.user.name || "",
         remark:   remark.trim(),
         outcome:  outcome || "Call Back",
         calledAt: new Date(),
       };
-      update.$push = update.$push
-        ? { ...update.$push, callHistory: historyEntry }
-        : { callHistory: historyEntry };
     }
 
     if (status !== undefined && status !== "Not Interested") {
@@ -334,15 +338,16 @@ const patchLead = async (req, res) => {
         scheduledAt = tomorrow;
       }
 
-      const followUpEntry = {
+      pushOps.scheduledCalls = {
         type:        "follow-up",
         scheduledAt,
         done:        false,
         doneAt:      null,
         note:        `Follow-up after status set to "${status}"`,
       };
-      update.$push = { scheduledCalls: followUpEntry };
     }
+
+    if (Object.keys(pushOps).length > 0) update.$push = pushOps;
 
     const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
     return res.status(200).json(updatedLead);
