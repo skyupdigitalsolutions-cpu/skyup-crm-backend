@@ -1,9 +1,12 @@
 // controllers/transcriptionController.js
 
-const Call = require('../models/Call');
-const MobileCallLog = require('../models/MobileCallLog');
-const { transcribeTwilioRecording, transcribeMobileRecording } = require('../utils/transcribeAudio');
-const { summarizeCallTranscript } = require('../utils/summarizeCall');
+const Call = require("../models/Call");
+const MobileCallLog = require("../models/MobileCallLog");
+const {
+  transcribeTwilioRecording,
+  transcribeMobileRecording,
+} = require("../utils/transcribeAudio");
+const { summarizeCallTranscript } = require("../utils/summarizeCall");
 
 // ── Helper: run the full pipeline and return result ───────────────────────────
 async function runPipeline(transcribeFn, contactName) {
@@ -17,14 +20,14 @@ async function runPipeline(transcribeFn, contactName) {
 function getCaller(req) {
   if (req.admin) {
     return {
-      isAdmin:   true,
-      company:   req.admin.company?._id || req.admin.company,
+      isAdmin: true,
+      company: req.admin.company?._id || req.admin.company,
     };
   }
   return {
-    isAdmin:  false,
-    userId:   req.user._id,
-    company:  req.user.company,
+    isAdmin: false,
+    userId: req.user._id,
+    company: req.user.company,
   };
 }
 
@@ -32,23 +35,35 @@ function getCaller(req) {
 const transcribeTwilioCall = async (req, res) => {
   const { recordingSid } = req.params;
   try {
-    await Call.findOneAndUpdate({ recordingSid }, { transcribeStatus: 'processing' });
+    await Call.findOneAndUpdate(
+      { recordingSid },
+      { transcribeStatus: "processing" },
+    );
     const call = await Call.findOne({ recordingSid });
-    const contactName = req.body.contactName || call?.contactName || 'the customer';
+    const contactName =
+      req.body.contactName || call?.contactName || "the customer";
     const { transcript, summary } = await runPipeline(
       () => transcribeTwilioRecording(recordingSid),
-      contactName
+      contactName,
     );
     const updated = await Call.findOneAndUpdate(
       { recordingSid },
-      { transcript, summary, transcribeStatus: 'done' },
-      { new: true }
+      { transcript, summary, transcribeStatus: "done" },
+      { new: true },
     );
-    res.json({ message: 'Transcription complete', transcript, summary, call: updated });
+    res.json({
+      message: "Transcription complete",
+      transcript,
+      summary,
+      call: updated,
+    });
   } catch (err) {
-    console.error('[transcribeTwilioCall] error:', err.message);
-    await Call.findOneAndUpdate({ recordingSid }, { transcribeStatus: 'failed' }).catch(() => {});
-    res.status(500).json({ message: err.message || 'Transcription failed' });
+    console.error("[transcribeTwilioCall] error:", err.message);
+    await Call.findOneAndUpdate(
+      { recordingSid },
+      { transcribeStatus: "failed" },
+    ).catch(() => {});
+    res.status(500).json({ message: err.message || "Transcription failed" });
   }
 };
 
@@ -56,11 +71,11 @@ const transcribeTwilioCall = async (req, res) => {
 const getTwilioTranscription = async (req, res) => {
   try {
     const call = await Call.findOne({ recordingSid: req.params.recordingSid });
-    if (!call) return res.status(404).json({ message: 'Recording not found' });
+    if (!call) return res.status(404).json({ message: "Recording not found" });
     res.json({
-      transcribeStatus: call.transcribeStatus || 'pending',
-      transcript:       call.transcript       || null,
-      summary:          call.summary          || null,
+      transcribeStatus: call.transcribeStatus || "pending",
+      transcript: call.transcript || null,
+      summary: call.summary || null,
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -82,28 +97,34 @@ const transcribeMobileCall = async (req, res) => {
       : { _id: callLogId, user: caller.userId };
 
     const log = await MobileCallLog.findOne(query);
-    if (!log) return res.status(404).json({ message: 'Call log not found' });
+    if (!log) return res.status(404).json({ message: "Call log not found" });
 
     const recording = log.recordings.id(recordingId);
-    if (!recording) return res.status(404).json({ message: 'Recording not found' });
+    if (!recording)
+      return res.status(404).json({ message: "Recording not found" });
 
-    recording.transcribeStatus = 'processing';
-    await log.save();
+    recording.transcribeStatus = "processing";
+    await log.save({ validateBeforeSave: false });
 
-    const contactName = log.name || 'the customer';
+    const contactName = log.name || "the customer";
     const { transcript, summary } = await runPipeline(
       () => transcribeMobileRecording(recording.url),
-      contactName
+      contactName,
     );
 
-    recording.transcript       = transcript;
-    recording.summary          = summary;
-    recording.transcribeStatus = 'done';
-    await log.save();
+    recording.transcript = transcript;
+    recording.summary = summary;
+    recording.transcribeStatus = "done";
+    await log.save({ validateBeforeSave: false });
 
-    res.json({ message: 'Transcription complete', transcript, summary, recordingId });
+    res.json({
+      message: "Transcription complete",
+      transcript,
+      summary,
+      recordingId,
+    });
   } catch (err) {
-    console.error('[transcribeMobileCall] error:', err.message);
+    console.error("[transcribeMobileCall] error:", err.message);
     try {
       const caller2 = getCaller(req);
       const q = caller2.isAdmin
@@ -112,10 +133,15 @@ const transcribeMobileCall = async (req, res) => {
       const log = await MobileCallLog.findOne(q);
       if (log) {
         const rec = log.recordings.id(recordingId);
-        if (rec) { rec.transcribeStatus = 'failed'; await log.save(); }
+        if (rec) {
+          rec.transcribeStatus = "failed";
+          await log.save({ validateBeforeSave: false });
+        }
       }
-    } catch { /* ignore */ }
-    res.status(500).json({ message: err.message || 'Transcription failed' });
+    } catch {
+      /* ignore */
+    }
+    res.status(500).json({ message: err.message || "Transcription failed" });
   }
 };
 
@@ -129,15 +155,16 @@ const getMobileTranscription = async (req, res) => {
       : { _id: req.params.callLogId, user: caller.userId };
 
     const log = await MobileCallLog.findOne(query);
-    if (!log) return res.status(404).json({ message: 'Call log not found' });
+    if (!log) return res.status(404).json({ message: "Call log not found" });
 
     const recording = log.recordings.id(req.params.recordingId);
-    if (!recording) return res.status(404).json({ message: 'Recording not found' });
+    if (!recording)
+      return res.status(404).json({ message: "Recording not found" });
 
     res.json({
-      transcribeStatus: recording.transcribeStatus || 'pending',
-      transcript:       recording.transcript       || null,
-      summary:          recording.summary          || null,
+      transcribeStatus: recording.transcribeStatus || "pending",
+      transcript: recording.transcript || null,
+      summary: recording.summary || null,
     });
   } catch (err) {
     res.status(500).json({ message: err.message });

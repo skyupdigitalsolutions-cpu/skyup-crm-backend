@@ -34,6 +34,7 @@ const mobileCallLogSchema = new mongoose.Schema(
       type: String,
       enum: ['incoming', 'outgoing', 'missed', 'voicemail', 'rejected', 'blocked', 'unknown'],
       required: true,
+      default: 'outgoing',
     },
     duration:  { type: Number, default: 0 },  // seconds
     timestamp: { type: Date,   required: true },
