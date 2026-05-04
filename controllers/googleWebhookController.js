@@ -110,8 +110,9 @@ const receiveGoogleWebhook = async (req, res) => {
     console.log("   Available column names:", userColumnData.map(c => c.column_name));
 
     // Guard: must have at least a name or phone
-    const hasName  = parsedFields["first_name"] || parsedFields["full_name"] || parsedFields["full name"];
-    const hasPhone = parsedFields["phone_number"] || parsedFields["phone"] || parsedFields["phone number"];
+    // Guard: after parseGoogleLeadData, keys are column_id lowercased (e.g. full_name, phone_number)
+    const hasName  = parsedFields["full_name"] || parsedFields["first_name"] || parsedFields["full name"];
+    const hasPhone = parsedFields["phone_number"] || parsedFields["phone"];
 
     if (!hasName && !hasPhone) {
       console.warn("⚠️  No recognisable lead fields (name/phone) found in user_column_data.");
