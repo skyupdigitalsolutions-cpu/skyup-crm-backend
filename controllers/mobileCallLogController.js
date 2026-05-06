@@ -336,4 +336,25 @@ const saveRemark = async (req, res) => {
   }
 };
 
-module.exports = { upload, syncCallLogs, getCallLogs, matchPhone, uploadRecording, getCompanyRecordings, getCallLogsForLead, saveRemark };
+// ── GET /api/call-logs/all ─────────────────────────────────────────────────────
+// Admin: all call logs for the company (no recordings filter — used by Attendance page)
+const getCompanyAllLogs = async (req, res) => {
+  try {
+    const page    = parseInt(req.query.page  || 1);
+    const limit   = parseInt(req.query.limit || 200);
+    const company = req.callerCompany || req.user?.company;
+    if (!company) return res.status(400).json({ message: 'Company not found in token' });
+    const [logs, total] = await Promise.all([
+      MobileCallLog.find({ company })
+        .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
+        .populate('matchedLead', 'name mobile status')
+        .populate('user', 'name email'),
+      MobileCallLog.countDocuments({ company }),
+    ]);
+    res.json({ logs, total, page, totalPages: Math.ceil(total / limit) });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = { upload, syncCallLogs, getCallLogs, matchPhone, uploadRecording, getCompanyRecordings, getCompanyAllLogs, getCallLogsForLead, saveRemark };
