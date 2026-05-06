@@ -31,11 +31,21 @@ function deriveCrmStatus(rec) {
 }
 
 // ── USER: Clock In ────────────────────────────────────────────────────────────
+const DEVICE_FIELDS_ATT = ["appName", "appVersion", "platform", "deviceModel", "osVersion", "fcmToken"];
+
 const clockIn = async (req, res) => {
   try {
     const userId    = req.user._id;
     const companyId = req.user.company;
     const date      = todayStr();
+
+    // ── Pull device / app info if the mobile app sent it ──────────────────────
+    const deviceFields = {};
+    DEVICE_FIELDS_ATT.forEach(f => {
+      if (req.body[f] !== undefined && req.body[f] !== null) {
+        deviceFields[f] = req.body[f];
+      }
+    });
 
     let record = await Attendance.findOne({ user: userId, date });
     if (record && record.loginTime && !record.logoutTime)
@@ -51,12 +61,20 @@ const clockIn = async (req, res) => {
       record.lastActivity     = new Date();
       record.activeBreakIndex = null;
       record.crmStatus        = null; // reset manual override
+      // Refresh device fields on re-clock-in
+      Object.assign(record, deviceFields);
       await record.save();
     } else {
       record = await Attendance.create({
         user: userId, company: companyId, date,
         loginTime: new Date(), status: "active", lastActivity: new Date(),
+        ...deviceFields,
       });
+    }
+
+    // Keep User document current (in case login missed it)
+    if (Object.keys(deviceFields).length > 0) {
+      await User.findByIdAndUpdate(userId, { $set: deviceFields });
     }
 
     res.status(200).json(record);

@@ -12,6 +12,14 @@ const userSchema = mongoose.Schema(
       ref: "Company",
       required: true, // Every user belongs to a company
     },
+
+    // ── Device / app info captured on login & clock-in ────────────────────────
+    appName:     { type: String, default: null },
+    appVersion:  { type: String, default: null },
+    platform:    { type: String, default: null },
+    deviceModel: { type: String, default: null },
+    osVersion:   { type: String, default: null },
+    fcmToken:    { type: String, default: null },
   },
   { timestamps: true }
 );

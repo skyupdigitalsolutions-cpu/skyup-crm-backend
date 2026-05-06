@@ -41,6 +41,14 @@ const attendanceSchema = new mongoose.Schema({
 
   remarks: { type: String, default: "" },
 
+  // ── Device / app info captured at clock-in ────────────────────────────────
+  appName:     { type: String, default: null },
+  appVersion:  { type: String, default: null },
+  platform:    { type: String, default: null },
+  deviceModel: { type: String, default: null },
+  osVersion:   { type: String, default: null },
+  fcmToken:    { type: String, default: null },
+
 }, { timestamps: true });
 
 attendanceSchema.index({ user: 1, date: 1 }, { unique: true });

@@ -42,6 +42,8 @@ const register = async (req, res) => {
 };
 
 // Login
+const DEVICE_FIELDS = ["appName", "appVersion", "platform", "deviceModel", "osVersion", "fcmToken"];
+
 const login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -51,6 +53,17 @@ const login = async (req, res) => {
 
       if (!user.company.isActive) {
         return res.status(403).json({ message: "Your company is deactivated" });
+      }
+
+      // ── Capture device / app info if the mobile app sent it ────────────────
+      const deviceUpdate = {};
+      DEVICE_FIELDS.forEach(f => {
+        if (req.body[f] !== undefined && req.body[f] !== null) {
+          deviceUpdate[f] = req.body[f];
+        }
+      });
+      if (Object.keys(deviceUpdate).length > 0) {
+        await User.findByIdAndUpdate(user._id, { $set: deviceUpdate });
       }
 
       res.json({
