@@ -1,9 +1,14 @@
 // backend/controllers/mobileCallLogController.js
+// CHANGE: Added getTodayCallLogs() — returns only today's logs for the mobile app.
+//         Added ?date= filter to getCallLogs() so mobile can request a specific day.
+//         Sync endpoint unchanged — backend still stores all logs permanently.
+//         Mobile app should only SEND today's logs (enforced in backgroundSyncService).
+
 const MobileCallLog = require('../models/MobileCallLog');
 const Lead          = require('../models/Leads');
 const multer        = require('multer');
 
-// ── Cloudinary storage — files survive Render redeploys (no ephemeral FS) ─────
+// ── Cloudinary storage ────────────────────────────────────────────────────────
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
@@ -16,9 +21,9 @@ cloudinary.config({
 const cloudinaryStorage = new CloudinaryStorage({
   cloudinary,
   params: async (req, file) => ({
-    folder:        'skyup-crm/recordings',
-    resource_type: 'video',   // Cloudinary uses 'video' for audio files
-    public_id:     `${req.user._id}_${Date.now()}`,
+    folder:          'skyup-crm/recordings',
+    resource_type:   'video',
+    public_id:       `${req.user._id}_${Date.now()}`,
     allowed_formats: ['mp3', 'm4a', 'aac', 'wav', 'amr', '3gp', 'ogg', 'opus'],
   }),
 });
@@ -57,6 +62,8 @@ function callTypeToOutcome(callType) {
 }
 
 // ── POST /api/call-logs/sync ──────────────────────────────────────────────────
+// No change — backend always stores permanently. Mobile app is responsible for
+// only sending today's logs (see backgroundSyncService LOOKBACK_MS change).
 const syncCallLogs = async (req, res) => {
   try {
     const { logs } = req.body;
@@ -136,17 +143,53 @@ const syncCallLogs = async (req, res) => {
 };
 
 // ── GET /api/call-logs ────────────────────────────────────────────────────────
+// CHANGE: Added optional ?date=YYYY-MM-DD query param.
+//         Mobile app uses this to fetch a specific day's logs.
+//         Admin/web dashboard omits ?date to get paginated full history.
 const getCallLogs = async (req, res) => {
   try {
     const page  = parseInt(req.query.page  || 1);
     const limit = parseInt(req.query.limit || 50);
+
+    // NEW: if ?date=YYYY-MM-DD is provided, restrict to that day (IST midnight → midnight)
+    const filter = { user: req.user._id };
+    if (req.query.date) {
+      const dayStart = new Date(req.query.date);          // e.g. 2026-05-07T00:00:00.000Z
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(dayStart);
+      dayEnd.setDate(dayEnd.getDate() + 1);
+      filter.timestamp = { $gte: dayStart, $lt: dayEnd };
+    }
+
     const [logs, total] = await Promise.all([
-      MobileCallLog.find({ user: req.user._id })
+      MobileCallLog.find(filter)
         .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
         .populate('matchedLead', 'name mobile status'),
-      MobileCallLog.countDocuments({ user: req.user._id }),
+      MobileCallLog.countDocuments(filter),
     ]);
     res.json({ logs, page, total, totalPages: Math.ceil(total / limit) });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── GET /api/call-logs/today ──────────────────────────────────────────────────
+// NEW ENDPOINT — mobile app calls this on screen mount instead of fetching
+// all historical logs. Returns only today's logs, no pagination needed.
+const getTodayCallLogs = async (req, res) => {
+  try {
+    const now      = new Date();
+    const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
+    const dayEnd   = new Date(now); dayEnd.setHours(23, 59, 59, 999);
+
+    const logs = await MobileCallLog.find({
+      user:      req.user._id,
+      timestamp: { $gte: dayStart, $lte: dayEnd },
+    })
+      .sort({ timestamp: -1 })
+      .populate('matchedLead', 'name mobile status');
+
+    res.json({ logs, date: now.toISOString().slice(0, 10), count: logs.length });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -166,24 +209,19 @@ const matchPhone = async (req, res) => {
 };
 
 // ── POST /api/call-logs/recording ─────────────────────────────────────────────
-// Uploads a recording and links it to both MobileCallLog and lead.callHistory
 const uploadRecording = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
     const { phoneNumber, timestamp, remark, leadId } = req.body;
-    // Cloudinary returns the permanent URL in req.file.path
     const fileUrl = req.file.path || req.file.secure_url || req.file.url;
     const ts = timestamp ? new Date(parseInt(timestamp)) : null;
 
-    // If the mobile app sends a leadId directly, use it (more reliable than
-    // phone number matching). Otherwise fall back to the existing phone match.
     let resolvedLeadId = null;
     if (leadId) {
       const lead = await Lead.findOne({ _id: leadId, company: req.user.company });
       if (lead) resolvedLeadId = lead._id;
     }
 
-    // Build the new recording sub-document
     const newRecording = {
       url:  fileUrl,
       name: req.file.originalname,
@@ -202,7 +240,6 @@ const uploadRecording = async (req, res) => {
           ...(remark         ? { remark:      remark.trim()  } : {}),
           ...(resolvedLeadId ? { matchedLead: resolvedLeadId } : {}),
         },
-        // Required fields provided on insert to satisfy schema validation
         $setOnInsert: {
           callType:  'outgoing',
           timestamp: ts || new Date(),
@@ -213,11 +250,9 @@ const uploadRecording = async (req, res) => {
       { upsert: true, new: true, sort: { timestamp: -1 } },
     );
 
-    // Get the newly pushed recording's _id (last in array)
     const savedRecording = updated.recordings[updated.recordings.length - 1];
     const fileUrl_forHistory = savedRecording?.url || fileUrl;
 
-    // Update matching lead callHistory entry with recording info
     const targetLeadId = resolvedLeadId || updated.matchedLead;
     if (targetLeadId) {
       try {
@@ -254,12 +289,10 @@ const uploadRecording = async (req, res) => {
 };
 
 // ── GET /api/call-logs/recordings ─────────────────────────────────────────────
-// Admin: all recordings for the company (used by ReportPage)
 const getCompanyRecordings = async (req, res) => {
   try {
     const page    = parseInt(req.query.page  || 1);
     const limit   = parseInt(req.query.limit || 100);
-    // Works for both admin (req.callerCompany) and user (req.user.company)
     const company = req.callerCompany || req.user?.company;
     if (!company) return res.status(400).json({ message: 'Company not found in token' });
     const [recordings, total] = await Promise.all([
@@ -276,7 +309,6 @@ const getCompanyRecordings = async (req, res) => {
 };
 
 // ── GET /api/call-logs/lead/:leadId ───────────────────────────────────────────
-// All mobile call logs for a specific lead (for lead detail view)
 const getCallLogsForLead = async (req, res) => {
   try {
     const company = req.callerCompany || req.user?.company;
@@ -289,7 +321,6 @@ const getCallLogsForLead = async (req, res) => {
 };
 
 // ── POST /api/call-logs/remark ────────────────────────────────────────────────
-// Mobile app posts a remark/outcome after a call
 const saveRemark = async (req, res) => {
   try {
     const { phoneNumber, timestamp, remark, outcome } = req.body;
@@ -336,8 +367,7 @@ const saveRemark = async (req, res) => {
   }
 };
 
-// ── GET /api/call-logs/all ─────────────────────────────────────────────────────
-// Admin: all call logs for the company (no recordings filter — used by Attendance page)
+// ── GET /api/call-logs/all ────────────────────────────────────────────────────
 const getCompanyAllLogs = async (req, res) => {
   try {
     const page    = parseInt(req.query.page  || 1);
@@ -357,4 +387,8 @@ const getCompanyAllLogs = async (req, res) => {
   }
 };
 
-module.exports = { upload, syncCallLogs, getCallLogs, matchPhone, uploadRecording, getCompanyRecordings, getCompanyAllLogs, getCallLogsForLead, saveRemark };
+module.exports = {
+  upload, syncCallLogs, getCallLogs, getTodayCallLogs,
+  matchPhone, uploadRecording, getCompanyRecordings,
+  getCompanyAllLogs, getCallLogsForLead, saveRemark,
+};
