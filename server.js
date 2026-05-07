@@ -125,7 +125,7 @@ app.get('/', (req, res) => res.send('Server is running'));
 // ── Health check for mobile app connectivity test ─────────────────────────────
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-// ── Webhook Routes (public — no auth) ────────────────────────────────────────
+// ── Webhook Routes (public — no auth)
 app.use('/meta', metaWebhookRoute);
 
 app.use('/website-webhook', (req, res, next) => {
@@ -157,7 +157,7 @@ app.use('/website-webhook', (req, res, next) => {
   next();
 }, websiteWebhookRoute);
 
-// ── API Routes ────────────────────────────────────────────────────────────────
+// ── API Routes 
 app.use('/api/meta-config', metaConfigRoute);
 
 app.use('/api/superadmin', superAdminRoute);

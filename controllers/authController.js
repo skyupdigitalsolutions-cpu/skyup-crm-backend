@@ -7,6 +7,7 @@ const register = async (req, res) => {
   try {
     const { name, email, password, companyId } = req.body;
 
+    // 1️⃣ Fetch company FIRST
     const company = await Company.findById(companyId);
     if (!company) {
       return res.status(404).json({ message: "Company not found" });
@@ -15,15 +16,28 @@ const register = async (req, res) => {
       return res.status(403).json({ message: "Company is not active" });
     }
 
+    // 2️⃣ NOW you can safely use company.plan
+    const PLAN_USER_LIMITS = { basic: 10, pro: 30, enterprise: 50 };
+    const userLimit = PLAN_USER_LIMITS[company.plan] || 10;
+    const existingUserCount = await User.countDocuments({ company: companyId });
+
+    if (existingUserCount >= userLimit) {
+      return res.status(403).json({
+        message: `Your ${company.plan} plan allows a maximum of ${userLimit} users. Please upgrade your plan to add more.`,
+        limitReached: true,
+        plan: company.plan,
+        maxUsers: userLimit,
+      });
+    }
+
+    // 3️⃣ Rest continues unchanged...
     const userExists = await User.findOne({ email });
     if (userExists) {
       return res.status(400).json({ message: "User already exists" });
     }
 
     const user = await User.create({
-      name,
-      email,
-      password,
+      name, email, password,
       company: companyId,
       role: "user",
     });
@@ -36,13 +50,21 @@ const register = async (req, res) => {
       role: user.role,
       token: generateToken(user._id, "user"),
     });
+
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
 // Login
-const DEVICE_FIELDS = ["appName", "appVersion", "platform", "deviceModel", "osVersion", "fcmToken"];
+const DEVICE_FIELDS = [
+  "appName",
+  "appVersion",
+  "platform",
+  "deviceModel",
+  "osVersion",
+  "fcmToken",
+];
 
 const login = async (req, res) => {
   try {
@@ -50,14 +72,13 @@ const login = async (req, res) => {
 
     const user = await User.findOne({ email }).populate("company");
     if (user && (await user.matchPassword(password))) {
-
       if (!user.company.isActive) {
         return res.status(403).json({ message: "Your company is deactivated" });
       }
 
       // ── Capture device / app info if the mobile app sent it ────────────────
       const deviceUpdate = {};
-      DEVICE_FIELDS.forEach(f => {
+      DEVICE_FIELDS.forEach((f) => {
         if (req.body[f] !== undefined && req.body[f] !== null) {
           deviceUpdate[f] = req.body[f];
         }

@@ -1,9 +1,22 @@
-const Admin = require("../models/Admin");
-const User = require("../models/Users");
-const Lead = require("../models/Leads");
-const generateToken = require("../utils/generateToken");
 
-// Get logged-in admin's company info (plan, etc.)
+const Admin   = require("../models/Admin");
+const User    = require("../models/Users");
+const Lead    = require("../models/Leads");
+const Company = require("../models/Company");
+
+// Plan limits — single source of truth on the backend
+// Must match UpgradePlan.jsx and UserManagement.jsx
+const PLAN_LIMITS = {
+  basic:      { maxAdmins: 1,  maxUsers: 10  },  // = starter
+  pro:        { maxAdmins: 3,  maxUsers: 30  },  // = growth
+  enterprise: { maxAdmins: 5,  maxUsers: 50  },
+};
+
+function getPlanLimits(plan) {
+  return PLAN_LIMITS[plan] || PLAN_LIMITS.basic;
+}
+
+// Get logged-in admin's company info
 const getMyCompany = async (req, res) => {
   try {
     res.status(200).json({
@@ -18,48 +31,53 @@ const getMyCompany = async (req, res) => {
   }
 };
 
-// Get all admins in same company only
+// Get all admins in same company
 const getAdmins = async (req, res) => {
   try {
-    const admins = await Admin.find({ company: req.admin.company._id })
-      .select("-password");
+    const admins = await Admin.find({ company: req.admin.company._id }).select("-password");
     res.status(200).json(admins);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// Get single admin — company check
+// Get single admin
 const getAdmin = async (req, res) => {
   try {
-    const { id } = req.params;
-    const admin = await Admin.findOne({ _id: id, company: req.admin.company._id })
-      .select("-password");
-    if (!admin) {
-      return res.status(404).json({ message: "Admin not found" });
-    }
+    const admin = await Admin.findOne({ _id: req.params.id, company: req.admin.company._id }).select("-password");
+    if (!admin) return res.status(404).json({ message: "Admin not found" });
     res.status(200).json(admin);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// Create admin — auto attach company from logged-in admin
+// FIX: Create admin — enforce plan limit before creating
 const createAdmin = async (req, res) => {
   try {
     const { name, email, password } = req.body;
+    const companyId = req.admin.company._id;
 
-    const adminExists = await Admin.findOne({ email });
-    if (adminExists) {
-      return res.status(400).json({ message: "Admin already exists" });
+    // FIX: Check plan limit server-side
+    const company = await Company.findById(companyId);
+    if (!company) return res.status(404).json({ message: "Company not found" });
+
+    const limits = getPlanLimits(company.plan);
+    const existingAdminCount = await Admin.countDocuments({ company: companyId });
+
+    if (existingAdminCount >= limits.maxAdmins) {
+      return res.status(403).json({
+        message: `Your ${company.plan} plan allows a maximum of ${limits.maxAdmins} admin${limits.maxAdmins > 1 ? "s" : ""}. Please upgrade your plan to add more.`,
+        limitReached: true,
+        plan: company.plan,
+        maxAdmins: limits.maxAdmins,
+      });
     }
 
-    const admin = await Admin.create({
-      name,
-      email,
-      password,
-      company: req.admin.company._id,
-    });
+    const adminExists = await Admin.findOne({ email });
+    if (adminExists) return res.status(400).json({ message: "Admin already exists" });
+
+    const admin = await Admin.create({ name, email, password, company: companyId });
 
     res.status(201).json({
       _id:     admin._id,
@@ -73,32 +91,25 @@ const createAdmin = async (req, res) => {
   }
 };
 
-// Delete admin — company check
+// Delete admin
 const deleteAdmin = async (req, res) => {
   try {
-    const { id } = req.params;
-    const admin = await Admin.findOne({ _id: id, company: req.admin.company._id });
-    if (!admin) {
-      return res.status(404).json({ message: "Admin Not Found" });
-    }
-    await Admin.findByIdAndDelete(id);
-    return res.status(200).json({ message: "Admin deleted Successfully" });
+    const admin = await Admin.findOne({ _id: req.params.id, company: req.admin.company._id });
+    if (!admin) return res.status(404).json({ message: "Admin Not Found" });
+    await Admin.findByIdAndDelete(req.params.id);
+    res.status(200).json({ message: "Admin deleted successfully" });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// Update admin — company check
+// Update admin
 const updateAdmin = async (req, res) => {
   try {
-    const { id } = req.params;
-    const admin = await Admin.findOne({ _id: id, company: req.admin.company._id });
-    if (!admin) {
-      return res.status(404).json({ message: "Admin Not Found!.." });
-    }
-    const updatedAdmin = await Admin.findByIdAndUpdate(id, req.body, { new: true })
-      .select("-password");
-    return res.status(200).json(updatedAdmin);
+    const admin = await Admin.findOne({ _id: req.params.id, company: req.admin.company._id });
+    if (!admin) return res.status(404).json({ message: "Admin Not Found" });
+    const updated = await Admin.findByIdAndUpdate(req.params.id, req.body, { new: true }).select("-password");
+    res.status(200).json(updated);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -107,8 +118,7 @@ const updateAdmin = async (req, res) => {
 // Get all users in same company
 const getCompanyUsers = async (req, res) => {
   try {
-    const users = await User.find({ company: req.admin.company._id })
-      .select("-password");
+    const users = await User.find({ company: req.admin.company._id }).select("-password");
     res.status(200).json(users);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -118,24 +128,20 @@ const getCompanyUsers = async (req, res) => {
 // Get all leads in same company
 const getCompanyLeads = async (req, res) => {
   try {
-    const leads = await Lead.find({ company: req.admin.company._id })
-      .populate("user", "name email");
+    const leads = await Lead.find({ company: req.admin.company._id }).populate("user", "name email");
     res.status(200).json(leads);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// Delete a user (agent) — company check to prevent cross-company deletes
+// FIX: Delete user — with company check
 const deleteCompanyUser = async (req, res) => {
   try {
-    const { id } = req.params;
-    const user = await User.findOne({ _id: id, company: req.admin.company._id });
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-    await User.findByIdAndDelete(id);
-    return res.status(200).json({ message: "User deleted successfully" });
+    const user = await User.findOne({ _id: req.params.id, company: req.admin.company._id });
+    if (!user) return res.status(404).json({ message: "User not found" });
+    await User.findByIdAndDelete(req.params.id);
+    res.status(200).json({ message: "User deleted successfully" });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
