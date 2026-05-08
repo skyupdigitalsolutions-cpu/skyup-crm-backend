@@ -1,6 +1,21 @@
 const Attendance = require("../models/Attendance");
 const User       = require("../models/Users");
 
+// ── Socket helper — emits attendance:updated to the user's private room ───────
+// The room name is `att:<userId>`. Both web and mobile join this room on mount.
+// If io isn't set yet (e.g. tests), the emit is silently skipped.
+function emitAttendanceUpdate(req, record) {
+  try {
+    const io = req.app.get("io") || global._io;
+    if (!io) return;
+    const userId = String(req.user._id);
+    io.to(`att:${userId}`).emit("attendance:updated", record);
+  } catch (e) {
+    // Never let a socket error crash the HTTP response
+    console.error("[socket] emitAttendanceUpdate error:", e.message);
+  }
+}
+
 // Helpers
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
@@ -77,6 +92,7 @@ const clockIn = async (req, res) => {
       await User.findByIdAndUpdate(userId, { $set: deviceFields });
     }
 
+    emitAttendanceUpdate(req, record);
     res.status(200).json(record);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
@@ -106,6 +122,7 @@ const clockOut = async (req, res) => {
     record.activeBreakIndex   = null;
     await record.save();
 
+    emitAttendanceUpdate(req, record);
     res.status(200).json(record);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
@@ -125,6 +142,7 @@ const startBreak = async (req, res) => {
     record.activeBreakIndex = record.breaks.length - 1;
     record.status = reason === "Auto Idle" ? "idle" : "on_break";
     await record.save();
+    emitAttendanceUpdate(req, record);
     res.status(200).json(record);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
@@ -145,6 +163,7 @@ const endBreak = async (req, res) => {
     record.status            = "active";
     record.lastActivity      = new Date();
     await record.save();
+    emitAttendanceUpdate(req, record);
     res.status(200).json(record);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };

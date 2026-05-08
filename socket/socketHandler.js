@@ -7,6 +7,16 @@ const initSocket = (io) => {
 
   io.on('connection', (socket) => {
 
+    // ── Attendance sync — each user joins their private room ──────────────────
+    // Room name: att:<userId>
+    // The backend emits attendance:updated to this room after every
+    // clockIn / clockOut / startBreak / endBreak so all open tabs and the
+    // mobile app stay in sync without polling.
+    socket.on("att_join", ({ userId }) => {
+      if (!userId) return;
+      socket.join(`att:${userId}`);
+    });
+
     // User joins
     socket.on('user_join', async (payload) => {
       const username = typeof payload === 'object' && payload !== null
