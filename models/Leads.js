@@ -113,7 +113,7 @@ leadSchema.index({ company: 1, mobile: 1 });
 
 // Meta webhook deduplication (leadgenId index already set via unique:true sparse above,
 // but explicit compound with company is useful for webhook lookups)
-leadSchema.index({ leadgenId: 1 }, { sparse: true });
+// leadSchema.index({ leadgenId: 1 }, { sparse: true });
 
 // ── PHONE DEDUP: Partial unique index on normalizedPhone ─────────────────────
 // Partial filter: only enforces uniqueness when normalizedPhone is a non-null string.
