@@ -742,4 +742,5 @@ module.exports = {
   updateLeadEmail,
   bulkUpdateEmails,
   adminGetAllLeads,
+  checkDuplicate,
 };
