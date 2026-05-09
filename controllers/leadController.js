@@ -1,103 +1,62 @@
 // controllers/leadController.js
-const Lead    = require("../models/Leads");
-const User    = require("../models/Users");
-const Company = require("../models/Company");
+const Lead = require("../models/Leads");
+const User = require("../models/Users");
 const { notifyTelegram } = require("../utils/telegramNotifier");
-const { normalizePhone } = require("../utils/normalizePhone");
 
-// ── Helper: check for an existing lead by normalizedPhone ─────────────────────
-// Returns the existing lead doc (lean) or null.
-// Uses the compound index {company, normalizedPhone} — O(log n).
-async function findDuplicateLead(companyId, mobile) {
-  const norm = normalizePhone(mobile);
-  if (!norm) return null;
-  return Lead.findOne(
-    { company: companyId, normalizedPhone: norm },
-    { name: 1, mobile: 1, status: 1, source: 1, createdAt: 1 }
-  ).lean();
-}
-
-// ── Helper: build duplicate 409 response body ─────────────────────────────────
-function dupResponse(existing) {
-  return {
-    duplicate:    true,
-    message:      `A lead with this mobile number already exists (${existing.mobile}).`,
-    existingLead: {
-      _id:       existing._id,
-      name:      existing.name,
-      mobile:    existing.mobile,
-      status:    existing.status,
-      source:    existing.source,
-      createdAt: existing.createdAt,
-    },
-  };
-}
-
-// ── FIX 4D: Atomic round-robin using Company.roundRobinIndex ─────────────────
-// Replaces the old getNextUser() that fired one countDocuments() per user.
-// Now uses a single atomic findByIdAndUpdate to advance the index — 1 DB call total.
+// ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
 async function getNextUser(companyId, excludeIds = []) {
   const users = await User.find({ company: companyId }).select("_id").lean();
   if (!users.length) return null;
-
-  const pool = excludeIds.length > 0
-    ? users.filter(u => !excludeIds.some(e => e.toString() === u._id.toString()))
-    : users;
-
-  const candidates = pool.length > 0 ? pool : users;
-
-  // Atomically increment the index and wrap around to stay in bounds
-  const updated = await Company.findByIdAndUpdate(
-    companyId,
-    [{ $set: { roundRobinIndex: {
-      $mod: [{ $add: ["$roundRobinIndex", 1] }, candidates.length]
-    }}}],
-    { new: true, select: "roundRobinIndex" }
+  const pool = users.filter(
+    (u) => !excludeIds.some((e) => e.toString() === u._id.toString()),
   );
-
-  return candidates[updated.roundRobinIndex]._id;
+  const candidates = pool.length > 0 ? pool : users;
+  const counts = await Promise.all(
+    candidates.map((u) =>
+      Lead.countDocuments({
+        company: companyId,
+        user: u._id,
+        status: { $nin: ["Not Interested", "Converted"] },
+      }).then((c) => ({ userId: u._id, count: c })),
+    ),
+  );
+  counts.sort((a, b) => a.count - b.count);
+  return counts[0].userId;
 }
 
 // ── Helper: build scheduled calls (+3d follow-up, +7d & +30d verification) ────
 function buildScheduledCalls() {
   const now = Date.now();
   return [
-    { type: "follow-up",    scheduledAt: new Date(now + 3  * 24 * 60 * 60 * 1000), done: false, note: "Auto follow-up after Not Interested" },
-    { type: "verification", scheduledAt: new Date(now + 7  * 24 * 60 * 60 * 1000), done: false, note: "7-day verification call" },
-    { type: "verification", scheduledAt: new Date(now + 30 * 24 * 60 * 60 * 1000), done: false, note: "1-month verification call" },
+    {
+      type: "follow-up",
+      scheduledAt: new Date(now + 3 * 24 * 60 * 60 * 1000),
+      done: false,
+      note: "Auto follow-up after Not Interested",
+    },
+    {
+      type: "verification",
+      scheduledAt: new Date(now + 7 * 24 * 60 * 60 * 1000),
+      done: false,
+      note: "7-day verification call",
+    },
+    {
+      type: "verification",
+      scheduledAt: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      done: false,
+      note: "1-month verification call",
+    },
   ];
 }
 
-// ── GET all leads — paginated (user sees leads assigned to them by admin OR self-created) ──
-// BUG FIX: Old filter used $or[{ user: req.user._id }, { user: null }]
-//   This MISSED leads the admin assigned to the user because admin-assigned leads
-//   have user: ObjectId (not null). The fix is simply user: req.user._id which
-//   captures ALL leads assigned to this user regardless of who assigned them.
+// ── GET all leads (user sees own + unassigned) ────────────────────────────────
 const getLeads = async (req, res) => {
   try {
-    const page  = parseInt(req.query.page)  || 1;
-    const limit = Math.min(parseInt(req.query.limit) || 200, 500);
-    const skip  = (page - 1) * limit;
-
-    // FIX: user: req.user._id captures ALL leads assigned to this user
-    // (self-created AND admin-assigned). Removed { user: null } — unassigned
-    // leads should not be visible to individual users.
-    const filter = {
+    const leads = await Lead.find({
       company: req.user.company,
-      user: req.user._id,
-    };
-
-    const [leads, total] = await Promise.all([
-      Lead.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .populate("user", "name email")
-        .lean(),
-      Lead.countDocuments(filter),
-    ]);
-
-    res.status(200).json({ leads, total, page, pages: Math.ceil(total / limit) });
+      $or: [{ user: req.user._id }, { user: null }],
+    }).populate("user", "name email");
+    res.status(200).json(leads);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -118,8 +77,14 @@ const getLeadsByCampaign = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { campaign } = req.query;
-    if (!campaign) return res.status(400).json({ message: "campaign query param is required" });
-    const leads = await Lead.find({ company: companyId, campaign }).populate("user", "name email");
+    if (!campaign)
+      return res
+        .status(400)
+        .json({ message: "campaign query param is required" });
+    const leads = await Lead.find({ company: companyId, campaign }).populate(
+      "user",
+      "name email",
+    );
     res.status(200).json(leads);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -129,28 +94,18 @@ const getLeadsByCampaign = async (req, res) => {
 // ── User creates a lead manually ──────────────────────────────────────────────
 const createLead = async (req, res) => {
   try {
-    // Duplicate check before insert
-    const dup = await findDuplicateLead(req.user.company, req.body.mobile);
-    if (dup) return res.status(409).json(dupResponse(dup));
-
     const lead = await Lead.create({
       ...req.body,
       user: req.body.user || req.user._id,
       company: req.user.company,
     });
 
-    notifyTelegram(lead, "Manual").catch(e => console.error("Telegram error:", e.message));
+    notifyTelegram(lead, "Manual").catch((e) =>
+      console.error("Telegram error:", e.message),
+    );
 
     res.status(201).json(lead);
   } catch (error) {
-    if (error.code === 11000) {
-      // Race condition: another request beat us; fetch the existing lead
-      const norm = normalizePhone(req.body.mobile);
-      const existing = norm
-        ? await Lead.findOne({ company: req.user.company, normalizedPhone: norm }, { name:1, mobile:1, status:1, source:1, createdAt:1 }).lean()
-        : null;
-      return res.status(409).json(existing ? dupResponse(existing) : { duplicate: true, message: "Duplicate mobile number." });
-    }
     res.status(500).json({ message: error.message });
   }
 };
@@ -159,40 +114,43 @@ const createLead = async (req, res) => {
 const adminCreateLead = async (req, res) => {
   try {
     const companyId = req.admin
-      ? (req.admin.company._id || req.admin.company)
+      ? req.admin.company._id || req.admin.company
       : req.body.companyId;
-    if (!companyId) return res.status(400).json({ message: "companyId is required." });
-
-    // Duplicate check
-    const dup = await findDuplicateLead(companyId, req.body.mobile);
-    if (dup) return res.status(409).json(dupResponse(dup));
-
+    if (!companyId)
+      return res.status(400).json({ message: "companyId is required." });
     let assignedUser = req.body.user || null;
     if (!assignedUser) {
       assignedUser = await getNextUser(companyId);
-      if (!assignedUser) return res.status(400).json({ message: "No users found in this company to assign the lead." });
+      if (!assignedUser)
+        return res
+          .status(400)
+          .json({
+            message: "No users found in this company to assign the lead.",
+          });
     }
     const lead = await Lead.create({
-      name: req.body.name, mobile: req.body.mobile,
+      name: req.body.name,
+      mobile: req.body.mobile,
       source: req.body.source || "Web Form",
       campaign: req.body.campaign || null,
       status: req.body.status || "New",
       date: req.body.date || new Date(),
       remark: req.body.remark || "Manually added",
-      user: assignedUser, company: companyId,
+      user: assignedUser,
+      company: companyId,
     });
-    const populated = await Lead.findById(lead._id).populate("user", "name email");
+    const populated = await Lead.findById(lead._id).populate(
+      "user",
+      "name email",
+    );
 
-    notifyTelegram(lead, req.body.source || "Manual").catch(e => console.error("Telegram error:", e.message));
+    // ── Notify admin on WhatsApp ──────────────────────────────────────────────
+    notifyTelegram(lead, req.body.source || "Manual").catch((e) =>
+      console.error("Telegram error:", e.message),
+    );
 
     res.status(201).json(populated);
   } catch (error) {
-    if (error.code === 11000) {
-      const companyId = req.admin ? (req.admin.company._id || req.admin.company) : req.body.companyId;
-      const norm = normalizePhone(req.body.mobile);
-      const existing = norm ? await Lead.findOne({ company: companyId, normalizedPhone: norm }, { name:1, mobile:1, status:1, source:1, createdAt:1 }).lean() : null;
-      return res.status(409).json(existing ? dupResponse(existing) : { duplicate: true, message: "Duplicate mobile number." });
-    }
     res.status(500).json({ message: error.message });
   }
 };
@@ -201,49 +159,66 @@ const adminCreateLead = async (req, res) => {
 const adminCreateLeadsBulk = async (req, res) => {
   try {
     const companyId = req.admin
-      ? (req.admin.company._id || req.admin.company)
+      ? req.admin.company._id || req.admin.company
       : req.body.companyId;
-    if (!companyId) return res.status(400).json({ message: "companyId is required." });
+    if (!companyId)
+      return res.status(400).json({ message: "companyId is required." });
     const items = req.body.leads;
     if (!Array.isArray(items) || items.length === 0)
-      return res.status(400).json({ message: "leads array is required and must not be empty." });
+      return res
+        .status(400)
+        .json({ message: "leads array is required and must not be empty." });
     if (items.length > 50)
-      return res.status(400).json({ message: "Maximum 50 leads per bulk request." });
-    const fallbackUser = await User.findOne({ company: companyId }).select("_id").lean();
-    const results = [], errors = [];
+      return res
+        .status(400)
+        .json({ message: "Maximum 50 leads per bulk request." });
+    const fallbackUser = await User.findOne({ company: companyId })
+      .select("_id")
+      .lean();
+    const results = [],
+      errors = [];
     for (let i = 0; i < items.length; i++) {
       const row = items[i];
       try {
-        // Per-row duplicate check
-        const dup = await findDuplicateLead(companyId, row.mobile);
-        if (dup) {
-          errors.push({ index: i, duplicate: true, message: `Duplicate: lead already exists for ${row.mobile}`, existingLead: dup });
+        const assignedUser =
+          row.user || (fallbackUser ? fallbackUser._id : null);
+        if (!assignedUser) {
+          errors.push({ index: i, message: "No user found." });
           continue;
         }
-        const assignedUser = row.user || (fallbackUser ? fallbackUser._id : null);
-        if (!assignedUser) { errors.push({ index: i, message: "No user found." }); continue; }
         const lead = await Lead.create({
-          name: row.name, mobile: row.mobile,
+          name: row.name,
+          mobile: row.mobile,
           source: row.source || "Web Form",
           campaign: row.campaign || null,
           status: row.status || "New",
           date: row.date || new Date(),
           remark: row.remark || "Manually added",
-          user: assignedUser, company: companyId,
+          user: assignedUser,
+          company: companyId,
         });
 
-        notifyTelegram(lead, row.source || "Bulk Import").catch(e => console.error("Telegram error:", e.message));
+        // ── Notify admin on WhatsApp ────────────────────────────────────────
+        notifyTelegram(lead, row.source || "Bulk Import").catch((e) =>
+          console.error("Telegram error:", e.message),
+        );
 
-        results.push(await Lead.findById(lead._id).populate("user", "name email"));
+        results.push(
+          await Lead.findById(lead._id).populate("user", "name email"),
+        );
       } catch (err) {
-        if (err.code === 11000) {
-          errors.push({ index: i, duplicate: true, message: `Duplicate mobile: ${row.mobile}` });
-        } else {
-          errors.push({ index: i, message: err.message });
-        }
+        errors.push({ index: i, message: err.message });
       }
     }
-    res.status(207).json({ saved: results, errors, total: items.length, savedCount: results.length, errorCount: errors.length });
+    res
+      .status(207)
+      .json({
+        saved: results,
+        errors,
+        total: items.length,
+        savedCount: results.length,
+        errorCount: errors.length,
+      });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -253,49 +228,61 @@ const adminCreateLeadsBulk = async (req, res) => {
 const adminImportCSV = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    if (!companyId) return res.status(400).json({ message: "companyId is required." });
+    if (!companyId)
+      return res.status(400).json({ message: "companyId is required." });
     const rows = req.body.leads;
     if (!Array.isArray(rows) || rows.length === 0)
       return res.status(400).json({ message: "No leads provided in CSV." });
     const users = await User.find({ company: companyId }).select("_id").lean();
-    if (!users.length) return res.status(400).json({ message: "No users found in this company." });
-    const results = [], errors = [];
+    if (!users.length)
+      return res
+        .status(400)
+        .json({ message: "No users found in this company." });
+    const results = [],
+      errors = [];
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       try {
         const assignedUser = users[i % users.length]._id;
         const mobile = row.mobile || row.phone || "";
-
-        // Duplicate check using normalizedPhone index
-        const dup = await findDuplicateLead(companyId, mobile);
-        if (dup) {
-          errors.push({ index: i, row: row.name || i, duplicate: true, message: `Duplicate: ${mobile} already exists as "${dup.name}"`, existingLead: dup });
-          continue;
-        }
-
         const adminDoc = {
-          name: row.name || "Unknown", mobile, email: row.email || "",
-          source: row.source || "CSV Import", campaign: row.campaign || null,
-          status: row.status || "New", date: row.date ? new Date(row.date) : new Date(),
-          remark: row.remark || "Imported via CSV", user: assignedUser, company: companyId,
+          name: row.name || "Unknown",
+          mobile,
+          email: row.email || "",
+          source: row.source || "CSV Import",
+          campaign: row.campaign || null,
+          status: row.status || "New",
+          date: row.date ? new Date(row.date) : new Date(),
+          remark: row.remark || "Imported via CSV",
+          user: assignedUser,
+          company: companyId,
         };
         if (row.leadgenId) adminDoc.leadgenId = row.leadgenId;
+        const inserted = await Lead.collection.insertOne(adminDoc);
+        const savedLead = await Lead.findById(inserted.insertedId).populate(
+          "user",
+          "name email",
+        );
 
-        // Use Lead.create so Mongoose pre-validate hook sets normalizedPhone
-        const savedLead = await Lead.create(adminDoc);
-        const populated = await Lead.findById(savedLead._id).populate("user", "name email");
-
-        notifyTelegram(adminDoc, row.source || "CSV Import").catch(e => console.error("Telegram error:", e.message));
-        results.push(populated);
+        // ── Notify admin on WhatsApp ────────────────────────────────────────
+        notifyTelegram(adminDoc, row.source || "CSV Import").catch((e) =>
+          console.error("Telegram error:", e.message),
+        );
+        results.push(savedLead);
       } catch (err) {
-        if (err.code === 11000) {
-          errors.push({ index: i, row: row.name || i, duplicate: true, message: `Duplicate mobile: ${row.mobile || row.phone}` });
-        } else {
-          errors.push({ index: i, row: row.name || i, message: err.message });
-        }
+        errors.push({ index: i, row: row.name || i, message: err.message });
       }
     }
-    res.status(207).json({ saved: results, errors, total: rows.length, savedCount: results.length, errorCount: errors.length, message: `${results.length} leads imported with round-robin assignment.` });
+    res
+      .status(207)
+      .json({
+        saved: results,
+        errors,
+        total: rows.length,
+        savedCount: results.length,
+        errorCount: errors.length,
+        message: `${results.length} leads imported with round-robin assignment.`,
+      });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -307,41 +294,50 @@ const userImportCSV = async (req, res) => {
     const rows = req.body.leads;
     if (!Array.isArray(rows) || rows.length === 0)
       return res.status(400).json({ message: "No leads provided in CSV." });
-    const results = [], errors = [];
+    const results = [],
+      errors = [];
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       try {
         const mobile = row.mobile || row.phone || "";
-
-        // Duplicate check
-        const dup = await findDuplicateLead(req.user.company, mobile);
-        if (dup) {
-          errors.push({ index: i, row: row.name || i, duplicate: true, message: `Duplicate: ${mobile} already exists as "${dup.name}"`, existingLead: dup });
-          continue;
-        }
-
         const userDoc = {
-          name: row.name || "Unknown", mobile, email: row.email || "",
-          source: row.source || "CSV Import", campaign: row.campaign || null,
-          status: row.status || "New", date: row.date ? new Date(row.date) : new Date(),
-          remark: row.remark || "Imported via CSV", user: req.user._id, company: req.user.company,
+          name: row.name || "Unknown",
+          mobile,
+          email: row.email || "",
+          source: row.source || "CSV Import",
+          campaign: row.campaign || null,
+          status: row.status || "New",
+          date: row.date ? new Date(row.date) : new Date(),
+          remark: row.remark || "Imported via CSV",
+          user: req.user._id,
+          company: req.user.company,
         };
-        // Use Lead.create so Mongoose hooks set normalizedPhone
-        const savedLead = await Lead.create(userDoc);
-        const populated = await Lead.findById(savedLead._id).populate("user", "name email");
+        const lead = await Lead.collection.insertOne(userDoc);
+        const savedLead = await Lead.findById(lead.insertedId).populate(
+          "user",
+          "name email",
+        );
 
-        notifyTelegram(userDoc, row.source || "CSV Import").catch(e => console.error("Telegram error:", e.message));
+        // ── Notify admin on WhatsApp ────────────────────────────────────────
+        notifyTelegram(userDoc, row.source || "CSV Import").catch((e) =>
+          console.error("Telegram error:", e.message),
+        );
 
-        results.push(populated);
+        results.push(savedLead);
       } catch (err) {
-        if (err.code === 11000) {
-          errors.push({ index: i, row: row.name || i, duplicate: true, message: `Duplicate mobile: ${row.mobile || row.phone}` });
-        } else {
-          errors.push({ index: i, row: row.name || i, message: err.message });
-        }
+        errors.push({ index: i, row: row.name || i, message: err.message });
       }
     }
-    res.status(207).json({ saved: results, errors, total: rows.length, savedCount: results.length, errorCount: errors.length, message: `${results.length} leads imported and assigned to you.` });
+    res
+      .status(207)
+      .json({
+        saved: results,
+        errors,
+        total: rows.length,
+        savedCount: results.length,
+        errorCount: errors.length,
+        message: `${results.length} leads imported and assigned to you.`,
+      });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -353,7 +349,9 @@ const deleteLead = async (req, res) => {
     const lead = await Lead.findOne({ _id: id, company: req.user.company });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
     await Lead.findByIdAndDelete(id);
-    return res.status(200).json({ message: "Deleted the Lead Successfully!.." });
+    return res
+      .status(200)
+      .json({ message: "Deleted the Lead Successfully!.." });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -364,7 +362,9 @@ const updateLead = async (req, res) => {
     const { id } = req.params;
     const lead = await Lead.findOne({ _id: id, company: req.user.company });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    const updatedLead = await Lead.findByIdAndUpdate(id, req.body, { new: true });
+    const updatedLead = await Lead.findByIdAndUpdate(id, req.body, {
+      new: true,
+    });
     return res.status(200).json(updatedLead);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -374,13 +374,15 @@ const updateLead = async (req, res) => {
 const adminUpdateLead = async (req, res) => {
   try {
     const { id } = req.params;
-    const companyId = req.admin ? (req.admin.company._id || req.admin.company) : req.body.companyId;
+    const companyId = req.admin
+      ? req.admin.company._id || req.admin.company
+      : req.body.companyId;
     const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    // FIX: Allow 'user' in safeBody so admin can reassign a lead to a different user.
-    // Only 'company' and 'leadgenId' are blocked to prevent cross-tenant moves.
-    const { company, leadgenId, ...safeBody } = req.body;
-    const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, { new: true }).populate("user", "name email");
+    const { company, user, leadgenId, ...safeBody } = req.body;
+    const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, {
+      new: true,
+    }).populate("user", "name email");
     return res.status(200).json(updatedLead);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -390,39 +392,30 @@ const adminUpdateLead = async (req, res) => {
 const adminDeleteLead = async (req, res) => {
   try {
     const { id } = req.params;
-    const companyId = req.admin ? (req.admin.company._id || req.admin.company) : null;
+    const companyId = req.admin
+      ? req.admin.company._id || req.admin.company
+      : null;
     const query = companyId ? { _id: id, company: companyId } : { _id: id };
     const lead = await Lead.findOne(query);
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
     await Lead.findByIdAndDelete(id);
-    return res.status(200).json({ message: "Deleted the Lead Successfully!.." });
+    return res
+      .status(200)
+      .json({ message: "Deleted the Lead Successfully!.." });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// ── GET my leads — paginated (alias for getLeads, same filter) ────────────────
 const getMyLeads = async (req, res) => {
   try {
-    const page  = parseInt(req.query.page)  || 1;
-    // FIX: Bump default limit to 200 so all admin-assigned leads load in one call
-    const limit = Math.min(parseInt(req.query.limit) || 200, 500);
-    const skip  = (page - 1) * limit;
-
-    // user: req.user._id catches ALL assigned leads (self-created + admin-assigned)
-    const filter = { company: req.user.company, user: req.user._id };
-
-    const [leads, total] = await Promise.all([
-      Lead.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .populate("user", "name email")
-        .lean(),
-      Lead.countDocuments(filter),
-    ]);
-
-    res.status(200).json({ leads, total, page, pages: Math.ceil(total / limit) });
+    const leads = await Lead.find({
+      company: req.user.company,
+      user: req.user._id,
+    })
+      .sort({ createdAt: -1 })
+      .populate("user", "name email");
+    res.status(200).json(leads);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -433,13 +426,15 @@ const patchLead = async (req, res) => {
     const { id } = req.params;
     const lead = await Lead.findOne({ _id: id, company: req.user.company });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    const { status, remark, outcome, followUpDate, temperature, Quality } = req.body;
+    const { status, remark, outcome, followUpDate, temperature, Quality } =
+      req.body;
     const update = {};
-    if (status      !== undefined) update.status = status;
-    if (remark      !== undefined) update.remark = remark;
+    if (status !== undefined) update.status = status;
+    if (remark !== undefined) update.remark = remark;
     // Accept temperature from both 'temperature' and 'Quality' field names
     const temp = temperature || Quality;
-    if (temp && ["Hot","Warm","Cold"].includes(temp)) update.temperature = temp;
+    if (temp && ["Hot", "Warm", "Cold"].includes(temp))
+      update.temperature = temp;
 
     // Build $push ops in a single object — prevents the overwrite bug where
     // the scheduledCalls assignment killed the callHistory assignment
@@ -448,10 +443,10 @@ const patchLead = async (req, res) => {
     // Push remark to callHistory so history is preserved, never overwritten
     if (remark && remark.trim()) {
       pushOps.callHistory = {
-        userId:   req.user._id,
+        userId: req.user._id,
         userName: req.user.name || "",
-        remark:   remark.trim(),
-        outcome:  outcome || "Call Back",
+        remark: remark.trim(),
+        outcome: outcome || "Call Back",
         calledAt: new Date(),
       };
     }
@@ -463,7 +458,9 @@ const patchLead = async (req, res) => {
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
         if (provided < todayStart) {
-          return res.status(400).json({ message: "Follow-up date cannot be in the past." });
+          return res
+            .status(400)
+            .json({ message: "Follow-up date cannot be in the past." });
         }
         scheduledAt = provided;
       } else {
@@ -474,11 +471,11 @@ const patchLead = async (req, res) => {
       }
 
       pushOps.scheduledCalls = {
-        type:        "follow-up",
+        type: "follow-up",
         scheduledAt,
-        done:        false,
-        doneAt:      null,
-        note:        `Follow-up after status set to "${status}"`,
+        done: false,
+        doneAt: null,
+        note: `Follow-up after status set to "${status}"`,
       };
     }
 
@@ -496,29 +493,41 @@ const patchLeadTemperature = async (req, res) => {
     const { id } = req.params;
     const {
       temperature,
-      voiceBotSummary, voiceBotScore, voiceBotReason,
-      voiceBotNextAction, voiceBotService, voiceBotCallSid,
-      voiceBotDuration, voiceBotTranscript, lastCalledByBot,
+      voiceBotSummary,
+      voiceBotScore,
+      voiceBotReason,
+      voiceBotNextAction,
+      voiceBotService,
+      voiceBotCallSid,
+      voiceBotDuration,
+      voiceBotTranscript,
+      lastCalledByBot,
     } = req.body;
 
     if (!["Hot", "Warm", "Cold"].includes(temperature))
-      return res.status(400).json({ message: "temperature must be Hot, Warm, or Cold" });
+      return res
+        .status(400)
+        .json({ message: "temperature must be Hot, Warm, or Cold" });
 
     const companyId = req.admin?.company?._id || req.admin?.company;
-    if (!companyId) return res.status(400).json({ message: "Company not found in token." });
+    if (!companyId)
+      return res.status(400).json({ message: "Company not found in token." });
     const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const update = { temperature };
-    if (voiceBotSummary    !== undefined) update.voiceBotSummary    = voiceBotSummary;
-    if (voiceBotScore      !== undefined) update.voiceBotScore      = voiceBotScore;
-    if (voiceBotReason     !== undefined) update.voiceBotReason     = voiceBotReason;
-    if (voiceBotNextAction !== undefined) update.voiceBotNextAction = voiceBotNextAction;
-    if (voiceBotService    !== undefined) update.voiceBotService    = voiceBotService;
-    if (voiceBotCallSid    !== undefined) update.voiceBotCallSid    = voiceBotCallSid;
-    if (voiceBotDuration   !== undefined) update.voiceBotDuration   = voiceBotDuration;
-    if (voiceBotTranscript !== undefined) update.voiceBotTranscript = voiceBotTranscript;
-    if (lastCalledByBot    !== undefined) update.lastCalledByBot    = lastCalledByBot;
+    if (voiceBotSummary !== undefined) update.voiceBotSummary = voiceBotSummary;
+    if (voiceBotScore !== undefined) update.voiceBotScore = voiceBotScore;
+    if (voiceBotReason !== undefined) update.voiceBotReason = voiceBotReason;
+    if (voiceBotNextAction !== undefined)
+      update.voiceBotNextAction = voiceBotNextAction;
+    if (voiceBotService !== undefined) update.voiceBotService = voiceBotService;
+    if (voiceBotCallSid !== undefined) update.voiceBotCallSid = voiceBotCallSid;
+    if (voiceBotDuration !== undefined)
+      update.voiceBotDuration = voiceBotDuration;
+    if (voiceBotTranscript !== undefined)
+      update.voiceBotTranscript = voiceBotTranscript;
+    if (lastCalledByBot !== undefined) update.lastCalledByBot = lastCalledByBot;
 
     const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
     return res.status(200).json(updatedLead);
@@ -539,10 +548,10 @@ const markNotInterested = async (req, res) => {
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const historyEntry = {
-      userId:   req.user._id,
+      userId: req.user._id,
       userName: req.user.name || "",
-      remark:   remark.trim(),
-      outcome:  "Not Interested",
+      remark: remark.trim(),
+      outcome: "Not Interested",
       calledAt: new Date(),
     };
 
@@ -551,7 +560,7 @@ const markNotInterested = async (req, res) => {
     const isSecondNI = currentReassignCount >= 1;
 
     let nextUserId = null;
-    let newStatus  = "Not Interested";
+    let newStatus = "Not Interested";
 
     if (!isSecondNI) {
       const excludeIds = [...(lead.previousAgents || []), req.user._id];
@@ -561,22 +570,26 @@ const markNotInterested = async (req, res) => {
     }
 
     const updatePayload = {
-      status:        newStatus,
-      remark:        remark.trim(),
-      reassignCount: currentReassignCount + 1,
+      $set: {
+        status: newStatus,
+        remark: remark.trim(),
+        reassignCount: currentReassignCount + 1,
+      },
       $push: {
-        callHistory:    historyEntry,
+        callHistory: historyEntry,
         scheduledCalls: { $each: newScheduledCalls },
         previousAgents: req.user._id,
       },
     };
 
+    // ✅ Now add user inside $set instead of top-level
     if (!isSecondNI && nextUserId) {
-      updatePayload.user = nextUserId;
+      updatePayload.$set.user = nextUserId;
     }
 
-    const updatedLead = await Lead.findByIdAndUpdate(id, updatePayload, { new: true })
-      .populate("user", "name email");
+    const updatedLead = await Lead.findByIdAndUpdate(id, updatePayload, {
+      new: true,
+    }).populate("user", "name email");
 
     const message = isSecondNI
       ? "Lead marked Not Interested again. 3 follow-up calls scheduled. Status reset to New."
@@ -585,8 +598,8 @@ const markNotInterested = async (req, res) => {
         : "No other agent available; lead kept with you. 3 follow-up calls scheduled.";
 
     return res.status(200).json({
-      lead:           updatedLead,
-      reassignedTo:   isSecondNI ? null : updatedLead.user,
+      lead: updatedLead,
+      reassignedTo: isSecondNI ? null : updatedLead.user,
       scheduledCalls: newScheduledCalls,
       isSecondNI,
       message,
@@ -597,6 +610,7 @@ const markNotInterested = async (req, res) => {
 };
 
 // ── PATCH /api/lead/admin/update-email/:id ────────────────────────────────────
+// Admin updates email of a single lead
 const updateLeadEmail = async (req, res) => {
   try {
     const { id } = req.params;
@@ -618,6 +632,8 @@ const updateLeadEmail = async (req, res) => {
 };
 
 // ── PATCH /api/lead/admin/bulk-update-emails ──────────────────────────────────
+// Body: { updates: [{ mobile, email }, ...] }
+// Matches leads by mobile number within company and sets their email
 const bulkUpdateEmails = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
@@ -626,17 +642,18 @@ const bulkUpdateEmails = async (req, res) => {
     if (!Array.isArray(updates) || updates.length === 0)
       return res.status(400).json({ message: "updates array is required" });
 
-    let matched = 0, notFound = 0;
+    let matched = 0,
+      notFound = 0;
     const notFoundList = [];
 
     for (const row of updates) {
       const mobile = (row.mobile || "").replace(/\D/g, "");
-      const email  = (row.email  || "").trim().toLowerCase();
+      const email = (row.email || "").trim().toLowerCase();
       if (!mobile || !email) continue;
 
       const result = await Lead.updateMany(
         { company: companyId, mobile },
-        { $set: { email } }
+        { $set: { email } },
       );
 
       if (result.matchedCount > 0) {
@@ -658,69 +675,39 @@ const bulkUpdateEmails = async (req, res) => {
   }
 };
 
-// ── FIX 4B: GET all leads for admin — paginated ───────────────────────────────
-// BEFORE: returned ALL leads with no limit.
-// AFTER:  returns 50 leads per page, max 100 per request.
-// Query params: ?page=1&limit=50
+// ── GET all leads for admin ───────────────────────────────────────────────────
 const adminGetAllLeads = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    if (!companyId) return res.status(400).json({ message: "Company not found in token." });
-
-    const page  = parseInt(req.query.page)  || 1;
-    // FIX: old cap of 100 caused Dashboard and AdminLeadsPage to silently truncate.
-    // Raised to 1000 so all company leads load in a single request.
-    const limit = Math.min(parseInt(req.query.limit) || 500, 1000);
-    const skip  = (page - 1) * limit;
-
-    const [leads, total] = await Promise.all([
-      Lead.find({ company: companyId })
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .populate("user", "name email")
-        .lean(),
-      Lead.countDocuments({ company: companyId }),
-    ]);
-
-    res.status(200).json({ leads, total, page, pages: Math.ceil(total / limit) });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-};
-
-// ── GET /api/lead/check-duplicate?mobile=XXXXXXXXXX ──────────────────────────
-// Used by the frontend to do live duplicate detection as the user types.
-const checkDuplicate = async (req, res) => {
-  try {
-    const mobile    = req.query.mobile || req.query.phone || "";
-    const companyId = req.user?.company || req.admin?.company?._id || req.admin?.company;
-    if (!companyId) return res.status(400).json({ message: "companyId required" });
-
-    const norm = normalizePhone(mobile);
-    if (!norm) return res.json({ duplicate: false, valid: false });
-
-    const existing = await Lead.findOne(
-      { company: companyId, normalizedPhone: norm },
-      { name: 1, mobile: 1, status: 1, source: 1, createdAt: 1 }
-    ).lean();
-
-    if (!existing) return res.json({ duplicate: false, valid: true, normalized: norm });
-    return res.json({ duplicate: true, valid: true, normalized: norm, existingLead: existing });
+    if (!companyId)
+      return res.status(400).json({ message: "Company not found in token." });
+    const leads = await Lead.find({ company: companyId })
+      .sort({ createdAt: -1 })
+      .populate("user", "name email");
+    res.status(200).json(leads);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
 module.exports = {
-  getLead, getLeads, getLeadsByCampaign,
-  createLead, adminCreateLead, adminCreateLeadsBulk,
-  adminImportCSV, userImportCSV,
-  updateLead, patchLead, patchLeadTemperature,
+  getLead,
+  getLeads,
+  getLeadsByCampaign,
+  createLead,
+  adminCreateLead,
+  adminCreateLeadsBulk,
+  adminImportCSV,
+  userImportCSV,
+  updateLead,
+  patchLead,
+  patchLeadTemperature,
   markNotInterested,
-  deleteLead, adminUpdateLead, adminDeleteLead,
+  deleteLead,
+  adminUpdateLead,
+  adminDeleteLead,
   getMyLeads,
-  updateLeadEmail, bulkUpdateEmails,
+  updateLeadEmail,
+  bulkUpdateEmails,
   adminGetAllLeads,
-  checkDuplicate,
 };
