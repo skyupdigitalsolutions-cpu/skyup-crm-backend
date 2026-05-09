@@ -698,6 +698,30 @@ const adminGetAllLeads = async (req, res) => {
   }
 };
 
+const checkDuplicate = async (req, res) => {
+  try {
+    const { mobile } = req.query;
+    if (!mobile) return res.status(400).json({ message: "mobile query param is required" });
+
+    const companyId = req.user?.company || req.admin?.company?._id || req.admin?.company;
+
+    // Normalize: last 10 digits
+    const normalized = mobile.replace(/\D/g, "").slice(-10);
+
+    const existing = await Lead.findOne({
+      company: companyId,
+      normalizedPhone: normalized,
+    }).select("name mobile status user").populate("user", "name");
+
+    if (existing) {
+      return res.status(200).json({ duplicate: true, lead: existing });
+    }
+    return res.status(200).json({ duplicate: false });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getLead,
   getLeads,
