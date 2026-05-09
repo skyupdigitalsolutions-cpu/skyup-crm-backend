@@ -1,7 +1,15 @@
 // controllers/leadController.js
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
-const { notifyTelegram } = require("../utils/telegramNotifier");
+// const { notifyTelegram } = require("../utils/telegramNotifier");
+
+// At the top of leadController.js
+let notifyTelegram = async () => {}; // safe no-op default
+try {
+  notifyTelegram = require("../utils/telegramNotifier").notifyTelegram;
+} catch (e) {
+  console.warn("telegramNotifier not available:", e.message);
+}
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
 async function getNextUser(companyId, excludeIds = []) {
