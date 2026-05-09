@@ -1,4 +1,3 @@
-
 const Admin   = require("../models/Admin");
 const User    = require("../models/Users");
 const Lead    = require("../models/Leads");
@@ -125,11 +124,27 @@ const getCompanyUsers = async (req, res) => {
   }
 };
 
-// Get all leads in same company
+// Get all leads in same company — paginated
+// BUG FIX: was returning ALL leads with no limit (response grows unboundedly).
+// Now returns paginated { leads[], total, page, pages } matching adminGetAllLeads shape.
 const getCompanyLeads = async (req, res) => {
   try {
-    const leads = await Lead.find({ company: req.admin.company._id }).populate("user", "name email");
-    res.status(200).json(leads);
+    const page  = parseInt(req.query.page)  || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 500, 1000);
+    const skip  = (page - 1) * limit;
+
+    const companyId = req.admin.company._id;
+    const [leads, total] = await Promise.all([
+      Lead.find({ company: companyId })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("user", "name email")
+        .lean(),
+      Lead.countDocuments({ company: companyId }),
+    ]);
+
+    res.status(200).json({ leads, total, page, pages: Math.ceil(total / limit) });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
