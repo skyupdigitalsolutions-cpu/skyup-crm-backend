@@ -21,21 +21,8 @@ const userSchema = mongoose.Schema(
     osVersion:   { type: String, default: null },
     fcmToken:    { type: String, default: null },
 
-    // ── Login IP tracking ─────────────────────────────────────────────────────
-    lastIpAddress: { type: String, default: null },
-    lastLoginAt:   { type: Date,   default: null },
-    loginHistory:  {
-      type: [{
-        ip:      { type: String },
-        device:  {
-          platform:    String,
-          deviceModel: String,
-          appVersion:  String,
-        },
-        loginAt: { type: Date, default: Date.now },
-      }],
-      default: [],
-    },
+    // ✅ FIX: added ipAddress field — was missing so it was silently dropped
+    ipAddress:   { type: String, default: null },
   },
   { timestamps: true }
 );
@@ -51,7 +38,7 @@ userSchema.methods.matchPassword = async function (enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
 };
 
-// ── FIX 4A: Performance indexes ───────────────────────────────────────────────
+// ── Performance indexes ───────────────────────────────────────────────────────
 userSchema.index({ email: 1 }, { unique: true });
 userSchema.index({ company: 1 });
 

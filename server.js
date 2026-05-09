@@ -47,6 +47,20 @@ const emailHistoryRoute    = require('./routes/emailHistory');
 const saanviProxyRoute = require('./routes/saanviProxy');
 
 const app    = express();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CRITICAL: trust proxy — Render/Heroku/any reverse proxy ke peeche chal rahe ho.
+//
+// Iske bina:
+//   • req.ip = Render ke internal proxy IP (saare clients ka same)
+//   • Rate limiter saare users ko ek hi bucket me daal deta hai
+//   • Office ke 5 users 5 min me poori company ka 100/15min limit thok dete hain
+//
+// '1' ka matlab: 1 hop ka X-Forwarded-For trust karo (Render hi 1 proxy hai).
+// Kabhi 'true' mat karna — wo IP spoofing allow kar deta hai.
+// ─────────────────────────────────────────────────────────────────────────────
+app.set('trust proxy', 1);
+
 const server = http.createServer(app);
 
 // ── Static origins always allowed ─────────────────────────────────────────────
@@ -202,6 +216,7 @@ connectDB().then(() => {
   const PORT = process.env.PORT || 5000;
   server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🛡️  Trust proxy:      enabled (1 hop)`);
     console.log(`🎙️  Recordings served at: /recordings/`);
     console.log(`🔐 BIP39 zero-knowledge encryption: enabled`);
     console.log(`📋 Privacy API:      /api/privacy`);

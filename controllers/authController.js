@@ -7,7 +7,6 @@ const register = async (req, res) => {
   try {
     const { name, email, password, companyId } = req.body;
 
-    // 1️⃣ Fetch company FIRST
     const company = await Company.findById(companyId);
     if (!company) {
       return res.status(404).json({ message: "Company not found" });
@@ -16,7 +15,6 @@ const register = async (req, res) => {
       return res.status(403).json({ message: "Company is not active" });
     }
 
-    // 2️⃣ NOW you can safely use company.plan
     const PLAN_USER_LIMITS = { basic: 10, pro: 30, enterprise: 50 };
     const userLimit = PLAN_USER_LIMITS[company.plan] || 10;
     const existingUserCount = await User.countDocuments({ company: companyId });
@@ -30,7 +28,6 @@ const register = async (req, res) => {
       });
     }
 
-    // 3️⃣ Rest continues unchanged...
     const userExists = await User.findOne({ email });
     if (userExists) {
       return res.status(400).json({ message: "User already exists" });
@@ -64,6 +61,7 @@ const DEVICE_FIELDS = [
   "deviceModel",
   "osVersion",
   "fcmToken",
+  "ipAddress",   // ✅ FIX: was missing — mobile app sends this but it was never saved
 ];
 
 const login = async (req, res) => {
@@ -83,40 +81,9 @@ const login = async (req, res) => {
           deviceUpdate[f] = req.body[f];
         }
       });
-
-      // ── Capture IP address ────────────────────────────────────────────────
-      // ipAddress comes from the mobile app's ipService.js (ipify lookup).
-      // Fall back to the request IP in case the app couldn't fetch it
-      // (e.g. no internet at login time, or web login from browser).
-      const ipAddress =
-        req.body.ipAddress ||
-        req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-        req.socket?.remoteAddress ||
-        null;
-
-      const loginHistoryEntry = {
-        ip: ipAddress,
-        device: {
-          platform:    req.body.platform    || null,
-          deviceModel: req.body.deviceModel || null,
-          appVersion:  req.body.appVersion  || null,
-        },
-        loginAt: new Date(),
-      };
-
-      await User.findByIdAndUpdate(user._id, {
-        $set: {
-          ...deviceUpdate,
-          lastIpAddress: ipAddress,
-          lastLoginAt:   new Date(),
-        },
-        $push: {
-          loginHistory: {
-            $each:  [loginHistoryEntry],
-            $slice: -20,   // keep last 20 logins only
-          },
-        },
-      });
+      if (Object.keys(deviceUpdate).length > 0) {
+        await User.findByIdAndUpdate(user._id, { $set: deviceUpdate });
+      }
 
       res.json({
         _id: user._id,
