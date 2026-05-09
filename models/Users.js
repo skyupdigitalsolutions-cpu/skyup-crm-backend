@@ -10,7 +10,7 @@ const userSchema = mongoose.Schema(
     company:  {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Company",
-      required: true, // Every user belongs to a company
+      required: true,
     },
 
     // ── Device / app info captured on login & clock-in ────────────────────────
@@ -20,6 +20,22 @@ const userSchema = mongoose.Schema(
     deviceModel: { type: String, default: null },
     osVersion:   { type: String, default: null },
     fcmToken:    { type: String, default: null },
+
+    // ── Login IP tracking ─────────────────────────────────────────────────────
+    lastIpAddress: { type: String, default: null },
+    lastLoginAt:   { type: Date,   default: null },
+    loginHistory:  {
+      type: [{
+        ip:      { type: String },
+        device:  {
+          platform:    String,
+          deviceModel: String,
+          appVersion:  String,
+        },
+        loginAt: { type: Date, default: Date.now },
+      }],
+      default: [],
+    },
   },
   { timestamps: true }
 );

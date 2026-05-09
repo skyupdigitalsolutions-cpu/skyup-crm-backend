@@ -83,9 +83,40 @@ const login = async (req, res) => {
           deviceUpdate[f] = req.body[f];
         }
       });
-      if (Object.keys(deviceUpdate).length > 0) {
-        await User.findByIdAndUpdate(user._id, { $set: deviceUpdate });
-      }
+
+      // ── Capture IP address ────────────────────────────────────────────────
+      // ipAddress comes from the mobile app's ipService.js (ipify lookup).
+      // Fall back to the request IP in case the app couldn't fetch it
+      // (e.g. no internet at login time, or web login from browser).
+      const ipAddress =
+        req.body.ipAddress ||
+        req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+        req.socket?.remoteAddress ||
+        null;
+
+      const loginHistoryEntry = {
+        ip: ipAddress,
+        device: {
+          platform:    req.body.platform    || null,
+          deviceModel: req.body.deviceModel || null,
+          appVersion:  req.body.appVersion  || null,
+        },
+        loginAt: new Date(),
+      };
+
+      await User.findByIdAndUpdate(user._id, {
+        $set: {
+          ...deviceUpdate,
+          lastIpAddress: ipAddress,
+          lastLoginAt:   new Date(),
+        },
+        $push: {
+          loginHistory: {
+            $each:  [loginHistoryEntry],
+            $slice: -20,   // keep last 20 logins only
+          },
+        },
+      });
 
       res.json({
         _id: user._id,
