@@ -34,6 +34,12 @@ const companySchema = mongoose.Schema(
       type: Boolean,
       default: false, // becomes true after client completes BIP39 setup
     },
+
+    // ── FIX 4D: Atomic round-robin index (replaces N+1 countDocuments loop) ──
+    roundRobinIndex: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true }
 );

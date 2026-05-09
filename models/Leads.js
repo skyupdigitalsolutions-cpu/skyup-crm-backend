@@ -89,5 +89,25 @@ const leadSchema = mongoose.Schema(
   { timestamps: true }
 );
 
+// ── FIX 4A: Performance indexes ───────────────────────────────────────────────
+// Most important: all lead queries filter by company
+leadSchema.index({ company: 1 });
+
+// Lead list view: filter by company + user + status
+leadSchema.index({ company: 1, user: 1, status: 1 });
+
+// Date-sorted lead list
+leadSchema.index({ company: 1, createdAt: -1 });
+
+// Phone number lookup (used in call log sync)
+leadSchema.index({ company: 1, mobile: 1 });
+
+// Meta webhook deduplication (leadgenId index already set via unique:true sparse above,
+// but explicit compound with company is useful for webhook lookups)
+leadSchema.index({ leadgenId: 1 }, { sparse: true });
+
+// Prevent duplicate leads per company (comment out if you allow same mobile across campaigns)
+// leadSchema.index({ company: 1, mobile: 1 }, { unique: true, sparse: true });
+
 const Lead = mongoose.model("Lead", leadSchema);
 module.exports = Lead;

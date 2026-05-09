@@ -1,22 +1,32 @@
 // controllers/leadController.js
-const Lead = require("../models/Leads");
-const User = require("../models/Users");
+const Lead    = require("../models/Leads");
+const User    = require("../models/Users");
+const Company = require("../models/Company");
 const { notifyTelegram } = require("../utils/telegramNotifier");
 
-// ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
+// ── FIX 4D: Atomic round-robin using Company.roundRobinIndex ─────────────────
+// Replaces the old getNextUser() that fired one countDocuments() per user.
+// Now uses a single atomic findByIdAndUpdate to advance the index — 1 DB call total.
 async function getNextUser(companyId, excludeIds = []) {
   const users = await User.find({ company: companyId }).select("_id").lean();
   if (!users.length) return null;
-  const pool = users.filter(u => !excludeIds.some(e => e.toString() === u._id.toString()));
+
+  const pool = excludeIds.length > 0
+    ? users.filter(u => !excludeIds.some(e => e.toString() === u._id.toString()))
+    : users;
+
   const candidates = pool.length > 0 ? pool : users;
-  const counts = await Promise.all(
-    candidates.map(u =>
-      Lead.countDocuments({ company: companyId, user: u._id, status: { $nin: ["Not Interested", "Converted"] } })
-        .then(c => ({ userId: u._id, count: c }))
-    )
+
+  // Atomically increment the index and wrap around to stay in bounds
+  const updated = await Company.findByIdAndUpdate(
+    companyId,
+    [{ $set: { roundRobinIndex: {
+      $mod: [{ $add: ["$roundRobinIndex", 1] }, candidates.length]
+    }}}],
+    { new: true, select: "roundRobinIndex" }
   );
-  counts.sort((a, b) => a.count - b.count);
-  return counts[0].userId;
+
+  return candidates[updated.roundRobinIndex]._id;
 }
 
 // ── Helper: build scheduled calls (+3d follow-up, +7d & +30d verification) ────
@@ -29,14 +39,32 @@ function buildScheduledCalls() {
   ];
 }
 
-// ── GET all leads (user sees own + unassigned) ────────────────────────────────
+// ── FIX 4B: GET all leads — paginated (user sees own + unassigned) ────────────
+// BEFORE: returned ALL leads with no limit — dangerous at scale.
+// AFTER:  returns 50 leads per page, max 100 per request.
+// Query params: ?page=1&limit=50
 const getLeads = async (req, res) => {
   try {
-    const leads = await Lead.find({
+    const page  = parseInt(req.query.page)  || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const skip  = (page - 1) * limit;
+
+    const filter = {
       company: req.user.company,
       $or: [{ user: req.user._id }, { user: null }],
-    }).populate("user", "name email");
-    res.status(200).json(leads);
+    };
+
+    const [leads, total] = await Promise.all([
+      Lead.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("user", "name email")
+        .lean(),
+      Lead.countDocuments(filter),
+    ]);
+
+    res.status(200).json({ leads, total, page, pages: Math.ceil(total / limit) });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -74,7 +102,7 @@ const createLead = async (req, res) => {
       company: req.user.company,
     });
 
-   notifyTelegram(lead, "Manual").catch(e => console.error("Telegram error:", e.message));
+    notifyTelegram(lead, "Manual").catch(e => console.error("Telegram error:", e.message));
 
     res.status(201).json(lead);
   } catch (error) {
@@ -105,8 +133,7 @@ const adminCreateLead = async (req, res) => {
     });
     const populated = await Lead.findById(lead._id).populate("user", "name email");
 
-    // ── Notify admin on WhatsApp ──────────────────────────────────────────────
-   notifyTelegram(lead, req.body.source || "Manual").catch(e => console.error("Telegram error:", e.message));
+    notifyTelegram(lead, req.body.source || "Manual").catch(e => console.error("Telegram error:", e.message));
 
     res.status(201).json(populated);
   } catch (error) {
@@ -143,7 +170,6 @@ const adminCreateLeadsBulk = async (req, res) => {
           user: assignedUser, company: companyId,
         });
 
-        // ── Notify admin on WhatsApp ────────────────────────────────────────
         notifyTelegram(lead, row.source || "Bulk Import").catch(e => console.error("Telegram error:", e.message));
 
         results.push(await Lead.findById(lead._id).populate("user", "name email"));
@@ -183,7 +209,6 @@ const adminImportCSV = async (req, res) => {
         const inserted = await Lead.collection.insertOne(adminDoc);
         const savedLead = await Lead.findById(inserted.insertedId).populate("user", "name email");
 
-        // ── Notify admin on WhatsApp ────────────────────────────────────────
         notifyTelegram(adminDoc, row.source || "CSV Import").catch(e => console.error("Telegram error:", e.message));
         results.push(savedLead);
       } catch (err) {
@@ -216,7 +241,6 @@ const userImportCSV = async (req, res) => {
         const lead = await Lead.collection.insertOne(userDoc);
         const savedLead = await Lead.findById(lead.insertedId).populate("user", "name email");
 
-        // ── Notify admin on WhatsApp ────────────────────────────────────────
         notifyTelegram(userDoc, row.source || "CSV Import").catch(e => console.error("Telegram error:", e.message));
 
         results.push(savedLead);
@@ -282,12 +306,26 @@ const adminDeleteLead = async (req, res) => {
   }
 };
 
+// ── FIX 4B: GET my leads — paginated ─────────────────────────────────────────
 const getMyLeads = async (req, res) => {
   try {
-    const leads = await Lead.find({ company: req.user.company, user: req.user._id })
-      .sort({ createdAt: -1 })
-      .populate("user", "name email");
-    res.status(200).json(leads);
+    const page  = parseInt(req.query.page)  || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const skip  = (page - 1) * limit;
+
+    const filter = { company: req.user.company, user: req.user._id };
+
+    const [leads, total] = await Promise.all([
+      Lead.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("user", "name email")
+        .lean(),
+      Lead.countDocuments(filter),
+    ]);
+
+    res.status(200).json({ leads, total, page, pages: Math.ceil(total / limit) });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -462,7 +500,6 @@ const markNotInterested = async (req, res) => {
 };
 
 // ── PATCH /api/lead/admin/update-email/:id ────────────────────────────────────
-// Admin updates email of a single lead
 const updateLeadEmail = async (req, res) => {
   try {
     const { id } = req.params;
@@ -484,8 +521,6 @@ const updateLeadEmail = async (req, res) => {
 };
 
 // ── PATCH /api/lead/admin/bulk-update-emails ──────────────────────────────────
-// Body: { updates: [{ mobile, email }, ...] }
-// Matches leads by mobile number within company and sets their email
 const bulkUpdateEmails = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
@@ -526,15 +561,30 @@ const bulkUpdateEmails = async (req, res) => {
   }
 };
 
-// ── GET all leads for admin ───────────────────────────────────────────────────
+// ── FIX 4B: GET all leads for admin — paginated ───────────────────────────────
+// BEFORE: returned ALL leads with no limit.
+// AFTER:  returns 50 leads per page, max 100 per request.
+// Query params: ?page=1&limit=50
 const adminGetAllLeads = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId) return res.status(400).json({ message: "Company not found in token." });
-    const leads = await Lead.find({ company: companyId })
-      .sort({ createdAt: -1 })
-      .populate("user", "name email");
-    res.status(200).json(leads);
+
+    const page  = parseInt(req.query.page)  || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const skip  = (page - 1) * limit;
+
+    const [leads, total] = await Promise.all([
+      Lead.find({ company: companyId })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("user", "name email")
+        .lean(),
+      Lead.countDocuments({ company: companyId }),
+    ]);
+
+    res.status(200).json({ leads, total, page, pages: Math.ceil(total / limit) });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

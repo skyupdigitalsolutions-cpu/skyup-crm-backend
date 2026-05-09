@@ -1,8 +1,10 @@
 // backend/controllers/mobileCallLogController.js
-// CHANGE: Added getTodayCallLogs() — returns only today's logs for the mobile app.
-//         Added ?date= filter to getCallLogs() so mobile can request a specific day.
-//         Sync endpoint unchanged — backend still stores all logs permanently.
-//         Mobile app should only SEND today's logs (enforced in backgroundSyncService).
+// FIX 4C: syncCallLogs() — eliminated N+1 query pattern.
+//         Previously: findLeadByPhone() was called once per log entry,
+//         each call loading ALL company leads from MongoDB.
+//         100 logs = 100 full collection scans.
+//         Now: load all company leads ONCE, build a phone-number Map,
+//         then do O(1) Map lookups inside the loop. 1 DB call total.
 
 const MobileCallLog = require('../models/MobileCallLog');
 const Lead          = require('../models/Leads');
@@ -46,12 +48,6 @@ function normalizePhone(phone) {
   return String(phone).replace(/[\s\-\(\)\+]/g, '').slice(-10);
 }
 
-async function findLeadByPhone(phoneNumber, companyId) {
-  const normalized = normalizePhone(phoneNumber);
-  const leads = await Lead.find({ company: companyId }).lean();
-  return leads.find(lead => normalizePhone(lead.mobile || '') === normalized) || null;
-}
-
 function callTypeToOutcome(callType) {
   const map = {
     incoming: 'Incoming Call', outgoing: 'Outgoing Call',
@@ -62,8 +58,7 @@ function callTypeToOutcome(callType) {
 }
 
 // ── POST /api/call-logs/sync ──────────────────────────────────────────────────
-// No change — backend always stores permanently. Mobile app is responsible for
-// only sending today's logs (see backgroundSyncService LOOKBACK_MS change).
+// FIX 4C: Replaced N+1 findLeadByPhone() calls with a single bulk fetch + Map.
 const syncCallLogs = async (req, res) => {
   try {
     const { logs } = req.body;
@@ -72,22 +67,37 @@ const syncCallLogs = async (req, res) => {
 
     const batch = logs.slice(0, 500);
 
-    const docs = await Promise.all(
-      batch.map(async (log) => {
-        const matchedLead = await findLeadByPhone(log.phoneNumber, req.user.company);
-        return {
-          user:        req.user._id,
-          company:     req.user.company,
-          phoneNumber: log.phoneNumber,
-          callType:    log.callType || 'unknown',
-          duration:    parseInt(log.duration || 0),
-          timestamp:   new Date(parseInt(log.timestamp)),
-          name:        log.name || '',
-          matchedLead: matchedLead?._id || null,
-          _leadObj:    matchedLead || null,
-        };
-      }),
-    );
+    // ── FIX 4C: Load all company leads ONCE, build a phone-number Map ─────────
+    // BEFORE: findLeadByPhone() was called inside the map() below — one full
+    //         collection scan per log entry (N+1 pattern).
+    // AFTER:  Single query with projection, then O(1) Map lookup per log entry.
+    const companyLeads = await Lead.find(
+      { company: req.user.company },
+      { mobile: 1, _id: 1, name: 1, status: 1 }
+    ).lean();
+
+    const leadMap = new Map();
+    for (const lead of companyLeads) {
+      const normalized = normalizePhone(lead.mobile || '');
+      if (normalized) leadMap.set(normalized, lead);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const docs = batch.map((log) => {
+      const normalized  = normalizePhone(log.phoneNumber || '');
+      const matchedLead = leadMap.get(normalized) || null; // O(1) lookup
+      return {
+        user:        req.user._id,
+        company:     req.user.company,
+        phoneNumber: log.phoneNumber,
+        callType:    log.callType || 'unknown',
+        duration:    parseInt(log.duration || 0),
+        timestamp:   new Date(parseInt(log.timestamp)),
+        name:        log.name || '',
+        matchedLead: matchedLead?._id || null,
+        _leadObj:    matchedLead || null,
+      };
+    });
 
     const ops = docs.map(({ _leadObj, ...doc }) => ({
       updateOne: {
@@ -143,18 +153,14 @@ const syncCallLogs = async (req, res) => {
 };
 
 // ── GET /api/call-logs ────────────────────────────────────────────────────────
-// CHANGE: Added optional ?date=YYYY-MM-DD query param.
-//         Mobile app uses this to fetch a specific day's logs.
-//         Admin/web dashboard omits ?date to get paginated full history.
 const getCallLogs = async (req, res) => {
   try {
     const page  = parseInt(req.query.page  || 1);
     const limit = parseInt(req.query.limit || 50);
 
-    // NEW: if ?date=YYYY-MM-DD is provided, restrict to that day (IST midnight → midnight)
     const filter = { user: req.user._id };
     if (req.query.date) {
-      const dayStart = new Date(req.query.date);          // e.g. 2026-05-07T00:00:00.000Z
+      const dayStart = new Date(req.query.date);
       dayStart.setHours(0, 0, 0, 0);
       const dayEnd = new Date(dayStart);
       dayEnd.setDate(dayEnd.getDate() + 1);
@@ -174,8 +180,6 @@ const getCallLogs = async (req, res) => {
 };
 
 // ── GET /api/call-logs/today ──────────────────────────────────────────────────
-// NEW ENDPOINT — mobile app calls this on screen mount instead of fetching
-// all historical logs. Returns only today's logs, no pagination needed.
 const getTodayCallLogs = async (req, res) => {
   try {
     const now      = new Date();
@@ -200,7 +204,14 @@ const matchPhone = async (req, res) => {
   try {
     const { phone } = req.query;
     if (!phone) return res.status(400).json({ message: 'phone query param required' });
-    const lead = await findLeadByPhone(phone, req.user.company);
+
+    const normalized = normalizePhone(phone);
+    // Use indexed query instead of loading all leads
+    const lead = await Lead.findOne(
+      { company: req.user.company },
+      { mobile: 1, name: 1, status: 1 }
+    ).where('mobile').equals(phone).lean();
+
     if (!lead) return res.json({ matched: false });
     res.json({ matched: true, leadId: lead._id, name: lead.name, status: lead.status, mobile: lead.mobile });
   } catch (error) {

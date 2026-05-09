@@ -23,16 +23,21 @@ const userSchema = mongoose.Schema(
   },
   { timestamps: true }
 );
-//Hashing the password before saving
-userSchema.pre("save", async function (){
-  if(!this.isModified("password")) return;
+
+// Hashing the password before saving
+userSchema.pre("save", async function () {
+  if (!this.isModified("password")) return;
   this.password = await bcrypt.hash(this.password, 10);
 });
 
-//compare the hashed password from DB to verify
-userSchema.methods.matchPassword = async function (enteredPassword){
+// Compare the hashed password from DB to verify
+userSchema.methods.matchPassword = async function (enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
-}
+};
+
+// ── FIX 4A: Performance indexes ───────────────────────────────────────────────
+userSchema.index({ email: 1 }, { unique: true });
+userSchema.index({ company: 1 });
 
 const User = mongoose.model("User", userSchema);
 
