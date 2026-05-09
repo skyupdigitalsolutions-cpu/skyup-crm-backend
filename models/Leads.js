@@ -134,28 +134,30 @@ leadSchema.index(
 leadSchema.index({ normalizedPhone: 1 }, { sparse: true });
 
 // ── Pre-validate hook: compute normalizedPhone automatically ─────────────────
-leadSchema.pre('validate', function (next) {
+leadSchema.pre('validate', async function () {
   if (this.mobile) {
     const n = normalizePhone(this.mobile);
     this.normalizedPhone = n || null;
   }
-  next();
 });
 
 // ── Pre-findOneAndUpdate / updateOne / updateMany hooks ───────────────────────
 // Keeps normalizedPhone in sync when mobile is updated via update operations.
-function syncNormalizedPhoneOnUpdate(next) {
-  const update = this.getUpdate();
-  const mobile =
-    (update && update.$set && update.$set.mobile) ||
-    (update && update.mobile);
-  if (mobile) {
-    const n = normalizePhone(mobile);
-    if (!update.$set) update.$set = {};
-    update.$set.normalizedPhone = n || null;
-    this.setUpdate(update);
+async function syncNormalizedPhoneOnUpdate() {
+  try {
+    const update = this.getUpdate();
+    const mobile =
+      (update && update.$set && update.$set.mobile) ||
+      (update && update.mobile);
+    if (mobile) {
+      const n = normalizePhone(mobile);
+      if (!update.$set) update.$set = {};
+      update.$set.normalizedPhone = n || null;
+      this.setUpdate(update);
+    }
+  } catch (err) {
+    console.error("syncNormalizedPhoneOnUpdate error:", err);
   }
-  next();
 }
 leadSchema.pre('findOneAndUpdate', syncNormalizedPhoneOnUpdate);
 leadSchema.pre('updateOne',        syncNormalizedPhoneOnUpdate);
