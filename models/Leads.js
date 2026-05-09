@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { normalizePhone } = require("../utils/normalizePhone");
 
 // ── Call history entry (one per agent interaction) ────────────────────────────
 const callHistorySchema = new mongoose.Schema(
@@ -75,6 +76,14 @@ const leadSchema = mongoose.Schema(
     // ── Reassignment counter ─────────────────────────────────────────────────
     reassignCount: { type: Number, default: 0 },
 
+    // ── Normalized phone for deduplication ───────────────────────────────────
+    // Always last 10 digits; set automatically by pre-validate hook.
+    normalizedPhone: {
+      type:    String,
+      default: null,
+      trim:    true,
+    },
+
     // ── Saanvi Voicebot fields ────────────────────────────────────────────────
     voiceBotSummary:    { type: String,  default: "" },
     voiceBotScore:      { type: Number,  default: null },
@@ -106,8 +115,51 @@ leadSchema.index({ company: 1, mobile: 1 });
 // but explicit compound with company is useful for webhook lookups)
 leadSchema.index({ leadgenId: 1 }, { sparse: true });
 
-// Prevent duplicate leads per company (comment out if you allow same mobile across campaigns)
-// leadSchema.index({ company: 1, mobile: 1 }, { unique: true, sparse: true });
+// ── PHONE DEDUP: Partial unique index on normalizedPhone ─────────────────────
+// Partial filter: only enforces uniqueness when normalizedPhone is a non-null string.
+// This lets leads with unparseable phones (landlines, test data) coexist safely.
+// The compound key {company + normalizedPhone} means the same number can exist
+// in different companies (correct behaviour for multi-tenant SaaS).
+leadSchema.index(
+  { company: 1, normalizedPhone: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      normalizedPhone: { $type: 'string', $exists: true },
+    },
+    name: 'company_normalizedPhone_unique',
+  }
+);
+// Fast lookup by normalizedPhone alone (for webhook / API dedup checks)
+leadSchema.index({ normalizedPhone: 1 }, { sparse: true });
+
+// ── Pre-validate hook: compute normalizedPhone automatically ─────────────────
+leadSchema.pre('validate', function (next) {
+  if (this.mobile) {
+    const n = normalizePhone(this.mobile);
+    this.normalizedPhone = n || null;
+  }
+  next();
+});
+
+// ── Pre-findOneAndUpdate / updateOne / updateMany hooks ───────────────────────
+// Keeps normalizedPhone in sync when mobile is updated via update operations.
+function syncNormalizedPhoneOnUpdate(next) {
+  const update = this.getUpdate();
+  const mobile =
+    (update && update.$set && update.$set.mobile) ||
+    (update && update.mobile);
+  if (mobile) {
+    const n = normalizePhone(mobile);
+    if (!update.$set) update.$set = {};
+    update.$set.normalizedPhone = n || null;
+    this.setUpdate(update);
+  }
+  next();
+}
+leadSchema.pre('findOneAndUpdate', syncNormalizedPhoneOnUpdate);
+leadSchema.pre('updateOne',        syncNormalizedPhoneOnUpdate);
+leadSchema.pre('updateMany',       syncNormalizedPhoneOnUpdate);
 
 const Lead = mongoose.model("Lead", leadSchema);
 module.exports = Lead;

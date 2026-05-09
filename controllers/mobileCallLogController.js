@@ -9,6 +9,7 @@
 const MobileCallLog = require('../models/MobileCallLog');
 const Lead          = require('../models/Leads');
 const multer        = require('multer');
+const { normalizePhone } = require('../utils/normalizePhone');
 
 // ── Cloudinary storage ────────────────────────────────────────────────────────
 const cloudinary = require('cloudinary').v2;
@@ -44,9 +45,7 @@ const upload = multer({
   },
 });
 
-function normalizePhone(phone) {
-  return String(phone).replace(/[\s\-\(\)\+]/g, '').slice(-10);
-}
+// NOTE: normalizePhone is imported from ../utils/normalizePhone (central source of truth)
 
 function callTypeToOutcome(callType) {
   const map = {

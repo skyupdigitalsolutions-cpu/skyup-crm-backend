@@ -245,14 +245,23 @@ async function handleStatusUpdate(status) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: Find an existing Lead by their WhatsApp phone number
+// Uses normalizedPhone index (O log n) — falls back to legacy mobile lookup
+// for records not yet migrated.
 // ─────────────────────────────────────────────────────────────────────────────
-async function findLeadByPhone(waPhone, companyId) {
-  // WA phone: "919876543210" (with country code, no +)
-  // Lead mobile: could be "9876543210" (10 digits) or "919876543210"
-  // Try both formats
-  const lastTen = waPhone.slice(-10);
+const { normalizePhone: _normalizeWAPhone } = require("../utils/normalizePhone");
 
-  const lead = await Lead.findOne({
+async function findLeadByPhone(waPhone, companyId) {
+  const norm = _normalizeWAPhone(waPhone);
+
+  // Fast indexed lookup
+  if (norm) {
+    const lead = await Lead.findOne({ company: companyId, normalizedPhone: norm });
+    if (lead) return lead;
+  }
+
+  // Fallback for un-migrated records
+  const lastTen = waPhone.slice(-10);
+  return Lead.findOne({
     company: companyId,
     $or: [
       { mobile: waPhone },
@@ -260,8 +269,6 @@ async function findLeadByPhone(waPhone, companyId) {
       { mobile: `+${waPhone}` },
     ],
   });
-
-  return lead;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -3,6 +3,35 @@ const Lead    = require("../models/Leads");
 const User    = require("../models/Users");
 const Company = require("../models/Company");
 const { notifyTelegram } = require("../utils/telegramNotifier");
+const { normalizePhone } = require("../utils/normalizePhone");
+
+// ── Helper: check for an existing lead by normalizedPhone ─────────────────────
+// Returns the existing lead doc (lean) or null.
+// Uses the compound index {company, normalizedPhone} — O(log n).
+async function findDuplicateLead(companyId, mobile) {
+  const norm = normalizePhone(mobile);
+  if (!norm) return null;
+  return Lead.findOne(
+    { company: companyId, normalizedPhone: norm },
+    { name: 1, mobile: 1, status: 1, source: 1, createdAt: 1 }
+  ).lean();
+}
+
+// ── Helper: build duplicate 409 response body ─────────────────────────────────
+function dupResponse(existing) {
+  return {
+    duplicate:    true,
+    message:      `A lead with this mobile number already exists (${existing.mobile}).`,
+    existingLead: {
+      _id:       existing._id,
+      name:      existing.name,
+      mobile:    existing.mobile,
+      status:    existing.status,
+      source:    existing.source,
+      createdAt: existing.createdAt,
+    },
+  };
+}
 
 // ── FIX 4D: Atomic round-robin using Company.roundRobinIndex ─────────────────
 // Replaces the old getNextUser() that fired one countDocuments() per user.
@@ -100,6 +129,10 @@ const getLeadsByCampaign = async (req, res) => {
 // ── User creates a lead manually ──────────────────────────────────────────────
 const createLead = async (req, res) => {
   try {
+    // Duplicate check before insert
+    const dup = await findDuplicateLead(req.user.company, req.body.mobile);
+    if (dup) return res.status(409).json(dupResponse(dup));
+
     const lead = await Lead.create({
       ...req.body,
       user: req.body.user || req.user._id,
@@ -110,6 +143,14 @@ const createLead = async (req, res) => {
 
     res.status(201).json(lead);
   } catch (error) {
+    if (error.code === 11000) {
+      // Race condition: another request beat us; fetch the existing lead
+      const norm = normalizePhone(req.body.mobile);
+      const existing = norm
+        ? await Lead.findOne({ company: req.user.company, normalizedPhone: norm }, { name:1, mobile:1, status:1, source:1, createdAt:1 }).lean()
+        : null;
+      return res.status(409).json(existing ? dupResponse(existing) : { duplicate: true, message: "Duplicate mobile number." });
+    }
     res.status(500).json({ message: error.message });
   }
 };
@@ -121,6 +162,11 @@ const adminCreateLead = async (req, res) => {
       ? (req.admin.company._id || req.admin.company)
       : req.body.companyId;
     if (!companyId) return res.status(400).json({ message: "companyId is required." });
+
+    // Duplicate check
+    const dup = await findDuplicateLead(companyId, req.body.mobile);
+    if (dup) return res.status(409).json(dupResponse(dup));
+
     let assignedUser = req.body.user || null;
     if (!assignedUser) {
       assignedUser = await getNextUser(companyId);
@@ -141,6 +187,12 @@ const adminCreateLead = async (req, res) => {
 
     res.status(201).json(populated);
   } catch (error) {
+    if (error.code === 11000) {
+      const companyId = req.admin ? (req.admin.company._id || req.admin.company) : req.body.companyId;
+      const norm = normalizePhone(req.body.mobile);
+      const existing = norm ? await Lead.findOne({ company: companyId, normalizedPhone: norm }, { name:1, mobile:1, status:1, source:1, createdAt:1 }).lean() : null;
+      return res.status(409).json(existing ? dupResponse(existing) : { duplicate: true, message: "Duplicate mobile number." });
+    }
     res.status(500).json({ message: error.message });
   }
 };
@@ -162,6 +214,12 @@ const adminCreateLeadsBulk = async (req, res) => {
     for (let i = 0; i < items.length; i++) {
       const row = items[i];
       try {
+        // Per-row duplicate check
+        const dup = await findDuplicateLead(companyId, row.mobile);
+        if (dup) {
+          errors.push({ index: i, duplicate: true, message: `Duplicate: lead already exists for ${row.mobile}`, existingLead: dup });
+          continue;
+        }
         const assignedUser = row.user || (fallbackUser ? fallbackUser._id : null);
         if (!assignedUser) { errors.push({ index: i, message: "No user found." }); continue; }
         const lead = await Lead.create({
@@ -178,7 +236,11 @@ const adminCreateLeadsBulk = async (req, res) => {
 
         results.push(await Lead.findById(lead._id).populate("user", "name email"));
       } catch (err) {
-        errors.push({ index: i, message: err.message });
+        if (err.code === 11000) {
+          errors.push({ index: i, duplicate: true, message: `Duplicate mobile: ${row.mobile}` });
+        } else {
+          errors.push({ index: i, message: err.message });
+        }
       }
     }
     res.status(207).json({ saved: results, errors, total: items.length, savedCount: results.length, errorCount: errors.length });
@@ -203,6 +265,14 @@ const adminImportCSV = async (req, res) => {
       try {
         const assignedUser = users[i % users.length]._id;
         const mobile = row.mobile || row.phone || "";
+
+        // Duplicate check using normalizedPhone index
+        const dup = await findDuplicateLead(companyId, mobile);
+        if (dup) {
+          errors.push({ index: i, row: row.name || i, duplicate: true, message: `Duplicate: ${mobile} already exists as "${dup.name}"`, existingLead: dup });
+          continue;
+        }
+
         const adminDoc = {
           name: row.name || "Unknown", mobile, email: row.email || "",
           source: row.source || "CSV Import", campaign: row.campaign || null,
@@ -210,13 +280,19 @@ const adminImportCSV = async (req, res) => {
           remark: row.remark || "Imported via CSV", user: assignedUser, company: companyId,
         };
         if (row.leadgenId) adminDoc.leadgenId = row.leadgenId;
-        const inserted = await Lead.collection.insertOne(adminDoc);
-        const savedLead = await Lead.findById(inserted.insertedId).populate("user", "name email");
+
+        // Use Lead.create so Mongoose pre-validate hook sets normalizedPhone
+        const savedLead = await Lead.create(adminDoc);
+        const populated = await Lead.findById(savedLead._id).populate("user", "name email");
 
         notifyTelegram(adminDoc, row.source || "CSV Import").catch(e => console.error("Telegram error:", e.message));
-        results.push(savedLead);
+        results.push(populated);
       } catch (err) {
-        errors.push({ index: i, row: row.name || i, message: err.message });
+        if (err.code === 11000) {
+          errors.push({ index: i, row: row.name || i, duplicate: true, message: `Duplicate mobile: ${row.mobile || row.phone}` });
+        } else {
+          errors.push({ index: i, row: row.name || i, message: err.message });
+        }
       }
     }
     res.status(207).json({ saved: results, errors, total: rows.length, savedCount: results.length, errorCount: errors.length, message: `${results.length} leads imported with round-robin assignment.` });
@@ -236,20 +312,33 @@ const userImportCSV = async (req, res) => {
       const row = rows[i];
       try {
         const mobile = row.mobile || row.phone || "";
+
+        // Duplicate check
+        const dup = await findDuplicateLead(req.user.company, mobile);
+        if (dup) {
+          errors.push({ index: i, row: row.name || i, duplicate: true, message: `Duplicate: ${mobile} already exists as "${dup.name}"`, existingLead: dup });
+          continue;
+        }
+
         const userDoc = {
           name: row.name || "Unknown", mobile, email: row.email || "",
           source: row.source || "CSV Import", campaign: row.campaign || null,
           status: row.status || "New", date: row.date ? new Date(row.date) : new Date(),
           remark: row.remark || "Imported via CSV", user: req.user._id, company: req.user.company,
         };
-        const lead = await Lead.collection.insertOne(userDoc);
-        const savedLead = await Lead.findById(lead.insertedId).populate("user", "name email");
+        // Use Lead.create so Mongoose hooks set normalizedPhone
+        const savedLead = await Lead.create(userDoc);
+        const populated = await Lead.findById(savedLead._id).populate("user", "name email");
 
         notifyTelegram(userDoc, row.source || "CSV Import").catch(e => console.error("Telegram error:", e.message));
 
-        results.push(savedLead);
+        results.push(populated);
       } catch (err) {
-        errors.push({ index: i, row: row.name || i, message: err.message });
+        if (err.code === 11000) {
+          errors.push({ index: i, row: row.name || i, duplicate: true, message: `Duplicate mobile: ${row.mobile || row.phone}` });
+        } else {
+          errors.push({ index: i, row: row.name || i, message: err.message });
+        }
       }
     }
     res.status(207).json({ saved: results, errors, total: rows.length, savedCount: results.length, errorCount: errors.length, message: `${results.length} leads imported and assigned to you.` });
@@ -600,6 +689,29 @@ const adminGetAllLeads = async (req, res) => {
   }
 };
 
+// ── GET /api/lead/check-duplicate?mobile=XXXXXXXXXX ──────────────────────────
+// Used by the frontend to do live duplicate detection as the user types.
+const checkDuplicate = async (req, res) => {
+  try {
+    const mobile    = req.query.mobile || req.query.phone || "";
+    const companyId = req.user?.company || req.admin?.company?._id || req.admin?.company;
+    if (!companyId) return res.status(400).json({ message: "companyId required" });
+
+    const norm = normalizePhone(mobile);
+    if (!norm) return res.json({ duplicate: false, valid: false });
+
+    const existing = await Lead.findOne(
+      { company: companyId, normalizedPhone: norm },
+      { name: 1, mobile: 1, status: 1, source: 1, createdAt: 1 }
+    ).lean();
+
+    if (!existing) return res.json({ duplicate: false, valid: true, normalized: norm });
+    return res.json({ duplicate: true, valid: true, normalized: norm, existingLead: existing });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getLead, getLeads, getLeadsByCampaign,
   createLead, adminCreateLead, adminCreateLeadsBulk,
@@ -610,4 +722,5 @@ module.exports = {
   getMyLeads,
   updateLeadEmail, bulkUpdateEmails,
   adminGetAllLeads,
+  checkDuplicate,
 };

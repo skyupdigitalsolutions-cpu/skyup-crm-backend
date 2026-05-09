@@ -3,6 +3,7 @@ const WebsiteConfig      = require("../models/WebsiteConfig");
 const Lead               = require("../models/Leads");
 const User               = require("../models/Users");
 const { notifyTelegram } = require("../utils/telegramNotifier");
+const { normalizePhone } = require("../utils/normalizePhone");
 
 async function getNextAssignedUser(config) {
   const users = await User.find({
@@ -37,36 +38,43 @@ const receiveWebsiteWebhook = async (req, res) => {
     if (!config) return console.error(`❌ No WebsiteConfig found for secret: "${webhook_secret}"`);
     if (!config.isActive) return console.warn(`⚠️  WebsiteConfig "${config.sourceName}" is PAUSED`);
 
-    const cleanMobile = (mobile || "").replace(/\D/g, "");
+    const cleanMobile = normalizePhone(mobile) || (mobile || "").replace(/\D/g, "");
 
-    // Deduplicate: same mobile + company within last 10 minutes
+    // Permanent dedup using normalizedPhone index (replaces old 10-min window)
     if (cleanMobile) {
-      const tenMinsAgo = new Date(Date.now() - 10 * 60 * 1000);
-      const duplicate  = await Lead.findOne({
-        company:   config.company,
-        mobile:    cleanMobile,
-        createdAt: { $gte: tenMinsAgo },
-      });
+      const normPhone  = normalizePhone(cleanMobile);
+      const duplicate  = normPhone
+        ? await Lead.findOne({ company: config.company, normalizedPhone: normPhone }, { _id: 1, name: 1 }).lean()
+        : null;
       if (duplicate) {
-        console.log(`⏭ Duplicate submission — mobile "${cleanMobile}" already saved recently`);
+        console.log(`⏭ Duplicate submission — mobile "${cleanMobile}" normalizes to "${normPhone}", exists as "${duplicate.name}"`);
         return;
       }
     }
 
     const assignedUserId = await getNextAssignedUser(config);
 
-    const newLead = await Lead.create({
-      name:     (name || "Unknown").trim(),
-      mobile:   cleanMobile,
-      email:    (email || "").trim(),
-      source:   "Website",
-      campaign: config.sourceName,
-      status:   config.defaultStatus,
-      date:     new Date(),
-      remark:   message ? `${config.defaultRemark} — ${message}` : config.defaultRemark,
-      user:     assignedUserId,
-      company:  config.company,
-    });
+    let newLead;
+    try {
+      newLead = await Lead.create({
+        name:     (name || "Unknown").trim(),
+        mobile:   cleanMobile,
+        email:    (email || "").trim(),
+        source:   "Website",
+        campaign: config.sourceName,
+        status:   config.defaultStatus,
+        date:     new Date(),
+        remark:   message ? `${config.defaultRemark} — ${message}` : config.defaultRemark,
+        user:     assignedUserId,
+        company:  config.company,
+      });
+    } catch (createErr) {
+      if (createErr.code === 11000) {
+        console.log(`   ⚠ Race-condition duplicate for ${cleanMobile} — skipping`);
+        return;
+      }
+      throw createErr;
+    }
 
     console.log(`✅ WEBSITE LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | source: "${config.sourceName}" | id: ${newLead._id}`);
 

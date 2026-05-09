@@ -11,11 +11,18 @@ const {
   getMyLeads,
   updateLeadEmail, bulkUpdateEmails,
   adminGetAllLeads,
+  checkDuplicate,
 } = require("../controllers/leadController");
 
 const { protect }           = require("../middlewares/authMiddleware");
 const { protectAdmin }      = require("../middlewares/adminAuthMiddleware");
 const { protectSuperAdmin } = require("../middlewares/superAdminMiddleware");
+
+// ── Duplicate-check endpoints (must come BEFORE /:id wildcard) ───────────────
+// User: GET /api/lead/check-duplicate?mobile=9876543210
+router.get("/check-duplicate", protect, checkDuplicate);
+// Admin: GET /api/lead/admin/check-duplicate?mobile=9876543210
+router.get("/admin/check-duplicate", protectAdmin, checkDuplicate);
 
 // ── RULE: All specific/named routes MUST come before wildcard /:id routes ─────
 

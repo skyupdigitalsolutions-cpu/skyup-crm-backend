@@ -30,6 +30,8 @@ const mobileCallLogSchema = new mongoose.Schema(
     company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
 
     phoneNumber: { type: String, required: true },
+    // Normalised last-10-digit form — used for fast lead matching
+    normalizedPhone: { type: String, default: null, trim: true },
     callType: {
       type: String,
       enum: ['incoming', 'outgoing', 'missed', 'voicemail', 'rejected', 'blocked', 'unknown'],
@@ -61,5 +63,18 @@ const mobileCallLogSchema = new mongoose.Schema(
 mobileCallLogSchema.index({ user: 1, timestamp: -1 });
 // ✅ FIX: compound index now includes callType to match the upsert filter (Bug #3)
 mobileCallLogSchema.index({ user: 1, phoneNumber: 1, timestamp: 1, callType: 1 }, { unique: true });
+// Fast lead-matching by normalizedPhone
+mobileCallLogSchema.index({ company: 1, normalizedPhone: 1 }, { sparse: true });
+
+// Auto-compute normalizedPhone before save
+mobileCallLogSchema.pre('validate', function (next) {
+  if (this.phoneNumber) {
+    try {
+      const { normalizePhone } = require('../utils/normalizePhone');
+      this.normalizedPhone = normalizePhone(this.phoneNumber) || null;
+    } catch { /* ignore if util not yet available */ }
+  }
+  next();
+});
 
 module.exports = mongoose.model('MobileCallLog', mobileCallLogSchema);

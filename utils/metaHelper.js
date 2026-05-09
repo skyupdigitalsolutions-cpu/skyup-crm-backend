@@ -1,5 +1,6 @@
 const axios  = require("axios");
 const User   = require("../models/Users");
+const { normalizePhoneSafe } = require("./normalizePhone");
 
 // ── Fetch lead data from Meta Graph API ───────────────────────────────────────
 const fetchLeadData = async (leadgenId, pageAccessToken, graphApiVersion) => {
@@ -73,9 +74,12 @@ const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
         : "Unknown"),
 
     mobile: (() => {
-  const raw = parsedFields["phone_number"] || parsedFields["mobile"] || "";
-  const stripped = raw.replace(/\D/g, "");
-  return stripped || raw || "N/A";
+  const raw      = parsedFields["phone_number"] || parsedFields["mobile"] || "";
+  const norm     = normalizePhoneSafe(raw);
+  // Store the normalised 10-digit form so the DB index can enforce uniqueness.
+  // The pre-validate hook on the Lead model will also set normalizedPhone,
+  // but storing it here directly means Meta leads are consistent from day 1.
+  return norm || raw.replace(/\D/g, "") || "N/A";
 })(),
     
 

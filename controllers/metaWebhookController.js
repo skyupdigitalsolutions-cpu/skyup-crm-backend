@@ -2,6 +2,7 @@
 const MetaConfig         = require("../models/MetaConfig");
 const Lead               = require("../models/Leads");
 const { notifyTelegram } = require("../utils/telegramNotifier");
+const { normalizePhone } = require("../utils/normalizePhone");
 const {
   fetchLeadData,
   parseFieldData,
@@ -144,7 +145,40 @@ const receiveWebhook = async (req, res) => {
         const assignedUserId = await getNextAssignedUser(config);
         const leadPayload   = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
 
-        const newLead = await Lead.create(leadPayload);
+        // ── Phone-based dedup: check normalizedPhone before insert ────────────
+        const normPhone = normalizePhone(leadPayload.mobile);
+        if (normPhone) {
+          const phoneDup = await Lead.findOne(
+            { company: config.company, normalizedPhone: normPhone },
+            { _id: 1, name: 1 }
+          ).lean();
+          if (phoneDup) {
+            console.log(`   ⏭ Phone duplicate — ${leadPayload.mobile} → normalizes to ${normPhone}, exists as "${phoneDup.name}" (${phoneDup._id})`);
+            // Append this Meta submission as a callHistory note on the existing lead
+            await Lead.findByIdAndUpdate(phoneDup._id, {
+              $push: { callHistory: {
+                userId:   null,
+                userName: "Meta Webhook",
+                remark:   `Duplicate Meta lead submission from campaign "${config.campaignName}" (leadgenId: ${leadgen_id})`,
+                outcome:  "Duplicate Submission",
+                calledAt: new Date(),
+              }},
+            });
+            continue;
+          }
+        }
+
+        let newLead;
+        try {
+          newLead = await Lead.create(leadPayload);
+        } catch (createErr) {
+          // Race condition: another concurrent webhook beat us
+          if (createErr.code === 11000) {
+            console.log(`   ⚠ Race-condition duplicate for ${leadPayload.mobile} — skipping`);
+            continue;
+          }
+          throw createErr;
+        }
         console.log(`\n✅ META LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`);
 
         // ── Notify via Telegram ───────────────────────────────────────────────

@@ -2,6 +2,7 @@
 const GoogleAdsConfig    = require("../models/GoogleAdsConfig");
 const Lead               = require("../models/Leads");
 const { notifyTelegram } = require("../utils/telegramNotifier");
+const { normalizePhone } = require("../utils/normalizePhone");
 const {
   parseGoogleLeadData,
   getNextAssignedUserGoogle,
@@ -126,7 +127,29 @@ const receiveGoogleWebhook = async (req, res) => {
     const assignedUserId = await getNextAssignedUserGoogle(config);
     const leadPayload    = mapGoogleLeadToSchema(parsedFields, config, googleLeadId, assignedUserId);
 
-    const newLead = await Lead.create(leadPayload);
+    // Phone-based dedup
+    const normPhone = normalizePhone(leadPayload.mobile);
+    if (normPhone) {
+      const phoneDup = await Lead.findOne(
+        { company: config.company, normalizedPhone: normPhone },
+        { _id: 1, name: 1 }
+      ).lean();
+      if (phoneDup) {
+        console.log(`   ⏭ Phone duplicate — ${leadPayload.mobile} → ${normPhone}, exists as "${phoneDup.name}"`);
+        return;
+      }
+    }
+
+    let newLead;
+    try {
+      newLead = await Lead.create(leadPayload);
+    } catch (createErr) {
+      if (createErr.code === 11000) {
+        console.log(`   ⚠ Race-condition duplicate for ${leadPayload.mobile} — skipping`);
+        return;
+      }
+      throw createErr;
+    }
 
     // ── FIX: Increment lead counter on the config (same as Meta webhook) ─────
     // Without this the campaign card always shows "—" for Leads.
