@@ -233,9 +233,9 @@ const getCompanyAttendance = async (req, res) => {
     const companyId = req.admin.company._id;
     const { date = todayStr() } = req.query;
 
-    const users   = await User.find({ company: companyId }).select("name email").lean();
+    const users   = await User.find({ company: companyId }).select("name email ipAddress appName appVersion platform deviceModel osVersion").lean();
     const records = await Attendance.find({ company: companyId, date })
-      .populate("user", "name email").lean();
+      .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion").lean();
 
     const recordMap = {};
     records.forEach(r => { recordMap[String(r.user?._id || r.user)] = r; });
@@ -287,7 +287,7 @@ const getAttendanceReport = async (req, res) => {
     // Fetch records
     const [records, total] = await Promise.all([
       Attendance.find(query)
-        .populate("user", "name email")
+        .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion")
         .sort({ date: -1, createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(Number(limit))
@@ -308,7 +308,7 @@ const getAttendanceReport = async (req, res) => {
       : enriched;
 
     // Get all users for the company (for absent rows — users with no record)
-    const allUsers = await User.find({ company: companyId }).select("name email").lean();
+    const allUsers = await User.find({ company: companyId }).select("name email ipAddress").lean();
 
     // Build absent rows: users with no record in range who have no record for today
     let absentRows = [];
@@ -397,7 +397,7 @@ const exportAttendance = async (req, res) => {
     if (userId) query.user = userId;
 
     const records = await Attendance.find(query)
-      .populate("user", "name email")
+      .populate("user", "name email ipAddress")
       .sort({ date: -1 })
       .lean();
 
@@ -423,7 +423,7 @@ const exportAttendance = async (req, res) => {
 const getCompanyUsers = async (req, res) => {
   try {
     const users = await User.find({ company: req.admin.company._id })
-      .select("name email").lean();
+      .select("name email ipAddress appName appVersion platform deviceModel osVersion").lean();
     res.status(200).json(users);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };

@@ -81,6 +81,8 @@ const login = async (req, res) => {
           deviceUpdate[f] = req.body[f];
         }
       });
+      // ✅ FIX: always record last login timestamp so frontend can display it
+      deviceUpdate.lastLoginAt = new Date();
       if (Object.keys(deviceUpdate).length > 0) {
         await User.findByIdAndUpdate(user._id, { $set: deviceUpdate });
       }
@@ -101,4 +103,31 @@ const login = async (req, res) => {
   }
 };
 
-module.exports = { register, login };
+// ── Update Device / IP info (called from mobile after login) ─────────────────
+// ✅ FIX: replaces the previous pattern of calling POST /auth/login a second
+//         time just to save the IP. This endpoint is lightweight — no password
+//         check, no token generation — just a targeted $set on the User doc.
+const DEVICE_UPDATE_FIELDS = [
+  "ipAddress", "appName", "appVersion", "platform",
+  "deviceModel", "osVersion", "fcmToken",
+];
+
+const updateDevice = async (req, res) => {
+  try {
+    const update = {};
+    DEVICE_UPDATE_FIELDS.forEach((f) => {
+      if (req.body[f] !== undefined && req.body[f] !== null) {
+        update[f] = req.body[f];
+      }
+    });
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ message: "No device fields provided." });
+    }
+    await User.findByIdAndUpdate(req.user._id, { $set: update });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = { register, login, updateDevice };

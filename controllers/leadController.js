@@ -365,12 +365,20 @@ const deleteLead = async (req, res) => {
   }
 };
 
+// ✅ FIX: strip protected fields before spreading req.body — prevents a user
+//         from reassigning a lead to themselves or changing the company by
+//         sending { user: "...", company: "..." } in the request body.
+//         adminUpdateLead already did this; now the user endpoint does too.
 const updateLead = async (req, res) => {
   try {
     const { id } = req.params;
     const lead = await Lead.findOne({ _id: id, company: req.user.company });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    const updatedLead = await Lead.findByIdAndUpdate(id, req.body, {
+
+    // Strip fields that must not be changed via the user endpoint
+    const { company, user, normalizedPhone, leadgenId, previousAgents, reassignCount, ...safeBody } = req.body;
+
+    const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, {
       new: true,
     });
     return res.status(200).json(updatedLead);
@@ -415,15 +423,42 @@ const adminDeleteLead = async (req, res) => {
   }
 };
 
+// ── GET /api/lead/my-leads ────────────────────────────────────────────────────
+// ✅ FIX: now returns paginated shape { leads, total, page, pages } instead of
+//         a plain array. Mobile leadsApi.js and UserLeadsPage.jsx both expect
+//         this shape; the plain-array response caused mobile to silently get 0
+//         leads (firstPage.data.leads was undefined → formatLead crash).
+//
+//         Frontend UserLeadsPage already handles both shapes via:
+//           res.data?.leads || (Array.isArray(res.data) ? res.data : [])
+//         so it continues to work. Mobile leadsApi no longer needs the fallback.
+//
+//         Default limit=200 so a single call fetches all leads for most users
+//         without needing multi-page parallel fetches. Callers may pass
+//         ?page=N&limit=N to paginate explicitly.
 const getMyLeads = async (req, res) => {
   try {
-    const leads = await Lead.find({
-      company: req.user.company,
-      user: req.user._id,
-    })
-      .sort({ createdAt: -1 })
-      .populate("user", "name email");
-    res.status(200).json(leads);
+    const page  = Math.max(1, parseInt(req.query.page  || "1",  10));
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit || "200", 10)));
+    const skip  = (page - 1) * limit;
+
+    const query = { company: req.user.company, user: req.user._id };
+
+    const [leads, total] = await Promise.all([
+      Lead.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("user", "name email"),
+      Lead.countDocuments(query),
+    ]);
+
+    res.status(200).json({
+      leads,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

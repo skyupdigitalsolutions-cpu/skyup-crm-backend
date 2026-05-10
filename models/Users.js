@@ -23,6 +23,8 @@ const userSchema = mongoose.Schema(
 
     // ✅ FIX: added ipAddress field — was missing so it was silently dropped
     ipAddress:   { type: String, default: null },
+    // ✅ FIX: track last login time so frontend "Last Login" column works
+    lastLoginAt: { type: Date,   default: null },
   },
   { timestamps: true }
 );
