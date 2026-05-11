@@ -96,37 +96,71 @@ const sendMessage = async (req, res) => {
       });
     }
 
-    // ── Send message via Meta WhatsApp Cloud API ───────────────────────────
-    const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
+    // ── Resolve MSG91 credentials (DB override → fallback to .env) ───────────
+    const provider      = config.provider || "msg91";
+    const authKey       = config.msg91AuthKey         || process.env.MSG91_AUTH_KEY;
+    const senderNumber  = config.msg91IntegratedNumber || process.env.MSG91_INTEGRATED_NUMBER;
 
-    let waResponse;
+    if (provider === "msg91") {
+      if (!authKey || !senderNumber) {
+        return res.status(500).json({
+          error: "MSG91 credentials missing. Set MSG91_AUTH_KEY and MSG91_INTEGRATED_NUMBER in your .env",
+        });
+      }
+    }
+
+    // ── Send message via MSG91 WhatsApp API ───────────────────────────────────
+    let waMessageId;
     try {
-      waResponse = await axios.post(
-        apiUrl,
-        {
-          messaging_product: "whatsapp",
-          recipient_type:    "individual",
-          to:                conversation.waPhone,
-          type:              "text",
-          text: {
-            preview_url: false,
-            body:        text.trim(),
+      if (provider === "msg91") {
+        const msg91Response = await axios.post(
+          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+          {
+            integrated_number: senderNumber,
+            content_type:      "template",   // for session messages use "text"
+            payload: [
+              {
+                to:      conversation.waPhone,
+                type:    "text",
+                message: { body: text.trim() },
+              },
+            ],
           },
-        },
-        {
-          headers: {
-            Authorization:  `Bearer ${config.accessToken}`,
-            "Content-Type": "application/json",
+          {
+            headers: {
+              authkey:        authKey,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        waMessageId = msg91Response.data?.data?.[0]?.id || null;
+        console.log(`✅ MSG91 send success → ${conversation.waPhone}`);
+      } else {
+        // ── Fallback: Meta Cloud API ─────────────────────────────────────────
+        const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
+        const metaResponse = await axios.post(
+          apiUrl,
+          {
+            messaging_product: "whatsapp",
+            recipient_type:    "individual",
+            to:                conversation.waPhone,
+            type:              "text",
+            text: { preview_url: false, body: text.trim() },
           },
-        }
-      );
+          {
+            headers: {
+              Authorization:  `Bearer ${config.accessToken}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        waMessageId = metaResponse.data?.messages?.[0]?.id;
+      }
     } catch (apiErr) {
-      const errMsg = apiErr.response?.data?.error?.message || apiErr.message;
+      const errMsg = apiErr.response?.data?.message || apiErr.response?.data?.error?.message || apiErr.message;
       console.error("❌ WA send error:", errMsg);
       return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
     }
-
-    const waMessageId = waResponse.data?.messages?.[0]?.id;
 
     // ── Save the outbound message ──────────────────────────────────────────
     const savedMsg = await WhatsAppMessage.create({
@@ -192,35 +226,70 @@ const sendTemplate = async (req, res) => {
     const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
     if (!config) return res.status(400).json({ error: "WhatsApp not configured" });
 
-    const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
+    const provider     = config.provider || "msg91";
+    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
+    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
 
-    let waResponse;
+    let waMessageId;
     try {
-      waResponse = await axios.post(
-        apiUrl,
-        {
-          messaging_product: "whatsapp",
-          to:   conversation.waPhone,
-          type: "template",
-          template: {
-            name:     templateName,
-            language: { code: languageCode },
-            components,
-          },
-        },
-        {
-          headers: {
-            Authorization:  `Bearer ${config.accessToken}`,
-            "Content-Type": "application/json",
-          },
+      if (provider === "msg91") {
+        if (!authKey || !senderNumber) {
+          return res.status(500).json({ error: "MSG91 credentials missing in .env" });
         }
-      );
+        const msg91Response = await axios.post(
+          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+          {
+            integrated_number: senderNumber,
+            content_type:      "template",
+            payload: [
+              {
+                to:   conversation.waPhone,
+                type: "template",
+                template: {
+                  name:       templateName,
+                  language:   { code: languageCode },
+                  components: components,
+                },
+              },
+            ],
+          },
+          {
+            headers: {
+              authkey:        authKey,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        waMessageId = msg91Response.data?.data?.[0]?.id || null;
+        console.log(`✅ MSG91 template send → ${conversation.waPhone} [${templateName}]`);
+      } else {
+        // ── Meta fallback ────────────────────────────────────────────────────
+        const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
+        const metaResponse = await axios.post(
+          apiUrl,
+          {
+            messaging_product: "whatsapp",
+            to:   conversation.waPhone,
+            type: "template",
+            template: {
+              name:       templateName,
+              language:   { code: languageCode },
+              components,
+            },
+          },
+          {
+            headers: {
+              Authorization:  `Bearer ${config.accessToken}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        waMessageId = metaResponse.data?.messages?.[0]?.id;
+      }
     } catch (apiErr) {
-      const errMsg = apiErr.response?.data?.error?.message || apiErr.message;
+      const errMsg = apiErr.response?.data?.message || apiErr.response?.data?.error?.message || apiErr.message;
       return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
     }
-
-    const waMessageId = waResponse.data?.messages?.[0]?.id;
     const templatePreview = `[Template: ${templateName}]`;
 
     const savedMsg = await WhatsAppMessage.create({
@@ -310,29 +379,62 @@ const closeConversation = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const saveConfig = async (req, res) => {
   try {
-    const { phoneNumberId, accessToken, verifyToken, businessAccountId, phoneNumber, graphApiVersion } = req.body;
+    const {
+      provider = "msg91",
+      // MSG91 fields
+      msg91AuthKey,
+      msg91IntegratedNumber,
+      // Meta fields
+      phoneNumberId,
+      accessToken,
+      verifyToken,
+      businessAccountId,
+      graphApiVersion,
+      // common
+      phoneNumber,
+    } = req.body;
     const { companyId } = req.user;
 
-    if (!phoneNumberId || !accessToken || !verifyToken) {
-      return res.status(400).json({ error: "phoneNumberId, accessToken and verifyToken are required" });
+    // Validate based on provider
+    if (provider === "msg91") {
+      // MSG91 can work fully from .env — no required body fields
+      // But if provided in body, save them as overrides
+    } else {
+      if (!phoneNumberId || !accessToken || !verifyToken) {
+        return res.status(400).json({ error: "phoneNumberId, accessToken and verifyToken are required for Meta provider" });
+      }
+    }
+
+    const updateData = {
+      provider,
+      phoneNumber: phoneNumber || "",
+      isActive:    true,
+      company:     companyId,
+    };
+
+    if (provider === "msg91") {
+      updateData.msg91AuthKey          = msg91AuthKey          || "";
+      updateData.msg91IntegratedNumber = msg91IntegratedNumber || "";
+    } else {
+      updateData.phoneNumberId      = phoneNumberId     || "";
+      updateData.accessToken        = accessToken       || "";
+      updateData.verifyToken        = verifyToken       || "";
+      updateData.businessAccountId  = businessAccountId || "";
+      updateData.graphApiVersion    = graphApiVersion   || "v21.0";
     }
 
     const config = await WhatsAppConfig.findOneAndUpdate(
       { company: companyId },
-      {
-        phoneNumberId,
-        accessToken,
-        verifyToken,
-        businessAccountId: businessAccountId || "",
-        phoneNumber:       phoneNumber || "",
-        graphApiVersion:   graphApiVersion || "v21.0",
-        isActive:          true,
-        company:           companyId,
-      },
+      updateData,
       { upsert: true, new: true }
     );
 
-    res.json({ success: true, config: { ...config.toObject(), accessToken: "***hidden***" } });
+    // Hide sensitive fields in response
+    const safeConfig = { ...config.toObject() };
+    if (safeConfig.msg91AuthKey)  safeConfig.msg91AuthKey  = "***hidden***";
+    if (safeConfig.accessToken)   safeConfig.accessToken   = "***hidden***";
+
+    res.json({ success: true, config: safeConfig });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -343,16 +445,43 @@ const getConfig = async (req, res) => {
   try {
     const { companyId } = req.user;
     const config = await WhatsAppConfig.findOne({ company: companyId });
-    if (!config) return res.json({ configured: false });
+
+    if (!config) {
+      // Check if .env has MSG91 credentials — auto-configured
+      const envAuthKey = process.env.MSG91_AUTH_KEY;
+      const envNumber  = process.env.MSG91_INTEGRATED_NUMBER;
+      if (envAuthKey && envNumber) {
+        return res.json({
+          configured:            true,
+          provider:              "msg91",
+          msg91Configured:       true,
+          msg91IntegratedNumber: envNumber,
+          source:                "env",
+        });
+      }
+      return res.json({ configured: false });
+    }
+
+    const provider = config.provider || "msg91";
+
+    // Resolve credentials: DB override first, then .env
+    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
+    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
 
     res.json({
-      configured:       true,
-      phoneNumber:      config.phoneNumber,
-      phoneNumberId:    config.phoneNumberId,
-      businessAccountId: config.businessAccountId,
-      graphApiVersion:  config.graphApiVersion,
-      isActive:         config.isActive,
-      // Never return accessToken or verifyToken to frontend
+      configured:            true,
+      provider,
+      phoneNumber:           config.phoneNumber,
+      isActive:              config.isActive,
+      // MSG91 info
+      msg91Configured:       !!(authKey && senderNumber),
+      msg91IntegratedNumber: senderNumber || "",
+      // Meta info (only if using meta)
+      ...(provider === "meta" && {
+        phoneNumberId:     config.phoneNumberId,
+        businessAccountId: config.businessAccountId,
+        graphApiVersion:   config.graphApiVersion,
+      }),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

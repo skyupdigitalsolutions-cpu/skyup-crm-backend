@@ -46,6 +46,10 @@ const emailHistoryRoute    = require('./routes/emailHistory');
 // ── Saanvi Voicebot Proxy (avoids CORS) ──────────────────────────────────────
 const saanviProxyRoute = require('./routes/saanviProxy');
 
+// ── WhatsApp Routes (MSG91 + Meta) ────────────────────────────────────────────
+const whatsappRoutes    = require('./routes/whatsappRoutes');
+const msg91WebhookRoute = require('./routes/msg91Webhook');
+
 const app    = express();
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -140,7 +144,9 @@ app.get('/', (req, res) => res.send('Server is running'));
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
 // ── Webhook Routes (public — no auth)
-app.use('/meta', metaWebhookRoute);
+app.use('/meta',           metaWebhookRoute);
+app.use('/msg91-webhook',  msg91WebhookRoute);   // MSG91 WhatsApp inbound webhook
+app.use('/wa-webhook',     whatsappRoutes);      // Meta WhatsApp webhook (kept for compatibility)
 
 app.use('/website-webhook', (req, res, next) => {
   const origin = req.headers.origin || '';
@@ -198,6 +204,9 @@ app.use('/api/subscription', subscriptionRoute);
 
 // ── Saanvi Voicebot Proxy ─────────────────────────────────────────────────────
 app.use('/api/saanvi', saanviProxyRoute);
+
+// ── WhatsApp API (conversations, send, config) ────────────────────────────────
+app.use('/api/whatsapp', whatsappRoutes);
 
 // ── Mobile App: Call Log Sync & Recordings ────────────────────────────────────
 const mobileCallLogRoute = require('./routes/mobileCallLog');

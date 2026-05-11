@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 
 // Stores the WhatsApp Business API credentials for each company
 // One company = one WhatsApp Business number
+// Supports both MSG91 and Meta Cloud API as providers
 const whatsAppConfigSchema = new mongoose.Schema(
   {
     company: {
@@ -11,47 +12,66 @@ const whatsAppConfigSchema = new mongoose.Schema(
       unique: true, // one WA config per company
     },
 
-    // From Meta Developer Console → WhatsApp → API Setup
+    // ── Provider selection ────────────────────────────────────────────────────
+    // "msg91" = MSG91 WhatsApp API  (env: MSG91_AUTH_KEY + MSG91_INTEGRATED_NUMBER)
+    // "meta"  = Meta WhatsApp Cloud API (phoneNumberId + accessToken below)
+    provider: {
+      type: String,
+      enum: ["msg91", "meta"],
+      default: "msg91",
+    },
+
+    // ── MSG91 fields (provider === "msg91") ───────────────────────────────────
+    // Falls back to process.env values if blank — so .env is the single source of truth
+    msg91AuthKey: {
+      type: String,
+      default: "",
+      trim: true,
+      // Example: "447171TxxxXXXX67f2b4e5"
+    },
+
+    msg91IntegratedNumber: {
+      type: String,
+      default: "",
+      trim: true,
+      // Example: "919876543210"  (country code + number, no +)
+    },
+
+    // ── Meta Cloud API fields (provider === "meta") ───────────────────────────
     phoneNumberId: {
       type: String,
-      required: true,
+      default: "",
       trim: true,
-      // Example: "123456789012345"
     },
 
-    // System User Access Token (permanent) — generated in Meta Business Manager
-    // Settings → Business Settings → System Users → Generate Token
     accessToken: {
       type: String,
-      required: true,
+      default: "",
       trim: true,
     },
 
-    // WhatsApp Business Account ID (found in Meta Business Manager)
     businessAccountId: {
       type: String,
       default: "",
       trim: true,
     },
 
-    // The actual WhatsApp phone number (e.g., "+919876543210")
-    phoneNumber: {
+    verifyToken: {
       type: String,
       default: "",
       trim: true,
     },
 
-    // Token you set in Meta webhook config — must match what Meta sends
-    verifyToken: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-
-    // Graph API version to use (keep updated)
     graphApiVersion: {
       type: String,
       default: "v21.0",
+    },
+
+    // ── Common ────────────────────────────────────────────────────────────────
+    phoneNumber: {
+      type: String,
+      default: "",
+      trim: true,
     },
 
     isActive: {
