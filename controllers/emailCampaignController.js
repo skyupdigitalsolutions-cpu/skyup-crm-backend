@@ -1,5 +1,6 @@
-const axios = require("axios");
-const Lead = require("../models/Leads");
+// controllers/emailCampaignController.js
+const axios    = require("axios");
+const Lead     = require("../models/Leads");
 const EmailLog = require("../models/EmailLog");
 
 // ── Brevo (Sendinblue) transactional email sender ──────────────────────────────
@@ -39,7 +40,52 @@ const saveLog = async ({ to, subject, body, campaignId, status, errorMessage, co
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: send all emails in the background (non-blocking).
+// Runs AFTER the HTTP response has already been sent to the client.
+// Uses a small concurrency pool (5 at a time) so we don't hammer Brevo.
+// ─────────────────────────────────────────────────────────────────────────────
+async function runCampaignInBackground({ leads, subject, bodyTemplate, fromName, companyId, companyName, campaignId }) {
+  const CONCURRENCY = 5; // max parallel Brevo calls
+  let sent = 0, failed = 0;
+
+  // Process leads in chunks of CONCURRENCY
+  for (let i = 0; i < leads.length; i += CONCURRENCY) {
+    const chunk = leads.slice(i, i + CONCURRENCY);
+
+    await Promise.all(
+      chunk.map(async (lead) => {
+        const html = bodyTemplate
+          .replace(/{{name}}/g, lead.name)
+          .replace(/{{campaign}}/g, lead.campaign || "")
+          .replace(/{{mobile}}/g, lead.mobile)
+          .replace(/{{email}}/g, lead.email);
+
+        try {
+          await sendViaBrevo({
+            to: [{ email: lead.email, name: lead.name }],
+            subject,
+            html,
+            fromName: fromName || companyName || "CRM",
+          });
+          sent++;
+          await saveLog({ to: lead.email, subject, body: html, campaignId, status: "sent", companyId });
+        } catch (err) {
+          failed++;
+          const errMsg = err?.response?.data?.message || err.message;
+          await saveLog({ to: lead.email, subject, body: html, campaignId, status: "failed", errorMessage: errMsg, companyId });
+        }
+      })
+    );
+  }
+
+  console.log(`📧 Campaign "${campaignId}" complete — sent: ${sent}, failed: ${failed}, total: ${leads.length}`);
+}
+
 // ── POST /api/email-campaign/send ─────────────────────────────────────────────
+// ✅ FIXED: responds immediately with total count, then processes in background.
+// Previously this awaited every Brevo call sequentially — with 500 leads the
+// request would hang for minutes. Now the HTTP response returns in <100ms.
 const sendBulkEmails = async (req, res) => {
   try {
     const { campaign, subject, bodyTemplate, fromName } = req.body;
@@ -58,34 +104,26 @@ const sendBulkEmails = async (req, res) => {
       return res.status(404).json({ message: "No leads with email found for this campaign" });
     }
 
-    let sent = 0, failed = 0;
-    const errors = [];
+    // ── Respond immediately so the client isn't left waiting ─────────────────
+    res.json({
+      message: `Campaign queued — sending to ${leads.length} leads in the background.`,
+      total: leads.length,
+      queued: true,
+    });
 
-    for (const lead of leads) {
-      const html = bodyTemplate
-        .replace(/{{name}}/g, lead.name)
-        .replace(/{{campaign}}/g, lead.campaign || "")
-        .replace(/{{mobile}}/g, lead.mobile)
-        .replace(/{{email}}/g, lead.email);
+    // ── Fire-and-forget: process all emails after the response is sent ────────
+    runCampaignInBackground({
+      leads,
+      subject,
+      bodyTemplate,
+      fromName,
+      companyId:   req.admin.company._id,
+      companyName: req.admin.company.name,
+      campaignId:  campaign,
+    }).catch((err) => {
+      console.error("runCampaignInBackground uncaught error:", err.message);
+    });
 
-      try {
-        await sendViaBrevo({
-          to: [{ email: lead.email, name: lead.name }],
-          subject,
-          html,
-          fromName: fromName || req.admin.company.name || "CRM",
-        });
-        sent++;
-        await saveLog({ to: lead.email, subject, body: html, campaignId: campaign, status: "sent", companyId: req.admin.company._id });
-      } catch (err) {
-        failed++;
-        const errMsg = err?.response?.data?.message || err.message;
-        errors.push({ email: lead.email, error: errMsg });
-        await saveLog({ to: lead.email, subject, body: html, campaignId: campaign, status: "failed", errorMessage: errMsg, companyId: req.admin.company._id });
-      }
-    }
-
-    res.json({ message: `Campaign sent: ${sent} succeeded, ${failed} failed`, sent, failed, total: leads.length, errors: errors.length > 0 ? errors : undefined });
   } catch (err) {
     console.error("Email campaign error:", err);
     res.status(500).json({ message: "Server error", error: err.message });
@@ -130,37 +168,49 @@ const sendCsvEmails = async (req, res) => {
   const { recipients, subject, bodyTemplate, fromName } = req.body;
   if (!recipients?.length || !subject) return res.status(400).json({ message: "recipients and subject required" });
 
+  // Respond immediately for large CSV lists too
+  res.json({
+    message: `CSV campaign queued — sending to ${recipients.length} recipients in the background.`,
+    total: recipients.length,
+    queued: true,
+  });
+
+  // Process in background with concurrency
+  const CONCURRENCY = 5;
   let sent = 0, failed = 0;
-  const errors = [];
 
-  for (const { name, email } of recipients) {
-    const html = bodyTemplate
-      .replace(/{{name}}/g, name || "Friend")
-      .replace(/{{campaign}}/g, "")
-      .replace(/{{mobile}}/g, "")
-      .replace(/{{email}}/g, email);
-
-    try {
-      await sendViaBrevo({ to: [{ name, email }], subject, html, fromName });
-      sent++;
-      await saveLog({ to: email, subject, body: html, campaignId: "csv-import", status: "sent", companyId: req.admin.company._id });
-    } catch (err) {
-      failed++;
-      errors.push({ email, error: err.message });
-      await saveLog({ to: email, subject, body: html, campaignId: "csv-import", status: "failed", errorMessage: err.message, companyId: req.admin.company._id });
+  (async () => {
+    for (let i = 0; i < recipients.length; i += CONCURRENCY) {
+      const chunk = recipients.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        chunk.map(async ({ name, email }) => {
+          const html = bodyTemplate
+            .replace(/{{name}}/g, name || "Friend")
+            .replace(/{{campaign}}/g, "")
+            .replace(/{{mobile}}/g, "")
+            .replace(/{{email}}/g, email);
+          try {
+            await sendViaBrevo({ to: [{ name, email }], subject, html, fromName });
+            sent++;
+            await saveLog({ to: email, subject, body: html, campaignId: "csv-import", status: "sent", companyId: req.admin.company._id });
+          } catch (err) {
+            failed++;
+            await saveLog({ to: email, subject, body: html, campaignId: "csv-import", status: "failed", errorMessage: err.message, companyId: req.admin.company._id });
+          }
+        })
+      );
     }
-  }
-
-  res.json({ sent, failed, total: recipients.length, errors });
+    console.log(`📧 CSV campaign complete — sent: ${sent}, failed: ${failed}, total: ${recipients.length}`);
+  })().catch((err) => console.error("CSV campaign background error:", err.message));
 };
 
 // ── GET /api/email/history ────────────────────────────────────────────────────
 const getEmailHistory = async (req, res) => {
   try {
     const { page = 1, limit = 10, search = "", campaignId = "", sortOrder = "desc", dateFrom = "", dateTo = "" } = req.query;
-    const pageNum = Math.max(1, parseInt(page));
+    const pageNum  = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
-    const skip = (pageNum - 1) * limitNum;
+    const skip     = (pageNum - 1) * limitNum;
 
     const filter = { company: req.admin.company._id };
     if (search.trim()) filter.to = { $regex: search.trim(), $options: "i" };
@@ -173,7 +223,6 @@ const getEmailHistory = async (req, res) => {
         filter.sentAt.$gte = new Date(dateFrom.trim());
       }
       if (dateTo.trim()) {
-        // Include the entire "to" day by going to end of that day
         const endDate = new Date(dateTo.trim());
         endDate.setHours(23, 59, 59, 999);
         filter.sentAt.$lte = endDate;

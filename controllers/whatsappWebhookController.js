@@ -7,6 +7,7 @@ const WhatsAppConversation   = require("../models/WhatsAppConversation");
 const WhatsAppMessage        = require("../models/WhatsAppMessage");
 const Lead                   = require("../models/Leads");
 const User                   = require("../models/Users");
+const { acquireWaDedupLock } = require("../middlewares/rateLimiter"); // ✅ Redis dedup
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /wa-webhook  — Meta's one-time verification handshake
@@ -101,10 +102,20 @@ async function handleInboundMessage(msg, value, config) {
   const waMessageId = msg.id;
   const timestamp   = new Date(parseInt(msg.timestamp) * 1000);
 
-  // Prevent duplicate processing (Meta can send same message twice)
+  // ── LAYER 1: Redis atomic dedup lock ─────────────────────────────────────
+  // Meta can fire the same webhook twice within milliseconds. A plain DB
+  // findOne() is too slow — both parallel requests pass the check before
+  // either has written to MongoDB. SET NX is atomic and resolves in <1ms.
+  const acquired = await acquireWaDedupLock(waMessageId);
+  if (!acquired) {
+    console.log(`⏭ Redis dedup: already processing WA message ${waMessageId}`);
+    return;
+  }
+
+  // ── LAYER 2: DB dedup guard (catches replays after Redis TTL expires) ─────
   const exists = await WhatsAppMessage.findOne({ waMessageId });
   if (exists) {
-    console.log(`⏭ Duplicate WA message: ${waMessageId}`);
+    console.log(`⏭ DB dedup: WA message already saved ${waMessageId}`);
     return;
   }
 

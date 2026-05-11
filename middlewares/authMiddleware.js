@@ -2,6 +2,7 @@
 const jwt   = require("jsonwebtoken");
 const User  = require("../models/Users");
 const Admin = require("../models/Admin");
+const { isTokenBlacklisted } = require("./rateLimiter");
 
 // ── User-only middleware ───────────────────────────────────────────────────────
 const protect = async (req, res, next) => {
@@ -10,6 +11,12 @@ const protect = async (req, res, next) => {
   if (req.headers.authorization?.startsWith("Bearer")) {
     try {
       token = req.headers.authorization.split(" ")[1];
+
+      // ── Blacklist check (logout / revocation) ───────────────────────────────
+      if (await isTokenBlacklisted(token)) {
+        return res.status(401).json({ message: "Token has been invalidated. Please log in again." });
+      }
+
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
       if (decoded.role && decoded.role !== "user") {
@@ -42,6 +49,12 @@ const protectAny = async (req, res, next) => {
   if (req.headers.authorization?.startsWith("Bearer")) {
     try {
       token = req.headers.authorization.split(" ")[1];
+
+      // ── Blacklist check ─────────────────────────────────────────────────────
+      if (await isTokenBlacklisted(token)) {
+        return res.status(401).json({ message: "Token has been invalidated. Please log in again." });
+      }
+
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
       if (decoded.role === "admin") {

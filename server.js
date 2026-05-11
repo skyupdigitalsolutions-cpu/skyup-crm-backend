@@ -223,3 +223,26 @@ connectDB().then(() => {
     console.log(`💳 Subscription API: /api/subscription`);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Graceful shutdown — close Redis before the process exits.
+// Without this, Render/Heroku sends SIGTERM and the connection is dropped
+// abruptly, leaving stale connections on the Redis server.
+// ─────────────────────────────────────────────────────────────────────────────
+const { redisClient } = require('./middlewares/rateLimiter');
+
+async function gracefulShutdown(signal) {
+  console.log(`\n${signal} received — shutting down gracefully...`);
+  try {
+    if (redisClient.isReady) {
+      await redisClient.quit();
+      console.log('✅ Redis connection closed.');
+    }
+  } catch (err) {
+    console.error('Redis quit error:', err.message);
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));

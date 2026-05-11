@@ -1,5 +1,7 @@
-const jwt = require("jsonwebtoken");
+// middlewares/adminAuthMiddleware.js
+const jwt   = require("jsonwebtoken");
 const Admin = require("../models/Admin");
+const { isTokenBlacklisted } = require("./rateLimiter");
 
 const protectAdmin = async (req, res, next) => {
   let token;
@@ -7,6 +9,11 @@ const protectAdmin = async (req, res, next) => {
   if (req.headers.authorization?.startsWith("Bearer")) {
     try {
       token = req.headers.authorization.split(" ")[1];
+
+      // ── Blacklist check (logout / revocation) ───────────────────────────────
+      if (await isTokenBlacklisted(token)) {
+        return res.status(401).json({ message: "Token has been invalidated. Please log in again." });
+      }
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 

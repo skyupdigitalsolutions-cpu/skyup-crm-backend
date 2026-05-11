@@ -1,9 +1,11 @@
+// controllers/adminAuthController.js
+const jwt     = require("jsonwebtoken");
+const Admin   = require("../models/Admin");
+const Company = require("../models/Company");
+const generateToken   = require("../utils/generateToken");
+const { blacklistToken } = require("../middlewares/rateLimiter");
 
-const Admin         = require("../models/Admin");
-const Company       = require("../models/Company");
-const generateToken = require("../utils/generateToken");
-
-// Register Admin (used when creating a new company)
+// ── Register Admin (used when creating a new company) ─────────────────────────
 const registerAdmin = async (req, res) => {
   try {
     const { name, email, password, companyId } = req.body;
@@ -31,7 +33,7 @@ const registerAdmin = async (req, res) => {
   }
 };
 
-// Login Admin
+// ── Login Admin ────────────────────────────────────────────────────────────────
 const loginAdmin = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -59,4 +61,28 @@ const loginAdmin = async (req, res) => {
   }
 };
 
-module.exports = { registerAdmin, loginAdmin };
+// ── Logout Admin ───────────────────────────────────────────────────────────────
+// Blacklists the current JWT so it cannot be reused even before its expiry.
+// Frontend should also clear the token from localStorage / cookies.
+const logoutAdmin = async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) {
+      return res.status(400).json({ message: "No token provided" });
+    }
+
+    const decoded = jwt.decode(token);
+    const nowSec  = Math.floor(Date.now() / 1000);
+    const ttl     = decoded?.exp ? decoded.exp - nowSec : 24 * 60 * 60;
+
+    if (ttl > 0) {
+      await blacklistToken(token, ttl);
+    }
+
+    res.json({ success: true, message: "Admin logged out successfully." });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = { registerAdmin, loginAdmin, logoutAdmin };
