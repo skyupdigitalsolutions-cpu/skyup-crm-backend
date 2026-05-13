@@ -211,7 +211,7 @@ const sendMessage = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const sendTemplate = async (req, res) => {
   try {
-    const { conversationId, templateName, languageCode = "en_US", components = [] } = req.body;
+    const { conversationId, templateName, languageCode = "en_US", components = [] } = req.body; // en_US is the correct MSG91 default
     const { companyId, userId } = req.user;
 
     const conversation = await WhatsAppConversation.findById(conversationId);
@@ -474,7 +474,7 @@ const startConversation = async (req, res) => {
       phone,              // client number e.g. "919876543210" (with country code, no +)
       contactName = "",   // optional display name
       templateName,       // MSG91 pre-approved template name (required)
-      languageCode = "en",
+      languageCode = "en_US",  // FIX: MSG91 rejects bare "en" — must be "en_US" or "en_GB"
       components   = [],  // template variable components
     } = req.body;
 
