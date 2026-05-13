@@ -5,6 +5,7 @@ const axios                  = require("axios");
 const WhatsAppConfig         = require("../models/WhatsAppConfig");
 const WhatsAppConversation   = require("../models/WhatsAppConversation");
 const crypto                  = require("crypto");
+const WhatsAppMessage        = require("../models/WhatsAppMessage");
 const Lead                   = require("../models/Leads");
 
 // ─────────────────────────────────────────────────────────────────────────────
