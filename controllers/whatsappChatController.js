@@ -4,7 +4,7 @@
 const axios                  = require("axios");
 const WhatsAppConfig         = require("../models/WhatsAppConfig");
 const WhatsAppConversation   = require("../models/WhatsAppConversation");
-const WhatsAppMessage        = require("../models/WhatsAppMessage");
+const crypto                  = require("crypto");
 const Lead                   = require("../models/Leads");
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -122,7 +122,12 @@ const sendMessage = async (req, res) => {
             },
           }
         );
-        waMessageId = msg91Response.data?.data?.id || msg91Response.data?.requestId || null;
+        // MSG91 session API often returns no message ID — generate a unique fallback
+        // so the sparse unique index on waMessageId never receives two nulls (E11000)
+        waMessageId =
+          msg91Response.data?.data?.id  ||
+          msg91Response.data?.requestId ||
+          `out_${Date.now()}_${crypto.randomUUID()}`;
         console.log(`✅ MSG91 send success → ${conversation.waPhone}`, msg91Response.data);
       } else {
         // ── Meta Cloud API fallback ───────────────────────────────────────────
@@ -143,7 +148,7 @@ const sendMessage = async (req, res) => {
             },
           }
         );
-        waMessageId = metaResponse.data?.messages?.[0]?.id;
+        waMessageId = metaResponse.data?.messages?.[0]?.id || `out_${Date.now()}_${crypto.randomUUID()}`;
       }
     } catch (apiErr) {
       const errData = apiErr.response?.data;
@@ -157,7 +162,7 @@ const sendMessage = async (req, res) => {
       direction:    "outbound",
       body:         text.trim(),
       messageType:  "text",
-      waMessageId:  waMessageId || null,
+      waMessageId,          // always a real string — never null (avoids E11000)
       sentBy:       userId,
       status:       "sent",
       waTimestamp:  new Date(),
@@ -248,7 +253,7 @@ const sendTemplate = async (req, res) => {
             },
           }
         );
-        waMessageId = msg91Response.data?.data?.[0]?.id || null;
+        waMessageId = msg91Response.data?.data?.[0]?.id || `tmpl_${Date.now()}_${crypto.randomUUID()}`;
         console.log(`✅ MSG91 template send → ${conversation.waPhone} [${templateName}]`);
       } else {
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
@@ -283,7 +288,7 @@ const sendTemplate = async (req, res) => {
       direction:     "outbound",
       body:          templatePreview,
       messageType:   "template",
-      waMessageId:   waMessageId || null,
+      waMessageId,          // always a real string — never null (avoids E11000)
       sentBy:        userId,
       status:        "sent",
       waTimestamp:   new Date(),

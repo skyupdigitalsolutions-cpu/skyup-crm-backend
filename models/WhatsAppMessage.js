@@ -31,12 +31,19 @@ const whatsAppMessageSchema = new mongoose.Schema(
       default: "text",
     },
 
-    // Meta's own message ID — used to prevent duplicates and track delivery status
+    // Meta's / MSG91's message ID — used to prevent duplicates and track delivery status
+    // IMPORTANT: sparse:true with unique only skips documents where the field is
+    // completely absent (undefined). Storing null still participates in the unique
+    // index on many MongoDB versions and causes E11000 on the 2nd null.
+    // Solution: controller always stores either the real ID or a generated UUID —
+    // never null. Default here is left out intentionally so undefined skips the index.
     waMessageId: {
-      type: String,
+      type:   String,
       unique: true,
-      sparse: true, // outbound messages get this after Meta confirms
-      trim: true,
+      sparse: true,
+      trim:   true,
+      // No `default` — stays undefined (not null) when omitted,
+      // which is properly skipped by the sparse index.
     },
 
     // For media messages — URL to download the media from Meta
