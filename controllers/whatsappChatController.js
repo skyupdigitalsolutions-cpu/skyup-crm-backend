@@ -102,30 +102,27 @@ const sendMessage = async (req, res) => {
     try {
       if (provider === "msg91") {
         // ── MSG91 session (text) message ──────────────────────────────────────
-        // IMPORTANT: The /bulk/ endpoint only supports templates.
-        // For free-form session messages, use the single-message endpoint
-        // WITHOUT /bulk/ and with content_type "text".
+        // The session message API uses a completely different flat payload
+        // compared to the /bulk/ template API.
+        // Correct endpoint: control.msg91.com (NOT api.msg91.com)
+        // Correct payload: { integrated_number, recipient_number, content_type, text }
         const msg91Response = await axios.post(
-          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
+          "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
           {
             integrated_number: senderNumber,
+            recipient_number:  conversation.waPhone,
             content_type:      "text",
-            payload: [
-              {
-                to:      conversation.waPhone,
-                type:    "text",
-                message: { body: text.trim() },
-              },
-            ],
+            text:              text.trim(),
           },
           {
             headers: {
-              authkey:        authKey,
-              "Content-Type": "application/json",
+              Authkey:         authKey,
+              "Content-Type":  "application/json",
+              "accept":        "application/json",
             },
           }
         );
-        waMessageId = msg91Response.data?.data?.[0]?.id || null;
+        waMessageId = msg91Response.data?.data?.id || msg91Response.data?.requestId || null;
         console.log(`✅ MSG91 send success → ${conversation.waPhone}`, msg91Response.data);
       } else {
         // ── Meta Cloud API fallback ───────────────────────────────────────────
