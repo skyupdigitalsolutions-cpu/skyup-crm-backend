@@ -14,30 +14,26 @@ const {
   getConfig,
 } = require("../controllers/whatsappChatController");
 
-// Import your existing auth middleware
-const { protect }      = require("../middlewares/authMiddleware");
-const { protectAdmin: adminProtect } = require("../middlewares/adminAuthMiddleware");
+const { protect }                        = require("../middlewares/authMiddleware");
+const { protectAdmin: adminProtect }     = require("../middlewares/adminAuthMiddleware");
 
-// ─── Webhook (public — NO auth, Meta calls these directly) ──────────────────
-// Register these in Meta Developer Console as your callback URL:
-// https://your-domain.com/wa-webhook
+// ─── Webhook (public — NO auth, Meta/MSG91 calls these directly) ─────────────
 router.get("/",  verifyWebhook);   // GET  /wa-webhook
 router.post("/", receiveWebhook);  // POST /wa-webhook
 
-// ─── API routes (auth required) ─────────────────────────────────────────────
-
-// Config (admin only)
+// ─── Config (admin only) ─────────────────────────────────────────────────────
 router.get( "/config",   adminProtect, getConfig);
 router.post("/config",   adminProtect, saveConfig);
 
-// Conversations
-router.get("/conversations",                            protect, getConversations);
-router.get("/conversations/:conversationId/messages",   protect, getMessages);
+// ─── Conversations (admin uses adminProtect, agents use protect) ──────────────
+// Use adminProtect for all — adminAuthMiddleware now sets req.user correctly
+router.get("/conversations",                            adminProtect, getConversations);
+router.get("/conversations/:conversationId/messages",   adminProtect, getMessages);
 router.patch("/conversations/:id/assign",               adminProtect, assignConversation);
-router.patch("/conversations/:id/close",                protect, closeConversation);
+router.patch("/conversations/:id/close",                adminProtect, closeConversation);
 
-// Sending messages
-router.post("/send",          protect, sendMessage);
-router.post("/send-template", protect, sendTemplate);
+// ─── Sending messages ─────────────────────────────────────────────────────────
+router.post("/send",          adminProtect, sendMessage);
+router.post("/send-template", adminProtect, sendTemplate);
 
 module.exports = router;
