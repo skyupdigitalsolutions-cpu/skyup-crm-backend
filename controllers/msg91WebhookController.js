@@ -10,6 +10,33 @@ const Lead                 = require("../models/Leads");
 const User                 = require("../models/Users");
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper: Parse MSG91 timestamp correctly
+// MSG91 sends ts as ISO string "2026-05-13T13:36:15+05:30"
+// AND unix timestamp inside the messages array — we prefer the unix one
+// ─────────────────────────────────────────────────────────────────────────────
+function parseTimestamp(ts, messagesStr) {
+  // First try: unix timestamp from messages array (most accurate)
+  try {
+    if (messagesStr) {
+      const msgs = typeof messagesStr === "string" ? JSON.parse(messagesStr) : messagesStr;
+      if (msgs?.[0]?.timestamp) {
+        const unix = parseInt(msgs[0].timestamp);
+        if (!isNaN(unix) && unix > 1000000000) return new Date(unix * 1000);
+      }
+    }
+  } catch (_) {}
+
+  // Second try: ts as ISO date string e.g. "2026-05-13T13:36:15+05:30"
+  if (ts) {
+    const d = new Date(ts);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  // Fallback to now
+  return new Date();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /msg91-webhook/msg91
 // MSG91 sends all WhatsApp events here
 // ─────────────────────────────────────────────────────────────────────────────
@@ -20,16 +47,6 @@ const receiveMSG91Webhook = async (req, res) => {
   try {
     const body = req.body;
     console.log("📲 MSG91 Webhook received:", JSON.stringify(body, null, 2));
-
-    // ── MSG91 actual payload fields ───────────────────────────────────────────
-    // customerNumber = sender's phone (who messaged you)
-    // integratedNumber = your business number
-    // text = message text
-    // messageType = type of message (text, image, etc.)
-    // customerName = sender's name
-    // requestId / uuid = unique message id
-    // ts = timestamp
-    // webhookType = "inbound" for incoming messages
 
     const webhookType = body.webhookType || body.type || "";
 
@@ -50,8 +67,10 @@ const receiveMSG91Webhook = async (req, res) => {
     const contactName = body.customerName || "";
     const msgText     = body.text || "";
     const msgType     = (body.messageType || body.contentType || "text").toLowerCase();
-    const waMessageId = body.requestId || body.uuid || `msg91_${Date.now()}_${waPhone}`;
-    const timestamp   = body.ts ? new Date(parseInt(body.ts) * 1000) : new Date();
+    const waMessageId = body.uuid || body.requestId || `msg91_${Date.now()}_${waPhone}`;
+
+    // ── Correct timestamp: prefer unix from messages[], fallback to ts ISO string
+    const timestamp = parseTimestamp(body.ts, body.messages);
 
     if (!waPhone) {
       console.warn("⚠️  MSG91 webhook: missing 'customerNumber', skipping");
@@ -72,12 +91,10 @@ const receiveMSG91Webhook = async (req, res) => {
       isActive:              true,
     });
 
-    // Fallback: if only one MSG91 config exists use it
     if (!config) {
       config = await WhatsAppConfig.findOne({ provider: "msg91", isActive: true });
     }
 
-    // Fallback: match env number
     if (!config && toNumber === (process.env.MSG91_INTEGRATED_NUMBER || "").replace(/\D/g, "")) {
       config = await WhatsAppConfig.findOne({ isActive: true });
     }
@@ -188,7 +205,7 @@ const receiveMSG91Webhook = async (req, res) => {
       io.to("wa_admin").emit("wa_message", payload);
     }
 
-    console.log(`📩 MSG91 WA inbound: ${waPhone} → "${msgBody.substring(0, 60)}"`);
+    console.log(`📩 MSG91 WA inbound: ${waPhone} → "${msgBody.substring(0, 60)}" @ ${timestamp}`);
 
   } catch (err) {
     console.error("❌ MSG91 webhook processing error:", err.message);
