@@ -102,9 +102,11 @@ const sendMessage = async (req, res) => {
     try {
       if (provider === "msg91") {
         // ── MSG91 session (text) message ──────────────────────────────────────
-        // content_type must be "text" for session messages (not "template")
+        // IMPORTANT: The /bulk/ endpoint only supports templates.
+        // For free-form session messages, use the single-message endpoint
+        // WITHOUT /bulk/ and with content_type "text".
         const msg91Response = await axios.post(
-          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
           {
             integrated_number: senderNumber,
             content_type:      "text",
@@ -165,9 +167,11 @@ const sendMessage = async (req, res) => {
     });
 
     await WhatsAppConversation.findByIdAndUpdate(conversationId, {
-      lastMessage:   text.trim(),
-      lastMessageAt: new Date(),
-      status:        "open",
+      lastMessage:      text.trim(),
+      lastMessageAt:    new Date(),
+      status:           "open",
+      // Refresh session window — the 24h clock resets each time we send
+      sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     });
 
     const io = global._io;
