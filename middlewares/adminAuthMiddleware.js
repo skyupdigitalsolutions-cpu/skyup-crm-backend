@@ -34,6 +34,15 @@ const protectAdmin = async (req, res, next) => {
         return res.status(403).json({ message: "Your company is deactivated" });
       }
 
+      // ── Also set req.user so WhatsApp (and other) controllers can read it ───
+      req.user = {
+        id:        req.admin._id.toString(),
+        userId:    req.admin._id.toString(),
+        companyId: req.admin.company._id.toString(),
+        role:      "admin",
+        name:      req.admin.name,
+      };
+
       return next();
     } catch (error) {
       return res.status(401).json({ message: "Not authorized, invalid token" });
