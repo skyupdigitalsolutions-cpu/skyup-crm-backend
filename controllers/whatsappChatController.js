@@ -242,7 +242,7 @@ const sendTemplate = async (req, res) => {
               template: {
                 name:              templateName,
                 language:          { code: languageCode, policy: "deterministic" },
-                to_and_components: [{ to: [conversation.waPhone] }],
+                to_and_components: [{ to: conversation.waPhone, components: [] }],
               },
             },
           },
@@ -537,7 +537,7 @@ const startConversation = async (req, res) => {
         // FIX: MSG91 bulk API payload format —
         // "payload" must be an OBJECT (not array), recipients go inside template.to_and_components
         // Correct structure: https://docs.msg91.com/whatsapp/template-bulk
-        const toAndComponents = { to: [cleanPhone] };
+        const toAndComponents = { to: cleanPhone, components: [] };
 
         const msg91Response = await axios.post(
           "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
