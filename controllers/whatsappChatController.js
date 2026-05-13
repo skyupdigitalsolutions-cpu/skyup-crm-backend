@@ -230,20 +230,25 @@ const sendTemplate = async (req, res) => {
         if (!authKey || !senderNumber) {
           return res.status(500).json({ error: "MSG91 credentials missing in .env" });
         }
-        // FIX: Only include components when non-empty — MSG91 rejects empty array for no-variable templates
-        const tmplPayload = { name: templateName, language: { code: languageCode } };
-        if (components && components.length > 0) tmplPayload.components = components;
-
+        // FIX: MSG91 bulk API — payload is an OBJECT, recipients inside to_and_components
         const msg91Response = await axios.post(
           "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
           {
             integrated_number: senderNumber,
             content_type:      "template",
-            payload: [{ to: conversation.waPhone, type: "template", template: tmplPayload }],
+            payload: {
+              messaging_product: "whatsapp",
+              type:              "template",
+              template: {
+                name:              templateName,
+                language:          { code: languageCode, policy: "deterministic" },
+                to_and_components: [{ to: [conversation.waPhone] }],
+              },
+            },
           },
           { headers: { authkey: authKey, "Content-Type": "application/json" } }
         );
-        waMessageId = msg91Response.data?.data?.[0]?.id || `tmpl_${Date.now()}_${crypto.randomUUID()}`;
+        waMessageId = msg91Response.data?.data?.[0]?.id || msg91Response.data?.requestId || `tmpl_${Date.now()}_${crypto.randomUUID()}`;
         console.log(`✅ MSG91 template send → ${conversation.waPhone} [${templateName}]`);
       } else {
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
@@ -529,26 +534,25 @@ const startConversation = async (req, res) => {
       if (provider === "msg91") {
         // FIX: Only include components key when non-empty.
         // MSG91 rejects an empty components array for no-variable templates.
-        const templatePayload = {
-          name:     templateName.trim(),
-          language: { code: languageCode },
-        };
-        if (components && components.length > 0) {
-          templatePayload.components = components;
-        }
+        // FIX: MSG91 bulk API payload format —
+        // "payload" must be an OBJECT (not array), recipients go inside template.to_and_components
+        // Correct structure: https://docs.msg91.com/whatsapp/template-bulk
+        const toAndComponents = { to: [cleanPhone] };
 
         const msg91Response = await axios.post(
           "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
           {
             integrated_number: senderNumber,
             content_type:      "template",
-            payload: [
-              {
-                to:       cleanPhone,
-                type:     "template",
-                template: templatePayload,
+            payload: {
+              messaging_product: "whatsapp",
+              type:              "template",
+              template: {
+                name:     templateName.trim(),
+                language: { code: languageCode, policy: "deterministic" },
+                to_and_components: [toAndComponents],
               },
-            ],
+            },
           },
           {
             headers: {
@@ -559,6 +563,7 @@ const startConversation = async (req, res) => {
         );
         waMessageId =
           msg91Response.data?.data?.[0]?.id ||
+          msg91Response.data?.requestId ||
           `tmpl_${Date.now()}_${crypto.randomUUID()}`;
         console.log(`✅ MSG91 initiation template sent → ${cleanPhone}`, msg91Response.data);
       } else {
