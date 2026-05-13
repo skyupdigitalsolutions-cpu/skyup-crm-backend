@@ -230,48 +230,29 @@ const sendTemplate = async (req, res) => {
         if (!authKey || !senderNumber) {
           return res.status(500).json({ error: "MSG91 credentials missing in .env" });
         }
+        // FIX: Only include components when non-empty — MSG91 rejects empty array for no-variable templates
+        const tmplPayload = { name: templateName, language: { code: languageCode } };
+        if (components && components.length > 0) tmplPayload.components = components;
+
         const msg91Response = await axios.post(
           "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
           {
             integrated_number: senderNumber,
             content_type:      "template",
-            payload: [
-              {
-                to:   conversation.waPhone,
-                type: "template",
-                template: {
-                  name:       templateName,
-                  language:   { code: languageCode },
-                  components: components,
-                },
-              },
-            ],
+            payload: [{ to: conversation.waPhone, type: "template", template: tmplPayload }],
           },
-          {
-            headers: {
-              authkey:        authKey,
-              "Content-Type": "application/json",
-            },
-          }
+          { headers: { authkey: authKey, "Content-Type": "application/json" } }
         );
         waMessageId = msg91Response.data?.data?.[0]?.id || `tmpl_${Date.now()}_${crypto.randomUUID()}`;
         console.log(`✅ MSG91 template send → ${conversation.waPhone} [${templateName}]`);
       } else {
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
+        const metaTmpl = { name: templateName, language: { code: languageCode } };
+        if (components && components.length > 0) metaTmpl.components = components;
         const metaResponse = await axios.post(
           apiUrl,
-          {
-            messaging_product: "whatsapp",
-            to:   conversation.waPhone,
-            type: "template",
-            template: { name: templateName, language: { code: languageCode }, components },
-          },
-          {
-            headers: {
-              Authorization:  `Bearer ${config.accessToken}`,
-              "Content-Type": "application/json",
-            },
-          }
+          { messaging_product: "whatsapp", to: conversation.waPhone, type: "template", template: metaTmpl },
+          { headers: { Authorization: `Bearer ${config.accessToken}`, "Content-Type": "application/json" } }
         );
         waMessageId = metaResponse.data?.messages?.[0]?.id;
       }
@@ -354,6 +335,31 @@ const closeConversation = async (req, res) => {
     );
 
     res.json({ success: true, conversation: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/whatsapp/conversations/:id
+// Admin can permanently delete a conversation and all its messages.
+// Used to clean up zombie conversations created when template send failed.
+// ─────────────────────────────────────────────────────────────────────────────
+const deleteConversation = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.user;
+
+    if (role !== "admin") {
+      return res.status(403).json({ error: "Only admins can delete conversations" });
+    }
+
+    // Delete all messages in the conversation first
+    await WhatsAppMessage.deleteMany({ conversation: id });
+    // Then delete the conversation itself
+    await WhatsAppConversation.findByIdAndDelete(id);
+
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -511,33 +517,26 @@ const startConversation = async (req, res) => {
       return res.status(500).json({ error: "MSG91 credentials missing" });
     }
 
-    // ── Find or create conversation ───────────────────────────────────────────
-    let conversation = await WhatsAppConversation.findOne({
-      waPhone:  cleanPhone,
-      company:  companyId,
-    });
-
-    // Try to link a known lead by phone number
+    // ── Try to link a known lead by phone number ─────────────────────────────
     const lead = await Lead.findOne({ mobile: { $regex: cleanPhone.slice(-10) } });
 
-    if (!conversation) {
-      conversation = await WhatsAppConversation.create({
-        waPhone:       cleanPhone,
-        contactName:   contactName.trim() || lead?.name || "",
-        company:       companyId,
-        assignedAgent: userId,
-        lead:          lead?._id || null,
-        status:        "open",
-        lastMessage:   "",
-        lastMessageAt: new Date(),
-        sessionExpiresAt: null, // session opens only after client replies
-      });
-    }
-
-    // ── Send template via MSG91 ───────────────────────────────────────────────
+    // ── FIX: Send template FIRST before creating conversation in DB ───────────
+    // Previously the conversation was created before the API call, leaving a
+    // zombie record (sessionExpiresAt: null) whenever MSG91 returned 400.
+    // Now: send the template first — only create/find the conversation on success.
     let waMessageId;
     try {
       if (provider === "msg91") {
+        // FIX: Only include components key when non-empty.
+        // MSG91 rejects an empty components array for no-variable templates.
+        const templatePayload = {
+          name:     templateName.trim(),
+          language: { code: languageCode },
+        };
+        if (components && components.length > 0) {
+          templatePayload.components = components;
+        }
+
         const msg91Response = await axios.post(
           "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
           {
@@ -545,13 +544,9 @@ const startConversation = async (req, res) => {
             content_type:      "template",
             payload: [
               {
-                to:   cleanPhone,
-                type: "template",
-                template: {
-                  name:       templateName.trim(),
-                  language:   { code: languageCode },
-                  components: components,
-                },
+                to:       cleanPhone,
+                type:     "template",
+                template: templatePayload,
               },
             ],
           },
@@ -569,25 +564,24 @@ const startConversation = async (req, res) => {
       } else {
         // Meta Cloud API
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
-        const metaResponse = await axios.post(
-          apiUrl,
-          {
-            messaging_product: "whatsapp",
-            to:   cleanPhone,
-            type: "template",
-            template: {
-              name:       templateName.trim(),
-              language:   { code: languageCode },
-              components,
-            },
+        const metaPayload = {
+          messaging_product: "whatsapp",
+          to:   cleanPhone,
+          type: "template",
+          template: {
+            name:     templateName.trim(),
+            language: { code: languageCode },
           },
-          {
-            headers: {
-              Authorization:  `Bearer ${config.accessToken}`,
-              "Content-Type": "application/json",
-            },
-          }
-        );
+        };
+        if (components && components.length > 0) {
+          metaPayload.template.components = components;
+        }
+        const metaResponse = await axios.post(apiUrl, metaPayload, {
+          headers: {
+            Authorization:  `Bearer ${config.accessToken}`,
+            "Content-Type": "application/json",
+          },
+        });
         waMessageId =
           metaResponse.data?.messages?.[0]?.id ||
           `tmpl_${Date.now()}_${crypto.randomUUID()}`;
@@ -596,7 +590,28 @@ const startConversation = async (req, res) => {
       const errData = apiErr.response?.data;
       const errMsg  = errData?.message || errData?.error?.message || apiErr.message;
       console.error("❌ start-conversation template error:", JSON.stringify(errData || errMsg));
+      // FIX: return error WITHOUT touching the DB — no zombie conversation is created
       return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
+    }
+
+    // ── Template sent successfully — now find or create the conversation ───────
+    let conversation = await WhatsAppConversation.findOne({
+      waPhone:  cleanPhone,
+      company:  companyId,
+    });
+
+    if (!conversation) {
+      conversation = await WhatsAppConversation.create({
+        waPhone:          cleanPhone,
+        contactName:      contactName.trim() || lead?.name || "",
+        company:          companyId,
+        assignedAgent:    userId,
+        lead:             lead?._id || null,
+        status:           "open",
+        lastMessage:      "",
+        lastMessageAt:    new Date(),
+        sessionExpiresAt: null,
+      });
     }
 
     // ── Save the outbound template message ────────────────────────────────────
@@ -615,10 +630,14 @@ const startConversation = async (req, res) => {
       templateName:  templateName.trim(),
     });
 
+    // FIX: set sessionExpiresAt so the 24h window opens immediately after admin sends the template.
+    // Without this the UI shows "24-hour session expired" even on brand-new conversations.
+    const sessionExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
     await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
-      lastMessage:   templatePreview,
-      lastMessageAt: new Date(),
-      status:        "open",
+      lastMessage:      templatePreview,
+      lastMessageAt:    new Date(),
+      status:           "open",
+      sessionExpiresAt: sessionExpiry,
     });
 
     // ── Broadcast to admin socket room so UI updates live ─────────────────────
@@ -660,6 +679,7 @@ module.exports = {
   sendTemplate,
   assignConversation,
   closeConversation,
+  deleteConversation,
   saveConfig,
   getConfig,
   startConversation,

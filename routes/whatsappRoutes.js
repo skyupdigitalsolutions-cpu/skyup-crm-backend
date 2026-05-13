@@ -10,9 +10,10 @@ const {
   sendTemplate,
   assignConversation,
   closeConversation,
+  deleteConversation,
   saveConfig,
   getConfig,
-  startConversation,           // ← NEW: admin-initiated conversation
+  startConversation,
 } = require("../controllers/whatsappChatController");
 
 const { protect }                        = require("../middlewares/authMiddleware");
@@ -36,7 +37,10 @@ router.patch("/conversations/:id/close",                adminProtect, closeConve
 router.post("/send",               adminProtect, sendMessage);
 router.post("/send-template",      adminProtect, sendTemplate);
 
-// ─── NEW: Admin starts a fresh conversation with any client number ────────────
+// ─── Admin starts a fresh conversation with any client number ────────────────
 router.post("/start-conversation", adminProtect, startConversation);
+
+// ─── Admin deletes a zombie/failed conversation ───────────────────────────────
+router.delete("/conversations/:id", adminProtect, deleteConversation);
 
 module.exports = router;
