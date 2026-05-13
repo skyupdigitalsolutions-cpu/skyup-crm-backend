@@ -21,25 +21,40 @@ const receiveMSG91Webhook = async (req, res) => {
     const body = req.body;
     console.log("📲 MSG91 Webhook received:", JSON.stringify(body, null, 2));
 
-    // MSG91 payload structure:
-    // { data: { from, to, type, text: { body }, id, timestamp }, event }
-    const event = body.event || body.type;
+    // ── MSG91 actual payload fields ───────────────────────────────────────────
+    // customerNumber = sender's phone (who messaged you)
+    // integratedNumber = your business number
+    // text = message text
+    // messageType = type of message (text, image, etc.)
+    // customerName = sender's name
+    // requestId / uuid = unique message id
+    // ts = timestamp
+    // webhookType = "inbound" for incoming messages
+
+    const webhookType = body.webhookType || body.type || "";
 
     // Only process inbound messages
-    if (event !== "message" && event !== "incoming" && !body.data?.from) {
-      console.log(`⚠️  MSG91 webhook: skipping event "${event}"`);
+    if (
+      webhookType !== "inbound" &&
+      webhookType !== "incoming" &&
+      webhookType !== "message" &&
+      !body.customerNumber
+    ) {
+      console.log(`⚠️  MSG91 webhook: skipping webhookType "${webhookType}"`);
       return;
     }
 
-    const data = body.data || body;
-
-    const waPhone     = (data.from || "").replace(/\D/g, "");  // strip non-digits
-    const waMessageId = data.id || data.message_id || `msg91_${Date.now()}_${waPhone}`;
-    const timestamp   = data.timestamp ? new Date(parseInt(data.timestamp) * 1000) : new Date();
-    const contactName = data.contact_name || data.profile?.name || "";
+    // ── Extract fields from MSG91 payload ─────────────────────────────────────
+    const waPhone     = (body.customerNumber || "").replace(/\D/g, "");
+    const toNumber    = (body.integratedNumber || "").replace(/\D/g, "");
+    const contactName = body.customerName || "";
+    const msgText     = body.text || "";
+    const msgType     = (body.messageType || body.contentType || "text").toLowerCase();
+    const waMessageId = body.requestId || body.uuid || `msg91_${Date.now()}_${waPhone}`;
+    const timestamp   = body.ts ? new Date(parseInt(body.ts) * 1000) : new Date();
 
     if (!waPhone) {
-      console.warn("⚠️  MSG91 webhook: missing 'from' phone number, skipping");
+      console.warn("⚠️  MSG91 webhook: missing 'customerNumber', skipping");
       return;
     }
 
@@ -51,24 +66,19 @@ const receiveMSG91Webhook = async (req, res) => {
     }
 
     // ── Identify which company this number belongs to ─────────────────────────
-    // MSG91 sends to: data.to  (your integrated number)
-    const toNumber = (data.to || "").replace(/\D/g, "");
-
-    // Find config by integrated number (DB) or env
     let config = await WhatsAppConfig.findOne({
       provider:              "msg91",
       msg91IntegratedNumber: toNumber,
       isActive:              true,
     });
 
-    // Fallback: if only one MSG91 config exists in the system use it
+    // Fallback: if only one MSG91 config exists use it
     if (!config) {
       config = await WhatsAppConfig.findOne({ provider: "msg91", isActive: true });
     }
 
-    // Fallback: use .env number match
+    // Fallback: match env number
     if (!config && toNumber === (process.env.MSG91_INTEGRATED_NUMBER || "").replace(/\D/g, "")) {
-      // Try to find any active config — first company wins (single-tenant)
       config = await WhatsAppConfig.findOne({ isActive: true });
     }
 
@@ -100,27 +110,31 @@ const receiveMSG91Webhook = async (req, res) => {
     }
 
     // ── Extract message content ───────────────────────────────────────────────
-    let msgBody     = "";
-    let messageType = "text";
-    let mediaId     = null;
+    let msgBody      = "";
+    let messageType  = "text";
+    let mediaId      = null;
     let mediaCaption = null;
 
-    const msgType = data.type || "text";
-
     if (msgType === "text") {
-      msgBody      = data.text?.body || data.message || data.body || "";
-      messageType  = "text";
+      msgBody     = msgText || "";
+      messageType = "text";
     } else if (["image", "document", "audio", "video", "sticker"].includes(msgType)) {
       messageType  = msgType;
-      mediaId      = data[msgType]?.id || data.media_id || null;
-      mediaCaption = data[msgType]?.caption || null;
-      msgBody      = mediaCaption || `[${msgType}]`;
+      mediaCaption = body.caption || null;
+      msgBody      = body.caption || body.filename || body.url || `[${msgType}]`;
+      mediaId      = body.url || null;
     } else if (msgType === "location") {
       messageType = "location";
-      msgBody     = `📍 Location: ${data.location?.name || `${data.location?.latitude}, ${data.location?.longitude}`}`;
+      msgBody     = `📍 Location: ${body.latitude}, ${body.longitude}`;
+    } else if (msgType === "button") {
+      messageType = "text";
+      msgBody     = body.button || msgText || "[button reply]";
+    } else if (msgType === "interactive") {
+      messageType = "text";
+      msgBody     = body.interactive || msgText || "[interactive reply]";
     } else {
       messageType = "unknown";
-      msgBody     = `[${msgType} message]`;
+      msgBody     = msgText || `[${msgType} message]`;
     }
 
     // ── Save the inbound message ──────────────────────────────────────────────
