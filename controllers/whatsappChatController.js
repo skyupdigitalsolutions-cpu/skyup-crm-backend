@@ -462,6 +462,197 @@ const getConfig = async (req, res) => {
   }
 };
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/whatsapp/start-conversation
+// Admin initiates a new WhatsApp conversation with a client number.
+// Since no session exists, a template message MUST be sent first.
+// ─────────────────────────────────────────────────────────────────────────────
+const startConversation = async (req, res) => {
+  try {
+    const {
+      phone,              // client number e.g. "919876543210" (with country code, no +)
+      contactName = "",   // optional display name
+      templateName,       // MSG91 pre-approved template name (required)
+      languageCode = "en",
+      components   = [],  // template variable components
+    } = req.body;
+
+    const { companyId, userId } = req.user;
+
+    // ── Validate phone ────────────────────────────────────────────────────────
+    if (!phone?.trim()) {
+      return res.status(400).json({ error: "Phone number is required" });
+    }
+    // Strip any non-digit characters and leading +
+    const cleanPhone = phone.trim().replace(/\D/g, "");
+    if (cleanPhone.length < 10 || cleanPhone.length > 15) {
+      return res.status(400).json({ error: "Invalid phone number. Include country code (e.g. 919876543210)" });
+    }
+
+    if (!templateName?.trim()) {
+      return res.status(400).json({
+        error: "A pre-approved template name is required to start a new conversation (WhatsApp rule: first message must be a template)",
+        code:  "TEMPLATE_REQUIRED",
+      });
+    }
+
+    // ── Load config ───────────────────────────────────────────────────────────
+    const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
+    if (!config) {
+      return res.status(400).json({ error: "WhatsApp is not configured for this company" });
+    }
+
+    const provider     = config.provider || "msg91";
+    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
+    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
+
+    if (provider === "msg91" && (!authKey || !senderNumber)) {
+      return res.status(500).json({ error: "MSG91 credentials missing" });
+    }
+
+    // ── Find or create conversation ───────────────────────────────────────────
+    let conversation = await WhatsAppConversation.findOne({
+      waPhone:  cleanPhone,
+      company:  companyId,
+    });
+
+    // Try to link a known lead by phone number
+    const lead = await Lead.findOne({ mobile: { $regex: cleanPhone.slice(-10) } });
+
+    if (!conversation) {
+      conversation = await WhatsAppConversation.create({
+        waPhone:       cleanPhone,
+        contactName:   contactName.trim() || lead?.name || "",
+        company:       companyId,
+        assignedAgent: userId,
+        lead:          lead?._id || null,
+        status:        "open",
+        lastMessage:   "",
+        lastMessageAt: new Date(),
+        sessionExpiresAt: null, // session opens only after client replies
+      });
+    }
+
+    // ── Send template via MSG91 ───────────────────────────────────────────────
+    let waMessageId;
+    try {
+      if (provider === "msg91") {
+        const msg91Response = await axios.post(
+          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+          {
+            integrated_number: senderNumber,
+            content_type:      "template",
+            payload: [
+              {
+                to:   cleanPhone,
+                type: "template",
+                template: {
+                  name:       templateName.trim(),
+                  language:   { code: languageCode },
+                  components: components,
+                },
+              },
+            ],
+          },
+          {
+            headers: {
+              authkey:        authKey,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        waMessageId =
+          msg91Response.data?.data?.[0]?.id ||
+          `tmpl_${Date.now()}_${crypto.randomUUID()}`;
+        console.log(`✅ MSG91 initiation template sent → ${cleanPhone}`, msg91Response.data);
+      } else {
+        // Meta Cloud API
+        const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
+        const metaResponse = await axios.post(
+          apiUrl,
+          {
+            messaging_product: "whatsapp",
+            to:   cleanPhone,
+            type: "template",
+            template: {
+              name:       templateName.trim(),
+              language:   { code: languageCode },
+              components,
+            },
+          },
+          {
+            headers: {
+              Authorization:  `Bearer ${config.accessToken}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        waMessageId =
+          metaResponse.data?.messages?.[0]?.id ||
+          `tmpl_${Date.now()}_${crypto.randomUUID()}`;
+      }
+    } catch (apiErr) {
+      const errData = apiErr.response?.data;
+      const errMsg  = errData?.message || errData?.error?.message || apiErr.message;
+      console.error("❌ start-conversation template error:", JSON.stringify(errData || errMsg));
+      return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
+    }
+
+    // ── Save the outbound template message ────────────────────────────────────
+    const templatePreview = `[Template: ${templateName}]`;
+
+    const savedMsg = await WhatsAppMessage.create({
+      conversation:  conversation._id,
+      direction:     "outbound",
+      body:          templatePreview,
+      messageType:   "template",
+      waMessageId,
+      sentBy:        userId,
+      status:        "sent",
+      waTimestamp:   new Date(),
+      isTemplate:    true,
+      templateName:  templateName.trim(),
+    });
+
+    await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
+      lastMessage:   templatePreview,
+      lastMessageAt: new Date(),
+      status:        "open",
+    });
+
+    // ── Broadcast to admin socket room so UI updates live ─────────────────────
+    const io = global._io;
+    if (io) {
+      io.to("wa_admin").emit("wa_new_conversation", {
+        conversation: await WhatsAppConversation.findById(conversation._id)
+          .populate("lead",          "name mobile email status")
+          .populate("assignedAgent", "name email"),
+      });
+      io.to("wa_admin").emit("wa_message", {
+        type:           "wa_new_message",
+        conversationId: conversation._id.toString(),
+        message: {
+          _id:         savedMsg._id.toString(),
+          direction:   "outbound",
+          body:        templatePreview,
+          messageType: "template",
+          waTimestamp: new Date(),
+          status:      "sent",
+          sentBy:      { _id: userId, name: req.user.name },
+        },
+        waPhone:   cleanPhone,
+        companyId: companyId.toString(),
+      });
+    }
+
+    res.json({ success: true, conversation, message: savedMsg });
+  } catch (err) {
+    console.error("startConversation error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getConversations,
   getMessages,
@@ -471,4 +662,5 @@ module.exports = {
   closeConversation,
   saveConfig,
   getConfig,
+  startConversation,
 };

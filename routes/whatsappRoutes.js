@@ -12,6 +12,7 @@ const {
   closeConversation,
   saveConfig,
   getConfig,
+  startConversation,           // ← NEW: admin-initiated conversation
 } = require("../controllers/whatsappChatController");
 
 const { protect }                        = require("../middlewares/authMiddleware");
@@ -25,15 +26,17 @@ router.post("/", receiveWebhook);  // POST /wa-webhook
 router.get( "/config",   adminProtect, getConfig);
 router.post("/config",   adminProtect, saveConfig);
 
-// ─── Conversations (admin uses adminProtect, agents use protect) ──────────────
-// Use adminProtect for all — adminAuthMiddleware now sets req.user correctly
+// ─── Conversations ────────────────────────────────────────────────────────────
 router.get("/conversations",                            adminProtect, getConversations);
 router.get("/conversations/:conversationId/messages",   adminProtect, getMessages);
 router.patch("/conversations/:id/assign",               adminProtect, assignConversation);
 router.patch("/conversations/:id/close",                adminProtect, closeConversation);
 
 // ─── Sending messages ─────────────────────────────────────────────────────────
-router.post("/send",          adminProtect, sendMessage);
-router.post("/send-template", adminProtect, sendTemplate);
+router.post("/send",               adminProtect, sendMessage);
+router.post("/send-template",      adminProtect, sendTemplate);
+
+// ─── NEW: Admin starts a fresh conversation with any client number ────────────
+router.post("/start-conversation", adminProtect, startConversation);
 
 module.exports = router;
