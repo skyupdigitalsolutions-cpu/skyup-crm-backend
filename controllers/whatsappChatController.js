@@ -9,15 +9,13 @@ const Lead                   = require("../models/Leads");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/whatsapp/conversations
-// Admin: returns ALL conversations | Agent: returns their assigned ones
 // ─────────────────────────────────────────────────────────────────────────────
 const getConversations = async (req, res) => {
   try {
-    const { companyId, userId, role } = req.user; // from your auth middleware
+    const { companyId, userId, role } = req.user;
 
     const filter = { company: companyId };
 
-    // Agents only see their own conversations; admin sees all
     if (role !== "admin") {
       filter.assignedAgent = userId;
     }
@@ -36,14 +34,12 @@ const getConversations = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/whatsapp/conversations/:conversationId/messages
-// Returns full message history for a conversation
 // ─────────────────────────────────────────────────────────────────────────────
 const getMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
     const { companyId, userId, role } = req.user;
 
-    // Verify the agent has access to this conversation
     const conversation = await WhatsAppConversation.findById(conversationId);
     if (!conversation) return res.status(404).json({ error: "Conversation not found" });
 
@@ -55,7 +51,6 @@ const getMessages = async (req, res) => {
       .populate("sentBy", "name")
       .sort({ waTimestamp: 1 });
 
-    // Mark as read — reset unread count
     await WhatsAppConversation.findByIdAndUpdate(conversationId, { unreadCount: 0 });
 
     res.json({ success: true, messages, conversation });
@@ -67,8 +62,7 @@ const getMessages = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/whatsapp/send
-// Agent sends a message to a WhatsApp contact
-// Body: { conversationId, text }
+// Send a plain text message within the 24h session window
 // ─────────────────────────────────────────────────────────────────────────────
 const sendMessage = async (req, res) => {
   try {
@@ -77,47 +71,43 @@ const sendMessage = async (req, res) => {
 
     if (!text?.trim()) return res.status(400).json({ error: "Message text is required" });
 
-    // Get conversation
     const conversation = await WhatsAppConversation.findById(conversationId);
     if (!conversation) return res.status(404).json({ error: "Conversation not found" });
 
-    // Get WA config for this company
     const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
     if (!config) return res.status(400).json({ error: "WhatsApp is not configured for this company" });
 
     // Check 24-hour session window
-    const now = new Date();
+    const now         = new Date();
     const sessionOpen = conversation.sessionExpiresAt && conversation.sessionExpiresAt > now;
 
     if (!sessionOpen) {
       return res.status(400).json({
         error: "24-hour session window has expired. You must send a pre-approved template message to re-engage this customer.",
-        code: "SESSION_EXPIRED",
+        code:  "SESSION_EXPIRED",
       });
     }
 
-    // ── Resolve MSG91 credentials (DB override → fallback to .env) ───────────
-    const provider      = config.provider || "msg91";
-    const authKey       = config.msg91AuthKey         || process.env.MSG91_AUTH_KEY;
-    const senderNumber  = config.msg91IntegratedNumber || process.env.MSG91_INTEGRATED_NUMBER;
+    const provider     = config.provider || "msg91";
+    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
+    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
 
-    if (provider === "msg91") {
-      if (!authKey || !senderNumber) {
-        return res.status(500).json({
-          error: "MSG91 credentials missing. Set MSG91_AUTH_KEY and MSG91_INTEGRATED_NUMBER in your .env",
-        });
-      }
+    if (provider === "msg91" && (!authKey || !senderNumber)) {
+      return res.status(500).json({
+        error: "MSG91 credentials missing. Set MSG91_AUTH_KEY and MSG91_INTEGRATED_NUMBER in your .env",
+      });
     }
 
-    // ── Send message via MSG91 WhatsApp API ───────────────────────────────────
     let waMessageId;
     try {
       if (provider === "msg91") {
+        // ── MSG91 session (text) message ──────────────────────────────────────
+        // content_type must be "text" for session messages (not "template")
         const msg91Response = await axios.post(
           "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
           {
             integrated_number: senderNumber,
-            content_type:      "template",   // for session messages use "text"
+            content_type:      "text",
             payload: [
               {
                 to:      conversation.waPhone,
@@ -134,9 +124,9 @@ const sendMessage = async (req, res) => {
           }
         );
         waMessageId = msg91Response.data?.data?.[0]?.id || null;
-        console.log(`✅ MSG91 send success → ${conversation.waPhone}`);
+        console.log(`✅ MSG91 send success → ${conversation.waPhone}`, msg91Response.data);
       } else {
-        // ── Fallback: Meta Cloud API ─────────────────────────────────────────
+        // ── Meta Cloud API fallback ───────────────────────────────────────────
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaResponse = await axios.post(
           apiUrl,
@@ -157,12 +147,12 @@ const sendMessage = async (req, res) => {
         waMessageId = metaResponse.data?.messages?.[0]?.id;
       }
     } catch (apiErr) {
-      const errMsg = apiErr.response?.data?.message || apiErr.response?.data?.error?.message || apiErr.message;
-      console.error("❌ WA send error:", errMsg);
+      const errData = apiErr.response?.data;
+      const errMsg  = errData?.message || errData?.error?.message || apiErr.message;
+      console.error("❌ WA send error:", JSON.stringify(errData || errMsg));
       return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
     }
 
-    // ── Save the outbound message ──────────────────────────────────────────
     const savedMsg = await WhatsAppMessage.create({
       conversation: conversationId,
       direction:    "outbound",
@@ -174,14 +164,12 @@ const sendMessage = async (req, res) => {
       waTimestamp:  new Date(),
     });
 
-    // ── Update conversation ────────────────────────────────────────────────
     await WhatsAppConversation.findByIdAndUpdate(conversationId, {
       lastMessage:   text.trim(),
       lastMessageAt: new Date(),
       status:        "open",
     });
 
-    // ── Real-time: push to admin room and to other agents ─────────────────
     const io = global._io;
     if (io) {
       const payload = {
@@ -196,8 +184,8 @@ const sendMessage = async (req, res) => {
           status:      "sent",
           sentBy:      { _id: userId, name: req.user.name },
         },
-        waPhone:      conversation.waPhone,
-        companyId:    companyId.toString(),
+        waPhone:   conversation.waPhone,
+        companyId: companyId.toString(),
       };
       io.to("wa_admin").emit("wa_message", payload);
       io.to(`wa_agent_${conversation.assignedAgent?.toString()}`).emit("wa_message", payload);
@@ -212,8 +200,7 @@ const sendMessage = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/whatsapp/send-template
-// Send a template message (used when 24h session has expired)
-// Body: { conversationId, templateName, languageCode, components }
+// Send a template message when 24h session has expired
 // ─────────────────────────────────────────────────────────────────────────────
 const sendTemplate = async (req, res) => {
   try {
@@ -263,7 +250,6 @@ const sendTemplate = async (req, res) => {
         waMessageId = msg91Response.data?.data?.[0]?.id || null;
         console.log(`✅ MSG91 template send → ${conversation.waPhone} [${templateName}]`);
       } else {
-        // ── Meta fallback ────────────────────────────────────────────────────
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaResponse = await axios.post(
           apiUrl,
@@ -271,11 +257,7 @@ const sendTemplate = async (req, res) => {
             messaging_product: "whatsapp",
             to:   conversation.waPhone,
             type: "template",
-            template: {
-              name:       templateName,
-              language:   { code: languageCode },
-              components,
-            },
+            template: { name: templateName, language: { code: languageCode }, components },
           },
           {
             headers: {
@@ -287,9 +269,12 @@ const sendTemplate = async (req, res) => {
         waMessageId = metaResponse.data?.messages?.[0]?.id;
       }
     } catch (apiErr) {
-      const errMsg = apiErr.response?.data?.message || apiErr.response?.data?.error?.message || apiErr.message;
+      const errData = apiErr.response?.data;
+      const errMsg  = errData?.message || errData?.error?.message || apiErr.message;
+      console.error("❌ WA template send error:", JSON.stringify(errData || errMsg));
       return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
     }
+
     const templatePreview = `[Template: ${templateName}]`;
 
     const savedMsg = await WhatsAppMessage.create({
@@ -305,7 +290,6 @@ const sendTemplate = async (req, res) => {
       templateName,
     });
 
-    // Reopen the 24h session window
     const newExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
     await WhatsAppConversation.findByIdAndUpdate(conversationId, {
       lastMessage:      templatePreview,
@@ -323,12 +307,10 @@ const sendTemplate = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH /api/whatsapp/conversations/:id/assign
-// Admin reassigns a conversation to a different agent
-// Body: { agentId }
 // ─────────────────────────────────────────────────────────────────────────────
 const assignConversation = async (req, res) => {
   try {
-    const { id } = req.params;
+    const { id }      = req.params;
     const { agentId } = req.body;
 
     const updated = await WhatsAppConversation.findByIdAndUpdate(
@@ -337,7 +319,6 @@ const assignConversation = async (req, res) => {
       { new: true }
     ).populate("assignedAgent", "name email");
 
-    // Notify new agent via socket
     const io = global._io;
     if (io) {
       io.to(`wa_agent_${agentId}`).emit("wa_assigned", {
@@ -354,7 +335,6 @@ const assignConversation = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH /api/whatsapp/conversations/:id/close
-// Close a conversation (mark as resolved)
 // ─────────────────────────────────────────────────────────────────────────────
 const closeConversation = async (req, res) => {
   try {
@@ -374,32 +354,23 @@ const closeConversation = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/whatsapp/config
-// Admin saves/updates WhatsApp Business API credentials
-// Body: { phoneNumberId, accessToken, verifyToken, businessAccountId, phoneNumber }
 // ─────────────────────────────────────────────────────────────────────────────
 const saveConfig = async (req, res) => {
   try {
     const {
       provider = "msg91",
-      // MSG91 fields
       msg91AuthKey,
       msg91IntegratedNumber,
-      // Meta fields
       phoneNumberId,
       accessToken,
       verifyToken,
       businessAccountId,
       graphApiVersion,
-      // common
       phoneNumber,
     } = req.body;
     const { companyId } = req.user;
 
-    // Validate based on provider
-    if (provider === "msg91") {
-      // MSG91 can work fully from .env — no required body fields
-      // But if provided in body, save them as overrides
-    } else {
+    if (provider !== "msg91") {
       if (!phoneNumberId || !accessToken || !verifyToken) {
         return res.status(400).json({ error: "phoneNumberId, accessToken and verifyToken are required for Meta provider" });
       }
@@ -429,10 +400,9 @@ const saveConfig = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // Hide sensitive fields in response
     const safeConfig = { ...config.toObject() };
-    if (safeConfig.msg91AuthKey)  safeConfig.msg91AuthKey  = "***hidden***";
-    if (safeConfig.accessToken)   safeConfig.accessToken   = "***hidden***";
+    if (safeConfig.msg91AuthKey) safeConfig.msg91AuthKey = "***hidden***";
+    if (safeConfig.accessToken)  safeConfig.accessToken  = "***hidden***";
 
     res.json({ success: true, config: safeConfig });
   } catch (err) {
@@ -440,14 +410,15 @@ const saveConfig = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/whatsapp/config
+// ─────────────────────────────────────────────────────────────────────────────
 const getConfig = async (req, res) => {
   try {
     const { companyId } = req.user;
     const config = await WhatsAppConfig.findOne({ company: companyId });
 
     if (!config) {
-      // Check if .env has MSG91 credentials — auto-configured
       const envAuthKey = process.env.MSG91_AUTH_KEY;
       const envNumber  = process.env.MSG91_INTEGRATED_NUMBER;
       if (envAuthKey && envNumber) {
@@ -462,9 +433,7 @@ const getConfig = async (req, res) => {
       return res.json({ configured: false });
     }
 
-    const provider = config.provider || "msg91";
-
-    // Resolve credentials: DB override first, then .env
+    const provider     = config.provider || "msg91";
     const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
     const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
 
@@ -473,10 +442,8 @@ const getConfig = async (req, res) => {
       provider,
       phoneNumber:           config.phoneNumber,
       isActive:              config.isActive,
-      // MSG91 info
       msg91Configured:       !!(authKey && senderNumber),
       msg91IntegratedNumber: senderNumber || "",
-      // Meta info (only if using meta)
       ...(provider === "meta" && {
         phoneNumberId:     config.phoneNumberId,
         businessAccountId: config.businessAccountId,
