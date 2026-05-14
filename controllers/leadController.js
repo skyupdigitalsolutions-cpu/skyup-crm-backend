@@ -490,60 +490,82 @@ const patchLead = async (req, res) => {
     const { id } = req.params;
     const lead = await Lead.findOne({ _id: id, company: req.user.company });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    const { status, remark, outcome, followUpDate, temperature, Quality } =
-      req.body;
+
+    const { status, remark, outcome, followUpDate, temperature, Quality } = req.body;
     const update = {};
+
     if (status !== undefined) update.status = status;
     if (remark !== undefined) update.remark = remark;
+
     // Accept temperature from both 'temperature' and 'Quality' field names
     const temp = temperature || Quality;
-    if (temp && ["Hot", "Warm", "Cold"].includes(temp))
-      update.temperature = temp;
+    if (temp && ["Hot", "Warm", "Cold"].includes(temp)) update.temperature = temp;
 
-    // Build $push ops in a single object — prevents the overwrite bug where
-    // the scheduledCalls assignment killed the callHistory assignment
+    // Build $push and $set ops separately to avoid MongoDB conflict
     const pushOps = {};
+    const setOps  = {};
 
-    // Push remark to callHistory so history is preserved, never overwritten
+    // ── Push call to callHistory ──────────────────────────────────────────────
     if (remark && remark.trim()) {
       pushOps.callHistory = {
-        userId: req.user._id,
+        userId:   req.user._id,
         userName: req.user.name || "",
-        remark: remark.trim(),
-        outcome: outcome || "Call Back",
+        remark:   remark.trim(),
+        outcome:  outcome || "Call Back",
         calledAt: new Date(),
       };
     }
 
-    if (status !== undefined && status !== "Not Interested") {
-      let scheduledAt;
-      if (followUpDate) {
-        const provided = new Date(followUpDate);
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
-        if (provided < todayStart) {
-          return res
-            .status(400)
-            .json({ message: "Follow-up date cannot be in the past." });
-        }
-        scheduledAt = provided;
-      } else {
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        tomorrow.setHours(9, 0, 0, 0);
-        scheduledAt = tomorrow;
-      }
+    // ── Mark the nearest pending follow-up as done (FIX: progress was stuck) ─
+    // Find first pending (not done) scheduled call by earliest scheduledAt
+    const pendingCalls = lead.scheduledCalls
+      .map((sc, idx) => ({ sc, idx }))
+      .filter(({ sc }) => !sc.done)
+      .sort((a, b) => new Date(a.sc.scheduledAt) - new Date(b.sc.scheduledAt));
 
-      pushOps.scheduledCalls = {
-        type: "follow-up",
-        scheduledAt,
-        done: false,
-        doneAt: null,
-        note: `Follow-up after status set to "${status}"`,
-      };
+    if (pendingCalls.length > 0) {
+      const { idx } = pendingCalls[0];
+      setOps[`scheduledCalls.${idx}.done`]   = true;
+      setOps[`scheduledCalls.${idx}.doneAt`] = new Date();
     }
 
+    // ── Schedule next follow-up only if explicitly requested ─────────────────
+    // Only schedule a new follow-up when agent provides a followUpDate
+    // OR when outcome is "Call Back" (agent explicitly wants a callback)
+    if (status !== undefined && status !== "Not Interested") {
+      const shouldSchedule = !!(followUpDate || outcome === "Call Back");
+
+      if (shouldSchedule) {
+        let scheduledAt;
+        if (followUpDate) {
+          const provided   = new Date(followUpDate);
+          const todayStart = new Date();
+          todayStart.setHours(0, 0, 0, 0);
+          if (provided < todayStart) {
+            return res.status(400).json({ message: "Follow-up date cannot be in the past." });
+          }
+          scheduledAt = provided;
+        } else {
+          // Default: tomorrow 9am
+          const tomorrow = new Date();
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          tomorrow.setHours(9, 0, 0, 0);
+          scheduledAt = tomorrow;
+        }
+
+        pushOps.scheduledCalls = {
+          type:        "follow-up",
+          scheduledAt,
+          done:        false,
+          doneAt:      null,
+          note:        `Follow-up after status "${status}" — outcome: ${outcome || "Call Back"}`,
+        };
+      }
+    }
+
+    // ── Assemble final update ─────────────────────────────────────────────────
     if (Object.keys(pushOps).length > 0) update.$push = pushOps;
+    if (Object.keys(setOps).length  > 0) update.$set  = { ...(update.$set || {}), ...setOps };
 
     const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
     return res.status(200).json(updatedLead);
@@ -810,6 +832,68 @@ const logPhoneReveal = async (req, res) => {
   }
 };
 
+
+// ── Follow-up alert counts for sidebar notification dots ─────────────────────
+// GET /api/lead/follow-up-alerts        (user token)
+// GET /api/lead/admin/follow-up-alerts  (admin token)
+const getFollowUpAlerts = async (req, res) => {
+  try {
+    const company =
+      req.user?.company ||
+      req.admin?.company?._id ||
+      req.admin?.company;
+    if (!company) return res.status(400).json({ message: "Company not found." });
+
+    const now        = new Date();
+    const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
+    const todayEnd   = new Date(now); todayEnd.setHours(23, 59, 59, 999);
+
+    const baseQuery = { company };
+    if (req.user && req.user.role !== "admin" && req.user.role !== "superadmin") {
+      baseQuery.user = req.user._id;
+    }
+
+    const leads = await Lead.find({
+      ...baseQuery,
+      scheduledCalls: {
+        $elemMatch: { done: false, scheduledAt: { $lte: todayEnd } },
+      },
+    })
+      .select("_id name status scheduledCalls")
+      .lean();
+
+    let todayCount   = 0;
+    let overdueCount = 0;
+    const seenToday   = new Set();
+    const seenOverdue = new Set();
+
+    for (const lead of leads) {
+      for (const sc of lead.scheduledCalls) {
+        if (sc.done) continue;
+        const d   = new Date(sc.scheduledAt);
+        const key = String(lead._id);
+        if (d >= todayStart && d <= todayEnd) {
+          todayCount++;
+          seenToday.add(key);
+        } else if (d < todayStart) {
+          overdueCount++;
+          seenOverdue.add(key);
+        }
+      }
+    }
+
+    return res.status(200).json({
+      todayCount,
+      overdueCount,
+      total: todayCount + overdueCount,
+      todayLeadCount:   seenToday.size,
+      overdueLeadCount: seenOverdue.size,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getLead,
   getLeads,
@@ -832,4 +916,5 @@ module.exports = {
   adminGetAllLeads,
   checkDuplicate,
   logPhoneReveal,
+  getFollowUpAlerts,
 };
