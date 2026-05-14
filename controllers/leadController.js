@@ -862,32 +862,38 @@ const getFollowUpAlerts = async (req, res) => {
       .select("_id name status scheduledCalls")
       .lean();
 
-    let todayCount   = 0;
-    let overdueCount = 0;
-    const seenToday   = new Set();
-    const seenOverdue = new Set();
+    // Count UNIQUE LEADS — not individual scheduledCall entries.
+    // A lead with multiple stale pending entries still counts as 1.
+    // A lead is "overdue" if its earliest pending call is past today.
+    // A lead is "today" if its earliest pending call is today (and not overdue).
+    let todayLeadCount   = 0;
+    let overdueLeadCount = 0;
 
     for (const lead of leads) {
-      for (const sc of lead.scheduledCalls) {
-        if (sc.done) continue;
-        const d   = new Date(sc.scheduledAt);
-        const key = String(lead._id);
-        if (d >= todayStart && d <= todayEnd) {
-          todayCount++;
-          seenToday.add(key);
-        } else if (d < todayStart) {
-          overdueCount++;
-          seenOverdue.add(key);
-        }
+      // Find the earliest pending scheduled call for this lead
+      const pendingCalls = lead.scheduledCalls
+        .filter(sc => !sc.done)
+        .map(sc => new Date(sc.scheduledAt))
+        .sort((a, b) => a - b);
+
+      if (pendingCalls.length === 0) continue;
+
+      const earliest = pendingCalls[0];
+      if (earliest < todayStart) {
+        // Overdue: earliest pending call is before today
+        overdueLeadCount++;
+      } else if (earliest <= todayEnd) {
+        // Due today
+        todayLeadCount++;
       }
     }
 
     return res.status(200).json({
-      todayCount,
-      overdueCount,
-      total: todayCount + overdueCount,
-      todayLeadCount:   seenToday.size,
-      overdueLeadCount: seenOverdue.size,
+      todayCount:      todayLeadCount,
+      overdueCount:    overdueLeadCount,
+      total:           todayLeadCount + overdueLeadCount,
+      todayLeadCount,
+      overdueLeadCount,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
