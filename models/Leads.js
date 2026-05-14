@@ -84,6 +84,17 @@ const leadSchema = mongoose.Schema(
       trim:    true,
     },
 
+    // ── Phone reveal tracking ────────────────────────────────────────────────
+    phoneRevealLog: {
+      type: [{
+        userId:     { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        userName:   { type: String, default: "" },
+        revealedAt: { type: Date, default: Date.now },
+      }],
+      default: [],
+    },
+    phoneRevealCount: { type: Number, default: 0 },
+
     // ── Saanvi Voicebot fields ────────────────────────────────────────────────
     voiceBotSummary:    { type: String,  default: "" },
     voiceBotScore:      { type: Number,  default: null },

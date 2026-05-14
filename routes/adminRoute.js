@@ -12,6 +12,7 @@ const {
   getCompanyUsers,
   getCompanyLeads,
   deleteCompanyUser,
+  getDashboardStats,
 } = adminController;
 const {
   registerAdmin,
@@ -27,9 +28,10 @@ router.post("/login",    authLimiter, loginAdmin);
 router.post("/logout",   protectAdmin, logoutAdmin);       // ✅ NEW — blacklists JWT in Redis
 
 // ── Company-specific routes (must be before /:id to avoid conflict) ───────────
-router.get("/company/me",    protectAdmin, getMyCompany || ((req, res) => res.status(501).json({ message: "Not implemented" })));
-router.get("/company/users", protectAdmin, getCompanyUsers);
-router.get("/company/leads", protectAdmin, getCompanyLeads);
+router.get("/company/me",        protectAdmin, getMyCompany || ((req, res) => res.status(501).json({ message: "Not implemented" })));
+router.get("/company/users",     protectAdmin, getCompanyUsers);
+router.get("/company/leads",     protectAdmin, getCompanyLeads);
+router.get("/dashboard-stats",   protectAdmin, getDashboardStats);
 
 // ── Admin CRUD (protected) ────────────────────────────────────────────────────
 router.get("/",  protectAdmin, getAdmins);

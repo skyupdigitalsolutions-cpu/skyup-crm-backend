@@ -162,6 +162,61 @@ const deleteCompanyUser = async (req, res) => {
   }
 };
 
+// ── GET /api/admin/dashboard-stats ───────────────────────────────────────────
+// Returns KPI stats for admin dashboard including phone reveal counts
+const getDashboardStats = async (req, res) => {
+  try {
+    const companyId = req.admin.company._id;
+
+    const [
+      totalLeads,
+      hotLeads,
+      warmLeads,
+      coldLeads,
+      revealAggregate,
+    ] = await Promise.all([
+      Lead.countDocuments({ company: companyId }),
+      Lead.countDocuments({ company: companyId, temperature: "Hot" }),
+      Lead.countDocuments({ company: companyId, temperature: "Warm" }),
+      Lead.countDocuments({ company: companyId, temperature: "Cold" }),
+      Lead.aggregate([
+        { $match: { company: companyId } },
+        { $group: {
+            _id: null,
+            totalReveals:   { $sum: "$phoneRevealCount" },
+            leadsRevealed:  { $sum: { $cond: [{ $gt: ["$phoneRevealCount", 0] }, 1, 0] } },
+          },
+        },
+      ]),
+    ]);
+
+    const revealStats = revealAggregate[0] || { totalReveals: 0, leadsRevealed: 0 };
+
+    // Top 5 most-revealed leads
+    const topRevealed = await Lead.find({ company: companyId, phoneRevealCount: { $gt: 0 } })
+      .sort({ phoneRevealCount: -1 })
+      .limit(5)
+      .select("name mobile phoneRevealCount")
+      .lean();
+
+    res.status(200).json({
+      totalLeads,
+      quality: { hot: hotLeads, warm: warmLeads, cold: coldLeads },
+      phoneReveal: {
+        totalReveals:  revealStats.totalReveals,
+        leadsRevealed: revealStats.leadsRevealed,
+        topRevealed:   topRevealed.map(l => ({
+          name:   l.name,
+          mobile: l.mobile,
+          count:  l.phoneRevealCount,
+        })),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -172,4 +227,5 @@ module.exports = {
   getCompanyUsers,
   getCompanyLeads,
   deleteCompanyUser,
+  getDashboardStats,
 };

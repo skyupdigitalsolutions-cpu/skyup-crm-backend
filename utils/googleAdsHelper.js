@@ -56,33 +56,43 @@ const getNextAssignedUserGoogle = async (config) => {
 // Map normalised Google fields → Lead schema
 // column_id values are lowercased, so we look up "full_name", "phone_number", "email", etc.
 const mapGoogleLeadToSchema = (parsed, config, googleLeadId, assignedUserId) => {
+  const { computeQuality } = require("./qualityHelper");
+
+  const STANDARD_GOOGLE_KEYS = new Set([
+    "full_name", "first_name", "last_name",
+    "phone_number", "phone", "email",
+  ]);
+
+  const extraAnswers = Object.entries(parsed)
+    .filter(([k]) => !STANDARD_GOOGLE_KEYS.has(k))
+    .map(([, v]) => v);
+
+  const totalCampaignQuestions = extraAnswers.length;
+
   const firstName = parsed["first_name"] || "";
   const lastName  = parsed["last_name"]  || "";
+  const fullName  = parsed["full_name"] || `${firstName} ${lastName}`.trim() || "Unknown";
+  const mobile    = (parsed["phone_number"] || parsed["phone"] || "").replace(/\D/g, "");
+  const email     = parsed["email"] || "";
 
-  // Google standard column_id for full name is FULL_NAME → "full_name"
-  const fullName =
-    parsed["full_name"] ||
-    `${firstName} ${lastName}`.trim() ||
-    "Unknown";
-
-  // Google standard column_id for phone is PHONE_NUMBER → "phone_number"
-  const mobile =
-    parsed["phone_number"] ||
-    parsed["phone"]        ||
-    "";
+  const temperature = computeQuality(
+    { name: fullName, mobile, email, _extraAnswers: extraAnswers },
+    totalCampaignQuestions
+  );
 
   return {
-    leadgenId: googleLeadId,
-    name:      fullName,
-    mobile:    mobile.replace(/\D/g, ""),   // digits only
-    email:     parsed["email"] || "",
-    source:    "Google Ads",
-    campaign:  config.campaignName,
-    status:    config.defaultStatus,
-    date:      new Date(),
-    remark:    config.defaultRemark,
-    user:      assignedUserId,
-    company:   config.company,
+    leadgenId:   googleLeadId,
+    name:        fullName,
+    mobile,
+    email,
+    source:      "Google Ads",
+    campaign:    config.campaignName,
+    status:      config.defaultStatus,
+    date:        new Date(),
+    remark:      config.defaultRemark,
+    temperature,          // ← AUTO QUALITY
+    user:        assignedUserId,
+    company:     config.company,
   };
 };
 

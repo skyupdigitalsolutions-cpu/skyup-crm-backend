@@ -12,6 +12,7 @@ const {
   updateLeadEmail, bulkUpdateEmails,
   adminGetAllLeads,
   checkDuplicate,
+  logPhoneReveal,
 } = require("../controllers/leadController");
 
 const { protect }           = require("../middlewares/authMiddleware");
@@ -50,6 +51,10 @@ router.post("/",                       protect,           createLead);
 
 // ── PATCH ─────────────────────────────────────────────────────────────────────
 router.patch("/:id/not-interested", protect, markNotInterested);   // NEW
+
+// ── Phone reveal tracking ────────────────────────────────────────────────────
+router.post("/:id/reveal-phone",       protect,      logPhoneReveal);
+router.post("/admin/:id/reveal-phone", protectAdmin, logPhoneReveal);
 router.patch("/:id/temperature",    protectAdmin, patchLeadTemperature); // voicebot uses admin token
 router.patch("/:id",                protect, patchLead);
 

@@ -1,6 +1,7 @@
 // controllers/leadController.js
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
+const { computeQuality } = require("../utils/qualityHelper");
 // const { notifyTelegram } = require("../utils/telegramNotifier");
 
 // At the top of leadController.js
@@ -144,6 +145,12 @@ const adminCreateLead = async (req, res) => {
       status: req.body.status || "New",
       date: req.body.date || new Date(),
       remark: req.body.remark || "Manually added",
+      temperature: req.body.temperature || computeQuality({
+        name:  req.body.name   || "",
+        mobile: req.body.mobile || "",
+        email:  req.body.email  || "",
+        _extraAnswers: [],
+      }, 0),
       user: assignedUser,
       company: companyId,
     });
@@ -253,6 +260,9 @@ const adminImportCSV = async (req, res) => {
       try {
         const assignedUser = users[i % users.length]._id;
         const mobile = row.mobile || row.phone || "";
+        const csvExtraAnswers = Object.keys(row)
+          .filter(k => !["name","mobile","phone","email","source","campaign","status","date","remark","leadgenId","user"].includes(k))
+          .map(k => row[k]);
         const adminDoc = {
           name: row.name || "Unknown",
           mobile,
@@ -262,6 +272,10 @@ const adminImportCSV = async (req, res) => {
           status: row.status || "New",
           date: row.date ? new Date(row.date) : new Date(),
           remark: row.remark || "Imported via CSV",
+          temperature: row.temperature || computeQuality(
+            { name: row.name || "", mobile, email: row.email || "", _extraAnswers: csvExtraAnswers },
+            csvExtraAnswers.length
+          ),
           user: assignedUser,
           company: companyId,
         };
@@ -308,6 +322,9 @@ const userImportCSV = async (req, res) => {
       const row = rows[i];
       try {
         const mobile = row.mobile || row.phone || "";
+        const csvExtraAnswers = Object.keys(row)
+          .filter(k => !["name","mobile","phone","email","source","campaign","status","date","remark","leadgenId","user"].includes(k))
+          .map(k => row[k]);
         const userDoc = {
           name: row.name || "Unknown",
           mobile,
@@ -317,6 +334,10 @@ const userImportCSV = async (req, res) => {
           status: row.status || "New",
           date: row.date ? new Date(row.date) : new Date(),
           remark: row.remark || "Imported via CSV",
+          temperature: row.temperature || computeQuality(
+            { name: row.name || "", mobile, email: row.email || "", _extraAnswers: csvExtraAnswers },
+            csvExtraAnswers.length
+          ),
           user: req.user._id,
           company: req.user.company,
         };
@@ -757,6 +778,38 @@ const checkDuplicate = async (req, res) => {
   }
 };
 
+// ── POST /api/lead/:id/reveal-phone ──────────────────────────────────────────
+// Called by frontend each time a user reveals a masked phone number.
+// Increments persisted reveal count and logs who/when.
+const logPhoneReveal = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Works for both user token and admin token
+    const actorId   = req.user?._id   || req.admin?._id;
+    const actorName = req.user?.name  || req.admin?.name || "";
+    const companyId = req.user?.company || req.admin?.company?._id || req.admin?.company;
+
+    const lead = await Lead.findOne({ _id: id, company: companyId });
+    if (!lead) return res.status(404).json({ message: "Lead Not Found" });
+
+    await Lead.findByIdAndUpdate(id, {
+      $inc:  { phoneRevealCount: 1 },
+      $push: {
+        phoneRevealLog: {
+          userId:     actorId,
+          userName:   actorName,
+          revealedAt: new Date(),
+        },
+      },
+    });
+
+    return res.status(200).json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getLead,
   getLeads,
@@ -778,4 +831,5 @@ module.exports = {
   bulkUpdateEmails,
   adminGetAllLeads,
   checkDuplicate,
+  logPhoneReveal,
 };

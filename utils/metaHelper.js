@@ -56,42 +56,58 @@ const getNextAssignedUser = async (config) => {
 
 // ── Map Meta fields → Lead schema ─────────────────────────────────────────────
 const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
-  // Build a remark that captures the custom Meta form fields
-  const extraFields = [
-    parsedFields["what_type_of_business_do_you_run?"]      && `Business: ${parsedFields["what_type_of_business_do_you_run?"]}`,
-    parsedFields["what_service_are_you_interested_in?"]    && `Service: ${parsedFields["what_service_are_you_interested_in?"]}`,
-    parsedFields["what_is_your_monthly_marketing_budget?"] && `Budget: ${parsedFields["what_is_your_monthly_marketing_budget?"]}`,
-    parsedFields["what_is_the_best_time_for_our_team_to_contact_you?"] && `Best time: ${parsedFields["what_is_the_best_time_for_our_team_to_contact_you?"]}`,
-  ].filter(Boolean).join(" | ");
+  const { computeQuality } = require("./qualityHelper");
+
+  // Standard Meta question keys — used to detect "extra" campaign questions
+  const STANDARD_META_KEYS = new Set([
+    "full_name", "first_name", "last_name",
+    "phone_number", "mobile", "email", "email_address",
+  ]);
+
+  // Collect all non-standard (custom campaign) field values
+  const extraAnswers = Object.entries(parsedFields)
+    .filter(([k]) => !STANDARD_META_KEYS.has(k))
+    .map(([, v]) => v);
+
+  const totalCampaignQuestions = extraAnswers.length;
+
+  // Build remark from extra fields
+  const extraFields = Object.entries(parsedFields)
+    .filter(([k]) => !STANDARD_META_KEYS.has(k))
+    .map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`)
+    .join(" | ");
+
+  const name =
+    parsedFields["full_name"] ||
+    (parsedFields["first_name"]
+      ? `${parsedFields["first_name"] || ""} ${parsedFields["last_name"] || ""}`.trim()
+      : "Unknown");
+
+  const raw    = parsedFields["phone_number"] || parsedFields["mobile"] || "";
+  const norm   = normalizePhoneSafe(raw);
+  const mobile = norm || raw.replace(/\D/g, "") || "N/A";
+
+  const email = parsedFields["email"] || parsedFields["email_address"] || "";
+
+  // Compute quality
+  const temperature = computeQuality(
+    { name, mobile, email, _extraAnswers: extraAnswers },
+    totalCampaignQuestions
+  );
 
   return {
     leadgenId,
-
-    name:
-      parsedFields["full_name"] ||
-      (parsedFields["first_name"]
-        ? `${parsedFields["first_name"] || ""} ${parsedFields["last_name"] || ""}`.trim()
-        : "Unknown"),
-
-    mobile: (() => {
-  const raw      = parsedFields["phone_number"] || parsedFields["mobile"] || "";
-  const norm     = normalizePhoneSafe(raw);
-  // Store the normalised 10-digit form so the DB index can enforce uniqueness.
-  // The pre-validate hook on the Lead model will also set normalizedPhone,
-  // but storing it here directly means Meta leads are consistent from day 1.
-  return norm || raw.replace(/\D/g, "") || "N/A";
-})(),
-    
-
-    email:  parsedFields["email"] || parsedFields["email_address"] || "",
-
-    source:   "Meta",
-    campaign: config.campaignName,
-    status:   config.defaultStatus,
-    date:     new Date(),
-    remark:   extraFields || config.defaultRemark,
-    user:     assignedUserId,
-    company:  config.company,
+    name,
+    mobile,
+    email,
+    source:      "Meta",
+    campaign:    config.campaignName,
+    status:      config.defaultStatus,
+    date:        new Date(),
+    remark:      extraFields || config.defaultRemark,
+    temperature,          // ← AUTO QUALITY
+    user:        assignedUserId,
+    company:     config.company,
   };
 };
 
