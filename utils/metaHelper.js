@@ -18,20 +18,74 @@ const fetchLeadData = async (leadgenId, pageAccessToken, graphApiVersion) => {
 };
 
 // ── Convert Meta's field_data array → plain key-value object ─────────────────
+// Stores BOTH the original key AND a lowercased/underscore-normalised key
+// so lookups work regardless of how the form creator named the field.
 const parseFieldData = (fieldData) => {
   const result = {};
   fieldData.forEach(({ name, values }) => {
-    result[name] = values[0];
+    const val = values && values[0] != null ? values[0] : "";
+    // Store under original name (e.g. "Phone Number", "PHONE_NUMBER", "phone_number")
+    result[name] = val;
+    // Also store under normalised key (lowercase, spaces→underscores)
+    const normKey = name.toLowerCase().replace(/\s+/g, "_");
+    if (!(normKey in result)) result[normKey] = val;
   });
   return result;
 };
 
+// ── Find phone value from parsedFields regardless of key name ─────────────────
+// Meta form creators can name the phone field anything.
+// Strategy: check known keys first, then fall back to scanning ALL values
+// for something that looks like a phone number (5-15 digits).
+const PHONE_KEYS = [
+  "phone_number", "phone", "mobile", "mobile_number",
+  "contact_number", "contact", "cell", "cell_number",
+  "whatsapp", "whatsapp_number", "tel", "telephone",
+  "number", "mob", "ph",
+];
+
+const NAME_KEYS = new Set([
+  "full_name", "first_name", "last_name", "name",
+]);
+const EMAIL_KEYS = new Set([
+  "email", "email_address", "email_id",
+]);
+
+function extractPhone(parsedFields) {
+  // 1. Check all known key variants (exact + normalised)
+  for (const k of PHONE_KEYS) {
+    const v = parsedFields[k];
+    if (v && String(v).trim()) {
+      console.log(`   📞 Phone matched via known key: field="${k}", value="${v}"`);
+      return String(v).trim();
+    }
+  }
+
+  // 2. Scan ALL field values — pick first one that looks like a phone
+  for (const [k, v] of Object.entries(parsedFields)) {
+    if (!v || NAME_KEYS.has(k) || EMAIL_KEYS.has(k)) continue;
+    const s     = String(v).trim();
+    const digits = s.replace(/\D/g, "");
+    // Phone-like: 5-15 digits, no @ sign, not all letters
+    if (
+      digits.length >= 5 &&
+      digits.length <= 15 &&
+      !s.includes("@") &&
+      !/^[a-zA-Z\s]+$/.test(s)
+    ) {
+      console.log(`   📞 Phone found via value-scan: field="${k}", value="${v}"`);
+      return s;
+    }
+  }
+
+  console.warn("   ⚠️  No phone field found in parsedFields. Keys received:", Object.keys(parsedFields));
+  return "";
+}
+
 // ── Pick next user via round robin & advance the pointer atomically ───────────
-//   Uses findOneAndUpdate so concurrent webhook calls don't assign to the same user.
 const getNextAssignedUser = async (config) => {
   const MetaConfig = require("../models/MetaConfig");
 
-  // Get all active users belonging to this company
   const users = await User.find({ company: config.company, isActive: { $ne: false } })
     .select("_id")
     .lean();
@@ -43,11 +97,10 @@ const getNextAssignedUser = async (config) => {
 
   const total = users.length;
 
-  // Atomically grab current index and increment (wraps with modulo on read)
   const updated = await MetaConfig.findByIdAndUpdate(
     config._id,
     { $inc: { roundRobinIndex: 1 } },
-    { new: false } // return the doc BEFORE increment so we use the current index
+    { new: false }
   );
 
   const currentIndex = (updated.roundRobinIndex || 0) % total;
@@ -61,7 +114,10 @@ const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
   // Standard Meta question keys — used to detect "extra" campaign questions
   const STANDARD_META_KEYS = new Set([
     "full_name", "first_name", "last_name",
-    "phone_number", "mobile", "email", "email_address",
+    "phone_number", "phone", "mobile", "mobile_number",
+    "contact_number", "contact", "cell", "cell_number",
+    "whatsapp", "whatsapp_number", "tel", "telephone", "number", "mob", "ph",
+    "email", "email_address", "email_id",
   ]);
 
   // Collect all non-standard (custom campaign) field values
@@ -83,11 +139,14 @@ const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
       ? `${parsedFields["first_name"] || ""} ${parsedFields["last_name"] || ""}`.trim()
       : "Unknown");
 
-  const raw    = parsedFields["phone_number"] || parsedFields["mobile"] || "";
+  // Smart phone extraction — never returns "N/A"
+  const raw    = extractPhone(parsedFields);
   const norm   = normalizePhoneSafe(raw);
-  const mobile = norm || raw.replace(/\D/g, "") || "N/A";
+  const mobile = norm || raw.replace(/\D/g, "") || "";
 
-  const email = parsedFields["email"] || parsedFields["email_address"] || "";
+  console.log(`   📱 Phone raw="${raw}" → norm="${norm}" → saved="${mobile}"`);
+
+  const email = parsedFields["email"] || parsedFields["email_address"] || parsedFields["email_id"] || "";
 
   // Compute quality
   const temperature = computeQuality(
@@ -105,7 +164,7 @@ const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
     status:      config.defaultStatus,
     date:        new Date(),
     remark:      extraFields || config.defaultRemark,
-    temperature,          // ← AUTO QUALITY
+    temperature,
     user:        assignedUserId,
     company:     config.company,
   };
