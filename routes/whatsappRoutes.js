@@ -18,7 +18,7 @@ const {
   getLeadsForWhatsApp,
 } = require("../controllers/whatsappChatController");
 
-const { protect }                        = require("../middlewares/authMiddleware");
+const { protect, protectAny }                = require("../middlewares/authMiddleware");
 const { protectAdmin: adminProtect }     = require("../middlewares/adminAuthMiddleware");
 
 // ─── Webhook (public — NO auth, Meta/MSG91 calls these directly) ─────────────
@@ -39,8 +39,8 @@ router.patch("/conversations/:id/close",                adminProtect, closeConve
 router.post("/send",               adminProtect, sendMessage);
 router.post("/send-template",      adminProtect, sendTemplate);
 
-// ─── Admin starts a fresh conversation with any client number ────────────────
-router.post("/start-conversation", adminProtect, startConversation);
+// ─── Admin or agent starts a fresh conversation with any client number ────────
+router.post("/start-conversation", protectAny, startConversation);
 
 // ─── Admin deletes a zombie/failed conversation ───────────────────────────────
 router.delete("/conversations/:id", adminProtect, deleteConversation);
@@ -48,7 +48,7 @@ router.delete("/conversations/:id", adminProtect, deleteConversation);
 // ─── Admin bulk-sends a template to ALL leads ────────────────────────────────
 router.post("/bulk-send", adminProtect, bulkSendToLeads);
 
-// ─── Get all leads for WhatsApp panel (Leads tab) ────────────────────────────
-router.get("/leads", adminProtect, getLeadsForWhatsApp);
+// ─── Get all leads for WhatsApp panel (Leads tab — admin sees all, agent sees own) ─
+router.get("/leads", protectAny, getLeadsForWhatsApp);
 
 module.exports = router;

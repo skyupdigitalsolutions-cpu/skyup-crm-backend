@@ -489,7 +489,11 @@ const startConversation = async (req, res) => {
       components   = [],  // template variable components
     } = req.body;
 
-    const { companyId, userId } = req.user;
+    const isAdmin   = !!req.admin;
+    const companyId = isAdmin
+      ? (req.admin.company?._id || req.admin.company)
+      : req.user.company;
+    const userId    = isAdmin ? null : req.user._id;
 
     // ── Validate phone ────────────────────────────────────────────────────────
     if (!phone?.trim()) {
@@ -813,13 +817,23 @@ const bulkSendToLeads = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const getLeadsForWhatsApp = async (req, res) => {
   try {
-    const { companyId } = req.user;
+    // Support both admin (req.admin) and agent (req.user) tokens via protectAny
+    const isAdmin   = !!req.admin;
+    const companyId = isAdmin
+      ? (req.admin.company?._id || req.admin.company)
+      : req.user.company;
 
-    // Fetch all leads for this company, newest first
-    const leads = await Lead.find({
+    // Admins see all company leads; agents see only their assigned leads
+    const filter = {
       company: companyId,
       mobile:  { $exists: true, $ne: "" },
-    })
+    };
+    if (!isAdmin) {
+      filter.user = req.user._id;
+    }
+
+    // Fetch leads for this company/agent, newest first
+    const leads = await Lead.find(filter)
       .select("name mobile email status source campaign date createdAt user")
       .populate("user", "name")
       .sort({ createdAt: -1 })
