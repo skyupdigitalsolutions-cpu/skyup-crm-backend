@@ -15,6 +15,7 @@ const {
   getConfig,
   startConversation,
   bulkSendToLeads,
+  getLeadsForWhatsApp,
 } = require("../controllers/whatsappChatController");
 
 const { protect }                        = require("../middlewares/authMiddleware");
@@ -46,5 +47,8 @@ router.delete("/conversations/:id", adminProtect, deleteConversation);
 
 // ─── Admin bulk-sends a template to ALL leads ────────────────────────────────
 router.post("/bulk-send", adminProtect, bulkSendToLeads);
+
+// ─── Get all leads for WhatsApp panel (Leads tab) ────────────────────────────
+router.get("/leads", adminProtect, getLeadsForWhatsApp);
 
 module.exports = router;

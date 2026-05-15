@@ -806,6 +806,55 @@ const bulkSendToLeads = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/whatsapp/leads
+// Returns all company leads (with name, mobile, status, source, date) so the
+// WhatsApp panel can show a "Leads" tab and let admin start a conversation.
+// ─────────────────────────────────────────────────────────────────────────────
+const getLeadsForWhatsApp = async (req, res) => {
+  try {
+    const { companyId } = req.user;
+
+    // Fetch all leads for this company, newest first
+    const leads = await Lead.find({
+      company: companyId,
+      mobile:  { $exists: true, $ne: "" },
+    })
+      .select("name mobile email status source campaign date createdAt user")
+      .populate("user", "name")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // For each lead, check if a WhatsApp conversation already exists
+    const phones = leads.map(l => (l.mobile || "").replace(/\D/g, ""));
+    const existingConvs = await WhatsAppConversation.find({
+      company:  companyId,
+      waPhone:  { $in: phones },
+    }).select("waPhone _id status").lean();
+
+    const convByPhone = {};
+    for (const c of existingConvs) {
+      convByPhone[c.waPhone] = c;
+    }
+
+    const result = leads.map(l => {
+      const cleanPhone = (l.mobile || "").replace(/\D/g, "");
+      const existingConv = convByPhone[cleanPhone] || null;
+      return {
+        ...l,
+        cleanPhone,
+        existingConversationId: existingConv?._id || null,
+        existingConversationStatus: existingConv?.status || null,
+      };
+    });
+
+    res.json({ success: true, leads: result });
+  } catch (err) {
+    console.error("getLeadsForWhatsApp error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getConversations,
   getMessages,
@@ -818,4 +867,5 @@ module.exports = {
   getConfig,
   startConversation,
   bulkSendToLeads,
+  getLeadsForWhatsApp,
 };

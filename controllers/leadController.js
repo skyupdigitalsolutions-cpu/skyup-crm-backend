@@ -159,6 +159,27 @@ const adminCreateLead = async (req, res) => {
       "name email",
     );
 
+    // ── Notify WhatsApp panel about new lead via socket ───────────────────────
+    const io = global._io;
+    if (io) {
+      io.to("wa_admin").emit("wa_new_lead", {
+        lead: {
+          _id:        lead._id,
+          name:       lead.name,
+          mobile:     lead.mobile,
+          cleanPhone: (lead.mobile || "").replace(/\D/g, ""),
+          status:     lead.status,
+          source:     lead.source,
+          campaign:   lead.campaign,
+          date:       lead.date,
+          createdAt:  lead.createdAt,
+          user:       populated?.user || null,
+          existingConversationId:     null,
+          existingConversationStatus: null,
+        },
+      });
+    }
+
     // ── Notify admin on WhatsApp ──────────────────────────────────────────────
     notifyTelegram(lead, req.body.source || "Manual").catch((e) =>
       console.error("Telegram error:", e.message),
