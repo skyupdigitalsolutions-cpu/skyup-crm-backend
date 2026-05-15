@@ -677,6 +677,135 @@ const startConversation = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/whatsapp/bulk-send
+// Admin sends a template message to ALL leads that have a mobile number.
+// Runs sequentially with a small delay to avoid MSG91 rate limits.
+// ─────────────────────────────────────────────────────────────────────────────
+const bulkSendToLeads = async (req, res) => {
+  try {
+    const { templateName, languageCode = "en_US" } = req.body;
+    const { companyId, userId } = req.user;
+
+    if (!templateName?.trim()) {
+      return res.status(400).json({ error: "templateName is required" });
+    }
+
+    const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
+    if (!config) return res.status(400).json({ error: "WhatsApp is not configured for this company" });
+
+    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
+    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
+
+    if (!authKey || !senderNumber) {
+      return res.status(500).json({ error: "MSG91 credentials missing" });
+    }
+
+    // Fetch all leads with a mobile number for this company
+    const leads = await Lead.find({
+      company: companyId,
+      mobile:  { $exists: true, $ne: "" },
+    }).lean();
+
+    if (leads.length === 0) {
+      return res.json({ success: true, sent: 0, failed: 0, total: 0, results: [] });
+    }
+
+    const results = [];
+    let sent = 0;
+    let failed = 0;
+
+    for (const lead of leads) {
+      const cleanPhone = (lead.mobile || "").replace(/\D/g, "");
+      if (cleanPhone.length < 10) {
+        results.push({ leadId: lead._id, name: lead.name, phone: lead.mobile, status: "skipped", reason: "Invalid phone number" });
+        failed++;
+        continue;
+      }
+
+      try {
+        // Send template via MSG91 bulk API
+        const msg91Response = await axios.post(
+          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+          {
+            integrated_number: senderNumber,
+            content_type:      "template",
+            payload: {
+              messaging_product: "whatsapp",
+              type:              "template",
+              template: {
+                name:              templateName.trim(),
+                language:          { code: languageCode, policy: "deterministic" },
+                to_and_components: [{ to: cleanPhone, components: [] }],
+              },
+            },
+          },
+          { headers: { authkey: authKey, "Content-Type": "application/json" } }
+        );
+
+        const waMessageId =
+          msg91Response.data?.data?.[0]?.id ||
+          msg91Response.data?.requestId ||
+          `bulk_${Date.now()}_${crypto.randomUUID()}`;
+
+        // Find or create conversation
+        let conversation = await WhatsAppConversation.findOne({ waPhone: cleanPhone, company: companyId });
+        if (!conversation) {
+          conversation = await WhatsAppConversation.create({
+            waPhone:          cleanPhone,
+            contactName:      lead.name || "",
+            company:          companyId,
+            assignedAgent:    userId,
+            lead:             lead._id,
+            status:           "open",
+            lastMessage:      "",
+            lastMessageAt:    new Date(),
+            sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          });
+        } else {
+          await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
+            sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+            status:           "open",
+            lastMessage:      `[Template: ${templateName}]`,
+            lastMessageAt:    new Date(),
+          });
+        }
+
+        const templatePreview = `[Template: ${templateName}]`;
+        await WhatsAppMessage.create({
+          conversation:  conversation._id,
+          direction:     "outbound",
+          body:          templatePreview,
+          messageType:   "template",
+          waMessageId,
+          sentBy:        userId,
+          status:        "sent",
+          waTimestamp:   new Date(),
+          isTemplate:    true,
+          templateName:  templateName.trim(),
+        });
+
+        results.push({ leadId: lead._id, name: lead.name, phone: cleanPhone, status: "sent" });
+        sent++;
+      } catch (err) {
+        const errMsg = err.response?.data?.message || err.message;
+        results.push({ leadId: lead._id, name: lead.name, phone: cleanPhone, status: "failed", reason: errMsg });
+        failed++;
+      }
+
+      // Small delay between requests to avoid rate limits
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    console.log(`📣 Bulk WA send complete: ${sent} sent, ${failed} failed out of ${leads.length} leads`);
+    res.json({ success: true, sent, failed, total: leads.length, results });
+
+  } catch (err) {
+    console.error("bulkSendToLeads error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getConversations,
   getMessages,
@@ -688,4 +817,5 @@ module.exports = {
   saveConfig,
   getConfig,
   startConversation,
+  bulkSendToLeads,
 };

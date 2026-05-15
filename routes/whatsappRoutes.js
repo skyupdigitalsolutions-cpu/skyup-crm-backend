@@ -14,6 +14,7 @@ const {
   saveConfig,
   getConfig,
   startConversation,
+  bulkSendToLeads,
 } = require("../controllers/whatsappChatController");
 
 const { protect }                        = require("../middlewares/authMiddleware");
@@ -42,5 +43,8 @@ router.post("/start-conversation", adminProtect, startConversation);
 
 // ─── Admin deletes a zombie/failed conversation ───────────────────────────────
 router.delete("/conversations/:id", adminProtect, deleteConversation);
+
+// ─── Admin bulk-sends a template to ALL leads ────────────────────────────────
+router.post("/bulk-send", adminProtect, bulkSendToLeads);
 
 module.exports = router;
