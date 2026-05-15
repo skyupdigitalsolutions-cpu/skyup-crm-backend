@@ -102,11 +102,6 @@ const sendMessage = async (req, res) => {
     let waMessageId;
     try {
       if (provider === "msg91") {
-        // ── MSG91 session (text) message ──────────────────────────────────────
-        // The session message API uses a completely different flat payload
-        // compared to the /bulk/ template API.
-        // Correct endpoint: control.msg91.com (NOT api.msg91.com)
-        // Correct payload: { integrated_number, recipient_number, content_type, text }
         const msg91Response = await axios.post(
           "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
           {
@@ -123,15 +118,12 @@ const sendMessage = async (req, res) => {
             },
           }
         );
-        // MSG91 session API often returns no message ID — generate a unique fallback
-        // so the sparse unique index on waMessageId never receives two nulls (E11000)
         waMessageId =
           msg91Response.data?.data?.id  ||
           msg91Response.data?.requestId ||
           `out_${Date.now()}_${crypto.randomUUID()}`;
         console.log(`✅ MSG91 send success → ${conversation.waPhone}`, msg91Response.data);
       } else {
-        // ── Meta Cloud API fallback ───────────────────────────────────────────
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaResponse = await axios.post(
           apiUrl,
@@ -163,7 +155,7 @@ const sendMessage = async (req, res) => {
       direction:    "outbound",
       body:         text.trim(),
       messageType:  "text",
-      waMessageId,          // always a real string — never null (avoids E11000)
+      waMessageId,
       sentBy:       userId,
       status:       "sent",
       waTimestamp:  new Date(),
@@ -173,7 +165,6 @@ const sendMessage = async (req, res) => {
       lastMessage:      text.trim(),
       lastMessageAt:    new Date(),
       status:           "open",
-      // Refresh session window — the 24h clock resets each time we send
       sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     });
 
@@ -211,7 +202,7 @@ const sendMessage = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const sendTemplate = async (req, res) => {
   try {
-    const { conversationId, templateName, languageCode = "en_US", components = [] } = req.body; // en_US is the correct MSG91 default
+    const { conversationId, templateName, languageCode = "en_US", components = [] } = req.body;
     const { companyId, userId } = req.user;
 
     const conversation = await WhatsAppConversation.findById(conversationId);
@@ -230,7 +221,6 @@ const sendTemplate = async (req, res) => {
         if (!authKey || !senderNumber) {
           return res.status(500).json({ error: "MSG91 credentials missing in .env" });
         }
-        // FIX: MSG91 bulk API — payload is an OBJECT, recipients inside to_and_components
         const msg91Response = await axios.post(
           "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
           {
@@ -275,7 +265,7 @@ const sendTemplate = async (req, res) => {
       direction:     "outbound",
       body:          templatePreview,
       messageType:   "template",
-      waMessageId,          // always a real string — never null (avoids E11000)
+      waMessageId,
       sentBy:        userId,
       status:        "sent",
       waTimestamp:   new Date(),
@@ -347,8 +337,6 @@ const closeConversation = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/whatsapp/conversations/:id
-// Admin can permanently delete a conversation and all its messages.
-// Used to clean up zombie conversations created when template send failed.
 // ─────────────────────────────────────────────────────────────────────────────
 const deleteConversation = async (req, res) => {
   try {
@@ -359,9 +347,7 @@ const deleteConversation = async (req, res) => {
       return res.status(403).json({ error: "Only admins can delete conversations" });
     }
 
-    // Delete all messages in the conversation first
     await WhatsAppMessage.deleteMany({ conversation: id });
-    // Then delete the conversation itself
     await WhatsAppConversation.findByIdAndDelete(id);
 
     res.json({ success: true });
@@ -473,20 +459,17 @@ const getConfig = async (req, res) => {
   }
 };
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/whatsapp/start-conversation
-// Admin initiates a new WhatsApp conversation with a client number.
-// Since no session exists, a template message MUST be sent first.
 // ─────────────────────────────────────────────────────────────────────────────
 const startConversation = async (req, res) => {
   try {
     const {
-      phone,              // client number e.g. "919876543210" (with country code, no +)
-      contactName = "",   // optional display name
-      templateName,       // MSG91 pre-approved template name (required)
-      languageCode = "en_US",  // FIX: MSG91 rejects bare "en" — must be "en_US" or "en_GB"
-      components   = [],  // template variable components
+      phone,
+      contactName = "",
+      templateName,
+      languageCode = "en_US",
+      components   = [],
     } = req.body;
 
     const isAdmin   = !!req.admin;
@@ -495,11 +478,9 @@ const startConversation = async (req, res) => {
       : req.user.company;
     const userId    = isAdmin ? null : req.user._id;
 
-    // ── Validate phone ────────────────────────────────────────────────────────
     if (!phone?.trim()) {
       return res.status(400).json({ error: "Phone number is required" });
     }
-    // Strip any non-digit characters and leading +
     const cleanPhone = phone.trim().replace(/\D/g, "");
     if (cleanPhone.length < 10 || cleanPhone.length > 15) {
       return res.status(400).json({ error: "Invalid phone number. Include country code (e.g. 919876543210)" });
@@ -512,7 +493,6 @@ const startConversation = async (req, res) => {
       });
     }
 
-    // ── Load config ───────────────────────────────────────────────────────────
     const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
     if (!config) {
       return res.status(400).json({ error: "WhatsApp is not configured for this company" });
@@ -526,21 +506,11 @@ const startConversation = async (req, res) => {
       return res.status(500).json({ error: "MSG91 credentials missing" });
     }
 
-    // ── Try to link a known lead by phone number ─────────────────────────────
     const lead = await Lead.findOne({ mobile: { $regex: cleanPhone.slice(-10) } });
 
-    // ── FIX: Send template FIRST before creating conversation in DB ───────────
-    // Previously the conversation was created before the API call, leaving a
-    // zombie record (sessionExpiresAt: null) whenever MSG91 returned 400.
-    // Now: send the template first — only create/find the conversation on success.
     let waMessageId;
     try {
       if (provider === "msg91") {
-        // FIX: Only include components key when non-empty.
-        // MSG91 rejects an empty components array for no-variable templates.
-        // FIX: MSG91 bulk API payload format —
-        // "payload" must be an OBJECT (not array), recipients go inside template.to_and_components
-        // Correct structure: https://docs.msg91.com/whatsapp/template-bulk
         const toAndComponents = { to: cleanPhone, components: [] };
 
         const msg91Response = await axios.post(
@@ -571,7 +541,6 @@ const startConversation = async (req, res) => {
           `tmpl_${Date.now()}_${crypto.randomUUID()}`;
         console.log(`✅ MSG91 initiation template sent → ${cleanPhone}`, msg91Response.data);
       } else {
-        // Meta Cloud API
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaPayload = {
           messaging_product: "whatsapp",
@@ -599,11 +568,9 @@ const startConversation = async (req, res) => {
       const errData = apiErr.response?.data;
       const errMsg  = errData?.message || errData?.error?.message || apiErr.message;
       console.error("❌ start-conversation template error:", JSON.stringify(errData || errMsg));
-      // FIX: return error WITHOUT touching the DB — no zombie conversation is created
       return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
     }
 
-    // ── Template sent successfully — now find or create the conversation ───────
     let conversation = await WhatsAppConversation.findOne({
       waPhone:  cleanPhone,
       company:  companyId,
@@ -623,7 +590,6 @@ const startConversation = async (req, res) => {
       });
     }
 
-    // ── Save the outbound template message ────────────────────────────────────
     const templatePreview = `[Template: ${templateName}]`;
 
     const savedMsg = await WhatsAppMessage.create({
@@ -639,8 +605,6 @@ const startConversation = async (req, res) => {
       templateName:  templateName.trim(),
     });
 
-    // FIX: set sessionExpiresAt so the 24h window opens immediately after admin sends the template.
-    // Without this the UI shows "24-hour session expired" even on brand-new conversations.
     const sessionExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
     await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
       lastMessage:      templatePreview,
@@ -649,7 +613,6 @@ const startConversation = async (req, res) => {
       sessionExpiresAt: sessionExpiry,
     });
 
-    // ── Broadcast to admin socket room so UI updates live ─────────────────────
     const io = global._io;
     if (io) {
       io.to("wa_admin").emit("wa_new_conversation", {
@@ -682,13 +645,102 @@ const startConversation = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Shared helper: send a template to one phone number via MSG91 / Meta
+// ─────────────────────────────────────────────────────────────────────────────
+const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, config, authKey, senderNumber }) => {
+  const provider = config.provider || "msg91";
+
+  if (provider === "msg91") {
+    const resp = await axios.post(
+      "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+      {
+        integrated_number: senderNumber,
+        content_type:      "template",
+        payload: {
+          messaging_product: "whatsapp",
+          type:              "template",
+          template: {
+            name:              templateName.trim(),
+            language:          { code: languageCode, policy: "deterministic" },
+            to_and_components: [{ to: cleanPhone, components: [] }],
+          },
+        },
+      },
+      { headers: { authkey: authKey, "Content-Type": "application/json" } }
+    );
+    return (
+      resp.data?.data?.[0]?.id ||
+      resp.data?.requestId ||
+      `bulk_${Date.now()}_${crypto.randomUUID()}`
+    );
+  } else {
+    const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
+    const resp = await axios.post(
+      apiUrl,
+      {
+        messaging_product: "whatsapp",
+        to:   cleanPhone,
+        type: "template",
+        template: { name: templateName.trim(), language: { code: languageCode } },
+      },
+      { headers: { Authorization: `Bearer ${config.accessToken}`, "Content-Type": "application/json" } }
+    );
+    return resp.data?.messages?.[0]?.id || `bulk_${Date.now()}_${crypto.randomUUID()}`;
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared helper: save conversation + message record after successful send
+// ─────────────────────────────────────────────────────────────────────────────
+const _saveConversationAndMessage = async ({ cleanPhone, contactName, companyId, userId, leadId, templateName, waMessageId }) => {
+  const templatePreview = `[Template: ${templateName}]`;
+
+  let conversation = await WhatsAppConversation.findOne({ waPhone: cleanPhone, company: companyId });
+  if (!conversation) {
+    conversation = await WhatsAppConversation.create({
+      waPhone:          cleanPhone,
+      contactName:      contactName || "",
+      company:          companyId,
+      assignedAgent:    userId,
+      lead:             leadId || null,
+      status:           "open",
+      lastMessage:      templatePreview,
+      lastMessageAt:    new Date(),
+      sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    });
+  } else {
+    await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
+      sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      status:           "open",
+      lastMessage:      templatePreview,
+      lastMessageAt:    new Date(),
+    });
+  }
+
+  await WhatsAppMessage.create({
+    conversation:  conversation._id,
+    direction:     "outbound",
+    body:          templatePreview,
+    messageType:   "template",
+    waMessageId,
+    sentBy:        userId,
+    status:        "sent",
+    waTimestamp:   new Date(),
+    isTemplate:    true,
+    templateName:  templateName.trim(),
+  });
+
+  return conversation;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/whatsapp/bulk-send
-// Admin sends a template message to ALL leads that have a mobile number.
-// Runs sequentially with a small delay to avoid MSG91 rate limits.
+// Send a template to ALL leads in a company (or filtered by campaign)
+// Body: { templateName, languageCode, campaign? }
 // ─────────────────────────────────────────────────────────────────────────────
 const bulkSendToLeads = async (req, res) => {
   try {
-    const { templateName, languageCode = "en_US" } = req.body;
+    const { templateName, languageCode = "en_US", campaign } = req.body;
     const { companyId, userId } = req.user;
 
     if (!templateName?.trim()) {
@@ -705,11 +757,16 @@ const bulkSendToLeads = async (req, res) => {
       return res.status(500).json({ error: "MSG91 credentials missing" });
     }
 
-    // Fetch all leads with a mobile number for this company
-    const leads = await Lead.find({
+    // Build filter — optionally restrict to a campaign
+    const filter = {
       company: companyId,
       mobile:  { $exists: true, $ne: "" },
-    }).lean();
+    };
+    if (campaign && campaign.trim()) {
+      filter.campaign = campaign.trim();
+    }
+
+    const leads = await Lead.find(filter).lean();
 
     if (leads.length === 0) {
       return res.json({ success: true, sent: 0, failed: 0, total: 0, results: [] });
@@ -728,65 +785,13 @@ const bulkSendToLeads = async (req, res) => {
       }
 
       try {
-        // Send template via MSG91 bulk API
-        const msg91Response = await axios.post(
-          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
-          {
-            integrated_number: senderNumber,
-            content_type:      "template",
-            payload: {
-              messaging_product: "whatsapp",
-              type:              "template",
-              template: {
-                name:              templateName.trim(),
-                language:          { code: languageCode, policy: "deterministic" },
-                to_and_components: [{ to: cleanPhone, components: [] }],
-              },
-            },
-          },
-          { headers: { authkey: authKey, "Content-Type": "application/json" } }
-        );
+        const waMessageId = await _sendTemplateToPhone({
+          cleanPhone, templateName, languageCode, config, authKey, senderNumber,
+        });
 
-        const waMessageId =
-          msg91Response.data?.data?.[0]?.id ||
-          msg91Response.data?.requestId ||
-          `bulk_${Date.now()}_${crypto.randomUUID()}`;
-
-        // Find or create conversation
-        let conversation = await WhatsAppConversation.findOne({ waPhone: cleanPhone, company: companyId });
-        if (!conversation) {
-          conversation = await WhatsAppConversation.create({
-            waPhone:          cleanPhone,
-            contactName:      lead.name || "",
-            company:          companyId,
-            assignedAgent:    userId,
-            lead:             lead._id,
-            status:           "open",
-            lastMessage:      "",
-            lastMessageAt:    new Date(),
-            sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-          });
-        } else {
-          await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
-            sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-            status:           "open",
-            lastMessage:      `[Template: ${templateName}]`,
-            lastMessageAt:    new Date(),
-          });
-        }
-
-        const templatePreview = `[Template: ${templateName}]`;
-        await WhatsAppMessage.create({
-          conversation:  conversation._id,
-          direction:     "outbound",
-          body:          templatePreview,
-          messageType:   "template",
-          waMessageId,
-          sentBy:        userId,
-          status:        "sent",
-          waTimestamp:   new Date(),
-          isTemplate:    true,
-          templateName:  templateName.trim(),
+        await _saveConversationAndMessage({
+          cleanPhone, contactName: lead.name, companyId, userId,
+          leadId: lead._id, templateName, waMessageId,
         });
 
         results.push({ leadId: lead._id, name: lead.name, phone: cleanPhone, status: "sent" });
@@ -797,7 +802,7 @@ const bulkSendToLeads = async (req, res) => {
         failed++;
       }
 
-      // Small delay between requests to avoid rate limits
+      // Small delay to respect rate limits
       await new Promise(r => setTimeout(r, 150));
     }
 
@@ -811,19 +816,92 @@ const bulkSendToLeads = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/whatsapp/bulk-send-csv
+// Send a template to an arbitrary list of phone numbers from CSV
+// Body: { recipients: [{name, phone}], templateName, languageCode }
+// ─────────────────────────────────────────────────────────────────────────────
+const bulkSendCSV = async (req, res) => {
+  try {
+    const { recipients, templateName, languageCode = "en_US" } = req.body;
+    const { companyId, userId } = req.user;
+
+    if (!templateName?.trim()) {
+      return res.status(400).json({ error: "templateName is required" });
+    }
+    if (!Array.isArray(recipients) || recipients.length === 0) {
+      return res.status(400).json({ error: "recipients array is required and must not be empty" });
+    }
+
+    const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
+    if (!config) return res.status(400).json({ error: "WhatsApp is not configured for this company" });
+
+    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
+    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
+
+    if (!authKey || !senderNumber) {
+      return res.status(500).json({ error: "MSG91 credentials missing" });
+    }
+
+    const results = [];
+    let sent = 0;
+    let failed = 0;
+
+    for (const recipient of recipients) {
+      const cleanPhone = (recipient.phone || "").toString().replace(/\D/g, "");
+      const contactName = recipient.name || "";
+
+      if (cleanPhone.length < 10) {
+        results.push({ name: contactName, phone: recipient.phone, status: "skipped", reason: "Invalid phone number" });
+        failed++;
+        continue;
+      }
+
+      try {
+        const waMessageId = await _sendTemplateToPhone({
+          cleanPhone, templateName, languageCode, config, authKey, senderNumber,
+        });
+
+        // Try to link to an existing lead by phone
+        const lead = await Lead.findOne({
+          company: companyId,
+          mobile:  { $regex: cleanPhone.slice(-10) },
+        }).lean();
+
+        await _saveConversationAndMessage({
+          cleanPhone, contactName, companyId, userId,
+          leadId: lead?._id || null, templateName, waMessageId,
+        });
+
+        results.push({ name: contactName, phone: cleanPhone, status: "sent" });
+        sent++;
+      } catch (err) {
+        const errMsg = err.response?.data?.message || err.message;
+        results.push({ name: contactName, phone: cleanPhone, status: "failed", reason: errMsg });
+        failed++;
+      }
+
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    console.log(`📣 Bulk WA CSV send: ${sent} sent, ${failed} failed out of ${recipients.length}`);
+    res.json({ success: true, sent, failed, total: recipients.length, results });
+
+  } catch (err) {
+    console.error("bulkSendCSV error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/whatsapp/leads
-// Returns all company leads (with name, mobile, status, source, date) so the
-// WhatsApp panel can show a "Leads" tab and let admin start a conversation.
 // ─────────────────────────────────────────────────────────────────────────────
 const getLeadsForWhatsApp = async (req, res) => {
   try {
-    // Support both admin (req.admin) and agent (req.user) tokens via protectAny
     const isAdmin   = !!req.admin;
     const companyId = isAdmin
       ? (req.admin.company?._id || req.admin.company)
       : req.user.company;
 
-    // Admins see all company leads; agents see only their assigned leads
     const filter = {
       company: companyId,
       mobile:  { $exists: true, $ne: "" },
@@ -832,14 +910,12 @@ const getLeadsForWhatsApp = async (req, res) => {
       filter.user = req.user._id;
     }
 
-    // Fetch leads for this company/agent, newest first
     const leads = await Lead.find(filter)
       .select("name mobile email status source campaign date createdAt user")
       .populate("user", "name")
       .sort({ createdAt: -1 })
       .lean();
 
-    // For each lead, check if a WhatsApp conversation already exists
     const phones = leads.map(l => (l.mobile || "").replace(/\D/g, ""));
     const existingConvs = await WhatsAppConversation.find({
       company:  companyId,
@@ -881,5 +957,6 @@ module.exports = {
   getConfig,
   startConversation,
   bulkSendToLeads,
+  bulkSendCSV,
   getLeadsForWhatsApp,
 };

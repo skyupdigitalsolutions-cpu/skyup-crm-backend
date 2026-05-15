@@ -15,10 +15,11 @@ const {
   getConfig,
   startConversation,
   bulkSendToLeads,
+  bulkSendCSV,
   getLeadsForWhatsApp,
 } = require("../controllers/whatsappChatController");
 
-const { protect, protectAny }                = require("../middlewares/authMiddleware");
+const { protect, protectAny }            = require("../middlewares/authMiddleware");
 const { protectAdmin: adminProtect }     = require("../middlewares/adminAuthMiddleware");
 
 // ─── Webhook (public — NO auth, Meta/MSG91 calls these directly) ─────────────
@@ -45,10 +46,13 @@ router.post("/start-conversation", protectAny, startConversation);
 // ─── Admin deletes a zombie/failed conversation ───────────────────────────────
 router.delete("/conversations/:id", adminProtect, deleteConversation);
 
-// ─── Admin bulk-sends a template to ALL leads ────────────────────────────────
-router.post("/bulk-send", adminProtect, bulkSendToLeads);
+// ─── Bulk send: all leads (or campaign-filtered leads) ───────────────────────
+router.post("/bulk-send",     adminProtect, bulkSendToLeads);
 
-// ─── Get all leads for WhatsApp panel (Leads tab — admin sees all, agent sees own) ─
+// ─── Bulk send: arbitrary recipients from CSV ────────────────────────────────
+router.post("/bulk-send-csv", adminProtect, bulkSendCSV);
+
+// ─── Get all leads for WhatsApp panel (Leads tab) ────────────────────────────
 router.get("/leads", protectAny, getLeadsForWhatsApp);
 
 module.exports = router;
