@@ -43,6 +43,10 @@ const attendanceRoute      = require('./routes/attendanceRoute');
 const emailCampaignRoute   = require('./routes/emailCampaign');
 const emailHistoryRoute    = require('./routes/emailHistory');
 
+// ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
+const smsCampaignRoute = require('./routes/smsCampaign');
+const smsHistoryRoute  = require('./routes/smsHistory');
+
 // ── Saanvi Voicebot Proxy (avoids CORS) ──────────────────────────────────────
 const saanviProxyRoute = require('./routes/saanviProxy');
 
@@ -197,6 +201,8 @@ app.use('/api/website-config', websiteConfigRoute);
 app.use('/api/chat',           chatRoutes);
 app.use('/api/email-campaign', emailCampaignRoute);
 app.use('/api/email',          emailHistoryRoute);
+app.use('/api/sms-campaign',   smsCampaignRoute);
+app.use('/api/sms',            smsHistoryRoute);
 
 // ── Privacy & Subscription (BIP39 zero-knowledge encryption) ─────────────────
 app.use('/api/privacy',      privacyRoute);
