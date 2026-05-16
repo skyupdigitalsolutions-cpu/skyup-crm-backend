@@ -112,7 +112,7 @@ const sendMessage = async (req, res) => {
           },
           {
             headers: {
-              Authkey:         authKey,
+              authkey:         authKey,
               "Content-Type":  "application/json",
               "accept":        "application/json",
             },
@@ -202,7 +202,7 @@ const sendMessage = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const sendTemplate = async (req, res) => {
   try {
-    const { conversationId, templateName, languageCode = "en_US", components = [] } = req.body;
+    const { conversationId, templateName, languageCode = "en", components = [] } = req.body;
     const { companyId, userId } = req.user;
 
     const conversation = await WhatsAppConversation.findById(conversationId);
@@ -468,7 +468,7 @@ const startConversation = async (req, res) => {
       phone,
       contactName = "",
       templateName,
-      languageCode = "en_US",
+      languageCode = "en",
       components   = [],
     } = req.body;
 
@@ -740,7 +740,7 @@ const _saveConversationAndMessage = async ({ cleanPhone, contactName, companyId,
 // ─────────────────────────────────────────────────────────────────────────────
 const bulkSendToLeads = async (req, res) => {
   try {
-    const { templateName, languageCode = "en_US", campaign } = req.body;
+    const { templateName, languageCode = "en", campaign } = req.body;
     const { companyId, userId } = req.user;
 
     if (!templateName?.trim()) {
@@ -822,7 +822,7 @@ const bulkSendToLeads = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const bulkSendCSV = async (req, res) => {
   try {
-    const { recipients, templateName, languageCode = "en_US" } = req.body;
+    const { recipients, templateName, languageCode = "en" } = req.body;
     const { companyId, userId } = req.user;
 
     if (!templateName?.trim()) {
