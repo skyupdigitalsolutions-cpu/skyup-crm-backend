@@ -10,6 +10,20 @@ const Lead                 = require("../models/Leads");
 const User                 = require("../models/Users");
 
 // ─────────────────────────────────────────────────────────────────────────────
+// normalizePhone — ensures 91 country code prefix for Indian WhatsApp numbers.
+// Numbers from Facebook Ads / Google Ads / website forms arrive as bare 10-digit
+// strings. MSG91 and Meta require the full number e.g. "919876543210".
+// ─────────────────────────────────────────────────────────────────────────────
+function normalizePhone(raw) {
+  if (!raw) return "";
+  let digits = String(raw).replace(/\D/g, "");
+  if (digits.startsWith("0091")) digits = digits.slice(4);
+  if (digits.startsWith("0") && digits.length === 11) digits = digits.slice(1);
+  if (digits.length === 10) digits = "91" + digits;
+  return digits;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helper: Parse MSG91 timestamp correctly
 // MSG91 sends ts as ISO string "2026-05-13T13:36:15+05:30"
 // AND unix timestamp inside the messages array — we prefer the unix one
@@ -62,7 +76,8 @@ const receiveMSG91Webhook = async (req, res) => {
     }
 
     // ── Extract fields from MSG91 payload ─────────────────────────────────────
-    const waPhone     = (body.customerNumber || "").replace(/\D/g, "");
+    // Normalize to full E.164 digits (with 91 prefix for Indian numbers)
+    const waPhone     = normalizePhone(body.customerNumber);
     const toNumber    = (body.integratedNumber || "").replace(/\D/g, "");
     const contactName = body.customerName || "";
     const msgText     = body.text || "";

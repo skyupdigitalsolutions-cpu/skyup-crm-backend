@@ -9,6 +9,32 @@ const WhatsAppMessage        = require("../models/WhatsAppMessage");
 const Lead                   = require("../models/Leads");
 
 // ─────────────────────────────────────────────────────────────────────────────
+// normalizePhone — ensures every WhatsApp number has the 91 country code.
+// Numbers from Facebook Ads, Google Ads, and website forms often arrive as
+// 10-digit local numbers (e.g. "9876543210") without the country prefix.
+// MSG91 and Meta both require the full E.164-style number (e.g. "919876543210").
+//
+// Rules:
+//   "9876543210"      → "919876543210"   (10 digits → prefix 91)
+//   "919876543210"    → "919876543210"   (already correct, leave as-is)
+//   "+919876543210"   → "919876543210"   (strip + only)
+//   "09876543210"     → "919876543210"   (leading 0 → replace with 91)
+//   "00919876543210"  → "919876543210"   (00 prefix → strip)
+// ─────────────────────────────────────────────────────────────────────────────
+function normalizePhone(raw) {
+  if (!raw) return "";
+  // Strip everything except digits
+  let digits = String(raw).replace(/\D/g, "");
+  // Strip leading double-zero international prefix (0091...)
+  if (digits.startsWith("0091")) digits = digits.slice(4);
+  // Strip leading single zero (091...)
+  if (digits.startsWith("0") && digits.length === 11) digits = digits.slice(1);
+  // If 10 digits assume Indian local number — prepend 91
+  if (digits.length === 10) digits = "91" + digits;
+  return digits;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/whatsapp/conversations
 // ─────────────────────────────────────────────────────────────────────────────
 const getConversations = async (req, res) => {
@@ -481,7 +507,7 @@ const startConversation = async (req, res) => {
     if (!phone?.trim()) {
       return res.status(400).json({ error: "Phone number is required" });
     }
-    const cleanPhone = phone.trim().replace(/\D/g, "");
+    const cleanPhone = normalizePhone(phone);
     if (cleanPhone.length < 10 || cleanPhone.length > 15) {
       return res.status(400).json({ error: "Invalid phone number. Include country code (e.g. 919876543210)" });
     }
@@ -777,7 +803,7 @@ const bulkSendToLeads = async (req, res) => {
     let failed = 0;
 
     for (const lead of leads) {
-      const cleanPhone = (lead.mobile || "").replace(/\D/g, "");
+      const cleanPhone = normalizePhone(lead.mobile);
       if (cleanPhone.length < 10) {
         results.push({ leadId: lead._id, name: lead.name, phone: lead.mobile, status: "skipped", reason: "Invalid phone number" });
         failed++;
@@ -847,7 +873,7 @@ const bulkSendCSV = async (req, res) => {
     let failed = 0;
 
     for (const recipient of recipients) {
-      const cleanPhone = (recipient.phone || "").toString().replace(/\D/g, "");
+      const cleanPhone = normalizePhone(recipient.phone);
       const contactName = recipient.name || "";
 
       if (cleanPhone.length < 10) {
@@ -928,7 +954,7 @@ const getLeadsForWhatsApp = async (req, res) => {
     }
 
     const result = leads.map(l => {
-      const cleanPhone = (l.mobile || "").replace(/\D/g, "");
+      const cleanPhone = normalizePhone(l.mobile);
       const existingConv = convByPhone[cleanPhone] || null;
       return {
         ...l,
