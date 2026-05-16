@@ -64,7 +64,7 @@ const getLeads = async (req, res) => {
     const leads = await Lead.find({
       company: req.user.company,
       $or: [{ user: req.user._id }, { user: null }],
-    }).populate("user", "name email");
+    }).populate("user", "name email").populate("previousAgents", "name email");
     res.status(200).json(leads);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -90,10 +90,9 @@ const getLeadsByCampaign = async (req, res) => {
       return res
         .status(400)
         .json({ message: "campaign query param is required" });
-    const leads = await Lead.find({ company: companyId, campaign }).populate(
-      "user",
-      "name email",
-    );
+    const leads = await Lead.find({ company: companyId, campaign })
+      .populate("user", "name email")
+      .populate("previousAgents", "name email");
     res.status(200).json(leads);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -154,10 +153,9 @@ const adminCreateLead = async (req, res) => {
       user: assignedUser,
       company: companyId,
     });
-    const populated = await Lead.findById(lead._id).populate(
-      "user",
-      "name email",
-    );
+    const populated = await Lead.findById(lead._id)
+      .populate("user", "name email")
+      .populate("previousAgents", "name email");
 
     // ── Notify WhatsApp panel about new lead via socket ───────────────────────
     const io = global._io;
@@ -240,7 +238,7 @@ const adminCreateLeadsBulk = async (req, res) => {
         );
 
         results.push(
-          await Lead.findById(lead._id).populate("user", "name email"),
+          await Lead.findById(lead._id).populate("user", "name email").populate("previousAgents", "name email"),
         );
       } catch (err) {
         errors.push({ index: i, message: err.message });
@@ -302,10 +300,9 @@ const adminImportCSV = async (req, res) => {
         };
         if (row.leadgenId) adminDoc.leadgenId = row.leadgenId;
         const inserted = await Lead.collection.insertOne(adminDoc);
-        const savedLead = await Lead.findById(inserted.insertedId).populate(
-          "user",
-          "name email",
-        );
+        const savedLead = await Lead.findById(inserted.insertedId)
+          .populate("user", "name email")
+          .populate("previousAgents", "name email");
 
         // ── Notify admin on WhatsApp ────────────────────────────────────────
         notifyTelegram(adminDoc, row.source || "CSV Import").catch((e) =>
@@ -363,10 +360,9 @@ const userImportCSV = async (req, res) => {
           company: req.user.company,
         };
         const lead = await Lead.collection.insertOne(userDoc);
-        const savedLead = await Lead.findById(lead.insertedId).populate(
-          "user",
-          "name email",
-        );
+        const savedLead = await Lead.findById(lead.insertedId)
+          .populate("user", "name email")
+          .populate("previousAgents", "name email");
 
         // ── Notify admin on WhatsApp ────────────────────────────────────────
         notifyTelegram(userDoc, row.source || "CSV Import").catch((e) =>
@@ -440,7 +436,7 @@ const adminUpdateLead = async (req, res) => {
     const { company, user, leadgenId, ...safeBody } = req.body;
     const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, {
       new: true,
-    }).populate("user", "name email");
+    }).populate("user", "name email").populate("previousAgents", "name email");
     return res.status(200).json(updatedLead);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -491,7 +487,8 @@ const getMyLeads = async (req, res) => {
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate("user", "name email"),
+        .populate("user", "name email")
+        .populate("previousAgents", "name email"),
       Lead.countDocuments(query),
     ]);
 
@@ -696,7 +693,7 @@ const markNotInterested = async (req, res) => {
 
     const updatedLead = await Lead.findByIdAndUpdate(id, updatePayload, {
       new: true,
-    }).populate("user", "name email");
+    }).populate("user", "name email").populate("previousAgents", "name email");
 
     const message = isSecondNI
       ? "Lead marked Not Interested again. 3 follow-up calls scheduled. Status reset to New."
@@ -790,7 +787,8 @@ const adminGetAllLeads = async (req, res) => {
       return res.status(400).json({ message: "Company not found in token." });
     const leads = await Lead.find({ company: companyId })
       .sort({ createdAt: -1 })
-      .populate("user", "name email");
+      .populate("user", "name email")
+      .populate("previousAgents", "name email");
     res.status(200).json(leads);
   } catch (error) {
     res.status(500).json({ message: error.message });
