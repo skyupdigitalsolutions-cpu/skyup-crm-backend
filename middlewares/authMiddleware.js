@@ -1,7 +1,9 @@
 // middlewares/authMiddleware.js
-const jwt   = require("jsonwebtoken");
-const User  = require("../models/Users");
-const Admin = require("../models/Admin");
+const jwt        = require("jsonwebtoken");
+const User       = require("../models/Users");
+const Admin      = require("../models/Admin");
+const SuperAdmin = require("../models/SuperAdmin");
+const Company    = require("../models/Company");
 const { isTokenBlacklisted } = require("./rateLimiter");
 
 // ── User-only middleware ───────────────────────────────────────────────────────
@@ -56,6 +58,34 @@ const protectAny = async (req, res, next) => {
       }
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+      if (decoded.role === "superadmin") {
+        // SuperAdmin acting as admin — resolve a company context so dual-role
+        // controllers (WhatsApp, call logs, etc.) work like they do for admin.
+        const superAdmin = await SuperAdmin.findById(decoded.id).select("-password");
+        if (!superAdmin) return res.status(401).json({ message: "Not authorized as superadmin" });
+
+        const headerCompanyId = req.headers["x-company-id"];
+        let company = null;
+        if (headerCompanyId) {
+          company = await Company.findById(headerCompanyId).catch(() => null);
+        }
+        if (!company) company = await Company.findOne({ isActive: true }).sort({ createdAt: 1 });
+        if (!company) company = await Company.findOne().sort({ createdAt: 1 });
+        if (!company) return res.status(404).json({ message: "No company found for superadmin to manage" });
+
+        req.superAdmin = superAdmin;
+        req.admin = {
+          _id:          superAdmin._id,
+          name:         superAdmin.name,
+          email:        superAdmin.email,
+          role:         "superadmin",
+          company,
+          isSuperAdmin: true,
+        };
+        req.callerCompany = company._id;
+        return next();
+      }
 
       if (decoded.role === "admin") {
         req.admin = await Admin.findById(decoded.id)
