@@ -143,16 +143,17 @@ const sendMessage = async (req, res) => {
     let waMessageId;
     try {
       if (provider === "msg91") {
-        // Plain text reply — single-message endpoint (only works inside 24h session window)
+        // Plain text reply — uses control.msg91.com single-message endpoint
+        // This is the endpoint that was confirmed working in production logs
         const msg91Payload = {
           integrated_number: senderNumber,
           recipient_number:  recipientPhone,
           content_type:      "text",
-          message:           text.trim(),
+          text:              text.trim(),
         };
         console.log("📤 MSG91 sendMessage request:", JSON.stringify(msg91Payload, null, 2));
         const msg91Response = await axios.post(
-          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
+          "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
           msg91Payload,
           {
             headers: {
