@@ -515,9 +515,11 @@ const startConversation = async (req, res) => {
       phone,
       contactName = "",
       templateName,
-      languageCode = "en",
+      languageCode = "en_US",
       components   = [],
     } = req.body;
+
+    console.log("🚀 startConversation called with:", JSON.stringify({ phone, contactName, templateName, languageCode }, null, 2));
 
     const isAdmin   = !!req.admin;
     const companyId = isAdmin
@@ -590,7 +592,15 @@ const startConversation = async (req, res) => {
           msg91Response.data?.data?.[0]?.id ||
           msg91Response.data?.requestId ||
           `tmpl_${Date.now()}_${crypto.randomUUID()}`;
-        console.log(`✅ MSG91 initiation template sent → ${cleanPhone}`, msg91Response.data);
+        console.log("✅ MSG91 start-conversation FULL RESPONSE:", JSON.stringify(msg91Response.data, null, 2));
+        console.log("📤 MSG91 request payload was:", JSON.stringify({
+          integrated_number: senderNumber,
+          templateName: templateName.trim(),
+          languageCode,
+          to: cleanPhone,
+          contactName: contactName.trim() || "(empty)",
+          components: bodyComponents,
+        }, null, 2));
       } else {
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaPayload = {
@@ -618,7 +628,9 @@ const startConversation = async (req, res) => {
     } catch (apiErr) {
       const errData = apiErr.response?.data;
       const errMsg  = errData?.message || errData?.error?.message || apiErr.message;
-      console.error("❌ start-conversation template error:", JSON.stringify(errData || errMsg));
+      console.error("❌ start-conversation template FULL ERROR:", JSON.stringify(errData, null, 2));
+      console.error("❌ HTTP status:", apiErr.response?.status);
+      console.error("❌ Error message:", errMsg);
       return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
     }
 
