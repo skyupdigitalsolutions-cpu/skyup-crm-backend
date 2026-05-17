@@ -111,5 +111,17 @@ const protectAdmin = async (req, res, next) => {
     return res.status(401).json({ message: "Not authorized, no token" });
   }
 };
+// ── Company-superadmin gate ───────────────────────────────────────────────────
+// Run AFTER protectAdmin. Passes only if the caller is the company's superadmin
+// (Admin.role === "superadmin") OR the global platform owner acting as admin
+// (synthetic req.admin.role === "superadmin", set above at line ~62).
+const requireCompanySuperAdmin = (req, res, next) => {
+  if (req.admin && req.admin.role === "superadmin") {
+    return next();
+  }
+  return res.status(403).json({
+    message: "Access denied: only the company superadmin can perform this action",
+  });
+};
 
-module.exports = { protectAdmin };
+module.exports = { protectAdmin, requireCompanySuperAdmin };
