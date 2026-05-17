@@ -143,27 +143,31 @@ const sendMessage = async (req, res) => {
     let waMessageId;
     try {
       if (provider === "msg91") {
+        // Plain text reply — single-message endpoint (only works inside 24h session window)
+        const msg91Payload = {
+          integrated_number: senderNumber,
+          recipient_number:  recipientPhone,
+          content_type:      "text",
+          message:           text.trim(),
+        };
+        console.log("📤 MSG91 sendMessage request:", JSON.stringify(msg91Payload, null, 2));
         const msg91Response = await axios.post(
-          "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
-          {
-            integrated_number: senderNumber,
-            recipient_number:  recipientPhone,
-            content_type:      "text",
-            text:              text.trim(),
-          },
+          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
+          msg91Payload,
           {
             headers: {
-              authkey:         authKey,
-              "Content-Type":  "application/json",
-              "accept":        "application/json",
+              authkey:        authKey,
+              "Content-Type": "application/json",
+              accept:         "application/json",
             },
           }
         );
         waMessageId =
-          msg91Response.data?.data?.id  ||
+          msg91Response.data?.data?.message_uuid ||
+          msg91Response.data?.data?.id ||
           msg91Response.data?.requestId ||
           `out_${Date.now()}_${crypto.randomUUID()}`;
-        console.log(`✅ MSG91 send success → ${recipientPhone}`, msg91Response.data);
+        console.log(`✅ MSG91 send success → ${recipientPhone}`, JSON.stringify(msg91Response.data, null, 2));
       } else {
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaResponse = await axios.post(
@@ -265,28 +269,37 @@ const sendTemplate = async (req, res) => {
         if (!authKey || !senderNumber) {
           return res.status(500).json({ error: "MSG91 credentials missing in .env" });
         }
-        const msg91Response = await axios.post(
-          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
-          {
-            integrated_number: senderNumber,
-            content_type:      "template",
-            payload: {
-              messaging_product: "whatsapp",
-              type:              "template",
-              template: {
-                name:              templateName,
-                language:          { code: languageCode, policy: "deterministic" },
-                // Fill in {{body_customer_name}} variable in crm_lead_followup template
-                to_and_components: [{ to: recipientPhone, components: conversation.contactName
-                  ? [{ type: "body", parameters: [{ type: "text", text: conversation.contactName }] }]
-                  : [] }],
-              },
+        // Normalize language code: MSG91/Meta require "en" not "en_US" for most templates
+        // unless your template was specifically registered with "en_US"
+        const resolvedLangCode = languageCode || "en";
+
+        const bodyComponents = conversation.contactName
+          ? [{ type: "body", parameters: [{ type: "text", text: conversation.contactName }] }]
+          : [];
+
+        const requestPayload = {
+          integrated_number: senderNumber,
+          content_type:      "template",
+          payload: {
+            messaging_product: "whatsapp",
+            type:              "template",
+            template: {
+              name:              templateName,
+              language:          { code: resolvedLangCode, policy: "deterministic" },
+              to_and_components: [{ to: recipientPhone, components: bodyComponents }],
             },
           },
+        };
+
+        console.log("📤 MSG91 sendTemplate request:", JSON.stringify(requestPayload, null, 2));
+
+        const msg91Response = await axios.post(
+          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+          requestPayload,
           { headers: { authkey: authKey, "Content-Type": "application/json" } }
         );
         waMessageId = msg91Response.data?.data?.[0]?.id || msg91Response.data?.requestId || `tmpl_${Date.now()}_${crypto.randomUUID()}`;
-        console.log(`✅ MSG91 template send → ${recipientPhone} [${templateName}]`);
+        console.log(`✅ MSG91 template send → ${recipientPhone} [${templateName}]`, JSON.stringify(msg91Response.data, null, 2));
       } else {
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaTmpl = { name: templateName, language: { code: languageCode } };
@@ -564,23 +577,29 @@ const startConversation = async (req, res) => {
         const bodyComponents = contactName.trim()
           ? [{ type: "body", parameters: [{ type: "text", text: contactName.trim() }] }]
           : [];
-        const toAndComponents = { to: cleanPhone, components: bodyComponents };
+
+        // Normalize language code — default to "en" if not provided
+        const resolvedLangCode = languageCode || "en";
+
+        const requestPayload = {
+          integrated_number: senderNumber,
+          content_type:      "template",
+          payload: {
+            messaging_product: "whatsapp",
+            type:              "template",
+            template: {
+              name:              templateName.trim(),
+              language:          { code: resolvedLangCode, policy: "deterministic" },
+              to_and_components: [{ to: cleanPhone, components: bodyComponents }],
+            },
+          },
+        };
+
+        console.log("📤 MSG91 start-conversation request:", JSON.stringify(requestPayload, null, 2));
 
         const msg91Response = await axios.post(
           "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
-          {
-            integrated_number: senderNumber,
-            content_type:      "template",
-            payload: {
-              messaging_product: "whatsapp",
-              type:              "template",
-              template: {
-                name:     templateName.trim(),
-                language: { code: languageCode, policy: "deterministic" },
-                to_and_components: [toAndComponents],
-              },
-            },
-          },
+          requestPayload,
           {
             headers: {
               authkey:        authKey,
@@ -593,14 +612,6 @@ const startConversation = async (req, res) => {
           msg91Response.data?.requestId ||
           `tmpl_${Date.now()}_${crypto.randomUUID()}`;
         console.log("✅ MSG91 start-conversation FULL RESPONSE:", JSON.stringify(msg91Response.data, null, 2));
-        console.log("📤 MSG91 request payload was:", JSON.stringify({
-          integrated_number: senderNumber,
-          templateName: templateName.trim(),
-          languageCode,
-          to: cleanPhone,
-          contactName: contactName.trim() || "(empty)",
-          components: bodyComponents,
-        }, null, 2));
       } else {
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaPayload = {
