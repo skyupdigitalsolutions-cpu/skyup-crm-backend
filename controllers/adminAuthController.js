@@ -14,10 +14,17 @@ const registerAdmin = async (req, res) => {
     if (!company) return res.status(404).json({ message: "Company not found" });
     if (!company.isActive) return res.status(403).json({ message: "Company is not active" });
 
-    const adminExists = await Admin.findOne({ email });
+const adminExists = await Admin.findOne({ email });
     if (adminExists) return res.status(400).json({ message: "Admin already exists" });
 
-    const admin = await Admin.create({ name, email, password, company: companyId });
+    // ── Per-company superadmin ───────────────────────────────────────────────
+    // FIRST admin of a company becomes that company's superadmin (full control
+    // inside their own company). Every later admin is a normal "admin".
+    // This does NOT touch the global platform SuperAdmin (models/SuperAdmin.js).
+    const existingCount = await Admin.countDocuments({ company: companyId });
+    const role = existingCount === 0 ? "superadmin" : "admin";
+
+    const admin = await Admin.create({ name, email, password, company: companyId, role });
 
     res.status(201).json({
       _id:     admin._id,
@@ -25,8 +32,8 @@ const registerAdmin = async (req, res) => {
       email:   admin.email,
       company: admin.company,
       plan:    company.plan,        // FIX: include plan so frontend doesn't need extra fetch
-      role:    "admin",
-      token:   generateToken(admin._id, "admin"),
+      role:    admin.role,          // CHANGED: real role (superadmin | admin), was hardcoded
+      token:   generateToken(admin._id, "admin"), // JWT role stays "admin" on purpose
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -47,14 +54,14 @@ const loginAdmin = async (req, res) => {
       return res.status(403).json({ message: "Your company is deactivated" });
     }
 
-    res.status(200).json({
+res.status(200).json({
       _id:     admin._id,
       name:    admin.name,
       email:   admin.email,
       company: admin.company._id,
       plan:    admin.company.plan,  // FIX: include plan in login response
-      role:    "admin",
-      token:   generateToken(admin._id, "admin"),
+      role:    admin.role,          // CHANGED: was hardcoded "admin"; now superadmin | admin
+      token:   generateToken(admin._id, "admin"), // JWT role stays "admin" so protectAdmin passes
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
