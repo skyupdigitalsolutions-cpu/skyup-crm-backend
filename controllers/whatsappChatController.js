@@ -270,13 +270,12 @@ const sendTemplate = async (req, res) => {
         if (!authKey || !senderNumber) {
           return res.status(500).json({ error: "MSG91 credentials missing in .env" });
         }
-        // Normalize language code: MSG91/Meta require "en" not "en_US" for most templates
-        // unless your template was specifically registered with "en_US"
         const resolvedLangCode = languageCode || "en";
-
-        const bodyComponents = conversation.contactName
-          ? [{ type: "body", parameters: [{ type: "text", text: conversation.contactName }] }]
-          : [];
+        // MSG91 correct payload — namespace required, to must be array, components is an object
+        const namespace = "68bcef67_e185_4e55_94df_52c26cb0bc37";
+        const components = conversation.contactName
+          ? { body_customer_name: { type: "text", value: conversation.contactName, parameter_name: "customer_name" } }
+          : {};
 
         const requestPayload = {
           integrated_number: senderNumber,
@@ -287,7 +286,8 @@ const sendTemplate = async (req, res) => {
             template: {
               name:              templateName,
               language:          { code: resolvedLangCode, policy: "deterministic" },
-              to_and_components: [{ to: recipientPhone, components: bodyComponents }],
+              namespace,
+              to_and_components: [{ to: [recipientPhone], components }],
             },
           },
         };
@@ -574,13 +574,12 @@ const startConversation = async (req, res) => {
     let waMessageId;
     try {
       if (provider === "msg91") {
-        // Fill in template variables — crm_lead_followup has {{body_customer_name}}
-        const bodyComponents = contactName.trim()
-          ? [{ type: "body", parameters: [{ type: "text", text: contactName.trim() }] }]
-          : [];
-
-        // Normalize language code — default to "en" if not provided
+        // MSG91 correct payload — namespace required, to must be array, components is an object
         const resolvedLangCode = languageCode || "en";
+        const namespace = "68bcef67_e185_4e55_94df_52c26cb0bc37";
+        const components = contactName.trim()
+          ? { body_customer_name: { type: "text", value: contactName.trim(), parameter_name: "customer_name" } }
+          : {};
 
         const requestPayload = {
           integrated_number: senderNumber,
@@ -591,7 +590,8 @@ const startConversation = async (req, res) => {
             template: {
               name:              templateName.trim(),
               language:          { code: resolvedLangCode, policy: "deterministic" },
-              to_and_components: [{ to: cleanPhone, components: bodyComponents }],
+              namespace,
+              to_and_components: [{ to: [cleanPhone], components }],
             },
           },
         };
@@ -726,10 +726,11 @@ const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, co
   const provider = config.provider || "msg91";
 
   if (provider === "msg91") {
-    // Fill in template body variables — crm_lead_followup uses {{body_customer_name}}
-    const bodyComponents = contactName.trim()
-      ? [{ type: "body", parameters: [{ type: "text", text: contactName.trim() }] }]
-      : [];
+    // MSG91 correct payload — namespace required, to must be array, components is an object
+    const namespace = "68bcef67_e185_4e55_94df_52c26cb0bc37";
+    const components = contactName.trim()
+      ? { body_customer_name: { type: "text", value: contactName.trim(), parameter_name: "customer_name" } }
+      : {};
 
     const resp = await axios.post(
       "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
@@ -741,8 +742,9 @@ const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, co
           type:              "template",
           template: {
             name:              templateName.trim(),
-            language:          { code: languageCode, policy: "deterministic" },
-            to_and_components: [{ to: cleanPhone, components: bodyComponents }],
+            language:          { code: languageCode || "en", policy: "deterministic" },
+            namespace,
+            to_and_components: [{ to: [cleanPhone], components }],
           },
         },
       },
