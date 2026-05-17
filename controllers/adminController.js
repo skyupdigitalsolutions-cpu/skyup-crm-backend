@@ -95,6 +95,21 @@ const deleteAdmin = async (req, res) => {
   try {
     const admin = await Admin.findOne({ _id: req.params.id, company: req.admin.company._id });
     if (!admin) return res.status(404).json({ message: "Admin Not Found" });
+
+    // Guard: never delete a company's last superadmin (would lock the company
+    // out of all admin-team management).
+    if (admin.role === "superadmin") {
+      const superCount = await Admin.countDocuments({
+        company: req.admin.company._id,
+        role: "superadmin",
+      });
+      if (superCount <= 1) {
+        return res.status(400).json({
+          message: "Cannot delete the only superadmin. Promote another admin to superadmin first.",
+        });
+      }
+    }
+
     await Admin.findByIdAndDelete(req.params.id);
     res.status(200).json({ message: "Admin deleted successfully" });
   } catch (error) {
