@@ -35,13 +35,13 @@ router.get("/dashboard-stats",   protectAdmin, getDashboardStats);
 
 // ── Admin CRUD (protected) ────────────────────────────────────────────────────
 router.get("/",  protectAdmin, getAdmins);
-router.post("/", protectAdmin, createAdmin);
+router.post("/", protectAdmin, requireCompanySuperAdmin, createAdmin);
 
 // User delete — must be before /:id to avoid conflict
-router.delete("/user/:id", protectAdmin, deleteCompanyUser);
+router.delete("/user/:id", protectAdmin, requireCompanySuperAdmin, deleteCompanyUser);
 
 router.get("/:id",    protectAdmin, getAdmin);
-router.delete("/:id", protectAdmin, deleteAdmin);
-router.put("/:id",    protectAdmin, updateAdmin);
+router.delete("/:id", protectAdmin, requireCompanySuperAdmin, deleteAdmin);
+router.put("/:id",    protectAdmin, requireCompanySuperAdmin, updateAdmin);
 
 module.exports = router;
