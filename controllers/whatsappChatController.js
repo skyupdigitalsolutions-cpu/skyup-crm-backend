@@ -7,6 +7,7 @@ const WhatsAppConversation   = require("../models/WhatsAppConversation");
 const crypto                  = require("crypto");
 const WhatsAppMessage        = require("../models/WhatsAppMessage");
 const Lead                   = require("../models/Leads");
+const { normalizePhone: _sharedNormalizePhone } = require("../utils/normalizePhone");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // normalizePhone — ensures every WhatsApp number has the 91 country code.
@@ -32,6 +33,16 @@ function normalizePhone(raw) {
   // If 10 digits assume Indian local number — prepend 91
   if (digits.length === 10) digits = "91" + digits;
   return digits;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// safeWaPhone — always returns a clean digits-only phone for WA API calls,
+// even if the value stored in DB still has a leading "+".
+// This is the fix for numbers that were manually updated in MongoDB Atlas
+// but may have been stored as "+919XXXXXXXXXX" instead of "919XXXXXXXXXX".
+// ─────────────────────────────────────────────────────────────────────────────
+function safeWaPhone(stored) {
+  return normalizePhone(stored);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,6 +136,10 @@ const sendMessage = async (req, res) => {
       });
     }
 
+    // Always sanitize waPhone before calling external API —
+    // numbers stored in DB may have a leading "+" from manual Atlas edits
+    const recipientPhone = safeWaPhone(conversation.waPhone);
+
     let waMessageId;
     try {
       if (provider === "msg91") {
@@ -132,7 +147,7 @@ const sendMessage = async (req, res) => {
           "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
           {
             integrated_number: senderNumber,
-            recipient_number:  conversation.waPhone,
+            recipient_number:  recipientPhone,
             content_type:      "text",
             text:              text.trim(),
           },
@@ -148,7 +163,7 @@ const sendMessage = async (req, res) => {
           msg91Response.data?.data?.id  ||
           msg91Response.data?.requestId ||
           `out_${Date.now()}_${crypto.randomUUID()}`;
-        console.log(`✅ MSG91 send success → ${conversation.waPhone}`, msg91Response.data);
+        console.log(`✅ MSG91 send success → ${recipientPhone}`, msg91Response.data);
       } else {
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaResponse = await axios.post(
@@ -156,7 +171,7 @@ const sendMessage = async (req, res) => {
           {
             messaging_product: "whatsapp",
             recipient_type:    "individual",
-            to:                conversation.waPhone,
+            to:                recipientPhone,
             type:              "text",
             text: { preview_url: false, body: text.trim() },
           },
@@ -241,6 +256,9 @@ const sendTemplate = async (req, res) => {
     const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
     const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
 
+    // Sanitize stored waPhone — may have a leading "+" from manual DB edits
+    const recipientPhone = safeWaPhone(conversation.waPhone);
+
     let waMessageId;
     try {
       if (provider === "msg91") {
@@ -258,21 +276,21 @@ const sendTemplate = async (req, res) => {
               template: {
                 name:              templateName,
                 language:          { code: languageCode, policy: "deterministic" },
-                to_and_components: [{ to: conversation.waPhone, components: [] }],
+                to_and_components: [{ to: recipientPhone, components: [] }],
               },
             },
           },
           { headers: { authkey: authKey, "Content-Type": "application/json" } }
         );
         waMessageId = msg91Response.data?.data?.[0]?.id || msg91Response.data?.requestId || `tmpl_${Date.now()}_${crypto.randomUUID()}`;
-        console.log(`✅ MSG91 template send → ${conversation.waPhone} [${templateName}]`);
+        console.log(`✅ MSG91 template send → ${recipientPhone} [${templateName}]`);
       } else {
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaTmpl = { name: templateName, language: { code: languageCode } };
         if (components && components.length > 0) metaTmpl.components = components;
         const metaResponse = await axios.post(
           apiUrl,
-          { messaging_product: "whatsapp", to: conversation.waPhone, type: "template", template: metaTmpl },
+          { messaging_product: "whatsapp", to: recipientPhone, type: "template", template: metaTmpl },
           { headers: { Authorization: `Bearer ${config.accessToken}`, "Content-Type": "application/json" } }
         );
         waMessageId = metaResponse.data?.messages?.[0]?.id;
