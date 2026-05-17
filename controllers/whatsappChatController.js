@@ -243,7 +243,7 @@ const sendMessage = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const sendTemplate = async (req, res) => {
   try {
-    const { conversationId, templateName, languageCode = "en", components = [] } = req.body;
+    const { conversationId, templateName, languageCode = "en_US", components = [] } = req.body;
     const { companyId, userId } = req.user;
 
     const conversation = await WhatsAppConversation.findById(conversationId);
@@ -276,7 +276,10 @@ const sendTemplate = async (req, res) => {
               template: {
                 name:              templateName,
                 language:          { code: languageCode, policy: "deterministic" },
-                to_and_components: [{ to: recipientPhone, components: [] }],
+                // Fill in {{body_customer_name}} variable in crm_lead_followup template
+                to_and_components: [{ to: recipientPhone, components: conversation.contactName
+                  ? [{ type: "body", parameters: [{ type: "text", text: conversation.contactName }] }]
+                  : [] }],
               },
             },
           },
@@ -555,7 +558,11 @@ const startConversation = async (req, res) => {
     let waMessageId;
     try {
       if (provider === "msg91") {
-        const toAndComponents = { to: cleanPhone, components: [] };
+        // Fill in template variables — crm_lead_followup has {{body_customer_name}}
+        const bodyComponents = contactName.trim()
+          ? [{ type: "body", parameters: [{ type: "text", text: contactName.trim() }] }]
+          : [];
+        const toAndComponents = { to: cleanPhone, components: bodyComponents };
 
         const msg91Response = await axios.post(
           "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
@@ -630,7 +637,7 @@ const startConversation = async (req, res) => {
         status:           "open",
         lastMessage:      "",
         lastMessageAt:    new Date(),
-        sessionExpiresAt: null,
+        sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       });
     }
 
@@ -691,10 +698,15 @@ const startConversation = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helper: send a template to one phone number via MSG91 / Meta
 // ─────────────────────────────────────────────────────────────────────────────
-const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, config, authKey, senderNumber }) => {
+const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, config, authKey, senderNumber, contactName = "" }) => {
   const provider = config.provider || "msg91";
 
   if (provider === "msg91") {
+    // Fill in template body variables — crm_lead_followup uses {{body_customer_name}}
+    const bodyComponents = contactName.trim()
+      ? [{ type: "body", parameters: [{ type: "text", text: contactName.trim() }] }]
+      : [];
+
     const resp = await axios.post(
       "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
       {
@@ -706,7 +718,7 @@ const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, co
           template: {
             name:              templateName.trim(),
             language:          { code: languageCode, policy: "deterministic" },
-            to_and_components: [{ to: cleanPhone, components: [] }],
+            to_and_components: [{ to: cleanPhone, components: bodyComponents }],
           },
         },
       },
@@ -784,7 +796,7 @@ const _saveConversationAndMessage = async ({ cleanPhone, contactName, companyId,
 // ─────────────────────────────────────────────────────────────────────────────
 const bulkSendToLeads = async (req, res) => {
   try {
-    const { templateName, languageCode = "en", campaign } = req.body;
+    const { templateName, languageCode = "en_US", campaign } = req.body;
     const { companyId, userId } = req.user;
 
     if (!templateName?.trim()) {
@@ -831,6 +843,7 @@ const bulkSendToLeads = async (req, res) => {
       try {
         const waMessageId = await _sendTemplateToPhone({
           cleanPhone, templateName, languageCode, config, authKey, senderNumber,
+          contactName: lead.name,
         });
 
         await _saveConversationAndMessage({
@@ -866,7 +879,7 @@ const bulkSendToLeads = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const bulkSendCSV = async (req, res) => {
   try {
-    const { recipients, templateName, languageCode = "en" } = req.body;
+    const { recipients, templateName, languageCode = "en_US" } = req.body;
     const { companyId, userId } = req.user;
 
     if (!templateName?.trim()) {
@@ -903,6 +916,7 @@ const bulkSendCSV = async (req, res) => {
       try {
         const waMessageId = await _sendTemplateToPhone({
           cleanPhone, templateName, languageCode, config, authKey, senderNumber,
+          contactName,
         });
 
         // Try to link to an existing lead by phone
