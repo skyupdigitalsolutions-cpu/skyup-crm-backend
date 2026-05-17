@@ -9,11 +9,6 @@ const WhatsAppMessage      = require("../models/WhatsAppMessage");
 const Lead                 = require("../models/Leads");
 const User                 = require("../models/Users");
 
-// ─────────────────────────────────────────────────────────────────────────────
-// normalizePhone — ensures 91 country code prefix for Indian WhatsApp numbers.
-// Numbers from Facebook Ads / Google Ads / website forms arrive as bare 10-digit
-// strings. MSG91 and Meta require the full number e.g. "919876543210".
-// ─────────────────────────────────────────────────────────────────────────────
 function normalizePhone(raw) {
   if (!raw) return "";
   let digits = String(raw).replace(/\D/g, "");
@@ -23,13 +18,7 @@ function normalizePhone(raw) {
   return digits;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper: Parse MSG91 timestamp correctly
-// MSG91 sends ts as ISO string "2026-05-13T13:36:15+05:30"
-// AND unix timestamp inside the messages array — we prefer the unix one
-// ─────────────────────────────────────────────────────────────────────────────
 function parseTimestamp(ts, messagesStr) {
-  // First try: unix timestamp from messages array (most accurate)
   try {
     if (messagesStr) {
       const msgs = typeof messagesStr === "string" ? JSON.parse(messagesStr) : messagesStr;
@@ -39,56 +28,126 @@ function parseTimestamp(ts, messagesStr) {
       }
     }
   } catch (_) {}
-
-  // Second try: ts as ISO date string e.g. "2026-05-13T13:36:15+05:30"
   if (ts) {
     const d = new Date(ts);
     if (!isNaN(d.getTime())) return d;
   }
-
-  // Fallback to now
   return new Date();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /msg91-webhook/msg91
-// MSG91 sends all WhatsApp events here
+// MSG91 sends ALL WhatsApp events here — inbound messages AND delivery reports
 // ─────────────────────────────────────────────────────────────────────────────
 const receiveMSG91Webhook = async (req, res) => {
-  // Always respond 200 immediately — MSG91 retries if no quick response
+  // Always respond 200 immediately — MSG91 retries if no quick ack
   res.sendStatus(200);
 
   try {
     const body = req.body;
     console.log("📲 MSG91 Webhook received:", JSON.stringify(body, null, 2));
 
-    const webhookType = body.webhookType || body.type || "";
+    // ── Detect event type ─────────────────────────────────────────────────────
+    // MSG91 sends different shapes for inbound messages vs delivery reports.
+    // webhookType / type / event can be:
+    //   inbound / incoming / message   → client sent us a message
+    //   outbound / sent / delivered / read / failed → delivery status update for our outbound message
+    const webhookType = (
+      body.webhookType || body.type || body.event || ""
+    ).toLowerCase();
 
-    // Only process inbound messages
-    if (
-      webhookType !== "inbound" &&
-      webhookType !== "incoming" &&
-      webhookType !== "message" &&
-      !body.customerNumber
-    ) {
-      console.log(`⚠️  MSG91 webhook: skipping webhookType "${webhookType}"`);
+    const isDeliveryReport = (
+      webhookType === "outbound"  ||
+      webhookType === "sent"      ||
+      webhookType === "delivered" ||
+      webhookType === "read"      ||
+      webhookType === "failed"    ||
+      // MSG91 sometimes sends delivery reports with a requestId but no customerNumber
+      (!body.customerNumber && (body.requestId || body.uuid) && !body.text)
+    );
+
+    // ── Handle delivery status update (outbound report) ───────────────────────
+    if (isDeliveryReport) {
+      const msgId = body.requestId || body.uuid || body.messageId;
+      console.log(`📬 MSG91 delivery report: type="${webhookType}" msgId="${msgId}"`);
+
+      if (msgId) {
+        // Map MSG91 status to our status
+        const statusMap = {
+          sent:      "sent",
+          delivered: "delivered",
+          read:      "read",
+          failed:    "failed",
+          outbound:  "sent",
+        };
+        const newStatus = statusMap[webhookType] || "sent";
+
+        // Update message status in DB if we have a record
+        const updated = await WhatsAppMessage.findOneAndUpdate(
+          { waMessageId: msgId },
+          { status: newStatus },
+          { new: true }
+        );
+
+        if (updated) {
+          console.log(`✅ Updated message ${msgId} status → ${newStatus}`);
+          // Emit real-time status update to admin
+          const io = global._io;
+          if (io) {
+            io.to("wa_admin").emit("wa_message_status", {
+              waMessageId: msgId,
+              status: newStatus,
+              conversationId: updated.conversation?.toString(),
+            });
+          }
+        } else {
+          console.log(`ℹ️  Delivery report for unknown message ${msgId} — ignoring`);
+        }
+      }
       return;
     }
 
-    // ── Extract fields from MSG91 payload ─────────────────────────────────────
-    // Normalize to full E.164 digits (with 91 prefix for Indian numbers)
-    const waPhone     = normalizePhone(body.customerNumber);
-    const toNumber    = (body.integratedNumber || "").replace(/\D/g, "");
-    const contactName = body.customerName || "";
-    const msgText     = body.text || "";
-    const msgType     = (body.messageType || body.contentType || "text").toLowerCase();
-    const waMessageId = body.uuid || body.requestId || `msg91_${Date.now()}_${waPhone}`;
+    // ── Handle inbound message ────────────────────────────────────────────────
+    // MSG91 payload fields for inbound:
+    //   customerNumber  — sender's phone (the client)
+    //   integratedNumber — your WhatsApp business number
+    //   text            — message text
+    //   messageType / contentType — type of message
+    //   uuid / requestId — unique message id
 
-    // ── Correct timestamp: prefer unix from messages[], fallback to ts ISO string
-    const timestamp = parseTimestamp(body.ts, body.messages);
+    // Some MSG91 payload shapes use different field names — handle all variants
+    const rawPhone =
+      body.customerNumber ||
+      body.from           ||
+      body.sender         ||
+      body.mobile         ||
+      "";
 
-    if (!waPhone) {
-      console.warn("⚠️  MSG91 webhook: missing 'customerNumber', skipping");
+    if (!rawPhone) {
+      console.warn("⚠️  MSG91 webhook: no sender phone found in payload, skipping");
+      console.warn("Payload keys:", Object.keys(body).join(", "));
+      return;
+    }
+
+    const waPhone     = normalizePhone(rawPhone);
+    const toNumber    = normalizePhone(
+      body.integratedNumber || body.to || body.recipient || ""
+    );
+    const contactName = body.customerName || body.name || body.senderName || "";
+    const msgText     = body.text || body.message || body.body || "";
+    const msgType     = (
+      body.messageType || body.contentType || body.type || "text"
+    ).toLowerCase();
+    const waMessageId =
+      body.uuid       ||
+      body.requestId  ||
+      body.messageId  ||
+      `msg91_${Date.now()}_${waPhone}`;
+
+    const timestamp = parseTimestamp(body.ts || body.timestamp, body.messages);
+
+    if (!waPhone || waPhone.length < 10) {
+      console.warn("⚠️  MSG91 webhook: invalid phone number, skipping");
       return;
     }
 
@@ -100,22 +159,26 @@ const receiveMSG91Webhook = async (req, res) => {
     }
 
     // ── Identify which company this number belongs to ─────────────────────────
-    let config = await WhatsAppConfig.findOne({
-      provider:              "msg91",
-      msg91IntegratedNumber: toNumber,
-      isActive:              true,
-    });
+    let config = null;
+
+    if (toNumber) {
+      config = await WhatsAppConfig.findOne({
+        provider:              "msg91",
+        msg91IntegratedNumber: toNumber,
+        isActive:              true,
+      });
+    }
 
     if (!config) {
       config = await WhatsAppConfig.findOne({ provider: "msg91", isActive: true });
     }
 
-    if (!config && toNumber === (process.env.MSG91_INTEGRATED_NUMBER || "").replace(/\D/g, "")) {
+    if (!config) {
       config = await WhatsAppConfig.findOne({ isActive: true });
     }
 
     if (!config) {
-      console.error(`❌ MSG91 webhook: No active WhatsApp config found for number "${toNumber}"`);
+      console.error(`❌ MSG91 webhook: No active WhatsApp config found`);
       return;
     }
 
@@ -147,26 +210,35 @@ const receiveMSG91Webhook = async (req, res) => {
     let mediaId      = null;
     let mediaCaption = null;
 
-    if (msgType === "text") {
+    // Remove "inbound" / "incoming" from type for content parsing
+    const contentType = msgType.replace(/^(inbound|incoming|outbound)\s*/, "").trim() || "text";
+
+    if (contentType === "text" || contentType === "inbound" || contentType === "incoming") {
       msgBody     = msgText || "";
       messageType = "text";
-    } else if (["image", "document", "audio", "video", "sticker"].includes(msgType)) {
-      messageType  = msgType;
+    } else if (["image", "document", "audio", "video", "sticker"].includes(contentType)) {
+      messageType  = contentType;
       mediaCaption = body.caption || null;
-      msgBody      = body.caption || body.filename || body.url || `[${msgType}]`;
+      msgBody      = body.caption || body.filename || body.url || `[${contentType}]`;
       mediaId      = body.url || null;
-    } else if (msgType === "location") {
+    } else if (contentType === "location") {
       messageType = "location";
       msgBody     = `📍 Location: ${body.latitude}, ${body.longitude}`;
-    } else if (msgType === "button") {
+    } else if (contentType === "button") {
       messageType = "text";
       msgBody     = body.button || msgText || "[button reply]";
-    } else if (msgType === "interactive") {
+    } else if (contentType === "interactive") {
       messageType = "text";
       msgBody     = body.interactive || msgText || "[interactive reply]";
     } else {
-      messageType = "unknown";
-      msgBody     = msgText || `[${msgType} message]`;
+      // Unknown type — still save with raw text if available
+      messageType = "text";
+      msgBody     = msgText || `[${contentType} message]`;
+    }
+
+    if (!msgBody) {
+      console.warn(`⚠️  MSG91 webhook: empty message body for type "${msgType}" — saving anyway`);
+      msgBody = `[${msgType}]`;
     }
 
     // ── Save the inbound message ──────────────────────────────────────────────
