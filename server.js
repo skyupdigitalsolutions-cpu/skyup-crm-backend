@@ -106,6 +106,9 @@ const corsOptions = {
     callback(new Error(`CORS blocked: ${origin}`));
   },
   credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-company-id"],
+  optionsSuccessStatus: 200,
 };
 
 const io = new Server(server, {
@@ -123,6 +126,7 @@ const io = new Server(server, {
 
 // ── CORS must be first ────────────────────────────────────────────────────────
 app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // Handle all preflight OPTIONS requests
 
 // ── Body parsers ──────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
