@@ -122,6 +122,24 @@ const updateAdmin = async (req, res) => {
   try {
     const admin = await Admin.findOne({ _id: req.params.id, company: req.admin.company._id });
     if (!admin) return res.status(404).json({ message: "Admin Not Found" });
+
+    if (req.body.role && !["superadmin", "admin"].includes(req.body.role)) {
+      return res.status(400).json({ message: "Invalid role" });
+    }
+
+    // Guard: don't demote the company's only superadmin.
+    if (admin.role === "superadmin" && req.body.role && req.body.role !== "superadmin") {
+      const superCount = await Admin.countDocuments({
+        company: req.admin.company._id,
+        role: "superadmin",
+      });
+      if (superCount <= 1) {
+        return res.status(400).json({
+          message: "Cannot demote the only superadmin. Promote another admin first.",
+        });
+      }
+    }
+
     const updated = await Admin.findByIdAndUpdate(req.params.id, req.body, { new: true }).select("-password");
     res.status(200).json(updated);
   } catch (error) {
