@@ -126,7 +126,7 @@ const io = new Server(server, {
 
 // ── CORS must be first ────────────────────────────────────────────────────────
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // Handle all preflight OPTIONS requests
+app.options(/(.*)/, cors(corsOptions)); // Handle all preflight OPTIONS requests
 
 // ── Body parsers ──────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
