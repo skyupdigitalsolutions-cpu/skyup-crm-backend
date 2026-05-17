@@ -17,15 +17,15 @@ const {
 const {
   registerAdmin,
   loginAdmin,
-  logoutAdmin,                                             // ✅ NEW
+  logoutAdmin,                                          
 } = require("../controllers/adminAuthController");
-const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
+const { protectAdmin, requireCompanySuperAdmin } = require("../middlewares/adminAuthMiddleware");
 const { authLimiter }  = require("../middlewares/rateLimiter");
 
 // ── Auth (public) ─────────────────────────────────────────────────────────────
 router.post("/register", authLimiter, registerAdmin);
 router.post("/login",    authLimiter, loginAdmin);
-router.post("/logout",   protectAdmin, logoutAdmin);       // ✅ NEW — blacklists JWT in Redis
+router.post("/logout",   protectAdmin, logoutAdmin);
 
 // ── Company-specific routes (must be before /:id to avoid conflict) ───────────
 router.get("/company/me",        protectAdmin, getMyCompany || ((req, res) => res.status(501).json({ message: "Not implemented" })));
