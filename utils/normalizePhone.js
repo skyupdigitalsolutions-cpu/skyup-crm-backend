@@ -6,10 +6,11 @@
  *
  * Rules (in order):
  *  1. Strip all non-digit characters (spaces, +, -, (, ), .)
- *  2. Strip known country-code prefixes: 0091, 091, 91 (India), 001, 01 (US/CA)
- *  3. Strip a single leading 0 (local trunk dialing)
- *  4. Return last 10 digits
- *  5. If result is not exactly 10 digits → return null (invalid / landline / test data)
+ *  2. FIX double-91 (e.g. "91918496868060" from bad Atlas bulk update)
+ *  3. Strip known country-code prefixes: 0091, 091, 91 (India), 001, 01 (US/CA)
+ *  4. Strip a single leading 0 (local trunk dialing)
+ *  5. Return last 10 digits
+ *  6. If result is not exactly 10 digits → return null (invalid / landline / test data)
  *
  * Returns: 10-digit string (e.g. "9876543210") | null
  */
@@ -36,6 +37,14 @@ function normalizePhone(raw) {
 
   if (!digits) return null;
 
+  // ── FIX: Handle double-country-code caused by bad bulk Atlas updates ──────
+  // When a number like "+918496868060" (already correct E.164) gets "+91"
+  // prepended again, it becomes "+91918496868060" → digits "91918496868060" (14 digits).
+  // Detect: starts with "9191" and length is 14 → strip the extra "91" prefix.
+  if (digits.startsWith('9191') && digits.length === 14) {
+    digits = digits.slice(2); // "91918496868060" → "918496868060"
+  }
+
   // Strip known country-code prefixes (longest first to avoid partial match)
   for (const prefix of COUNTRY_CODE_PREFIXES) {
     if (digits.startsWith(prefix) && digits.length > prefix.length) {
@@ -54,7 +63,7 @@ function normalizePhone(raw) {
     digits = digits.slice(-10);
   }
 
-  // Must be exactly 10 digits to be valid (Indian mobile + most international)
+  // Must be exactly 10 digits to be valid
   if (digits.length !== 10) return null;
 
   // Basic sanity: must not be all the same digit (e.g. 0000000000)
@@ -65,7 +74,6 @@ function normalizePhone(raw) {
 
 /**
  * Same as normalizePhone but never throws — returns null on any error.
- * Safe to use in webhooks / untrusted input.
  */
 function normalizePhoneSafe(raw) {
   try {
