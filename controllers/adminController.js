@@ -36,7 +36,10 @@ const getMyCompany = async (req, res) => {
 // Get all admins in same company
 const getAdmins = async (req, res) => {
   try {
-    const admins = await Admin.find({ company: req.admin.company._id }).select("-password");
+    const filter = { company: req.admin.company._id };
+    // Only a company superadmin may see superadmin accounts.
+    if (req.admin.role !== "superadmin") filter.role = { $ne: "superadmin" };
+    const admins = await Admin.find(filter).select("-password");
     res.status(200).json(admins);
   } catch (error) {
     res.status(500).json({ message: error.message });
