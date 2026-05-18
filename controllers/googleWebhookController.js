@@ -3,6 +3,7 @@ const GoogleAdsConfig    = require("../models/GoogleAdsConfig");
 const Lead               = require("../models/Leads");
 const { notifyTelegram } = require("../utils/telegramNotifier");
 const { normalizePhone } = require("../utils/normalizePhone");
+const { autoSendTemplates } = require("./leadController");
 const {
   parseGoogleLeadData,
   getNextAssignedUserGoogle,
@@ -163,6 +164,9 @@ const receiveGoogleWebhook = async (req, res) => {
     notifyTelegram(newLead, config.campaignName).catch((e) =>
       console.error("Telegram error:", e.message)
     );
+
+    // ── Auto-send WhatsApp / Email / SMS template if enabled ─────────────────
+    autoSendTemplates(newLead, newLead.company);
 
   } catch (err) {
     console.error("❌ GOOGLE WEBHOOK PROCESSING ERROR:", err.message);

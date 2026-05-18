@@ -3,6 +3,7 @@ const MetaConfig         = require("../models/MetaConfig");
 const Lead               = require("../models/Leads");
 const { notifyTelegram } = require("../utils/telegramNotifier");
 const { normalizePhone } = require("../utils/normalizePhone");
+const { autoSendTemplates } = require("./leadController");
 const {
   fetchLeadData,
   parseFieldData,
@@ -184,6 +185,9 @@ const receiveWebhook = async (req, res) => {
         // ── Notify via Telegram ───────────────────────────────────────────────
         // Pass parsedFields so the notifier can include all Meta form Q&A
         notifyTelegram(newLead, config.campaignName, parsedFields).catch(e => console.error("Telegram error:", e.message));
+
+        // ── Auto-send WhatsApp / Email / SMS template if enabled ───────────────
+        autoSendTemplates(newLead, newLead.company);
 
       }
     }

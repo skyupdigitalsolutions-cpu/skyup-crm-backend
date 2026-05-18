@@ -1,6 +1,8 @@
 // controllers/leadController.js
-const Lead = require("../models/Leads");
-const User = require("../models/Users");
+const Lead    = require("../models/Leads");
+const User    = require("../models/Users");
+const Company = require("../models/Company");
+const axios   = require("axios");
 const { computeQuality } = require("../utils/qualityHelper");
 // const { notifyTelegram } = require("../utils/telegramNotifier");
 
@@ -12,6 +14,67 @@ try {
   console.warn("telegramNotifier not available:", e.message);
 }
 
+
+// ── Helper: auto-send WhatsApp/Email/SMS template to a new lead ──────────────
+async function autoSendTemplates(lead, companyId) {
+  try {
+    const company = await Company.findById(companyId).select("autoTemplate").lean();
+    if (!company || !company.autoTemplate) return;
+    const { whatsapp, email, sms } = company.autoTemplate;
+    const API = process.env.BACKEND_INTERNAL_URL || ("http://localhost:" + (process.env.PORT || 5000));
+    const ADMIN_TOKEN = process.env.INTERNAL_ADMIN_TOKEN || "";
+    const headers = ADMIN_TOKEN ? { Authorization: "Bearer " + ADMIN_TOKEN } : {};
+
+    // ── WhatsApp ──────────────────────────────────────────────────────────────
+    if (whatsapp && whatsapp.enabled && lead.mobile) {
+      const phone = (lead.mobile || "").replace(/\D/g, "");
+      if (phone.length >= 10) {
+        axios.post(API + "/api/whatsapp/start-conversation", {
+          phone,
+          contactName:  lead.name || "",
+          templateName: whatsapp.templateName || "crm_lead_followup",
+          languageCode: whatsapp.languageCode || "en_US",
+        }, { headers }).catch(e => console.error("autoTemplate WA error:", e.message));
+      }
+    }
+
+    // ── Email ─────────────────────────────────────────────────────────────────
+    if (email && email.enabled && lead.email) {
+      const body = (email.bodyTemplate || "<p>Hi {{name}},</p>")
+        .replace(/{{name}}/g, lead.name || "")
+        .replace(/{{mobile}}/g, lead.mobile || "")
+        .replace(/{{campaign}}/g, lead.campaign || "")
+        .replace(/{{email}}/g, lead.email || "");
+      axios.post(API + "/api/email-campaign/send-single", {
+        name: lead.name || "",
+        email: lead.email,
+        subject: (email.subject || "Welcome!").replace(/{{name}}/g, lead.name || ""),
+        bodyTemplate: body,
+        fromName: email.fromName || undefined,
+      }, { headers }).catch(e => console.error("autoTemplate Email error:", e.message));
+    }
+
+    // ── SMS ───────────────────────────────────────────────────────────────────
+    if (sms && sms.enabled && lead.mobile) {
+      const mobile = (lead.mobile || "").replace(/\D/g, "");
+      if (mobile.length >= 10) {
+        const message = (sms.message || "Hi {{name}}!")
+          .replace(/{{name}}/g, lead.name || "")
+          .replace(/{{mobile}}/g, lead.mobile || "")
+          .replace(/{{campaign}}/g, lead.campaign || "");
+        axios.post(API + "/api/sms-campaign/send-single", {
+          name:       lead.name || "",
+          mobile,
+          message,
+          templateId: sms.templateId || undefined,
+          senderId:   sms.senderId   || undefined,
+        }, { headers }).catch(e => console.error("autoTemplate SMS error:", e.message));
+      }
+    }
+  } catch (err) {
+    console.error("autoSendTemplates error:", err.message);
+  }
+}
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
 async function getNextUser(companyId, excludeIds = []) {
   const users = await User.find({ company: companyId }).select("_id").lean();
@@ -182,6 +245,9 @@ const adminCreateLead = async (req, res) => {
     notifyTelegram(lead, req.body.source || "Manual").catch((e) =>
       console.error("Telegram error:", e.message),
     );
+
+    // ── Auto-send WhatsApp / Email / SMS template if enabled ─────────────────
+    autoSendTemplates(lead, companyId);
 
     res.status(201).json(populated);
   } catch (error) {
@@ -942,4 +1008,5 @@ module.exports = {
   checkDuplicate,
   logPhoneReveal,
   getFollowUpAlerts,
+  autoSendTemplates,
 };

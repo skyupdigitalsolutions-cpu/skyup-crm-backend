@@ -40,6 +40,28 @@ const companySchema = mongoose.Schema(
       type: Number,
       default: 0,
     },
+
+    // ── Auto-template settings for new leads ─────────────────────────────────
+    // When enabled, every new lead automatically receives a template message
+    autoTemplate: {
+      whatsapp: {
+        enabled:      { type: Boolean, default: false },
+        templateName: { type: String,  default: "crm_lead_followup" },
+        languageCode: { type: String,  default: "en_US" },
+      },
+      email: {
+        enabled:      { type: Boolean, default: false },
+        subject:      { type: String,  default: "Welcome! We'll be in touch soon." },
+        fromName:     { type: String,  default: "" },
+        bodyTemplate: { type: String,  default: "<p>Hi {{name}},</p><p>Thank you for your interest. Our team will reach out to you shortly.</p><p>Regards,<br/>The Team</p>" },
+      },
+      sms: {
+        enabled:    { type: Boolean, default: false },
+        message:    { type: String,  default: "Hi {{name}}, thanks for your interest! Our team will contact you soon." },
+        templateId: { type: String,  default: "" },
+        senderId:   { type: String,  default: "" },
+      },
+    },
   },
   { timestamps: true }
 );

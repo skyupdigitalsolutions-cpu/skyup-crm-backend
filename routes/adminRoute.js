@@ -13,6 +13,8 @@ const {
   getCompanyLeads,
   deleteCompanyUser,
   getDashboardStats,
+  getAutoTemplateSettings,
+  updateAutoTemplateSettings,
 } = adminController;
 const {
   registerAdmin,
@@ -32,6 +34,8 @@ router.get("/company/me",        protectAdmin, getMyCompany || ((req, res) => re
 router.get("/company/users",     protectAdmin, getCompanyUsers);
 router.get("/company/leads",     protectAdmin, getCompanyLeads);
 router.get("/dashboard-stats",   protectAdmin, getDashboardStats);
+router.get("/company/auto-template", protectAdmin, getAutoTemplateSettings);
+router.put("/company/auto-template", protectAdmin, updateAutoTemplateSettings);
 
 // ── Admin CRUD (protected) ────────────────────────────────────────────────────
 router.get("/",  protectAdmin, getAdmins);

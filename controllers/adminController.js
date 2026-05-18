@@ -250,6 +250,50 @@ const getDashboardStats = async (req, res) => {
   }
 };
 
+// ── GET /api/admin/company/auto-template ─────────────────────────────────────
+const getAutoTemplateSettings = async (req, res) => {
+  try {
+    const company = await Company.findById(req.admin.company._id).select("autoTemplate");
+    if (!company) return res.status(404).json({ message: "Company not found" });
+    res.json({ autoTemplate: company.autoTemplate || {} });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── PUT /api/admin/company/auto-template ─────────────────────────────────────
+const updateAutoTemplateSettings = async (req, res) => {
+  try {
+    const { whatsapp, email, sms } = req.body;
+    const update = {};
+    if (whatsapp !== undefined) {
+      if (typeof whatsapp.enabled      === "boolean") update["autoTemplate.whatsapp.enabled"]      = whatsapp.enabled;
+      if (whatsapp.templateName !== undefined)         update["autoTemplate.whatsapp.templateName"] = whatsapp.templateName;
+      if (whatsapp.languageCode !== undefined)         update["autoTemplate.whatsapp.languageCode"] = whatsapp.languageCode;
+    }
+    if (email !== undefined) {
+      if (typeof email.enabled      === "boolean")  update["autoTemplate.email.enabled"]      = email.enabled;
+      if (email.subject     !== undefined)           update["autoTemplate.email.subject"]      = email.subject;
+      if (email.fromName    !== undefined)           update["autoTemplate.email.fromName"]     = email.fromName;
+      if (email.bodyTemplate !== undefined)          update["autoTemplate.email.bodyTemplate"] = email.bodyTemplate;
+    }
+    if (sms !== undefined) {
+      if (typeof sms.enabled  === "boolean")  update["autoTemplate.sms.enabled"]    = sms.enabled;
+      if (sms.message    !== undefined)        update["autoTemplate.sms.message"]    = sms.message;
+      if (sms.templateId !== undefined)        update["autoTemplate.sms.templateId"] = sms.templateId;
+      if (sms.senderId   !== undefined)        update["autoTemplate.sms.senderId"]   = sms.senderId;
+    }
+    const company = await Company.findByIdAndUpdate(
+      req.admin.company._id,
+      { $set: update },
+      { new: true, select: "autoTemplate" }
+    );
+    res.json({ success: true, autoTemplate: company.autoTemplate });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -261,4 +305,6 @@ module.exports = {
   getCompanyLeads,
   deleteCompanyUser,
   getDashboardStats,
+  getAutoTemplateSettings,
+  updateAutoTemplateSettings,
 };
