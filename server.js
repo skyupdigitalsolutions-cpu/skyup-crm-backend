@@ -207,6 +207,7 @@ app.use('/api/email-campaign', emailCampaignRoute);
 app.use('/api/email',          emailHistoryRoute);
 app.use('/api/sms-campaign',   smsCampaignRoute);
 app.use('/api/sms',            smsHistoryRoute);
+app.use('/api/sms-config',     require('./routes/smsConfig'));   // ← SMS Auth Key config per company
 
 // ── Privacy & Subscription (BIP39 zero-knowledge encryption) ─────────────────
 app.use('/api/privacy',      privacyRoute);

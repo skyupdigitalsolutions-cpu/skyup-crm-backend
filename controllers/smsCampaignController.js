@@ -1,17 +1,34 @@
 // controllers/smsCampaignController.js
 // SMS Blasting via MSG91 — supports campaign (CRM leads), single, and CSV modes.
 // MSG91 API v5 docs: https://docs.msg91.com/reference/send-sms
+//
+// Auth Key is now read from SmsConfig (DB, per-company) first,
+// falling back to process.env.MSG91_AUTH_KEY if not set in DB.
 
-const axios = require("axios");
-const Lead = require("../models/Leads");
-const SmsLog = require("../models/SmsLog");
+const axios     = require("axios");
+const Lead      = require("../models/Leads");
+const SmsLog    = require("../models/SmsLog");
+const SmsConfig = require("../models/SmsConfig"); // ← NEW
+
+// ── Helper: get auth key + sender ID for a company ───────────────────────────
+// Reads from SmsConfig (DB) first, falls back to .env
+async function getCompanySmsCredentials(companyId) {
+  const config = await SmsConfig.findOne({ company: companyId });
+  return {
+    authKey:  config?.msg91AuthKey  || process.env.MSG91_AUTH_KEY  || "",
+    senderId: config?.msg91SenderId || process.env.MSG91_SENDER_ID || "SKYCRM",
+  };
+}
 
 // ── MSG91 SMS sender (v5 JSON API) ───────────────────────────────────────────
 // Uses MSG91's modern v5 REST API with JSON body (not the legacy sendhttp.php).
 // MSG91 requires DLT-registered template IDs for Indian numbers.
-const sendViaMSG91 = async ({ mobile, message, templateId, senderId }) => {
-  const authKey = process.env.MSG91_AUTH_KEY;
-  if (!authKey) throw new Error("MSG91_AUTH_KEY not configured in environment");
+const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) => {
+  if (!authKey) {
+    throw new Error(
+      "MSG91 Auth Key not configured. Go to SMS Settings (gear icon) and save your Auth Key."
+    );
+  }
 
   // Normalize: strip all non-digits, then ensure country code prefix
   let phone = mobile.replace(/\D/g, "");
@@ -19,8 +36,8 @@ const sendViaMSG91 = async ({ mobile, message, templateId, senderId }) => {
   if (phone.length === 10) phone = "91" + phone;
 
   const payload = {
-    sender: senderId || process.env.MSG91_SENDER_ID || "SKYCRM",
-    route: "4", // 4 = transactional, 1 = promotional
+    sender:  senderId || "SKYCRM",
+    route:   "4", // 4 = transactional, 1 = promotional
     country: "91",
     sms: [
       {
@@ -38,9 +55,9 @@ const sendViaMSG91 = async ({ mobile, message, templateId, senderId }) => {
     payload,
     {
       headers: {
-        authkey: authKey,
+        authkey:        authKey,
         "Content-Type": "application/json",
-        Accept: "application/json",
+        Accept:         "application/json",
       },
     },
   );
@@ -78,9 +95,9 @@ const saveLog = async ({
       senderId,
       campaignId,
       status,
-      errorMessage: errorMessage || null,
+      errorMessage:   errorMessage   || null,
       msg91RequestId: msg91RequestId || null,
-      company: companyId,
+      company:        companyId,
     });
   } catch (err) {
     console.error("SmsLog save failed:", err.message);
@@ -95,10 +112,10 @@ async function runSmsInBackground({
   senderId,
   companyId,
   campaignId,
+  authKey,       // ← passed from controller after DB lookup
 }) {
   const CONCURRENCY = 5;
-  let sent = 0,
-    failed = 0;
+  let sent = 0, failed = 0;
 
   for (let i = 0; i < leads.length; i += CONCURRENCY) {
     const chunk = leads.slice(i, i + CONCURRENCY);
@@ -107,9 +124,9 @@ async function runSmsInBackground({
       chunk.map(async (lead) => {
         // Merge-tag substitution
         const body = message
-          .replace(/{{name}}/g, lead.name || "")
-          .replace(/{{mobile}}/g, lead.mobile || "")
-          .replace(/{{email}}/g, lead.email || "")
+          .replace(/{{name}}/g,     lead.name     || "")
+          .replace(/{{mobile}}/g,   lead.mobile   || "")
+          .replace(/{{email}}/g,    lead.email    || "")
           .replace(/{{campaign}}/g, lead.campaign || "");
 
         try {
@@ -118,30 +135,31 @@ async function runSmsInBackground({
             message: body,
             templateId,
             senderId,
+            authKey, // ← use company-specific key
           });
           sent++;
           await saveLog({
-            to: lead.mobile,
-            recipientName: lead.name,
-            message: body,
+            to:             lead.mobile,
+            recipientName:  lead.name,
+            message:        body,
             templateId,
             senderId,
             campaignId,
-            status: "sent",
+            status:         "sent",
             msg91RequestId: String(requestId),
             companyId,
           });
         } catch (err) {
           failed++;
           await saveLog({
-            to: lead.mobile,
+            to:            lead.mobile,
             recipientName: lead.name,
-            message: body,
+            message:       body,
             templateId,
             senderId,
             campaignId,
-            status: "failed",
-            errorMessage: err.message,
+            status:        "failed",
+            errorMessage:  err.message,
             companyId,
           });
         }
@@ -159,12 +177,22 @@ const sendBulkSms = async (req, res) => {
   try {
     const { campaign, message, templateId, senderId } = req.body;
     if (!campaign || !message) {
-      return res
-        .status(400)
-        .json({ message: "campaign and message are required" });
+      return res.status(400).json({ message: "campaign and message are required" });
     }
+
+    // ── Fetch company SMS credentials from DB ─────────────────────────────
+    const companyId = req.admin.company._id;
+    const creds     = await getCompanySmsCredentials(companyId);
+    const authKey   = creds.authKey;
+
+    if (!authKey) {
+      return res.status(400).json({
+        message: "MSG91 Auth Key not configured. Go to SMS Settings (gear icon) and save your Auth Key first.",
+      });
+    }
+
     const leads = await Lead.find({
-      company: req.admin.company._id,
+      company: companyId,
       campaign,
       mobile: { $exists: true, $ne: "" },
     })
@@ -172,32 +200,29 @@ const sendBulkSms = async (req, res) => {
       .lean();
 
     if (leads.length === 0) {
-      return res
-        .status(404)
-        .json({
-          message: `No leads with mobile numbers found in campaign "${campaign}"`,
-        });
+      return res.status(404).json({
+        message: `No leads with mobile numbers found in campaign "${campaign}"`,
+      });
     }
 
     res.json({
       success: true,
       message: `SMS blast started for ${leads.length} leads in "${campaign}"`,
-      total: leads.length,
+      total:   leads.length,
     });
 
     runSmsInBackground({
       leads,
       message,
       templateId: templateId || null,
-      senderId: senderId || null,
-      companyId: req.admin.company._id,
+      senderId:   senderId   || creds.senderId,
+      companyId,
       campaignId: campaign,
+      authKey,
     });
   } catch (err) {
     console.error("sendBulkSms error:", err);
-    res
-      .status(500)
-      .json({ message: "Internal server error", error: err.message });
+    res.status(500).json({ message: "Internal server error", error: err.message });
   }
 };
 
@@ -206,40 +231,54 @@ const sendSingleSms = async (req, res) => {
   try {
     const { name, mobile, message, templateId, senderId } = req.body;
     if (!mobile || !message) {
-      return res
-        .status(400)
-        .json({ message: "mobile and message are required" });
+      return res.status(400).json({ message: "mobile and message are required" });
     }
+
+    // ── Fetch company SMS credentials from DB ─────────────────────────────
+    const companyId = req.admin.company._id;
+    const creds     = await getCompanySmsCredentials(companyId);
+    const authKey   = creds.authKey;
+
+    if (!authKey) {
+      return res.status(400).json({
+        message: "MSG91 Auth Key not configured. Go to SMS Settings (gear icon) and save your Auth Key first.",
+      });
+    }
+
     const body = message
-      .replace(/{{name}}/g, name || "")
+      .replace(/{{name}}/g,   name   || "")
       .replace(/{{mobile}}/g, mobile || "");
+
     const requestId = await sendViaMSG91({
       mobile,
       message: body,
       templateId,
-      senderId,
+      senderId: senderId || creds.senderId,
+      authKey,
     });
+
     await saveLog({
-      to: mobile,
-      recipientName: name || "",
-      message: body,
+      to:             mobile,
+      recipientName:  name || "",
+      message:        body,
       templateId,
-      senderId,
-      campaignId: null,
-      status: "sent",
+      senderId:       senderId || creds.senderId,
+      campaignId:     null,
+      status:         "sent",
       msg91RequestId: String(requestId),
-      companyId: req.admin.company._id,
+      companyId,
     });
+
     res.json({ success: true, message: "SMS sent", requestId });
   } catch (err) {
     await saveLog({
-      to: req.body.mobile || "",
-      recipientName: req.body.name || "",
-      message: req.body.message || "",
-      campaignId: null,
-      status: "failed",
-      errorMessage: err.message,
-      companyId: req.admin.company._id,
+      to:            req.body.mobile || "",
+      recipientName: req.body.name   || "",
+      message:       req.body.message || "",
+      campaignId:    null,
+      status:        "failed",
+      errorMessage:  err.message,
+      companyId:     req.admin.company._id,
     });
     res.status(500).json({ message: "Failed to send SMS", error: err.message });
   }
@@ -252,26 +291,37 @@ const sendCsvSms = async (req, res) => {
     if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
       return res.status(400).json({ message: "recipients array is required" });
     }
-    if (!message)
-      return res.status(400).json({ message: "message is required" });
+    if (!message) return res.status(400).json({ message: "message is required" });
+
+    // ── Fetch company SMS credentials from DB ─────────────────────────────
+    const companyId = req.admin.company._id;
+    const creds     = await getCompanySmsCredentials(companyId);
+    const authKey   = creds.authKey;
+
+    if (!authKey) {
+      return res.status(400).json({
+        message: "MSG91 Auth Key not configured. Go to SMS Settings (gear icon) and save your Auth Key first.",
+      });
+    }
 
     res.json({
       success: true,
       message: `SMS blast started for ${recipients.length} CSV recipients`,
-      total: recipients.length,
+      total:   recipients.length,
     });
 
     runSmsInBackground({
       leads: recipients.map((r) => ({
-        name: r.name || "",
+        name:   r.name   || "",
         mobile: r.mobile,
-        email: "",
+        email:  "",
       })),
       message,
       templateId: templateId || null,
-      senderId: senderId || null,
-      companyId: req.admin.company._id,
+      senderId:   senderId   || creds.senderId,
+      companyId,
       campaignId: "csv-blast",
+      authKey,
     });
   } catch (err) {
     console.error("sendCsvSms error:", err);
@@ -283,37 +333,37 @@ const sendCsvSms = async (req, res) => {
 const getSmsHistory = async (req, res) => {
   try {
     const {
-      page = 1,
-      limit = 50,
-      search = "",
+      page      = 1,
+      limit     = 50,
+      search    = "",
       campaignId = "",
       sortOrder = "desc",
-      dateFrom = "",
-      dateTo = "",
+      dateFrom  = "",
+      dateTo    = "",
     } = req.query;
+
     const filter = { company: req.admin.company._id };
-    if (search) filter.to = { $regex: search, $options: "i" };
+    if (search)    filter.to         = { $regex: search, $options: "i" };
     if (campaignId) filter.campaignId = campaignId;
     if (dateFrom || dateTo) {
       filter.sentAt = {};
       if (dateFrom) filter.sentAt.$gte = new Date(dateFrom);
-      if (dateTo)
-        filter.sentAt.$lte = new Date(
-          new Date(dateTo).setHours(23, 59, 59, 999),
-        );
+      if (dateTo)   filter.sentAt.$lte = new Date(new Date(dateTo).setHours(23, 59, 59, 999));
     }
+
     const total = await SmsLog.countDocuments(filter);
-    const data = await SmsLog.find(filter)
+    const data  = await SmsLog.find(filter)
       .sort({ sentAt: sortOrder === "asc" ? 1 : -1 })
       .skip((+page - 1) * +limit)
       .limit(+limit)
       .lean();
+
     res.json({
       success: true,
       data,
       pagination: {
-        page: +page,
-        limit: +limit,
+        page:       +page,
+        limit:      +limit,
         total,
         totalPages: Math.ceil(total / +limit),
       },
@@ -327,7 +377,7 @@ const getSmsHistory = async (req, res) => {
 const getSmsCampaigns = async (req, res) => {
   try {
     const campaigns = await SmsLog.distinct("campaignId", {
-      company: req.admin.company._id,
+      company:    req.admin.company._id,
       campaignId: { $ne: null },
     });
     res.json({ success: true, data: campaigns.filter(Boolean) });
@@ -340,7 +390,7 @@ const getSmsCampaigns = async (req, res) => {
 const deleteSmsLog = async (req, res) => {
   try {
     const log = await SmsLog.findOneAndDelete({
-      _id: req.params.id,
+      _id:     req.params.id,
       company: req.admin.company._id,
     });
     if (!log) return res.status(404).json({ message: "Log not found" });
@@ -354,12 +404,11 @@ const deleteSmsLog = async (req, res) => {
 const previewSmsCampaign = async (req, res) => {
   try {
     const { campaign } = req.query;
-    if (!campaign)
-      return res.status(400).json({ message: "campaign is required" });
+    if (!campaign) return res.status(400).json({ message: "campaign is required" });
     const count = await Lead.countDocuments({
-      company: req.admin.company._id,
+      company:  req.admin.company._id,
       campaign,
-      mobile: { $exists: true, $ne: "" },
+      mobile:   { $exists: true, $ne: "" },
     });
     res.json({ success: true, count });
   } catch (err) {
