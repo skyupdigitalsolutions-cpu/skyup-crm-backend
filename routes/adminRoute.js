@@ -15,11 +15,16 @@ const {
   getDashboardStats,
   getAutoTemplateSettings,
   updateAutoTemplateSettings,
+  getCompanyBrand,
+  updateCompanyBrand,
+  deleteCompanyLogo,
+  getBrevoStatus,
+  saveBrevoConfig,
 } = adminController;
 const {
   registerAdmin,
   loginAdmin,
-  logoutAdmin,                                          
+  logoutAdmin,
 } = require("../controllers/adminAuthController");
 const { protectAdmin, requireCompanySuperAdmin } = require("../middlewares/adminAuthMiddleware");
 const { authLimiter }  = require("../middlewares/rateLimiter");
@@ -36,6 +41,15 @@ router.get("/company/leads",     protectAdmin, getCompanyLeads);
 router.get("/dashboard-stats",   protectAdmin, getDashboardStats);
 router.get("/company/auto-template", protectAdmin, getAutoTemplateSettings);
 router.put("/company/auto-template", protectAdmin, updateAutoTemplateSettings);
+
+// ── Company Branding (SuperAdmin only) ────────────────────────────────────────
+router.get("/company/brand",         protectAdmin, getCompanyBrand);
+router.put("/company/brand",         protectAdmin, requireCompanySuperAdmin, updateCompanyBrand);
+router.delete("/company/brand/logo", protectAdmin, requireCompanySuperAdmin, deleteCompanyLogo);
+
+// ── Brevo email config ────────────────────────────────────────────────────────
+router.get("/company/brevo-status",  protectAdmin, getBrevoStatus);
+router.put("/company/brevo-config",  protectAdmin, requireCompanySuperAdmin, saveBrevoConfig);
 
 // ── Admin CRUD (protected) ────────────────────────────────────────────────────
 router.get("/",  protectAdmin, getAdmins);

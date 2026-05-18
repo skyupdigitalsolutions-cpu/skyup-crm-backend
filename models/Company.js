@@ -41,6 +41,27 @@ const companySchema = mongoose.Schema(
       default: 0,
     },
 
+    // ── Company Branding (set by SuperAdmin) ──────────────────────────────────
+    // Displayed in the Sidebar navbar across all interfaces
+    brandName: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    brandLogoUrl: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    // ── Brevo (email blast) API key ───────────────────────────────────────────
+    brevoApiKey: {
+      type: String,
+      default: "",
+      trim: true,
+      select: false, // never returned in normal queries — must be explicitly selected
+    },
+
     // ── Auto-template settings for new leads ─────────────────────────────────
     // When enabled, every new lead automatically receives a template message
     autoTemplate: {

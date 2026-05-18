@@ -2,6 +2,9 @@ const Admin   = require("../models/Admin");
 const User    = require("../models/Users");
 const Lead    = require("../models/Leads");
 const Company = require("../models/Company");
+const multer  = require("multer");
+const path    = require("path");
+const fs      = require("fs");
 
 // Plan limits — single source of truth on the backend
 // Must match UpgradePlan.jsx and UserManagement.jsx
@@ -158,8 +161,6 @@ const getCompanyUsers = async (req, res) => {
 };
 
 // Get all leads in same company — paginated
-// BUG FIX: was returning ALL leads with no limit (response grows unboundedly).
-// Now returns paginated { leads[], total, page, pages } matching adminGetAllLeads shape.
 const getCompanyLeads = async (req, res) => {
   try {
     const page  = parseInt(req.query.page)  || 1;
@@ -196,7 +197,6 @@ const deleteCompanyUser = async (req, res) => {
 };
 
 // ── GET /api/admin/dashboard-stats ───────────────────────────────────────────
-// Returns KPI stats for admin dashboard including phone reveal counts
 const getDashboardStats = async (req, res) => {
   try {
     const companyId = req.admin.company._id;
@@ -225,7 +225,6 @@ const getDashboardStats = async (req, res) => {
 
     const revealStats = revealAggregate[0] || { totalReveals: 0, leadsRevealed: 0 };
 
-    // Top 5 most-revealed leads
     const topRevealed = await Lead.find({ company: companyId, phoneRevealCount: { $gt: 0 } })
       .sort({ phoneRevealCount: -1 })
       .limit(5)
@@ -294,6 +293,101 @@ const updateAutoTemplateSettings = async (req, res) => {
   }
 };
 
+// ── Company Branding ──────────────────────────────────────────────────────────
+// GET /api/admin/company/brand  →  { name, logoUrl }
+const getCompanyBrand = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const company   = await Company.findById(companyId).select("brandName brandLogoUrl").lean();
+    res.json({ name: company?.brandName || "", logoUrl: company?.brandLogoUrl || "" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// Multer storage for logo uploads
+const brandStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = path.join(__dirname, "../public/uploads/logos");
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const cid = req.admin?.company?._id || req.admin?.company;
+    cb(null, `logo_${cid}${ext}`);
+  },
+});
+const brandUpload = multer({
+  storage: brandStorage,
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith("image/")) cb(null, true);
+    else cb(new Error("Only image files are allowed"));
+  },
+}).single("logo");
+
+// PUT /api/admin/company/brand  →  FormData: name (text) + logo (file, optional)
+const updateCompanyBrand = (req, res) => {
+  brandUpload(req, res, async (err) => {
+    if (err) return res.status(400).json({ message: err.message });
+    try {
+      const companyId = req.admin?.company?._id || req.admin?.company;
+      const updates   = {};
+      if (req.body.name !== undefined) {
+        updates.brandName = req.body.name.trim().slice(0, 40);
+      }
+      if (req.file) {
+        // Adjust this URL prefix to match your server / CDN setup
+        updates.brandLogoUrl = `/uploads/logos/${req.file.filename}`;
+      }
+      const company = await Company.findByIdAndUpdate(companyId, updates, { new: true })
+        .select("brandName brandLogoUrl");
+      res.json({ name: company.brandName, logoUrl: company.brandLogoUrl });
+    } catch (e) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+};
+
+// DELETE /api/admin/company/brand/logo
+const deleteCompanyLogo = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    await Company.findByIdAndUpdate(companyId, { brandLogoUrl: "" });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+};
+
+// ── Brevo (email blast) connection ────────────────────────────────────────────
+// GET /api/admin/company/brevo-status  →  { connected: bool }
+const getBrevoStatus = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const company   = await Company.findById(companyId).select("+brevoApiKey").lean();
+    res.json({ connected: !!(company?.brevoApiKey) });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// PUT /api/admin/company/brevo-config  →  { apiKey }
+const saveBrevoConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { apiKey } = req.body;
+    if (!apiKey || !apiKey.trim()) {
+      return res.status(400).json({ message: "Brevo API key is required" });
+    }
+    await Company.findByIdAndUpdate(companyId, { brevoApiKey: apiKey.trim() });
+    res.json({ success: true, connected: true });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -307,4 +401,9 @@ module.exports = {
   getDashboardStats,
   getAutoTemplateSettings,
   updateAutoTemplateSettings,
+  getCompanyBrand,
+  updateCompanyBrand,
+  deleteCompanyLogo,
+  getBrevoStatus,
+  saveBrevoConfig,
 };
