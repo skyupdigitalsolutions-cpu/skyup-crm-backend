@@ -7,10 +7,16 @@ const userSchema = mongoose.Schema(
     email:    { type: String, required: true, trim: true },
     password: { type: String, required: true },
     role:     { type: String, default: "user" },
-    company:  {
+   company:  {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Company",
       required: true,
+    },
+    // Admin who created this user. Used to scope visibility per-admin.
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Admin",
+      default: null,
     },
 
     // ── Device / app info captured on login & clock-in ────────────────────────
