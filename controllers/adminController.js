@@ -152,11 +152,50 @@ const updateAdmin = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+// Create a user (agent) owned by the calling admin
+const createCompanyUser = async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    const companyId = req.admin.company._id;
 
+    const company = await Company.findById(companyId);
+    if (!company) return res.status(404).json({ message: "Company not found" });
+
+    const PLAN_USER_LIMITS = { basic: 10, pro: 30, enterprise: 50 };
+    const userLimit = PLAN_USER_LIMITS[company.plan] || 10;
+    const existingUserCount = await User.countDocuments({ company: companyId });
+    if (existingUserCount >= userLimit) {
+      return res.status(403).json({
+        message: `Your ${company.plan} plan allows a maximum of ${userLimit} users. Please upgrade your plan to add more.`,
+        limitReached: true, plan: company.plan, maxUsers: userLimit,
+      });
+    }
+
+    const exists = await User.findOne({ email });
+    if (exists) return res.status(400).json({ message: "User already exists" });
+
+    const user = await User.create({
+      name, email, password,
+      company: companyId,
+      role: "user",
+      createdBy: req.admin._id,
+    });
+
+    res.status(201).json({
+      _id: user._id, name: user.name, email: user.email,
+      company: user.company, role: user.role,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
 // Get all users in same company
 const getCompanyUsers = async (req, res) => {
   try {
-    const users = await User.find({ company: req.admin.company._id }).select("-password");
+    const filter = { company: req.admin.company._id };
+    // Superadmin sees all company users; a regular admin sees only their own.
+    if (req.admin.role !== "superadmin") filter.createdBy = req.admin._id;
+    const users = await User.find(filter).select("-password");
     res.status(200).json(users);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -190,7 +229,9 @@ const getCompanyLeads = async (req, res) => {
 // FIX: Delete user — with company check
 const deleteCompanyUser = async (req, res) => {
   try {
-    const user = await User.findOne({ _id: req.params.id, company: req.admin.company._id });
+   const query = { _id: req.params.id, company: req.admin.company._id };
+    if (req.admin.role !== "superadmin") query.createdBy = req.admin._id;
+    const user = await User.findOne(query);
     if (!user) return res.status(404).json({ message: "User not found" });
     await User.findByIdAndDelete(req.params.id);
     res.status(200).json({ message: "User deleted successfully" });
@@ -400,6 +441,7 @@ module.exports = {
   updateAdmin,
   getCompanyUsers,
   getCompanyLeads,
+  createCompanyUser,
   deleteCompanyUser,
   getDashboardStats,
   getAutoTemplateSettings,
