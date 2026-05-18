@@ -1,3 +1,4 @@
+// models/Leads.js — UPDATED (added assignedAdmin + activityTimeline; all existing fields unchanged)
 const mongoose = require("mongoose");
 const { normalizePhone } = require("../utils/normalizePhone");
 
@@ -55,6 +56,24 @@ const leadSchema = mongoose.Schema(
       required: true,
     },
 
+    // ── NEW: Admin who owns / manages this lead ───────────────────────────────
+    assignedAdmin: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Admin",
+      default: null,
+    },
+
+    // ── NEW: Full audit trail of every action on this lead ────────────────────
+    activityTimeline: [
+      {
+        action:      { type: String },
+        performedBy: { type: mongoose.Schema.Types.ObjectId },
+        role:        { type: String },
+        timestamp:   { type: Date, default: Date.now },
+        note:        { type: String, default: "" },
+      },
+    ],
+
     // ── Full history of every agent who handled this lead ────────────────────
     callHistory: {
       type: [callHistorySchema],
@@ -77,7 +96,6 @@ const leadSchema = mongoose.Schema(
     reassignCount: { type: Number, default: 0 },
 
     // ── Normalized phone for deduplication ───────────────────────────────────
-    // Always last 10 digits; set automatically by pre-validate hook.
     normalizedPhone: {
       type:    String,
       default: null,
@@ -86,7 +104,7 @@ const leadSchema = mongoose.Schema(
 
     // ── Phone reveal tracking ────────────────────────────────────────────────
     phoneRevealLog: {
-      type: [{
+      type: [{ 
         userId:     { type: mongoose.Schema.Types.ObjectId, ref: "User" },
         userName:   { type: String, default: "" },
         revealedAt: { type: Date, default: Date.now },
@@ -109,28 +127,13 @@ const leadSchema = mongoose.Schema(
   { timestamps: true }
 );
 
-// ── FIX 4A: Performance indexes ───────────────────────────────────────────────
-// Most important: all lead queries filter by company
+// ── Performance indexes ───────────────────────────────────────────────────────
 leadSchema.index({ company: 1 });
-
-// Lead list view: filter by company + user + status
 leadSchema.index({ company: 1, user: 1, status: 1 });
-
-// Date-sorted lead list
 leadSchema.index({ company: 1, createdAt: -1 });
-
-// Phone number lookup (used in call log sync)
 leadSchema.index({ company: 1, mobile: 1 });
 
-// Meta webhook deduplication (leadgenId index already set via unique:true sparse above,
-// but explicit compound with company is useful for webhook lookups)
-// leadSchema.index({ leadgenId: 1 }, { sparse: true });
-
 // ── PHONE DEDUP: Partial unique index on normalizedPhone ─────────────────────
-// Partial filter: only enforces uniqueness when normalizedPhone is a non-null string.
-// This lets leads with unparseable phones (landlines, test data) coexist safely.
-// The compound key {company + normalizedPhone} means the same number can exist
-// in different companies (correct behaviour for multi-tenant SaaS).
 leadSchema.index(
   { company: 1, normalizedPhone: 1 },
   {
@@ -141,7 +144,6 @@ leadSchema.index(
     name: 'company_normalizedPhone_unique',
   }
 );
-// Fast lookup by normalizedPhone alone (for webhook / API dedup checks)
 leadSchema.index({ normalizedPhone: 1 }, { sparse: true });
 
 // ── Pre-validate hook: compute normalizedPhone automatically ─────────────────
@@ -153,7 +155,6 @@ leadSchema.pre('validate', async function () {
 });
 
 // ── Pre-findOneAndUpdate / updateOne / updateMany hooks ───────────────────────
-// Keeps normalizedPhone in sync when mobile is updated via update operations.
 async function syncNormalizedPhoneOnUpdate() {
   try {
     const update = this.getUpdate();

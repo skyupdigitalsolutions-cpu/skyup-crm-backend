@@ -1,4 +1,4 @@
-// models/Company.js
+// models/Company.js — UPDATED (added 10 new fields; all existing fields unchanged)
 const mongoose = require("mongoose");
 
 const companySchema = mongoose.Schema(
@@ -42,7 +42,6 @@ const companySchema = mongoose.Schema(
     },
 
     // ── Company Branding (set by SuperAdmin) ──────────────────────────────────
-    // Displayed in the Sidebar navbar across all interfaces
     brandName: {
       type: String,
       default: "",
@@ -54,6 +53,28 @@ const companySchema = mongoose.Schema(
       trim: true,
     },
 
+    // ── NEW: Extended Branding & Media ────────────────────────────────────────
+    logo:    { type: String, default: "" },
+    favicon: { type: String, default: "" },
+    website: { type: String, default: "" },
+    address: { type: String, default: "" },
+
+    // ── NEW: Theme Colors ─────────────────────────────────────────────────────
+    companyPrimaryColor:   { type: String, default: "#2563EB" },
+    companySecondaryColor: { type: String, default: "#1E40AF" },
+    stickyHeaderEnabled:   { type: Boolean, default: true },
+
+    // ── NEW: Tenant Limits ────────────────────────────────────────────────────
+    maxUsers: { type: Number, default: 10 },
+    maxLeads: { type: Number, default: 1000 },
+
+    // ── NEW: Audit — which Developer account created this company ─────────────
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Developer",
+      default: null,
+    },
+
     // ── Brevo (email blast) API key ───────────────────────────────────────────
     brevoApiKey: {
       type: String,
@@ -63,7 +84,6 @@ const companySchema = mongoose.Schema(
     },
 
     // ── Auto-template settings for new leads ─────────────────────────────────
-    // When enabled, every new lead automatically receives a template message
     autoTemplate: {
       whatsapp: {
         enabled:      { type: Boolean, default: false },

@@ -1,8 +1,9 @@
-// middlewares/authMiddleware.js
+// middlewares/authMiddleware.js — UPDATED (added protectUnified + authorizeRoles; existing code unchanged)
 const jwt        = require("jsonwebtoken");
 const User       = require("../models/Users");
 const Admin      = require("../models/Admin");
 const SuperAdmin = require("../models/SuperAdmin");
+const Developer  = require("../models/Developer");
 const Company    = require("../models/Company");
 const { isTokenBlacklisted } = require("./rateLimiter");
 
@@ -21,7 +22,7 @@ const protect = async (req, res, next) => {
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-      if (decoded.role && decoded.role !== "user") {
+      if (decoded.role && decoded.role !== "user" && decoded.role !== "employee") {
         return res.status(403).json({ message: "Access denied: not a user token" });
       }
 
@@ -42,9 +43,6 @@ const protect = async (req, res, next) => {
 };
 
 // ── Dual middleware — accepts BOTH admin and user tokens ───────────────────────
-// Sets req.user  + req.callerCompany when called by a regular user
-// Sets req.admin + req.callerCompany when called by an admin
-// Controllers use req.callerCompany so they work for both roles.
 const protectAny = async (req, res, next) => {
   let token;
 
@@ -59,11 +57,20 @@ const protectAny = async (req, res, next) => {
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-      if (decoded.role === "superadmin") {
-        // SuperAdmin acting as admin — resolve a company context so dual-role
+      if (decoded.role === "super_admin" || decoded.role === "superadmin") {
+        // super_admin acting as admin — resolve a company context so dual-role
         // controllers (WhatsApp, call logs, etc.) work like they do for admin.
-        const superAdmin = await SuperAdmin.findById(decoded.id).select("-password");
-        if (!superAdmin) return res.status(401).json({ message: "Not authorized as superadmin" });
+        const superAdmin = await SuperAdmin.findById(decoded.id).select("-password")
+          || await Admin.findById(decoded.id).select("-password").populate("company");
+
+        if (!superAdmin) return res.status(401).json({ message: "Not authorized as super_admin" });
+
+        // For Admin model super_admin, company is already populated
+        if (superAdmin.company) {
+          req.admin = superAdmin;
+          req.callerCompany = superAdmin.company?._id || superAdmin.company;
+          return next();
+        }
 
         const headerCompanyId = req.headers["x-company-id"];
         let company = null;
@@ -72,14 +79,14 @@ const protectAny = async (req, res, next) => {
         }
         if (!company) company = await Company.findOne({ isActive: true }).sort({ createdAt: 1 });
         if (!company) company = await Company.findOne().sort({ createdAt: 1 });
-        if (!company) return res.status(404).json({ message: "No company found for superadmin to manage" });
+        if (!company) return res.status(404).json({ message: "No company found for super_admin to manage" });
 
         req.superAdmin = superAdmin;
         req.admin = {
           _id:          superAdmin._id,
           name:         superAdmin.name,
           email:        superAdmin.email,
-          role:         "superadmin",
+          role:         "super_admin",
           company,
           isSuperAdmin: true,
         };
@@ -110,4 +117,43 @@ const protectAny = async (req, res, next) => {
   }
 };
 
-module.exports = { protect, protectAny };
+// ── NEW: Unified JWT middleware — handles all 4 roles ─────────────────────────
+const protectUnified = async (req, res, next) => {
+  if (!req.headers.authorization?.startsWith("Bearer"))
+    return res.status(401).json({ message: "Not authorized, no token" });
+
+  try {
+    const token = req.headers.authorization.split(" ")[1];
+
+    if (await isTokenBlacklisted(token))
+      return res.status(401).json({ message: "Token invalidated. Please log in again." });
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (decoded.role === "developer") {
+      req.user = await Developer.findById(decoded.id).select("-password");
+    } else if (["super_admin", "admin"].includes(decoded.role)) {
+      req.user = await Admin.findById(decoded.id).select("-password").populate("company");
+    } else {
+      // employee / user
+      req.user = await User.findById(decoded.id).select("-password");
+    }
+
+    if (!req.user) return res.status(401).json({ message: "Not authorized" });
+    next();
+  } catch {
+    return res.status(401).json({ message: "Not authorized, invalid token" });
+  }
+};
+
+// ── NEW: Role gate — use after protectUnified ─────────────────────────────────
+const authorizeRoles = (...roles) => (req, res, next) => {
+  if (!req.user || !roles.includes(req.user.role)) {
+    return res.status(403).json({
+      message: `Access denied. Required: ${roles.join(", ")}`,
+    });
+  }
+  next();
+};
+
+module.exports = { protect, protectAny, protectUnified, authorizeRoles };

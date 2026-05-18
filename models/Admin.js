@@ -1,3 +1,4 @@
+// models/Admin.js — UPDATED (role enum: "superadmin" → "super_admin", added avatar/department/isActive + unique index)
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 
@@ -11,7 +12,18 @@ const adminSchema = mongoose.Schema(
       ref: "Company",
       required: true, // Every admin belongs to a company
     },
-    role: { type: String, enum: ["superadmin", "admin"], default: "admin" },
+
+    // ── UPDATED: "superadmin" renamed to "super_admin" ────────────────────────
+    role: {
+      type: String,
+      enum: ["super_admin", "admin"],
+      default: "admin",
+    },
+
+    // ── NEW: Profile fields ───────────────────────────────────────────────────
+    avatar:     { type: String, default: "" },
+    department: { type: String, default: "" },
+    isActive:   { type: Boolean, default: true },
   },
   { timestamps: true }
 );
@@ -27,9 +39,19 @@ adminSchema.methods.matchPassword = async function (enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
 };
 
-// ── FIX 4A: Performance indexes ───────────────────────────────────────────────
+// ── Performance indexes ───────────────────────────────────────────────────────
 adminSchema.index({ email: 1 }, { unique: true });
 adminSchema.index({ company: 1 });
+
+// ── NEW: Enforce ONE super_admin per company ──────────────────────────────────
+adminSchema.index(
+  { company: 1, role: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { role: "super_admin" },
+    name: "one_super_admin_per_company",
+  }
+);
 
 const Admin = mongoose.model("Admin", adminSchema);
 module.exports = Admin;

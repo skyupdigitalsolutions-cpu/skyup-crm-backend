@@ -1,9 +1,17 @@
-// controllers/leadController.js
+// controllers/leadController.js — UPDATED (added getCompanyId helper for multi-tenant isolation)
 const Lead    = require("../models/Leads");
 const User    = require("../models/Users");
 const Company = require("../models/Company");
 const axios   = require("axios");
 const { computeQuality } = require("../utils/qualityHelper");
+
+// ── UPDATED: Resolve companyId from req — prefers req.companyId (companyIsolation middleware)
+//    then falls back to existing req.admin / req.user patterns for backward compatibility ──
+const getCompanyId = (req) =>
+  req.companyId ||
+  (req.admin ? (req.admin.company?._id || req.admin.company) : null) ||
+  req.user?.company ||
+  null;
 // const { notifyTelegram } = require("../utils/telegramNotifier");
 
 // At the top of leadController.js
@@ -125,7 +133,7 @@ function buildScheduledCalls() {
 const getLeads = async (req, res) => {
   try {
     const leads = await Lead.find({
-      company: req.user.company,
+      company: getCompanyId(req),
       $or: [{ user: req.user._id }, { user: null }],
     }).populate("user", "name email").populate("previousAgents", "name email");
     res.status(200).json(leads);
@@ -137,7 +145,7 @@ const getLeads = async (req, res) => {
 const getLead = async (req, res) => {
   try {
     const { id } = req.params;
-    const lead = await Lead.findOne({ _id: id, company: req.user.company });
+    const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
     res.status(200).json(lead);
   } catch (error) {
@@ -168,7 +176,7 @@ const createLead = async (req, res) => {
     const lead = await Lead.create({
       ...req.body,
       user: req.body.user || req.user._id,
-      company: req.user.company,
+      company: getCompanyId(req),
     });
 
     notifyTelegram(lead, "Manual").catch((e) =>
@@ -184,9 +192,7 @@ const createLead = async (req, res) => {
 // ── Admin creates a single lead ───────────────────────────────────────────────
 const adminCreateLead = async (req, res) => {
   try {
-    const companyId = req.admin
-      ? req.admin.company._id || req.admin.company
-      : req.body.companyId;
+    const companyId = getCompanyId(req);
     if (!companyId)
       return res.status(400).json({ message: "companyId is required." });
     let assignedUser = req.body.user || null;
@@ -258,9 +264,7 @@ const adminCreateLead = async (req, res) => {
 // ── Admin bulk create leads ───────────────────────────────────────────────────
 const adminCreateLeadsBulk = async (req, res) => {
   try {
-    const companyId = req.admin
-      ? req.admin.company._id || req.admin.company
-      : req.body.companyId;
+    const companyId = getCompanyId(req);
     if (!companyId)
       return res.status(400).json({ message: "companyId is required." });
     const items = req.body.leads;
@@ -423,7 +427,7 @@ const userImportCSV = async (req, res) => {
             csvExtraAnswers.length
           ),
           user: req.user._id,
-          company: req.user.company,
+          company: getCompanyId(req),
         };
         const lead = await Lead.collection.insertOne(userDoc);
         const savedLead = await Lead.findById(lead.insertedId)
@@ -458,7 +462,7 @@ const userImportCSV = async (req, res) => {
 const deleteLead = async (req, res) => {
   try {
     const { id } = req.params;
-    const lead = await Lead.findOne({ _id: id, company: req.user.company });
+    const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
     await Lead.findByIdAndDelete(id);
     return res
@@ -476,7 +480,7 @@ const deleteLead = async (req, res) => {
 const updateLead = async (req, res) => {
   try {
     const { id } = req.params;
-    const lead = await Lead.findOne({ _id: id, company: req.user.company });
+    const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     // Strip fields that must not be changed via the user endpoint
@@ -494,9 +498,7 @@ const updateLead = async (req, res) => {
 const adminUpdateLead = async (req, res) => {
   try {
     const { id } = req.params;
-    const companyId = req.admin
-      ? req.admin.company._id || req.admin.company
-      : req.body.companyId;
+    const companyId = getCompanyId(req);
     const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
     const { company, user, leadgenId, ...safeBody } = req.body;
@@ -546,7 +548,7 @@ const getMyLeads = async (req, res) => {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit || "200", 10)));
     const skip  = (page - 1) * limit;
 
-    const query = { company: req.user.company, user: req.user._id };
+    const query = { company: getCompanyId(req), user: req.user._id };
 
     const [leads, total] = await Promise.all([
       Lead.find(query)
@@ -572,7 +574,7 @@ const getMyLeads = async (req, res) => {
 const patchLead = async (req, res) => {
   try {
     const { id } = req.params;
-    const lead = await Lead.findOne({ _id: id, company: req.user.company });
+    const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const { status, remark, outcome, followUpDate, temperature, Quality } = req.body;
@@ -714,7 +716,7 @@ const markNotInterested = async (req, res) => {
     if (!remark || !remark.trim())
       return res.status(400).json({ message: "A remark/reason is required." });
 
-    const lead = await Lead.findOne({ _id: id, company: req.user.company });
+    const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const historyEntry = {

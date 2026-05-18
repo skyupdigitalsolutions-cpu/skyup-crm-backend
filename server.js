@@ -10,7 +10,8 @@ const connectDB           = require('./config/db');
 const initSocket          = require('./socket/socketHandler');
 
 // ── CRM Routes ────────────────────────────────────────────────────────────────
-const superAdminRoute = require('./routes/superAdminRoute');
+const superAdminRoute   = require('./routes/superAdminRoute');
+const developerRoutes   = require('./routes/developerRoutes');
 const adminRoute      = require('./routes/adminRoute');
 const authRoute       = require('./routes/authRoutes');
 const leadRoute       = require('./routes/leadRoute');
@@ -189,6 +190,7 @@ app.use('/website-webhook', (req, res, next) => {
 app.use('/api/meta-config', metaConfigRoute);
 
 app.use('/api/superadmin', superAdminRoute);
+app.use('/api/developer', developerRoutes);
 app.use('/api/admin',      adminRoute);
 app.use('/api/auth',       authRoute);
 app.use('/api/lead',       leadRoute);

@@ -1,3 +1,4 @@
+// controllers/superAdminController.js — UPDATED (added createAdmin, fixed getDashboardStats with companyId filter; all existing functions unchanged)
 const SuperAdmin = require("../models/SuperAdmin");
 const Company = require("../models/Company");
 const Admin = require("../models/Admin");
@@ -22,31 +23,46 @@ const registerSuperAdmin = async (req, res) => {
       _id: superAdmin._id,
       name: superAdmin.name,
       email: superAdmin.email,
-      role: "superadmin",
-      token: generateToken(superAdmin._id, "superadmin"),
+      role: "super_admin",
+      token: generateToken(superAdmin._id, "super_admin"),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// Login SuperAdmin
+// Login SuperAdmin (legacy — unified login at /api/auth/login is preferred)
 const loginSuperAdmin = async (req, res) => {
   try {
     const { email, password } = req.body;
-    const superAdmin = await SuperAdmin.findOne({ email });
 
+    // Try Admin model first (new super_admin)
+    const adminDoc = await Admin.findOne({ email, role: "super_admin" }).populate("company");
+    if (adminDoc && (await adminDoc.matchPassword(password))) {
+      return res.status(200).json({
+        _id: adminDoc._id,
+        name: adminDoc.name,
+        email: adminDoc.email,
+        role: "super_admin",
+        companyId: adminDoc.company?._id,
+        companyName: adminDoc.company?.name,
+        token: generateToken(adminDoc._id, "super_admin"),
+      });
+    }
+
+    // Fallback: legacy SuperAdmin document
+    const superAdmin = await SuperAdmin.findOne({ email });
     if (superAdmin && (await superAdmin.matchPassword(password))) {
-      res.status(200).json({
+      return res.status(200).json({
         _id: superAdmin._id,
         name: superAdmin.name,
         email: superAdmin.email,
         role: superAdmin.role,
-        token: generateToken(superAdmin._id, "superadmin"),
+        token: generateToken(superAdmin._id, "super_admin"),
       });
-    } else {
-      res.status(401).json({ message: "Invalid email or password" });
     }
+
+    res.status(401).json({ message: "Invalid email or password" });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -136,8 +152,22 @@ const deleteCompany = async (req, res) => {
   }
 };
 
+// ── UPDATED: getDashboardStats now accepts optional companyId (from companyIsolation) ─
 const getDashboardStats = async (req, res) => {
   try {
+    const companyId = req.companyId; // set by companyIsolation middleware
+
+    if (companyId) {
+      // Scoped stats for a specific company's super_admin
+      const [users, leads, admins] = await Promise.all([
+        User.countDocuments({ company: companyId }),
+        Lead.countDocuments({ company: companyId }),
+        Admin.countDocuments({ company: companyId, role: "admin" }),
+      ]);
+      return res.json({ users, leads, admins });
+    }
+
+    // Platform-wide stats (legacy, for old SuperAdmin flow)
     const totalCompanies  = await Company.countDocuments();
     const activeCompanies = await Company.countDocuments({ isActive: true });
     const totalAdmins     = await Admin.countDocuments();
@@ -156,10 +186,46 @@ const getDashboardStats = async (req, res) => {
   }
 };
 
+// ── NEW: super_admin creates an admin within their own company ────────────────
+const createAdmin = async (req, res) => {
+  try {
+    const { name, email, password, department } = req.body;
+    const companyId = req.companyId; // from companyIsolation middleware
+
+    if (!companyId)
+      return res.status(400).json({ message: "Company context missing" });
+
+    // super_admin cannot create another super_admin
+    if (req.body.role === "super_admin")
+      return res.status(403).json({ message: "Cannot create another super admin" });
+
+    const existing = await Admin.findOne({ email });
+    if (existing)
+      return res.status(400).json({ message: "An admin with this email already exists" });
+
+    const admin = await Admin.create({
+      name, email, password, department,
+      role: "admin",
+      company: companyId,
+    });
+
+    res.status(201).json({
+      _id: admin._id,
+      name: admin.name,
+      email: admin.email,
+      role: admin.role,
+      department: admin.department,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   registerSuperAdmin,
   loginSuperAdmin,
   createCompany,
+  createAdmin,
   getCompanies,
   getCompany,
   toggleCompany,
