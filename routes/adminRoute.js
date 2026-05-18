@@ -11,6 +11,7 @@ const {
   updateAdmin,
   getCompanyUsers,
   getCompanyLeads,
+  createCompanyUser,
   deleteCompanyUser,
   getDashboardStats,
   getAutoTemplateSettings,
@@ -56,7 +57,9 @@ router.get("/",  protectAdmin, getAdmins);
 router.post("/", protectAdmin, requireCompanySuperAdmin, createAdmin);
 
 // User delete — must be before /:id to avoid conflict
-router.delete("/user/:id", protectAdmin, requireCompanySuperAdmin, deleteCompanyUser);
+// User create/delete — must be before /:id to avoid conflict
+router.post("/user",       protectAdmin, createCompanyUser);
+router.delete("/user/:id", protectAdmin, deleteCompanyUser);
 
 router.get("/:id",    protectAdmin, getAdmin);
 router.delete("/:id", protectAdmin, requireCompanySuperAdmin, deleteAdmin);
