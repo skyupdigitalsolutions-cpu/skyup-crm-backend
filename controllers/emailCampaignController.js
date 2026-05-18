@@ -1,6 +1,6 @@
 // controllers/emailCampaignController.js
-const axios    = require("axios");
-const Lead     = require("../models/Leads");
+const axios = require("axios");
+const Lead = require("../models/Leads");
 const EmailLog = require("../models/EmailLog");
 
 // ── Brevo (Sendinblue) transactional email sender ──────────────────────────────
@@ -19,12 +19,20 @@ const sendViaBrevo = async ({ to, subject, html, fromName }) => {
         "api-key": process.env.BREVO_API_KEY,
         "Content-Type": "application/json",
       },
-    }
+    },
   );
 };
 
 // ── Helper: persist an email log entry ────────────────────────────────────────
-const saveLog = async ({ to, subject, body, campaignId, status, errorMessage, companyId }) => {
+const saveLog = async ({
+  to,
+  subject,
+  body,
+  campaignId,
+  status,
+  errorMessage,
+  companyId,
+}) => {
   try {
     await EmailLog.create({
       to,
@@ -45,9 +53,18 @@ const saveLog = async ({ to, subject, body, campaignId, status, errorMessage, co
 // Runs AFTER the HTTP response has already been sent to the client.
 // Uses a small concurrency pool (5 at a time) so we don't hammer Brevo.
 // ─────────────────────────────────────────────────────────────────────────────
-async function runCampaignInBackground({ leads, subject, bodyTemplate, fromName, companyId, companyName, campaignId }) {
+async function runCampaignInBackground({
+  leads,
+  subject,
+  bodyTemplate,
+  fromName,
+  companyId,
+  companyName,
+  campaignId,
+}) {
   const CONCURRENCY = 5; // max parallel Brevo calls
-  let sent = 0, failed = 0;
+  let sent = 0,
+    failed = 0;
 
   // Process leads in chunks of CONCURRENCY
   for (let i = 0; i < leads.length; i += CONCURRENCY) {
@@ -69,17 +86,34 @@ async function runCampaignInBackground({ leads, subject, bodyTemplate, fromName,
             fromName: fromName || companyName || "CRM",
           });
           sent++;
-          await saveLog({ to: lead.email, subject, body: html, campaignId, status: "sent", companyId });
+          await saveLog({
+            to: lead.email,
+            subject,
+            body: html,
+            campaignId,
+            status: "sent",
+            companyId,
+          });
         } catch (err) {
           failed++;
           const errMsg = err?.response?.data?.message || err.message;
-          await saveLog({ to: lead.email, subject, body: html, campaignId, status: "failed", errorMessage: errMsg, companyId });
+          await saveLog({
+            to: lead.email,
+            subject,
+            body: html,
+            campaignId,
+            status: "failed",
+            errorMessage: errMsg,
+            companyId,
+          });
         }
-      })
+      }),
     );
   }
 
-  console.log(`📧 Campaign "${campaignId}" complete — sent: ${sent}, failed: ${failed}, total: ${leads.length}`);
+  console.log(
+    `📧 Campaign "${campaignId}" complete — sent: ${sent}, failed: ${failed}, total: ${leads.length}`,
+  );
 }
 
 // ── POST /api/email-campaign/send ─────────────────────────────────────────────
@@ -91,7 +125,9 @@ const sendBulkEmails = async (req, res) => {
     const { campaign, subject, bodyTemplate, fromName } = req.body;
 
     if (!campaign || !subject || !bodyTemplate) {
-      return res.status(400).json({ message: "campaign, subject, and bodyTemplate are required" });
+      return res
+        .status(400)
+        .json({ message: "campaign, subject, and bodyTemplate are required" });
     }
 
     const leads = await Lead.find({
@@ -101,7 +137,9 @@ const sendBulkEmails = async (req, res) => {
     });
 
     if (leads.length === 0) {
-      return res.status(404).json({ message: "No leads with email found for this campaign" });
+      return res
+        .status(404)
+        .json({ message: "No leads with email found for this campaign" });
     }
 
     // ── Respond immediately so the client isn't left waiting ─────────────────
@@ -117,13 +155,12 @@ const sendBulkEmails = async (req, res) => {
       subject,
       bodyTemplate,
       fromName,
-      companyId:   req.admin.company._id,
+      companyId: req.admin.company._id,
       companyName: req.admin.company.name,
-      campaignId:  campaign,
+      campaignId: campaign,
     }).catch((err) => {
       console.error("runCampaignInBackground uncaught error:", err.message);
     });
-
   } catch (err) {
     console.error("Email campaign error:", err);
     res.status(500).json({ message: "Server error", error: err.message });
@@ -134,8 +171,13 @@ const sendBulkEmails = async (req, res) => {
 const previewCampaign = async (req, res) => {
   try {
     const { campaign } = req.query;
-    if (!campaign) return res.status(400).json({ message: "campaign is required" });
-    const count = await Lead.countDocuments({ company: req.admin.company._id, campaign, email: { $exists: true, $ne: "" } });
+    if (!campaign)
+      return res.status(400).json({ message: "campaign is required" });
+    const count = await Lead.countDocuments({
+      company: req.admin.company._id,
+      campaign,
+      email: { $exists: true, $ne: "" },
+    });
     res.json({ campaign, leadCount: count });
   } catch (err) {
     res.status(500).json({ message: "Server error", error: err.message });
@@ -145,7 +187,8 @@ const previewCampaign = async (req, res) => {
 // ── POST /api/email-campaign/send-single ─────────────────────────────────────
 const sendSingleEmail = async (req, res) => {
   const { name, email, subject, bodyTemplate, fromName } = req.body;
-  if (!email || !subject) return res.status(400).json({ message: "email and subject required" });
+  if (!email || !subject)
+    return res.status(400).json({ message: "email and subject required" });
 
   const html = bodyTemplate
     .replace(/{{name}}/g, name || "Friend")
@@ -155,18 +198,39 @@ const sendSingleEmail = async (req, res) => {
 
   try {
     await sendViaBrevo({ to: [{ name, email }], subject, html, fromName });
-    await saveLog({ to: email, subject, body: html, campaignId: null, status: "sent", companyId: req.admin.company._id });
+    await saveLog({
+      to: email,
+      subject,
+      body: html,
+      campaignId: null,
+      status: "sent",
+      companyId: req.admin.company._id,
+    });
     res.json({ sent: 1, failed: 0, total: 1 });
   } catch (err) {
-    await saveLog({ to: email, subject, body: html, campaignId: null, status: "failed", errorMessage: err.message, companyId: req.admin.company._id });
-    res.json({ sent: 0, failed: 1, total: 1, errors: [{ email, error: err.message }] });
+    await saveLog({
+      to: email,
+      subject,
+      body: html,
+      campaignId: null,
+      status: "failed",
+      errorMessage: err.message,
+      companyId: req.admin.company._id,
+    });
+    res.json({
+      sent: 0,
+      failed: 1,
+      total: 1,
+      errors: [{ email, error: err.message }],
+    });
   }
 };
 
 // ── POST /api/email-campaign/send-csv ────────────────────────────────────────
 const sendCsvEmails = async (req, res) => {
   const { recipients, subject, bodyTemplate, fromName } = req.body;
-  if (!recipients?.length || !subject) return res.status(400).json({ message: "recipients and subject required" });
+  if (!recipients?.length || !subject)
+    return res.status(400).json({ message: "recipients and subject required" });
 
   // Respond immediately for large CSV lists too
   res.json({
@@ -177,7 +241,8 @@ const sendCsvEmails = async (req, res) => {
 
   // Process in background with concurrency
   const CONCURRENCY = 5;
-  let sent = 0, failed = 0;
+  let sent = 0,
+    failed = 0;
 
   (async () => {
     for (let i = 0; i < recipients.length; i += CONCURRENCY) {
@@ -190,27 +255,59 @@ const sendCsvEmails = async (req, res) => {
             .replace(/{{mobile}}/g, "")
             .replace(/{{email}}/g, email);
           try {
-            await sendViaBrevo({ to: [{ name, email }], subject, html, fromName });
+            await sendViaBrevo({
+              to: [{ name, email }],
+              subject,
+              html,
+              fromName,
+            });
             sent++;
-            await saveLog({ to: email, subject, body: html, campaignId: "csv-import", status: "sent", companyId: req.admin.company._id });
+            await saveLog({
+              to: email,
+              subject,
+              body: html,
+              campaignId: "csv-import",
+              status: "sent",
+              companyId: req.admin.company._id,
+            });
           } catch (err) {
             failed++;
-            await saveLog({ to: email, subject, body: html, campaignId: "csv-import", status: "failed", errorMessage: err.message, companyId: req.admin.company._id });
+            await saveLog({
+              to: email,
+              subject,
+              body: html,
+              campaignId: "csv-import",
+              status: "failed",
+              errorMessage: err.message,
+              companyId: req.admin.company._id,
+            });
           }
-        })
+        }),
       );
     }
-    console.log(`📧 CSV campaign complete — sent: ${sent}, failed: ${failed}, total: ${recipients.length}`);
-  })().catch((err) => console.error("CSV campaign background error:", err.message));
+    console.log(
+      `📧 CSV campaign complete — sent: ${sent}, failed: ${failed}, total: ${recipients.length}`,
+    );
+  })().catch((err) =>
+    console.error("CSV campaign background error:", err.message),
+  );
 };
 
 // ── GET /api/email/history ────────────────────────────────────────────────────
 const getEmailHistory = async (req, res) => {
   try {
-    const { page = 1, limit = 10, search = "", campaignId = "", sortOrder = "desc", dateFrom = "", dateTo = "" } = req.query;
-    const pageNum  = Math.max(1, parseInt(page));
+    const {
+      page = 1,
+      limit = 10,
+      search = "",
+      campaignId = "",
+      sortOrder = "desc",
+      dateFrom = "",
+      dateTo = "",
+    } = req.query;
+    const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
-    const skip     = (pageNum - 1) * limitNum;
+    const skip = (pageNum - 1) * limitNum;
 
     const filter = { company: req.admin.company._id };
     if (search.trim()) filter.to = { $regex: search.trim(), $options: "i" };
@@ -231,51 +328,102 @@ const getEmailHistory = async (req, res) => {
 
     const sortDir = sortOrder === "asc" ? 1 : -1;
     const [logs, total] = await Promise.all([
-      EmailLog.find(filter).sort({ sentAt: sortDir }).skip(skip).limit(limitNum).select("-body").lean(),
+      EmailLog.find(filter)
+        .sort({ sentAt: sortDir })
+        .skip(skip)
+        .limit(limitNum)
+        .select("-body")
+        .lean(),
       EmailLog.countDocuments(filter),
     ]);
 
     res.json({
       success: true,
       data: logs,
-      pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) },
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+      },
     });
   } catch (err) {
     console.error("getEmailHistory error:", err);
-    res.status(500).json({ success: false, message: "Server error", error: err.message });
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 };
 
 // ── GET /api/email/history/:id ────────────────────────────────────────────────
 const getEmailLogById = async (req, res) => {
   try {
-    const log = await EmailLog.findOne({ _id: req.params.id, company: req.admin.company._id }).lean();
-    if (!log) return res.status(404).json({ success: false, message: "Log not found" });
+    const log = await EmailLog.findOne({
+      _id: req.params.id,
+      company: req.admin.company._id,
+    }).lean();
+    if (!log)
+      return res.status(404).json({ success: false, message: "Log not found" });
     res.json({ success: true, data: log });
   } catch (err) {
-    res.status(500).json({ success: false, message: "Server error", error: err.message });
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 };
 
 // ── DELETE /api/email/history/:id ─────────────────────────────────────────────
 const deleteEmailLog = async (req, res) => {
   try {
-    const log = await EmailLog.findOneAndDelete({ _id: req.params.id, company: req.admin.company._id });
-    if (!log) return res.status(404).json({ success: false, message: "Log not found" });
+    const log = await EmailLog.findOneAndDelete({
+      _id: req.params.id,
+      company: req.admin.company._id,
+    });
+    if (!log)
+      return res.status(404).json({ success: false, message: "Log not found" });
     res.json({ success: true, message: "Log deleted" });
   } catch (err) {
-    res.status(500).json({ success: false, message: "Server error", error: err.message });
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 };
 
 // ── GET /api/email/history/campaigns ─────────────────────────────────────────
 const getDistinctCampaigns = async (req, res) => {
   try {
-    const campaigns = await EmailLog.distinct("campaignId", { company: req.admin.company._id, campaignId: { $ne: null } });
+    const campaigns = await EmailLog.distinct("campaignId", {
+      company: req.admin.company._id,
+      campaignId: { $ne: null },
+    });
     res.json({ success: true, data: campaigns.filter(Boolean) });
   } catch (err) {
-    res.status(500).json({ success: false, message: "Server error", error: err.message });
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 };
 
-module.exports = { sendBulkEmails, previewCampaign, sendSingleEmail, sendCsvEmails, getEmailHistory, getEmailLogById, deleteEmailLog, getDistinctCampaigns };
+// GET /api/email-campaign/brevo-status
+const getBrevoStatus = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    // Check your existing email config model / Company model for brevoApiKey
+    const company = await Company.findById(companyId).select("brevoApiKey").lean();
+    res.json({ connected: !!(company?.brevoApiKey) });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+module.exports = {
+  sendBulkEmails,
+  previewCampaign,
+  sendSingleEmail,
+  sendCsvEmails,
+  getEmailHistory,
+  getEmailLogById,
+  deleteEmailLog,
+  getDistinctCampaigns,
+  getBrevoStatus
+};
