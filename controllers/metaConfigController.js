@@ -77,7 +77,8 @@ const addConfig = async (req, res) => {
       });
     }
 
-    const existing = await MetaConfig.findOne({ pageId });
+    const formIdValue = req.body.formId?.trim() || "";
+    const existing = await MetaConfig.findOne({ pageId, formId: formIdValue });
     if (existing) {
       return res.status(400).json({ message: "This Meta page is already connected" });
     }
@@ -90,6 +91,9 @@ const addConfig = async (req, res) => {
       pageId,
       pageAccessToken,
       formIds:         formIds || [],
+      formId:          req.body.formId?.trim() || "",         // ← ADD
+      adSetName:       req.body.adSetName?.trim() || "",      // ← ADD
+      parentCampaignName: req.body.parentCampaignName?.trim() || "",
       company:         companyId,
       roundRobinIndex: 0,
       defaultStatus:   defaultStatus || "New",
