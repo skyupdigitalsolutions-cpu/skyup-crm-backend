@@ -85,7 +85,22 @@ const receiveWebhook = async (req, res) => {
       const pageId = e.id;
       console.log(`\n🔍 Processing entry — pageId: "${pageId}"`);
 
-      const config = await MetaConfig.findOne({ pageId });
+      // Step 1: exact match by pageId + specific formId
+let config = await MetaConfig.findOne({ pageId, formId: form_id, isActive: true });
+
+// Step 2: match by pageId + formIds array (legacy multi-form whitelist)
+if (!config) {
+  config = await MetaConfig.findOne({ pageId, formIds: form_id, isActive: true });
+}
+
+// Step 3: catch-all — config for this page with no specific form
+if (!config) {
+  config = await MetaConfig.findOne({
+    pageId,
+    isActive: true,
+    $or: [{ formId: "" }, { formId: { $exists: false } }],
+  });
+}
 
       if (!config) {
         const all = await MetaConfig.find({}).select("pageId campaignName isActive").lean();
