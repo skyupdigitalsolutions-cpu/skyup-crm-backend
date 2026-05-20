@@ -1,4 +1,4 @@
-// controllers/superAdminController.js — UPDATED (added createAdmin, fixed getDashboardStats with companyId filter; all existing functions unchanged)
+// controllers/superAdminController.js
 const SuperAdmin = require("../models/SuperAdmin");
 const Company = require("../models/Company");
 const Admin = require("../models/Admin");
@@ -221,6 +221,118 @@ const createAdmin = async (req, res) => {
   }
 };
 
+// ── NEW: GET /api/superadmin/admin-details/:adminId ───────────────────────────
+// Returns full profile of a specific admin: their info, assigned users,
+// all leads they own (assignedAdmin) or were created under, and phone-reveal stats.
+const getAdminDetails = async (req, res) => {
+  try {
+    const companyId = req.companyId; // from companyIsolation middleware
+    const { adminId } = req.params;
+
+    // Verify the target admin belongs to this company
+    const admin = await Admin.findOne({ _id: adminId, company: companyId }).select("-password").lean();
+    if (!admin) return res.status(404).json({ message: "Admin not found" });
+
+    // Users created by this admin
+    const users = await User.find({ company: companyId, createdBy: adminId })
+      .select("-password")
+      .lean();
+
+    // Leads assigned to this admin (assignedAdmin field)
+    const leads = await Lead.find({ company: companyId, assignedAdmin: adminId })
+      .select("name mobile email status source campaign temperature phoneRevealCount assignedAdmin user date remark")
+      .lean();
+
+    // Phone reveal stats: leads where any reveal was done by users under this admin
+    // We look at phoneRevealLog entries whose userId belongs to this admin's users
+    const userIds = users.map((u) => u._id.toString());
+    const leadsWithRevealsByAdmin = await Lead.find({
+      company: companyId,
+      "phoneRevealLog.0": { $exists: true },
+    })
+      .select("name mobile phoneRevealLog phoneRevealCount")
+      .lean();
+
+    // Build per-admin reveal stats
+    let totalRevealsByAdmin = 0;
+    const revealedLeads = [];
+    leadsWithRevealsByAdmin.forEach((lead) => {
+      const adminReveals = lead.phoneRevealLog.filter(
+        (entry) => userIds.includes(entry.userId?.toString())
+      );
+      if (adminReveals.length > 0) {
+        totalRevealsByAdmin += adminReveals.length;
+        revealedLeads.push({
+          leadId: lead._id,
+          name: lead.name,
+          mobile: lead.mobile,
+          revealCount: adminReveals.length,
+          revealedBy: adminReveals.map((e) => ({ userName: e.userName, revealedAt: e.revealedAt })),
+        });
+      }
+    });
+
+    // Lead status breakdown
+    const statusBreakdown = leads.reduce((acc, l) => {
+      acc[l.status] = (acc[l.status] || 0) + 1;
+      return acc;
+    }, {});
+
+    // Temperature breakdown
+    const tempBreakdown = leads.reduce((acc, l) => {
+      const t = l.temperature || "Unknown";
+      acc[t] = (acc[t] || 0) + 1;
+      return acc;
+    }, {});
+
+    res.status(200).json({
+      admin,
+      users,
+      leads,
+      stats: {
+        totalUsers: users.length,
+        totalLeads: leads.length,
+        statusBreakdown,
+        tempBreakdown,
+        phoneReveals: {
+          totalRevealsByAdmin,
+          leadsRevealed: revealedLeads.length,
+          details: revealedLeads,
+        },
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── NEW: GET /api/superadmin/all-admins ───────────────────────────────────────
+// Returns all admins in the company with summary stats for the dropdown filter.
+const getAllAdminsWithStats = async (req, res) => {
+  try {
+    const companyId = req.companyId;
+
+    const admins = await Admin.find({ company: companyId, role: "admin" })
+      .select("-password")
+      .lean();
+
+    // Attach quick stats per admin
+    const adminsWithStats = await Promise.all(
+      admins.map(async (admin) => {
+        const [userCount, leadCount] = await Promise.all([
+          User.countDocuments({ company: companyId, createdBy: admin._id }),
+          Lead.countDocuments({ company: companyId, assignedAdmin: admin._id }),
+        ]);
+        return { ...admin, userCount, leadCount };
+      })
+    );
+
+    res.status(200).json(adminsWithStats);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   registerSuperAdmin,
   loginSuperAdmin,
@@ -231,4 +343,6 @@ module.exports = {
   toggleCompany,
   deleteCompany,
   getDashboardStats,
+  getAdminDetails,
+  getAllAdminsWithStats,
 };
