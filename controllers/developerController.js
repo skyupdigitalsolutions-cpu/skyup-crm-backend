@@ -88,6 +88,40 @@ const createCompanySuperAdmin = async (req, res) => {
   }
 };
 
+// ── Update Company (name, email, phone, plan, logo) ────────────────────────────
+const updateCompany = async (req, res) => {
+  try {
+    const company = await Company.findById(req.params.id);
+    if (!company)
+      return res.status(404).json({ message: "Company not found" });
+
+    const { name, email, phone, plan } = req.body;
+
+    // Check email uniqueness only if email changed
+    if (email && email !== company.email) {
+      const exists = await Company.findOne({ email, _id: { $ne: company._id } });
+      if (exists)
+        return res.status(400).json({ message: "Another company with this email already exists" });
+      company.email = email;
+    }
+
+    if (name)  company.name  = name;
+    if (phone !== undefined) company.phone = phone;
+    if (plan && ["basic","pro","enterprise"].includes(plan)) company.plan = plan;
+
+    // Logo uploaded via multer (multipart/form-data)
+    if (req.file) {
+      // If using cloudinary/s3 upload middleware, req.file.path or req.file.location
+      company.logo = req.file.path || req.file.location || req.file.filename || "";
+    }
+
+    await company.save();
+    res.json(company);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // ── List all companies (without sensitive fields) ──────────────────────────────
 const getCompanies = async (req, res) => {
   try {
@@ -148,6 +182,7 @@ module.exports = {
   createCompany,
   createCompanySuperAdmin,
   getCompanies,
+  updateCompany,
   toggleCompanyStatus,
   getSubscriptions,
   updateSubscription,
