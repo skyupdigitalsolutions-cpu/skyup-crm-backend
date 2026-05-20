@@ -8,11 +8,13 @@ const {
   toggleConfig,
   deleteConfig,
 } = require("../controllers/metaConfigController");
+const { syncFromMeta } = require("../controllers/metaSyncController");
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 
 // All routes protected — company is derived from req.admin inside the controller
 router.get("/", protectAdmin, getAllConfigs);
 router.get("/:id", protectAdmin, getConfigById);
+router.post("/sync", protectAdmin, syncFromMeta);   // ← FIX: Auto-Sync from Meta
 router.post("/", protectAdmin, addConfig);
 router.put("/:id", protectAdmin, updateConfig);
 router.patch("/:id/toggle", protectAdmin, toggleConfig);
