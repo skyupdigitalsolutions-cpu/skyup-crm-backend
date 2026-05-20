@@ -134,6 +134,15 @@ const protectUnified = async (req, res, next) => {
       req.user = await Developer.findById(decoded.id).select("-password");
     } else if (["super_admin", "admin"].includes(decoded.role)) {
       req.user = await Admin.findById(decoded.id).select("-password").populate("company");
+      // Fall back to legacy SuperAdmin collection if not found in Admin model
+      if (!req.user) {
+        const legacySuperAdmin = await SuperAdmin.findById(decoded.id).select("-password");
+        if (legacySuperAdmin) {
+          // Normalise: attach role so authorizeRoles("super_admin") works
+          req.user = legacySuperAdmin;
+          if (!req.user.role) req.user = { ...req.user.toObject(), role: "super_admin" };
+        }
+      }
     } else {
       // employee / user
       req.user = await User.findById(decoded.id).select("-password");
