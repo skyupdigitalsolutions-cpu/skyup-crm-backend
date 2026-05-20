@@ -3,9 +3,16 @@ const mongoose = require("mongoose");
 const metaConfigSchema = new mongoose.Schema(
   {
     campaignName:    { type: String, required: true },
-    pageId:          { type: String, required: true, unique: true },
+    pageId:          { type: String, required: true},
     pageAccessToken: { type: String, required: true },
     formIds:         [{ type: String }], // empty = accept all forms
+    formId: {
+  type: String,
+  default: "",
+  trim: true,
+  // The specific Meta lead form ID this config handles.
+  // Empty = catch-all for any form on this page.
+},
     isActive:        { type: Boolean, default: true },
 
     company: {
@@ -43,6 +50,10 @@ const metaConfigSchema = new mongoose.Schema(
     },
   },
   { timestamps: true },
+);
+metaConfigSchema.index(
+  { pageId: 1, formId: 1 },
+  { unique: true, name: "pageId_formId_unique" }
 );
 
 module.exports = mongoose.model("MetaConfig", metaConfigSchema);
