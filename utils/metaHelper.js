@@ -161,6 +161,7 @@ const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
     email,
     source:      "Meta",
     campaign:    config.campaignName,
+    adSetName:   config.adSetName || "",  
     status:      config.defaultStatus,
     date:        new Date(),
     remark:      extraFields || config.defaultRemark,
