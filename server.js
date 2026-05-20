@@ -221,6 +221,10 @@ app.use('/api/saanvi', saanviProxyRoute);
 // ── WhatsApp API (conversations, send, config) ────────────────────────────────
 app.use('/api/whatsapp', whatsappRoutes);
 
+// ── Reports — unified daily / employee / campaign reports ─────────────────────
+const reportRoutes = require('./routes/reportRoutes');
+app.use('/api/reports', reportRoutes);
+
 // ── Mobile App: Call Log Sync & Recordings ────────────────────────────────────
 const mobileCallLogRoute = require('./routes/mobileCallLog');
 app.use('/api/call-logs', mobileCallLogRoute);
