@@ -8,6 +8,7 @@ const {
   createCompany,
   createCompanySuperAdmin,
   getCompanies,
+  updateCompany,
   toggleCompanyStatus,
   getSubscriptions,
   updateSubscription,
@@ -27,6 +28,7 @@ router.get("/dashboard",                       getDeveloperDashboard);   // aggr
 router.get("/companies",                       getCompanies);
 router.post("/companies",                      createCompany);
 router.post("/companies/:id/super-admin",      createCompanySuperAdmin);
+router.put("/companies/:id",                   updateCompany);
 router.put("/companies/:id/toggle",            toggleCompanyStatus);
 router.get("/subscriptions",                   getSubscriptions);
 router.put("/subscriptions/:companyId",        updateSubscription);
