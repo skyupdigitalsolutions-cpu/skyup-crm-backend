@@ -36,6 +36,7 @@ const leadSchema = mongoose.Schema(
     email:     { type: String, default: "", trim: true },
     source:    { type: String, required: true, trim: true },
     campaign:  { type: String, required: false, default: null },
+    adSetName: { type: String, default: "", trim: true },
     status:    { type: String, required: true, trim: true },
     date:      { type: Date, required: true },
     remark:    { type: String, required: true, trim: true },
