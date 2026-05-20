@@ -233,8 +233,16 @@ const getCompanyAttendance = async (req, res) => {
     const companyId = req.admin.company._id;
     const { date = todayStr() } = req.query;
 
-    const users   = await User.find({ company: companyId }).select("name email ipAddress appName appVersion platform deviceModel osVersion").lean();
-    const records = await Attendance.find({ company: companyId, date })
+    // Scope: super_admin sees all users; regular admin sees only users they created
+    const userQuery = { company: companyId };
+    if (req.admin.role !== "super_admin") {
+      userQuery.createdBy = req.admin._id;
+    }
+
+    const users   = await User.find(userQuery).select("name email ipAddress appName appVersion platform deviceModel osVersion").lean();
+    const userIds = users.map(u => u._id);
+
+    const records = await Attendance.find({ company: companyId, date, user: { $in: userIds } })
       .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion").lean();
 
     const recordMap = {};
@@ -280,9 +288,24 @@ const getAttendanceReport = async (req, res) => {
     const from  = startDate || today;
     const to    = endDate   || today;
 
+    // Scope: super_admin sees all users; regular admin sees only their users
+    let allowedUserIds = null;
+    if (req.admin.role !== "super_admin") {
+      const scopedUsers = await User.find({ company: companyId, createdBy: req.admin._id }).select("_id").lean();
+      allowedUserIds = scopedUsers.map(u => u._id);
+    }
+
     // Build base query
     const query = { company: companyId, date: { $gte: from, $lte: to } };
-    if (userId) query.user = userId;
+    if (userId) {
+      // If a specific userId is requested, honour it only if it's in the allowed set
+      if (allowedUserIds && !allowedUserIds.some(id => String(id) === String(userId))) {
+        return res.status(200).json({ records: [], total: 0, page: 1, pages: 1 });
+      }
+      query.user = userId;
+    } else if (allowedUserIds) {
+      query.user = { $in: allowedUserIds };
+    }
 
     // Fetch records
     const [records, total] = await Promise.all([
@@ -307,8 +330,10 @@ const getAttendanceReport = async (req, res) => {
       ? enriched.filter(r => r.derivedCrmStatus === crmStatus)
       : enriched;
 
-    // Get all users for the company (for absent rows — users with no record)
-    const allUsers = await User.find({ company: companyId }).select("name email ipAddress").lean();
+    // Get users for absent rows — scoped the same way as the main query
+    const absentUserQuery = { company: companyId };
+    if (allowedUserIds) absentUserQuery._id = { $in: allowedUserIds };
+    const allUsers = await User.find(absentUserQuery).select("name email ipAddress").lean();
 
     // Build absent rows: users with no record in range who have no record for today
     let absentRows = [];
@@ -393,8 +418,22 @@ const exportAttendance = async (req, res) => {
     const from  = startDate || today;
     const to    = endDate   || today;
 
+    // Scope: super_admin sees all; regular admin sees only their users
+    let exportAllowedIds = null;
+    if (req.admin.role !== "super_admin") {
+      const scopedUsers = await User.find({ company: companyId, createdBy: req.admin._id }).select("_id").lean();
+      exportAllowedIds = scopedUsers.map(u => u._id);
+    }
+
     const query = { company: companyId, date: { $gte: from, $lte: to } };
-    if (userId) query.user = userId;
+    if (userId) {
+      if (exportAllowedIds && !exportAllowedIds.some(id => String(id) === String(userId))) {
+        return res.status(200).json([]);
+      }
+      query.user = userId;
+    } else if (exportAllowedIds) {
+      query.user = { $in: exportAllowedIds };
+    }
 
     const records = await Attendance.find(query)
       .populate("user", "name email ipAddress")
@@ -422,7 +461,12 @@ const exportAttendance = async (req, res) => {
 // ── ADMIN: Get company users list (for employee filter dropdown) ───────────────
 const getCompanyUsers = async (req, res) => {
   try {
-    const users = await User.find({ company: req.admin.company._id })
+    // Scope: super_admin sees all users; regular admin sees only their own users
+    const userQuery = { company: req.admin.company._id };
+    if (req.admin.role !== "super_admin") {
+      userQuery.createdBy = req.admin._id;
+    }
+    const users = await User.find(userQuery)
       .select("name email ipAddress appName appVersion platform deviceModel osVersion").lean();
     res.status(200).json(users);
   } catch (err) { res.status(500).json({ message: err.message }); }
