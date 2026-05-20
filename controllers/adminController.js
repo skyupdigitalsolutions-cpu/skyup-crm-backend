@@ -38,7 +38,7 @@ const getAdmins = async (req, res) => {
   try {
     const filter = { company: req.admin.company._id };
     // Only a company superadmin may see superadmin accounts.
-    if (req.admin.role !== "superadmin") filter.role = { $ne: "superadmin" };
+    if (req.admin.role !== "super_admin") filter.role = { $ne: "super_admin" };
     const admins = await Admin.find(filter).select("-password");
     res.status(200).json(admins);
   } catch (error) {
@@ -68,7 +68,7 @@ const createAdmin = async (req, res) => {
     if (!company) return res.status(404).json({ message: "Company not found" });
 
     const limits = getPlanLimits(company.plan);
-    const existingAdminCount = await Admin.countDocuments({ company: companyId, role: { $ne: "superadmin" } });
+    const existingAdminCount = await Admin.countDocuments({ company: companyId, role: { $ne: "super_admin" } });
 
     if (existingAdminCount >= limits.maxAdmins) {
       return res.status(403).json({
@@ -104,10 +104,10 @@ const deleteAdmin = async (req, res) => {
 
     // Guard: never delete a company's last superadmin (would lock the company
     // out of all admin-team management).
-    if (admin.role === "superadmin") {
+    if (admin.role === "super_admin") {
       const superCount = await Admin.countDocuments({
         company: req.admin.company._id,
-        role: "superadmin",
+        role: "super_admin",
       });
       if (superCount <= 1) {
         return res.status(400).json({
@@ -129,15 +129,15 @@ const updateAdmin = async (req, res) => {
     const admin = await Admin.findOne({ _id: req.params.id, company: req.admin.company._id });
     if (!admin) return res.status(404).json({ message: "Admin Not Found" });
 
-    if (req.body.role && !["superadmin", "admin"].includes(req.body.role)) {
+    if (req.body.role && !["super_admin", "admin"].includes(req.body.role)) {
       return res.status(400).json({ message: "Invalid role" });
     }
 
     // Guard: don't demote the company's only superadmin.
-    if (admin.role === "superadmin" && req.body.role && req.body.role !== "superadmin") {
+    if (admin.role === "super_admin" && req.body.role && req.body.role !== "super_admin") {
       const superCount = await Admin.countDocuments({
         company: req.admin.company._id,
-        role: "superadmin",
+        role: "super_admin",
       });
       if (superCount <= 1) {
         return res.status(400).json({
@@ -194,7 +194,7 @@ const getCompanyUsers = async (req, res) => {
   try {
     const filter = { company: req.admin.company._id };
     // Superadmin sees all company users; a regular admin sees only their own.
-    if (req.admin.role !== "superadmin") filter.createdBy = req.admin._id;
+    if (req.admin.role !== "super_admin") filter.createdBy = req.admin._id;
     const users = await User.find(filter).select("-password");
     res.status(200).json(users);
   } catch (error) {
@@ -230,7 +230,7 @@ const getCompanyLeads = async (req, res) => {
 const deleteCompanyUser = async (req, res) => {
   try {
    const query = { _id: req.params.id, company: req.admin.company._id };
-    if (req.admin.role !== "superadmin") query.createdBy = req.admin._id;
+    if (req.admin.role !== "super_admin") query.createdBy = req.admin._id;
     const user = await User.findOne(query);
     if (!user) return res.status(404).json({ message: "User not found" });
     await User.findByIdAndDelete(req.params.id);
