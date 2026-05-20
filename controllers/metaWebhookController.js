@@ -50,9 +50,6 @@ const verifyWebhook = async (req, res) => {
   console.warn(`❌ Token mismatch — received: "${token}"`);
   console.warn(`   ENV META_VERIFY_TOKEN: "${envToken || "not set"}"`);
   console.warn(`   Also checked all active campaign verifyTokens in DB — none matched.`);
-  console.warn(`   👉 Fix: Make sure the Verify Token in Meta's App dashboard matches`);
-  console.warn(`      either META_VERIFY_TOKEN in your .env OR the verifyToken saved`);
-  console.warn(`      for the campaign in your CRM.`);
   return res.sendStatus(403);
 };
 
@@ -85,42 +82,6 @@ const receiveWebhook = async (req, res) => {
       const pageId = e.id;
       console.log(`\n🔍 Processing entry — pageId: "${pageId}"`);
 
-      // Step 1: exact match by pageId + specific formId
-let config = await MetaConfig.findOne({ pageId, formId: form_id, isActive: true });
-
-// Step 2: match by pageId + formIds array (legacy multi-form whitelist)
-if (!config) {
-  config = await MetaConfig.findOne({ pageId, formIds: form_id, isActive: true });
-}
-
-// Step 3: catch-all — config for this page with no specific form
-if (!config) {
-  config = await MetaConfig.findOne({
-    pageId,
-    isActive: true,
-    $or: [{ formId: "" }, { formId: { $exists: false } }],
-  });
-}
-
-      if (!config) {
-        const all = await MetaConfig.find({}).select("pageId campaignName isActive").lean();
-        console.error(`❌ No MetaConfig found for pageId: "${pageId}"`);
-        console.error(`   All registered pageIds: ${JSON.stringify(all)}`);
-        continue;
-      }
-
-      if (!config.isActive) {
-        console.warn(`⚠️  MetaConfig for pageId "${pageId}" exists but is PAUSED — activate it in CRM.`);
-        continue;
-      }
-
-      if (!config.pageAccessToken || config.pageAccessToken.startsWith("your_") || config.pageAccessToken === "EAAxxxxxx") {
-        console.error(`❌ pageAccessToken for campaign "${config.campaignName}" is a placeholder.`);
-        continue;
-      }
-
-      console.log(`✅ Config found — campaign: "${config.campaignName}", active: ${config.isActive}`);
-
       for (const change of e.changes) {
         console.log(`   change.field: "${change.field}"`);
 
@@ -129,14 +90,51 @@ if (!config) {
           continue;
         }
 
+        // ── form_id is now declared BEFORE any config lookup that uses it ──────
         const { leadgen_id, form_id } = change.value;
         console.log(`   leadgen_id: "${leadgen_id}"`);
         console.log(`   form_id   : "${form_id}"`);
 
-        if (config.formIds && config.formIds.length > 0 && !config.formIds.includes(form_id)) {
-          console.warn(`   ⏭ form_id "${form_id}" not in allowed list`);
+        // ── Config lookup — most-specific match first ─────────────────────────
+        // Step 1: exact match by pageId + specific formId (one adset config)
+        let config = await MetaConfig.findOne({ pageId, formId: form_id, isActive: true });
+
+        // Step 2: match by pageId + formIds array (legacy multi-form whitelist)
+        if (!config) {
+          config = await MetaConfig.findOne({ pageId, formIds: form_id, isActive: true });
+        }
+
+        // Step 3: catch-all — any active config for this page with no specific form
+        if (!config) {
+          config = await MetaConfig.findOne({
+            pageId,
+            isActive: true,
+            $or: [{ formId: "" }, { formId: { $exists: false } }],
+          });
+        }
+
+        if (!config) {
+          const all = await MetaConfig.find({}).select("pageId campaignName isActive").lean();
+          console.error(`❌ No MetaConfig found for pageId: "${pageId}", formId: "${form_id}"`);
+          console.error(`   All registered configs: ${JSON.stringify(all)}`);
           continue;
         }
+
+        if (!config.isActive) {
+          console.warn(`⚠️  MetaConfig "${config.campaignName}" is PAUSED — activate it in CRM.`);
+          continue;
+        }
+
+        if (
+          !config.pageAccessToken ||
+          config.pageAccessToken.startsWith("your_") ||
+          config.pageAccessToken === "EAAxxxxxx"
+        ) {
+          console.error(`❌ pageAccessToken for campaign "${config.campaignName}" is a placeholder.`);
+          continue;
+        }
+
+        console.log(`✅ Config found — campaign: "${config.campaignName}", adset: "${config.adSetName}", active: ${config.isActive}`);
 
         const duplicate = await Lead.findOne({ leadgenId: leadgen_id });
         if (duplicate) {
@@ -157,11 +155,11 @@ if (!config) {
           continue;
         }
 
-        const parsedFields  = parseFieldData(leadData.field_data);
+        const parsedFields   = parseFieldData(leadData.field_data);
         const assignedUserId = await getNextAssignedUser(config);
-        const leadPayload   = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
+        const leadPayload    = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
 
-        // ── Phone-based dedup: check normalizedPhone before insert ────────────
+        // ── Phone-based dedup ─────────────────────────────────────────────────
         const normPhone = normalizePhone(leadPayload.mobile);
         if (normPhone) {
           const phoneDup = await Lead.findOne(
@@ -169,16 +167,17 @@ if (!config) {
             { _id: 1, name: 1 }
           ).lean();
           if (phoneDup) {
-            console.log(`   ⏭ Phone duplicate — ${leadPayload.mobile} → normalizes to ${normPhone}, exists as "${phoneDup.name}" (${phoneDup._id})`);
-            // Append this Meta submission as a callHistory note on the existing lead
+            console.log(`   ⏭ Phone duplicate — ${leadPayload.mobile} → ${normPhone}, exists as "${phoneDup.name}" (${phoneDup._id})`);
             await Lead.findByIdAndUpdate(phoneDup._id, {
-              $push: { callHistory: {
-                userId:   null,
-                userName: "Meta Webhook",
-                remark:   `Duplicate Meta lead submission from campaign "${config.campaignName}" (leadgenId: ${leadgen_id})`,
-                outcome:  "Duplicate Submission",
-                calledAt: new Date(),
-              }},
+              $push: {
+                callHistory: {
+                  userId:   null,
+                  userName: "Meta Webhook",
+                  remark:   `Duplicate Meta lead submission from campaign "${config.campaignName}" (leadgenId: ${leadgen_id})`,
+                  outcome:  "Duplicate Submission",
+                  calledAt: new Date(),
+                },
+              },
             });
             continue;
           }
@@ -188,22 +187,20 @@ if (!config) {
         try {
           newLead = await Lead.create(leadPayload);
         } catch (createErr) {
-          // Race condition: another concurrent webhook beat us
           if (createErr.code === 11000) {
             console.log(`   ⚠ Race-condition duplicate for ${leadPayload.mobile} — skipping`);
             continue;
           }
           throw createErr;
         }
-        console.log(`\n✅ META LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`);
 
-        // ── Notify via Telegram ───────────────────────────────────────────────
-        // Pass parsedFields so the notifier can include all Meta form Q&A
-        notifyTelegram(newLead, config.campaignName, parsedFields).catch(e => console.error("Telegram error:", e.message));
+        console.log(`\n✅ META LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | adset: "${config.adSetName}" | id: ${newLead._id}`);
 
-        // ── Auto-send WhatsApp / Email / SMS template if enabled ───────────────
+        notifyTelegram(newLead, config.campaignName, parsedFields).catch((e) =>
+          console.error("Telegram error:", e.message)
+        );
+
         autoSendTemplates(newLead, newLead.company);
-
       }
     }
   } catch (err) {
