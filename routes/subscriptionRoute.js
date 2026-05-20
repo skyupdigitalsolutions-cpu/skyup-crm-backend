@@ -6,9 +6,11 @@
 
 const express = require('express');
 const router  = express.Router();
+const jwt     = require('jsonwebtoken');
 
-const { protectSuperAdmin }  = require('../middlewares/superAdminMiddleware');
-const { protectDeveloper }   = require('../middlewares/developerMiddleware');
+const Admin      = require('../models/Admin');
+const SuperAdmin = require('../models/SuperAdmin');
+const Developer  = require('../models/Developer');
 
 const {
   getPlans,
@@ -19,21 +21,49 @@ const {
   getCompanySubscription,
 } = require('../controllers/subscriptionController');
 
-// ── Middleware: allow either superadmin OR developer ──────────────────────────
-// This lets both internal developers and superadmins manage subscriptions.
-const protectPrivileged = (req, res, next) => {
-  // Try superadmin first, fall back to developer
-  protectSuperAdmin(req, res, (superAdminErr) => {
-    if (!superAdminErr) return next();           // superadmin OK
-    protectDeveloper(req, res, (devErr) => {
-      if (!devErr) return next();                // developer OK
-      // Neither succeeded — return 403
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied. Requires superadmin or developer role.',
-      });
+// ── Middleware: allow either super_admin OR developer ─────────────────────────
+// FIX: previous version chained protectSuperAdmin → protectDeveloper, but
+// protectSuperAdmin never calls next(err) on failure (it sends res.json directly),
+// so the developer fallback was never reached. We now decode the JWT once and
+// route to the correct collection based on the role claim.
+const protectPrivileged = async (req, res, next) => {
+  if (!req.headers.authorization?.startsWith('Bearer')) {
+    return res.status(401).json({ success: false, message: 'No token provided' });
+  }
+  try {
+    const token   = req.headers.authorization.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const role    = decoded.role === 'superadmin' ? 'super_admin' : decoded.role;
+
+    if (role === 'developer') {
+      const dev = await Developer.findById(decoded.id).select('-password');
+      if (!dev) return res.status(401).json({ success: false, message: 'Developer not found' });
+      req.developer = dev;
+      return next();
+    }
+
+    if (role === 'super_admin') {
+      // Try Admin model first (new multi-tenant super_admin), then legacy SuperAdmin
+      const adminDoc = await Admin.findById(decoded.id).select('-password');
+      if (adminDoc && adminDoc.role === 'super_admin') {
+        req.superAdmin = adminDoc;
+        return next();
+      }
+      const legacy = await SuperAdmin.findById(decoded.id).select('-password');
+      if (legacy) {
+        req.superAdmin = legacy;
+        return next();
+      }
+      return res.status(401).json({ success: false, message: 'Not authorized as super_admin' });
+    }
+
+    return res.status(403).json({
+      success: false,
+      message: 'Access denied. Requires super_admin or developer role.',
     });
-  });
+  } catch (err) {
+    return res.status(401).json({ success: false, message: 'Not authorized, invalid token' });
+  }
 };
 
 // ── Public ────────────────────────────────────────────────────────────────────
