@@ -130,22 +130,30 @@ const protectUnified = async (req, res, next) => {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    if (decoded.role === "developer") {
+    // Normalise legacy "superadmin" -> "super_admin" so all role checks are consistent
+    const normalizedRole = decoded.role === "superadmin" ? "super_admin" : decoded.role;
+
+    if (normalizedRole === "developer") {
       req.user = await Developer.findById(decoded.id).select("-password");
-    } else if (["super_admin", "admin"].includes(decoded.role)) {
+    } else if (["super_admin", "admin"].includes(normalizedRole)) {
       req.user = await Admin.findById(decoded.id).select("-password").populate("company");
       // Fall back to legacy SuperAdmin collection if not found in Admin model
       if (!req.user) {
         const legacySuperAdmin = await SuperAdmin.findById(decoded.id).select("-password");
         if (legacySuperAdmin) {
-          // Normalise: attach role so authorizeRoles("super_admin") works
-          req.user = legacySuperAdmin;
-          if (!req.user.role) req.user = { ...req.user.toObject(), role: "super_admin" };
+          // Always force role to "super_admin" regardless of what the model stores
+          req.user = { ...legacySuperAdmin.toObject(), role: "super_admin" };
         }
       }
     } else {
       // employee / user
       req.user = await User.findById(decoded.id).select("-password");
+    }
+
+    // Ensure role is always normalised on req.user (covers Admin model docs with old role string)
+    if (req.user && req.user.role === "superadmin") {
+      const obj = typeof req.user.toObject === "function" ? req.user.toObject() : { ...req.user };
+      req.user = { ...obj, role: "super_admin" };
     }
 
     if (!req.user) return res.status(401).json({ message: "Not authorized" });
