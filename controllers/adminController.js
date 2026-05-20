@@ -68,7 +68,7 @@ const createAdmin = async (req, res) => {
     if (!company) return res.status(404).json({ message: "Company not found" });
 
     const limits = getPlanLimits(company.plan);
-    const existingAdminCount = await Admin.countDocuments({ company: companyId });
+    const existingAdminCount = await Admin.countDocuments({ company: companyId, role: { $ne: "superadmin" } });
 
     if (existingAdminCount >= limits.maxAdmins) {
       return res.status(403).json({
