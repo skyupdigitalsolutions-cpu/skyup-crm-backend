@@ -6,9 +6,10 @@ const MetaConfig = require("../models/MetaConfig");
  * then auto-creates a MetaConfig for each adset+form combination.
  *
  * Flow:
- *  1. GET /{pageId}/leadgen_forms  → forms with adset_id, adset_name, campaign_name
- *  2. For forms missing adset_name, fetch /{adset_id}?fields=name,campaign_id,campaign{name}
- *  3. Upsert one MetaConfig per unique (pageId, formId)
+ *  1. DROP the legacy pageId_1 unique index if it still exists (migration)
+ *  2. GET /{pageId}/leadgen_forms  → forms with adset_id, adset_name, campaign_name
+ *  3. For forms missing adset_name, fetch /{adset_id}?fields=name,campaign_id,campaign{name}
+ *  4. Upsert one MetaConfig per unique (pageId, formId)
  */
 const syncFromMeta = async (req, res) => {
   try {
@@ -19,7 +20,29 @@ const syncFromMeta = async (req, res) => {
       return res.status(400).json({ message: "pageId and pageAccessToken are required" });
     }
 
-    // ── Step 1: Fetch all lead forms on the page ──────────────────────────────
+    // ── Step 1: Drop the legacy single-field unique index on pageId ───────────
+    // The old index only allowed ONE document per pageId, which breaks multi-adset
+    // support. The model now defines a compound (pageId, formId) index instead.
+    try {
+      const collection = MetaConfig.collection;
+      const indexes = await collection.indexes();
+      const legacyIndex = indexes.find(
+        (idx) =>
+          idx.name === "pageId_1" &&
+          idx.unique === true &&
+          Object.keys(idx.key).length === 1 &&
+          idx.key.pageId !== undefined
+      );
+      if (legacyIndex) {
+        await collection.dropIndex("pageId_1");
+        console.log("✅ Dropped legacy pageId_1 unique index");
+      }
+    } catch (indexErr) {
+      // Non-fatal — log and continue; index may already be gone
+      console.warn("⚠️  Could not drop legacy index (may not exist):", indexErr.message);
+    }
+
+    // ── Step 2: Fetch all lead forms on the page ──────────────────────────────
     let allForms = [];
     let nextUrl = `https://graph.facebook.com/${graphApiVersion}/${pageId}/leadgen_forms`;
     let params = {
@@ -28,24 +51,22 @@ const syncFromMeta = async (req, res) => {
       limit: 100,
     };
 
-    // Paginate through all forms
     while (nextUrl) {
       const formsRes = await axios.get(nextUrl, { params });
       const page = formsRes.data?.data || [];
       allForms = allForms.concat(page);
       nextUrl = formsRes.data?.paging?.next || null;
-      params = {}; // next URL already has params baked in
+      params = {};
     }
 
     if (allForms.length === 0) {
       return res.json({ success: true, created: 0, skipped: 0, forms: [] });
     }
 
-    // ── Step 2: Enrich forms that are missing adset_name / campaign_name ───────
-    // Meta sometimes omits these fields if the form isn't tied to an active ad.
+    // ── Step 3: Enrich forms that are missing adset_name / campaign_name ───────
     const enrichedForms = await Promise.all(
       allForms.map(async (form) => {
-        if (form.adset_name && form.campaign_name) return form; // already complete
+        if (form.adset_name && form.campaign_name) return form;
 
         if (form.adset_id) {
           try {
@@ -61,12 +82,11 @@ const syncFromMeta = async (req, res) => {
             const adset = adsetRes.data;
             return {
               ...form,
-              adset_name:    form.adset_name    || adset.name               || "",
-              campaign_name: form.campaign_name || adset.campaign?.name     || "",
-              campaign_id:   form.campaign_id   || adset.campaign?.id       || adset.campaign_id || "",
+              adset_name:    form.adset_name    || adset.name           || "",
+              campaign_name: form.campaign_name || adset.campaign?.name || "",
+              campaign_id:   form.campaign_id   || adset.campaign?.id   || adset.campaign_id || "",
             };
           } catch {
-            // If ad set lookup fails (deleted / permission gap), keep what we have
             return form;
           }
         }
@@ -74,7 +94,7 @@ const syncFromMeta = async (req, res) => {
       })
     );
 
-    // ── Step 3: Upsert MetaConfig per (pageId, formId) ─────────────────────────
+    // ── Step 4: Upsert MetaConfig per (pageId, formId) ─────────────────────────
     let created = 0;
     let skipped = 0;
     const results = [];
