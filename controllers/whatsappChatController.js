@@ -127,12 +127,12 @@ const sendMessage = async (req, res) => {
     }
 
     const provider     = config.provider || "msg91";
-    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
-    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
+    const authKey      = config.msg91AuthKey;
+    const senderNumber = config.msg91IntegratedNumber;
 
     if (provider === "msg91" && (!authKey || !senderNumber)) {
       return res.status(500).json({
-        error: "MSG91 credentials missing. Set MSG91_AUTH_KEY and MSG91_INTEGRATED_NUMBER in your .env",
+        error: "MSG91 credentials not configured for your company. Go to Communications → Integrations → WhatsApp/SMS and connect MSG91.",
       });
     }
 
@@ -258,8 +258,8 @@ const sendTemplate = async (req, res) => {
     if (!config) return res.status(400).json({ error: "WhatsApp not configured" });
 
     const provider     = config.provider || "msg91";
-    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
-    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
+    const authKey      = config.msg91AuthKey;
+    const senderNumber = config.msg91IntegratedNumber;
 
     // Sanitize stored waPhone — may have a leading "+" from manual DB edits
     const recipientPhone = safeWaPhone(conversation.waPhone);
@@ -484,23 +484,13 @@ const getConfig = async (req, res) => {
     const config = await WhatsAppConfig.findOne({ company: companyId });
 
     if (!config) {
-      const envAuthKey = process.env.MSG91_AUTH_KEY;
-      const envNumber  = process.env.MSG91_INTEGRATED_NUMBER;
-      if (envAuthKey && envNumber) {
-        return res.json({
-          configured:            true,
-          provider:              "msg91",
-          msg91Configured:       true,
-          msg91IntegratedNumber: envNumber,
-          source:                "env",
-        });
-      }
+      // No config saved for this company — they must set up their own credentials
       return res.json({ configured: false });
     }
 
     const provider     = config.provider || "msg91";
-    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
-    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
+    const authKey      = config.msg91AuthKey;
+    const senderNumber = config.msg91IntegratedNumber;
 
     res.json({
       configured:            true,
@@ -562,8 +552,8 @@ const startConversation = async (req, res) => {
     }
 
     const provider     = config.provider || "msg91";
-    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
-    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
+    const authKey      = config.msg91AuthKey;
+    const senderNumber = config.msg91IntegratedNumber;
 
     if (provider === "msg91" && (!authKey || !senderNumber)) {
       return res.status(500).json({ error: "MSG91 credentials missing" });
@@ -832,8 +822,8 @@ const bulkSendToLeads = async (req, res) => {
     const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
     if (!config) return res.status(400).json({ error: "WhatsApp is not configured for this company" });
 
-    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
-    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
+    const authKey      = config.msg91AuthKey;
+    const senderNumber = config.msg91IntegratedNumber;
 
     if (!authKey || !senderNumber) {
       return res.status(500).json({ error: "MSG91 credentials missing" });
@@ -918,8 +908,8 @@ const bulkSendCSV = async (req, res) => {
     const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
     if (!config) return res.status(400).json({ error: "WhatsApp is not configured for this company" });
 
-    const authKey      = config.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
-    const senderNumber = config.msg91IntegratedNumber  || process.env.MSG91_INTEGRATED_NUMBER;
+    const authKey      = config.msg91AuthKey;
+    const senderNumber = config.msg91IntegratedNumber;
 
     if (!authKey || !senderNumber) {
       return res.status(500).json({ error: "MSG91 credentials missing" });
