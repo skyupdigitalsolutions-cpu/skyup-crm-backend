@@ -508,16 +508,29 @@ const deleteBrevoConfig = async (req, res) => {
 
 // ── MSG91 (WhatsApp + SMS) config ─────────────────────────────────────────────
 // GET /api/admin/company/msg91-config
+// GET /api/admin/company/msg91-config
+// ── STRICT company isolation: only returns credentials stored for THIS company.
+//    Never falls back to .env globals — that would leak one company's config
+//    into another company's integrations page.
 const getMsg91Config = async (req, res) => {
   try {
-    const companyId     = req.admin?.company?._id || req.admin?.company;
+    const companyId      = req.admin?.company?._id || req.admin?.company;
     const WhatsAppConfig = require("../models/WhatsAppConfig");
-    const config        = await WhatsAppConfig.findOne({ company: companyId }).lean();
-    const authKey       = config?.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
-    const intNumber     = config?.msg91IntegratedNumber || process.env.MSG91_INTEGRATED_NUMBER;
+    const SmsConfig      = require("../models/SmsConfig");
+
+    const waConfig  = await WhatsAppConfig.findOne({ company: companyId }).lean();
+    const smsConfig = await SmsConfig.findOne({ company: companyId }).lean();
+
+    // "connected" requires BOTH WhatsApp number AND auth key saved for THIS company.
+    // No .env fallback — each company must configure their own credentials.
+    const hasAuthKey  = !!(waConfig?.msg91AuthKey || smsConfig?.msg91AuthKey);
+    const hasWaNumber = !!(waConfig?.msg91IntegratedNumber);
+
     res.json({
-      connected:        !!(authKey && intNumber),
-      integratedNumber: intNumber || "",
+      connected:        hasAuthKey && hasWaNumber,
+      integratedNumber: waConfig?.msg91IntegratedNumber || "",
+      // Return masked indicator so frontend knows a key exists without exposing it
+      authKeySet:       hasAuthKey,
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -525,6 +538,8 @@ const getMsg91Config = async (req, res) => {
 };
 
 // PUT /api/admin/company/msg91-config
+// ── Saves MSG91 credentials strictly for THIS company only.
+//    One key enables both WhatsApp AND SMS for this company — isolated from others.
 const saveMsg91Config = async (req, res) => {
   try {
     const companyId      = req.admin?.company?._id || req.admin?.company;
@@ -538,21 +553,21 @@ const saveMsg91Config = async (req, res) => {
     const WhatsAppConfig = require("../models/WhatsAppConfig");
     const SmsConfig      = require("../models/SmsConfig");
 
-    // Save to WhatsApp config (used by WhatsApp blasts)
+    // Save to WhatsApp config — scoped to this company only
     await WhatsAppConfig.findOneAndUpdate(
       { company: companyId },
       { company: companyId, provider: "msg91", msg91AuthKey: authKey.trim(), msg91IntegratedNumber: integratedNumber.trim(), isActive: true },
       { upsert: true, new: true }
     );
 
-    // Mirror auth key to SmsConfig (used by SMS blasts) — same key, separate collection
+    // Mirror auth key to SmsConfig — same key, separate collection, same company scope
     await SmsConfig.findOneAndUpdate(
       { company: companyId },
       { company: companyId, msg91AuthKey: authKey.trim(), isActive: true },
       { upsert: true, new: true }
     );
 
-    res.json({ success: true, connected: true, integratedNumber: integratedNumber.trim() });
+    res.json({ success: true, connected: true, integratedNumber: integratedNumber.trim(), authKeySet: true });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
