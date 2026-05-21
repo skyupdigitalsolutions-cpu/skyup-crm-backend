@@ -2,21 +2,37 @@
 const axios = require("axios");
 const Lead = require("../models/Leads");
 const EmailLog = require("../models/EmailLog");
+const Company = require("../models/Company");
 
 // ── Brevo (Sendinblue) transactional email sender ──────────────────────────────
-const sendViaBrevo = async ({ to, subject, html, fromName }) => {
-  const fromEmail = process.env.BREVO_SENDER_EMAIL;
+// Fetches per-company API key + sender from DB, falls back to .env
+const sendViaBrevo = async ({ to, subject, html, fromName, companyId }) => {
+  let apiKey    = process.env.BREVO_API_KEY;
+  let fromEmail = process.env.BREVO_SENDER_EMAIL;
+  let dbFromName = fromName;
+
+  if (companyId) {
+    const company = await Company.findById(companyId).select("+brevoApiKey brevoSenderEmail brevoSenderName").lean();
+    if (company?.brevoApiKey)      apiKey    = company.brevoApiKey;
+    if (company?.brevoSenderEmail) fromEmail = company.brevoSenderEmail;
+    if (!dbFromName && company?.brevoSenderName) dbFromName = company.brevoSenderName;
+  }
+
+  if (!apiKey || !fromEmail) {
+    throw new Error("Brevo is not configured. Please connect Brevo in Communications → Integrations.");
+  }
+
   await axios.post(
     "https://api.brevo.com/v3/smtp/email",
     {
-      sender: { name: fromName || "CRM", email: fromEmail },
+      sender: { name: dbFromName || "CRM", email: fromEmail },
       to,
       subject,
       htmlContent: html,
     },
     {
       headers: {
-        "api-key": process.env.BREVO_API_KEY,
+        "api-key": apiKey,
         "Content-Type": "application/json",
       },
     },
@@ -84,6 +100,7 @@ async function runCampaignInBackground({
             subject,
             html,
             fromName: fromName || companyName || "CRM",
+            companyId,
           });
           sent++;
           await saveLog({
@@ -197,7 +214,7 @@ const sendSingleEmail = async (req, res) => {
     .replace(/{{email}}/g, email);
 
   try {
-    await sendViaBrevo({ to: [{ name, email }], subject, html, fromName });
+    await sendViaBrevo({ to: [{ name, email }], subject, html, fromName, companyId: req.admin.company._id });
     await saveLog({
       to: email,
       subject,
@@ -260,6 +277,7 @@ const sendCsvEmails = async (req, res) => {
               subject,
               html,
               fromName,
+              companyId: req.admin.company._id,
             });
             sent++;
             await saveLog({
