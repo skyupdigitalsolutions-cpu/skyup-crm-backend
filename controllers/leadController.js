@@ -169,6 +169,25 @@ const getLeadsByCampaign = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+const getDistinctCampaigns = async (req, res) => {
+  try {
+    const companyId = getCompanyId(req);
+    if (!companyId)
+      return res.status(400).json({ message: "companyId is required." });
+
+    const campaigns = await Lead.distinct("campaign", {
+      company:  companyId,
+      campaign: { $nin: [null, ""] },
+    });
+
+    res.status(200).json({
+      success: true,
+      data: campaigns.filter(Boolean).sort(),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
 
 // ── User creates a lead manually ──────────────────────────────────────────────
 const createLead = async (req, res) => {
@@ -991,6 +1010,7 @@ module.exports = {
   getLead,
   getLeads,
   getLeadsByCampaign,
+  getDistinctCampaigns,  
   createLead,
   adminCreateLead,
   adminCreateLeadsBulk,
