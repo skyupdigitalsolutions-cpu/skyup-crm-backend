@@ -1,9 +1,50 @@
 // controllers/developerController.js — NEW FILE
+const path          = require("path");
+const fs            = require("fs");
+const multer        = require("multer");
 const Developer     = require("../models/Developer");
 const Company       = require("../models/Company");
 const Admin         = require("../models/Admin");
 const User          = require("../models/Users");
 const generateToken = require("../utils/generateToken");
+
+// ── Multer for company logo uploads (developer panel) ─────────────────────────
+const logoStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = path.join(__dirname, "../public/uploads/logos");
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `company_logo_${req.params.id || Date.now()}${ext}`);
+  },
+});
+
+const logoUpload = multer({
+  storage: logoStorage,
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith("image/")) cb(null, true);
+    else cb(new Error("Only image files are allowed"));
+  },
+}).single("logo");
+
+// Wrapper: parses multipart if a file is present, otherwise falls through
+// (express.json() already parsed the body for JSON requests)
+const withOptionalLogo = (handler) => (req, res) => {
+  const ct = req.headers["content-type"] || "";
+  if (ct.includes("multipart/form-data")) {
+    // Parse the multipart form — then hand off to handler
+    logoUpload(req, res, (err) => {
+      if (err) return res.status(400).json({ message: err.message });
+      handler(req, res);
+    });
+  } else {
+    // JSON body already parsed by express.json() — just call handler
+    handler(req, res);
+  }
+};
 
 // ── Login ──────────────────────────────────────────────────────────────────────
 const developerLogin = async (req, res) => {
@@ -39,23 +80,35 @@ const getDeveloperDashboard = async (req, res) => {
 };
 
 // ── Create Company ─────────────────────────────────────────────────────────────
-const createCompany = async (req, res) => {
+const _createCompanyHandler = async (req, res) => {
   try {
-    const { name, email, phone, plan } = req.body;
+    const body  = req.body || {};
+    const { name, email, phone, plan } = body;
+
+    if (!name || !email)
+      return res.status(400).json({ message: "Company name and email are required" });
 
     const exists = await Company.findOne({ email });
     if (exists)
       return res.status(400).json({ message: "A company with this email already exists" });
 
-    const company = await Company.create({
+    const companyData = {
       name, email, phone, plan,
       createdBy: req.user._id,
-    });
+    };
+
+    if (req.file) {
+      companyData.logo = `/uploads/logos/${req.file.filename}`;
+    }
+
+    const company = await Company.create(companyData);
     res.status(201).json(company);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
+
+const createCompany = withOptionalLogo(_createCompanyHandler);
 
 // ── Create super_admin for a company — enforces 1 per company ─────────────────
 const createCompanySuperAdmin = async (req, res) => {
@@ -89,13 +142,19 @@ const createCompanySuperAdmin = async (req, res) => {
 };
 
 // ── Update Company (name, email, phone, plan, logo) ────────────────────────────
-const updateCompany = async (req, res) => {
+// NOTE: exported as a wrapped handler via withOptionalLogo so multer runs first
+//       when the request is multipart/form-data (logo upload), and the raw
+//       handler is called directly for plain JSON requests.
+const _updateCompanyHandler = async (req, res) => {
   try {
     const company = await Company.findById(req.params.id);
     if (!company)
       return res.status(404).json({ message: "Company not found" });
 
-    const { name, email, phone, plan } = req.body;
+    // req.body may be undefined when multer hasn't parsed it yet for non-multipart
+    // requests — guard with nullish coalescing so we never crash on destructure.
+    const body  = req.body || {};
+    const { name, email, phone, plan } = body;
 
     // Check email uniqueness only if email changed
     if (email && email !== company.email) {
@@ -111,8 +170,8 @@ const updateCompany = async (req, res) => {
 
     // Logo uploaded via multer (multipart/form-data)
     if (req.file) {
-      // If using cloudinary/s3 upload middleware, req.file.path or req.file.location
-      company.logo = req.file.path || req.file.location || req.file.filename || "";
+      // Store relative URL served from /uploads/logos/
+      company.logo = `/uploads/logos/${req.file.filename}`;
     }
 
     await company.save();
@@ -121,6 +180,9 @@ const updateCompany = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+
+// Public export — wraps with optional logo parsing middleware
+const updateCompany = withOptionalLogo(_updateCompanyHandler);
 
 // ── List all companies (without sensitive fields) ──────────────────────────────
 const getCompanies = async (req, res) => {
