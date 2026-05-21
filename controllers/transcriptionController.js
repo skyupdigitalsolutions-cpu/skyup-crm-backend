@@ -6,7 +6,8 @@ const {
   transcribeTwilioRecording,
   transcribeMobileRecording,
 } = require("../utils/transcribeAudio");
-const { summarizeCallTranscript } = require("../utils/summarizeCall");
+const { summarizeCallTranscript, combineLeadSummaries } = require("../utils/summarizeCall");
+const Lead = require("../models/Leads");
 
 // ── Helper: run the full pipeline and return result ───────────────────────────
 async function runPipeline(transcribeFn, contactName) {
@@ -171,9 +172,72 @@ const getMobileTranscription = async (req, res) => {
   }
 };
 
+// ── GET /api/transcription/lead/:leadId/summary ───────────────────────────────
+// Fetches all call summaries for a lead and combines them into one master summary.
+// Accepts both admin and user tokens (protectAny).
+const getLeadCombinedSummary = async (req, res) => {
+  const { leadId } = req.params;
+  const caller = getCaller(req);
+
+  try {
+    // Verify the lead belongs to this company
+    const lead = await Lead.findOne({
+      _id: leadId,
+      company: caller.company,
+    }).lean();
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+    // Gather all MobileCallLog records matched to this lead
+    const logs = await MobileCallLog.find({
+      matchedLead: leadId,
+      company: caller.company,
+    })
+      .sort({ timestamp: 1 }) // chronological order
+      .lean();
+
+    // Extract every recording that has a completed summary
+    const summaries = [];
+    for (const log of logs) {
+      for (const rec of log.recordings || []) {
+        if (rec.transcribeStatus === 'done' && rec.summary) {
+          summaries.push({
+            ...rec.summary,
+            calledAt: log.timestamp || log.createdAt,
+          });
+        }
+      }
+    }
+
+    if (summaries.length === 0) {
+      return res.json({
+        leadId,
+        leadName:      lead.name,
+        totalCalls:    logs.length,
+        summarizedCalls: 0,
+        combinedSummary: null,
+        message: 'No transcribed calls found for this lead. Transcribe some recordings first.',
+      });
+    }
+
+    const combinedSummary = await combineLeadSummaries(summaries, lead.name);
+
+    res.json({
+      leadId,
+      leadName:        lead.name,
+      totalCalls:      logs.length,
+      summarizedCalls: summaries.length,
+      combinedSummary,
+    });
+  } catch (err) {
+    console.error('[getLeadCombinedSummary] error:', err.message);
+    res.status(500).json({ message: err.message || 'Failed to generate combined summary' });
+  }
+};
+
 module.exports = {
   transcribeTwilioCall,
   getTwilioTranscription,
   transcribeMobileCall,
   getMobileTranscription,
+  getLeadCombinedSummary,
 };
