@@ -153,6 +153,7 @@ const loginUnified = async (req, res) => {
         _id: user._id, name: user.name, email: user.email,
         role: user.role || "employee",
         companyId: user.company,
+        createdBy: user.createdBy,  
         token: generateToken(user._id, user.role || "employee"),
       });
     }
