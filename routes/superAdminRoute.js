@@ -4,6 +4,8 @@ const router = express.Router();
 const {
   registerSuperAdmin,
   loginSuperAdmin,
+  verifySuperAdminOtp,
+  resendSuperAdminOtp,
   createCompany,
   createAdmin,
   getCompanies,
@@ -20,8 +22,10 @@ const companyIsolation = require("../middlewares/companyIsolation");
 const { authLimiter } = require("../middlewares/rateLimiter");
 
 // ── Auth (public) ─────────────────────────────────────────────────────────────
-router.post("/register", authLimiter, registerSuperAdmin); // Run once only!
-router.post("/login",    authLimiter, loginSuperAdmin);     // Legacy — use /api/auth/login instead
+router.post("/register",   authLimiter, registerSuperAdmin);  // Run once only!
+router.post("/login",      authLimiter, loginSuperAdmin);     // Step 1: sends OTP
+router.post("/verify-otp", authLimiter, verifySuperAdminOtp); // Step 2: returns JWT
+router.post("/resend-otp", authLimiter, resendSuperAdminOtp); // Resend OTP
 
 // ── Protected routes — use new unified middleware stack ───────────────────────
 router.get("/dashboard",
@@ -31,11 +35,11 @@ router.get("/dashboard",
 router.post("/admins",
   protectUnified, authorizeRoles("super_admin"), companyIsolation, createAdmin);
 
-// NEW: list all admins with user/lead counts (for the filter dropdown)
+// list all admins with user/lead counts (for the filter dropdown)
 router.get("/admins",
   protectUnified, authorizeRoles("super_admin"), companyIsolation, getAllAdminsWithStats);
 
-// NEW: get full details for one specific admin (users, leads, phone reveals)
+// get full details for one specific admin (users, leads, phone reveals)
 router.get("/admins/:adminId",
   protectUnified, authorizeRoles("super_admin"), companyIsolation, getAdminDetails);
 

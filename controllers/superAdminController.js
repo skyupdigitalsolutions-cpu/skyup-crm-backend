@@ -1,12 +1,23 @@
 // controllers/superAdminController.js
-const SuperAdmin = require("../models/SuperAdmin");
-const Company = require("../models/Company");
-const Admin = require("../models/Admin");
-const User = require("../models/Users");
-const Lead = require("../models/Leads");
-const generateToken = require("../utils/generateToken");
+const bcrypt       = require("bcryptjs");
+const SuperAdmin   = require("../models/SuperAdmin");
+const Company      = require("../models/Company");
+const Admin        = require("../models/Admin");
+const User         = require("../models/Users");
+const Lead         = require("../models/Leads");
+const generateToken         = require("../utils/generateToken");
+const { sendSuperAdminOtp } = require("../utils/brevoMailer");
 
-// ─── Auth ──────────────────────────────────────────
+// ── OTP config ─────────────────────────────────────────────────────────────────
+const OTP_EXPIRY_MIN  = 10;
+const MAX_ATTEMPTS    = 3;
+const LOCK_MIN        = 15;
+
+function generateOtp() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// ─── Auth ──────────────────────────────────────────────────────────────────────
 
 // Register SuperAdmin (run once only!)
 const registerSuperAdmin = async (req, res) => {
@@ -31,44 +42,206 @@ const registerSuperAdmin = async (req, res) => {
   }
 };
 
-// Login SuperAdmin (legacy — unified login at /api/auth/login is preferred)
+// ── STEP 1: POST /api/superadmin/login ────────────────────────────────────────
+// Validates email + password → sends OTP to super admin email.
+// Does NOT return a JWT yet.
 const loginSuperAdmin = async (req, res) => {
   try {
     const { email, password } = req.body;
+    if (!email || !password)
+      return res.status(400).json({ message: "Email and password are required." });
 
-    // Try Admin model first (new super_admin)
+    let targetName  = "";
+    let targetEmail = "";
+    let isAdmin     = false; // true = found in Admin model
+
+    // Try Admin model first (new multi-tenant super_admin)
     const adminDoc = await Admin.findOne({ email, role: "super_admin" }).populate("company");
     if (adminDoc && (await adminDoc.matchPassword(password))) {
-      return res.status(200).json({
-        _id: adminDoc._id,
-        name: adminDoc.name,
-        email: adminDoc.email,
-        role: "super_admin",
-        companyId: adminDoc.company?._id,
-        companyName: adminDoc.company?.name,
-        token: generateToken(adminDoc._id, "super_admin"),
-      });
+      targetName  = adminDoc.name;
+      targetEmail = adminDoc.email;
+      isAdmin     = true;
     }
 
     // Fallback: legacy SuperAdmin document
-    const superAdmin = await SuperAdmin.findOne({ email });
-    if (superAdmin && (await superAdmin.matchPassword(password))) {
-      return res.status(200).json({
-        _id: superAdmin._id,
-        name: superAdmin.name,
-        email: superAdmin.email,
-        role: superAdmin.role,
-        token: generateToken(superAdmin._id, "super_admin"),
+    if (!isAdmin) {
+      const legacyDoc = await SuperAdmin.findOne({ email });
+      if (legacyDoc && (await legacyDoc.matchPassword(password))) {
+        targetName  = legacyDoc.name;
+        targetEmail = legacyDoc.email;
+
+        // Respect existing lockout
+        if (legacyDoc.otpLockedUntil && legacyDoc.otpLockedUntil > new Date()) {
+          const mins = Math.ceil((legacyDoc.otpLockedUntil - Date.now()) / 60000);
+          return res.status(429).json({
+            message: `Too many failed OTP attempts. Try again in ${mins} minute(s).`,
+          });
+        }
+      }
+    }
+
+    if (!targetEmail)
+      return res.status(401).json({ message: "Invalid email or password." });
+
+    // Generate & hash OTP
+    const plainOtp  = generateOtp();
+    const hashedOtp = await bcrypt.hash(plainOtp, 10);
+    const otpExpiry = new Date(Date.now() + OTP_EXPIRY_MIN * 60 * 1000);
+
+    // Upsert an OTP record in the SuperAdmin collection (works for both flows)
+    await SuperAdmin.findOneAndUpdate(
+      { email: targetEmail },
+      {
+        $set: {
+          name:           targetName,
+          email:          targetEmail,
+          // Keep password field valid; if it's a new shadow doc set a placeholder
+          ...(isAdmin ? {} : {}),
+          otp:            hashedOtp,
+          otpExpiry,
+          otpAttempts:    0,
+          otpLockedUntil: null,
+        },
+        $setOnInsert: { password: "SHADOW_NO_DIRECT_LOGIN" },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    // Send OTP via Brevo
+    try {
+      await sendSuperAdminOtp(targetEmail, targetName, plainOtp);
+    } catch (mailErr) {
+      console.error("Brevo OTP send error:", mailErr.message);
+      return res.status(502).json({
+        message: "Could not send OTP email. Check your BREVO_API_KEY configuration.",
       });
     }
 
-    res.status(401).json({ message: "Invalid email or password" });
+    return res.status(200).json({
+      message:      "OTP sent to your registered email. Please verify to complete login.",
+      otpSent:      true,
+      email:        targetEmail,
+      expiresInMin: OTP_EXPIRY_MIN,
+    });
+  } catch (error) {
+    console.error("loginSuperAdmin error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── STEP 2: POST /api/superadmin/verify-otp ───────────────────────────────────
+// Accepts { email, otp } → returns JWT on success.
+const verifySuperAdminOtp = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp)
+      return res.status(400).json({ message: "Email and OTP are required." });
+
+    const otpDoc = await SuperAdmin.findOne({ email });
+    if (!otpDoc || !otpDoc.otp)
+      return res.status(400).json({ message: "No pending OTP. Please login again." });
+
+    // Lockout check
+    if (otpDoc.otpLockedUntil && otpDoc.otpLockedUntil > new Date()) {
+      const mins = Math.ceil((otpDoc.otpLockedUntil - Date.now()) / 60000);
+      return res.status(429).json({ message: `Account locked. Try again in ${mins} minute(s).` });
+    }
+
+    // Expiry check
+    if (!otpDoc.otpExpiry || otpDoc.otpExpiry < new Date()) {
+      otpDoc.otp = null; otpDoc.otpExpiry = null; otpDoc.otpAttempts = 0;
+      await otpDoc.save();
+      return res.status(400).json({ message: "OTP has expired. Please login again." });
+    }
+
+    // OTP match
+    const isMatch = await otpDoc.matchOtp(String(otp).trim());
+    if (!isMatch) {
+      otpDoc.otpAttempts += 1;
+      if (otpDoc.otpAttempts >= MAX_ATTEMPTS) {
+        otpDoc.otp            = null;
+        otpDoc.otpExpiry      = null;
+        otpDoc.otpLockedUntil = new Date(Date.now() + LOCK_MIN * 60 * 1000);
+        await otpDoc.save();
+        return res.status(429).json({
+          message: `Too many failed attempts. Locked for ${LOCK_MIN} minutes.`,
+        });
+      }
+      await otpDoc.save();
+      const left = MAX_ATTEMPTS - otpDoc.otpAttempts;
+      return res.status(400).json({ message: `Incorrect OTP. ${left} attempt(s) remaining.` });
+    }
+
+    // Clear OTP
+    otpDoc.otp = null; otpDoc.otpExpiry = null;
+    otpDoc.otpAttempts = 0; otpDoc.otpLockedUntil = null;
+    await otpDoc.save();
+
+    // Resolve real admin doc for JWT response
+    const adminDoc = await Admin.findOne({ email, role: "super_admin" }).populate("company");
+    if (adminDoc) {
+      return res.status(200).json({
+        _id:         adminDoc._id,
+        name:        adminDoc.name,
+        email:       adminDoc.email,
+        role:        "super_admin",
+        companyId:   adminDoc.company?._id,
+        companyName: adminDoc.company?.name,
+        token:       generateToken(adminDoc._id, "super_admin"),
+      });
+    }
+
+    // Fallback: legacy SuperAdmin doc (real one, not shadow)
+    return res.status(200).json({
+      _id:   otpDoc._id,
+      name:  otpDoc.name,
+      email: otpDoc.email,
+      role:  "super_admin",
+      token: generateToken(otpDoc._id, "super_admin"),
+    });
+  } catch (error) {
+    console.error("verifySuperAdminOtp error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── RESEND: POST /api/superadmin/resend-otp ───────────────────────────────────
+const resendSuperAdminOtp = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ message: "Email is required." });
+
+    const otpDoc = await SuperAdmin.findOne({ email });
+    if (!otpDoc)
+      return res.status(400).json({ message: "No pending login session. Please login again." });
+
+    if (otpDoc.otpLockedUntil && otpDoc.otpLockedUntil > new Date()) {
+      const mins = Math.ceil((otpDoc.otpLockedUntil - Date.now()) / 60000);
+      return res.status(429).json({ message: `Account locked. Try again in ${mins} minute(s).` });
+    }
+
+    const plainOtp  = generateOtp();
+    const hashedOtp = await bcrypt.hash(plainOtp, 10);
+    otpDoc.otp            = hashedOtp;
+    otpDoc.otpExpiry      = new Date(Date.now() + OTP_EXPIRY_MIN * 60 * 1000);
+    otpDoc.otpAttempts    = 0;
+    otpDoc.otpLockedUntil = null;
+    await otpDoc.save();
+
+    try {
+      await sendSuperAdminOtp(email, otpDoc.name, plainOtp);
+    } catch (mailErr) {
+      console.error("Brevo OTP resend error:", mailErr.message);
+      return res.status(502).json({ message: "Failed to resend OTP. Check BREVO_API_KEY." });
+    }
+
+    return res.status(200).json({ message: "New OTP sent to your email.", expiresInMin: OTP_EXPIRY_MIN });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// ─── Company Management ───────────────────────────
+// ─── Company Management ────────────────────────────────────────────────────────
 
 const createCompany = async (req, res) => {
   try {
@@ -222,29 +395,22 @@ const createAdmin = async (req, res) => {
 };
 
 // ── NEW: GET /api/superadmin/admin-details/:adminId ───────────────────────────
-// Returns full profile of a specific admin: their info, assigned users,
-// all leads they own (assignedAdmin) or were created under, and phone-reveal stats.
 const getAdminDetails = async (req, res) => {
   try {
-    const companyId = req.companyId; // from companyIsolation middleware
+    const companyId = req.companyId;
     const { adminId } = req.params;
 
-    // Verify the target admin belongs to this company
     const admin = await Admin.findOne({ _id: adminId, company: companyId }).select("-password").lean();
     if (!admin) return res.status(404).json({ message: "Admin not found" });
 
-    // Users created by this admin
     const users = await User.find({ company: companyId, createdBy: adminId })
       .select("-password")
       .lean();
 
-    // Leads assigned to this admin (assignedAdmin field)
     const leads = await Lead.find({ company: companyId, assignedAdmin: adminId })
       .select("name mobile email status source campaign temperature phoneRevealCount assignedAdmin user date remark")
       .lean();
 
-    // Phone reveal stats: leads where any reveal was done by users under this admin
-    // We look at phoneRevealLog entries whose userId belongs to this admin's users
     const userIds = users.map((u) => u._id.toString());
     const leadsWithRevealsByAdmin = await Lead.find({
       company: companyId,
@@ -253,7 +419,6 @@ const getAdminDetails = async (req, res) => {
       .select("name mobile phoneRevealLog phoneRevealCount")
       .lean();
 
-    // Build per-admin reveal stats
     let totalRevealsByAdmin = 0;
     const revealedLeads = [];
     leadsWithRevealsByAdmin.forEach((lead) => {
@@ -272,13 +437,11 @@ const getAdminDetails = async (req, res) => {
       }
     });
 
-    // Lead status breakdown
     const statusBreakdown = leads.reduce((acc, l) => {
       acc[l.status] = (acc[l.status] || 0) + 1;
       return acc;
     }, {});
 
-    // Temperature breakdown
     const tempBreakdown = leads.reduce((acc, l) => {
       const t = l.temperature || "Unknown";
       acc[t] = (acc[t] || 0) + 1;
@@ -307,7 +470,6 @@ const getAdminDetails = async (req, res) => {
 };
 
 // ── NEW: GET /api/superadmin/all-admins ───────────────────────────────────────
-// Returns all admins in the company with summary stats for the dropdown filter.
 const getAllAdminsWithStats = async (req, res) => {
   try {
     const companyId = req.companyId;
@@ -316,7 +478,6 @@ const getAllAdminsWithStats = async (req, res) => {
       .select("-password")
       .lean();
 
-    // Attach quick stats per admin
     const adminsWithStats = await Promise.all(
       admins.map(async (admin) => {
         const [userCount, leadCount] = await Promise.all([
@@ -336,6 +497,8 @@ const getAllAdminsWithStats = async (req, res) => {
 module.exports = {
   registerSuperAdmin,
   loginSuperAdmin,
+  verifySuperAdminOtp,
+  resendSuperAdminOtp,
   createCompany,
   createAdmin,
   getCompanies,
