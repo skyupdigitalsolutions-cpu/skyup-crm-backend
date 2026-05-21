@@ -21,6 +21,13 @@ const {
   deleteCompanyLogo,
   getBrevoStatus,
   saveBrevoConfig,
+  // ── New integration config handlers ──────────────────────────────────────
+  getBrevoConfig,
+  saveBrevoFullConfig,
+  deleteBrevoConfig,
+  getMsg91Config,
+  saveMsg91Config,
+  deleteMsg91Config,
 } = adminController;
 const {
   registerAdmin,
@@ -48,15 +55,23 @@ router.get("/company/brand",         protectAdmin, getCompanyBrand);
 router.put("/company/brand",         protectAdmin, requireCompanySuperAdmin, updateCompanyBrand);
 router.delete("/company/brand/logo", protectAdmin, requireCompanySuperAdmin, deleteCompanyLogo);
 
-// ── Brevo email config ────────────────────────────────────────────────────────
+// ── Brevo email config (full: GET + PUT + DELETE) ─────────────────────────────
+router.get("/company/brevo-config",    protectAdmin, getBrevoConfig);
+router.put("/company/brevo-config",    protectAdmin, requireCompanySuperAdmin, saveBrevoFullConfig);
+router.delete("/company/brevo-config", protectAdmin, requireCompanySuperAdmin, deleteBrevoConfig);
+
+// ── MSG91 config — WhatsApp + SMS in one (GET + PUT + DELETE) ─────────────────
+router.get("/company/msg91-config",    protectAdmin, getMsg91Config);
+router.put("/company/msg91-config",    protectAdmin, requireCompanySuperAdmin, saveMsg91Config);
+router.delete("/company/msg91-config", protectAdmin, requireCompanySuperAdmin, deleteMsg91Config);
+
+// ── Legacy brevo-status (kept for backward compat) ───────────────────────────
 router.get("/company/brevo-status",  protectAdmin, getBrevoStatus);
-router.put("/company/brevo-config",  protectAdmin, requireCompanySuperAdmin, saveBrevoConfig);
 
 // ── Admin CRUD (protected) ────────────────────────────────────────────────────
 router.get("/",  protectAdmin, getAdmins);
 router.post("/", protectAdmin, requireCompanySuperAdmin, createAdmin);
 
-// User delete — must be before /:id to avoid conflict
 // User create/delete — must be before /:id to avoid conflict
 router.post("/user",       protectAdmin, createCompanyUser);
 router.delete("/user/:id", protectAdmin, deleteCompanyUser);
