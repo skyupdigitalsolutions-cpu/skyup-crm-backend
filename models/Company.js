@@ -75,12 +75,22 @@ const companySchema = mongoose.Schema(
       default: null,
     },
 
-    // ── Brevo (email blast) API key ───────────────────────────────────────────
+    // ── Brevo (email blast) credentials ──────────────────────────────────────
     brevoApiKey: {
       type: String,
       default: "",
       trim: true,
       select: false, // never returned in normal queries — must be explicitly selected
+    },
+    brevoSenderEmail: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    brevoSenderName: {
+      type: String,
+      default: "",
+      trim: true,
     },
 
     // ── Auto-template settings for new leads ─────────────────────────────────
