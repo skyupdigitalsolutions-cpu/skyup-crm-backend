@@ -13,7 +13,7 @@ const {
 } = require('../controllers/mobileCallLogController');
 
 router.get('/match',        protect,    matchPhone);
-router.get('/today',        protect,    getTodayCallLogs);   // NEW: mobile app — today only
+router.get('/today',        protectAny, getTodayCallLogs);   // protectAny: agents see own, admins see all company
 router.get('/',             protect,    getCallLogs);        // supports ?date=YYYY-MM-DD
 router.post('/sync',        protect,    syncCallLogs);
 router.post('/recording',   protect,    upload.single('recording'), uploadRecording);
