@@ -452,3 +452,129 @@ module.exports = {
   getBrevoStatus,
   saveBrevoConfig,
 };
+
+// ── Brevo full config (replaces legacy getBrevoStatus + saveBrevoConfig) ──────
+// GET /api/admin/company/brevo-config
+const getBrevoConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const company   = await Company.findById(companyId).select("+brevoApiKey brevoSenderEmail brevoSenderName").lean();
+    res.json({
+      connected:   !!(company?.brevoApiKey),
+      senderEmail: company?.brevoSenderEmail || "",
+      senderName:  company?.brevoSenderName  || "",
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// PUT /api/admin/company/brevo-config
+const saveBrevoFullConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { apiKey, senderEmail, senderName } = req.body;
+    if (!apiKey || !apiKey.trim()) {
+      return res.status(400).json({ message: "Brevo API key is required" });
+    }
+    if (!senderEmail || !senderEmail.trim()) {
+      return res.status(400).json({ message: "Sender email is required" });
+    }
+    await Company.findByIdAndUpdate(companyId, {
+      brevoApiKey:      apiKey.trim(),
+      brevoSenderEmail: senderEmail.trim(),
+      brevoSenderName:  (senderName || "CRM").trim(),
+    });
+    res.json({ success: true, connected: true, senderEmail: senderEmail.trim(), senderName: (senderName || "CRM").trim() });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// DELETE /api/admin/company/brevo-config
+const deleteBrevoConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    await Company.findByIdAndUpdate(companyId, {
+      brevoApiKey: "",
+      brevoSenderEmail: "",
+      brevoSenderName:  "",
+    });
+    res.json({ success: true, connected: false });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── MSG91 (WhatsApp + SMS) config ─────────────────────────────────────────────
+// GET /api/admin/company/msg91-config
+const getMsg91Config = async (req, res) => {
+  try {
+    const companyId     = req.admin?.company?._id || req.admin?.company;
+    const WhatsAppConfig = require("../models/WhatsAppConfig");
+    const config        = await WhatsAppConfig.findOne({ company: companyId }).lean();
+    const authKey       = config?.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
+    const intNumber     = config?.msg91IntegratedNumber || process.env.MSG91_INTEGRATED_NUMBER;
+    res.json({
+      connected:        !!(authKey && intNumber),
+      integratedNumber: intNumber || "",
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// PUT /api/admin/company/msg91-config
+const saveMsg91Config = async (req, res) => {
+  try {
+    const companyId      = req.admin?.company?._id || req.admin?.company;
+    const { authKey, integratedNumber } = req.body;
+    if (!authKey || !authKey.trim()) {
+      return res.status(400).json({ message: "MSG91 Auth Key is required" });
+    }
+    if (!integratedNumber || !integratedNumber.trim()) {
+      return res.status(400).json({ message: "Integrated WhatsApp number is required" });
+    }
+    const WhatsAppConfig = require("../models/WhatsAppConfig");
+    const SmsConfig      = require("../models/SmsConfig");
+
+    // Save to WhatsApp config (used by WhatsApp blasts)
+    await WhatsAppConfig.findOneAndUpdate(
+      { company: companyId },
+      { company: companyId, provider: "msg91", msg91AuthKey: authKey.trim(), msg91IntegratedNumber: integratedNumber.trim(), isActive: true },
+      { upsert: true, new: true }
+    );
+
+    // Mirror auth key to SmsConfig (used by SMS blasts) — same key, separate collection
+    await SmsConfig.findOneAndUpdate(
+      { company: companyId },
+      { company: companyId, msg91AuthKey: authKey.trim(), isActive: true },
+      { upsert: true, new: true }
+    );
+
+    res.json({ success: true, connected: true, integratedNumber: integratedNumber.trim() });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// DELETE /api/admin/company/msg91-config
+const deleteMsg91Config = async (req, res) => {
+  try {
+    const companyId      = req.admin?.company?._id || req.admin?.company;
+    const WhatsAppConfig = require("../models/WhatsAppConfig");
+    const SmsConfig      = require("../models/SmsConfig");
+    await WhatsAppConfig.findOneAndUpdate({ company: companyId }, { msg91AuthKey: "", msg91IntegratedNumber: "", isActive: false });
+    await SmsConfig.findOneAndUpdate({ company: companyId }, { msg91AuthKey: "", isActive: false });
+    res.json({ success: true, connected: false });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+module.exports.getBrevoConfig      = getBrevoConfig;
+module.exports.saveBrevoFullConfig = saveBrevoFullConfig;
+module.exports.deleteBrevoConfig   = deleteBrevoConfig;
+module.exports.getMsg91Config      = getMsg91Config;
+module.exports.saveMsg91Config     = saveMsg91Config;
+module.exports.deleteMsg91Config   = deleteMsg91Config;
