@@ -5,21 +5,27 @@ const EmailLog = require("../models/EmailLog");
 const Company = require("../models/Company");
 
 // ── Brevo (Sendinblue) transactional email sender ──────────────────────────────
-// Fetches per-company API key + sender from DB, falls back to .env
+// STRICT company isolation: reads ONLY credentials saved for this company in DB.
+// No .env fallback — if a company has not connected Brevo, the call fails with
+// a clear message. This prevents one company's Brevo key being used for another.
 const sendViaBrevo = async ({ to, subject, html, fromName, companyId }) => {
-  let apiKey    = process.env.BREVO_API_KEY;
-  let fromEmail = process.env.BREVO_SENDER_EMAIL;
-  let dbFromName = fromName;
-
-  if (companyId) {
-    const company = await Company.findById(companyId).select("+brevoApiKey brevoSenderEmail brevoSenderName").lean();
-    if (company?.brevoApiKey)      apiKey    = company.brevoApiKey;
-    if (company?.brevoSenderEmail) fromEmail = company.brevoSenderEmail;
-    if (!dbFromName && company?.brevoSenderName) dbFromName = company.brevoSenderName;
+  if (!companyId) {
+    throw new Error("Company ID is required to send email.");
   }
 
+  const company = await Company.findById(companyId)
+    .select("+brevoApiKey brevoSenderEmail brevoSenderName")
+    .lean();
+
+  const apiKey     = company?.brevoApiKey      || "";
+  const fromEmail  = company?.brevoSenderEmail || "";
+  const dbFromName = fromName || company?.brevoSenderName || "CRM";
+
   if (!apiKey || !fromEmail) {
-    throw new Error("Brevo is not configured. Please connect Brevo in Communications → Integrations.");
+    throw new Error(
+      "Email (Brevo) is not connected for your company. " +
+      "Go to Communications → Integrations → Email and connect your Brevo account."
+    );
   }
 
   await axios.post(
