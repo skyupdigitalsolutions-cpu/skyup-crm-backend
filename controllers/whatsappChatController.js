@@ -271,8 +271,8 @@ const sendTemplate = async (req, res) => {
           return res.status(500).json({ error: "MSG91 credentials missing in .env" });
         }
         const resolvedLangCode = languageCode || "en";
-        // MSG91 correct payload — namespace required, to must be array, components is an object
-        const namespace = "68bcef67_e185_4e55_94df_52c26cb0bc37";
+        // FIX Bug #4: read namespace from config instead of hardcoding
+        const namespace = config.msg91Namespace || "";
         const components = conversation.contactName
           ? { body_customer_name: { type: "text", value: conversation.contactName, parameter_name: "customer_name" } }
           : {};
@@ -286,7 +286,7 @@ const sendTemplate = async (req, res) => {
             template: {
               name:              templateName,
               language:          { code: resolvedLangCode, policy: "deterministic" },
-              namespace,
+              ...(namespace ? { namespace } : {}),
               to_and_components: [{ to: [recipientPhone], components }],
             },
           },
@@ -566,7 +566,9 @@ const startConversation = async (req, res) => {
       if (provider === "msg91") {
         // MSG91 correct payload — namespace required, to must be array, components is an object
         const resolvedLangCode = languageCode || "en";
-        const namespace = "68bcef67_e185_4e55_94df_52c26cb0bc37";
+        // FIX Bug #4: namespace was hardcoded to one company's value.
+        // Now read from WhatsAppConfig so every company uses their own namespace.
+        const namespace = config.msg91Namespace || "";
         const components = contactName.trim()
           ? { body_customer_name: { type: "text", value: contactName.trim(), parameter_name: "customer_name" } }
           : {};
@@ -580,7 +582,7 @@ const startConversation = async (req, res) => {
             template: {
               name:              templateName.trim(),
               language:          { code: resolvedLangCode, policy: "deterministic" },
-              namespace,
+              ...(namespace ? { namespace } : {}),
               to_and_components: [{ to: [cleanPhone], components }],
             },
           },
@@ -716,8 +718,8 @@ const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, co
   const provider = config.provider || "msg91";
 
   if (provider === "msg91") {
-    // MSG91 correct payload — namespace required, to must be array, components is an object
-    const namespace = "68bcef67_e185_4e55_94df_52c26cb0bc37";
+    // FIX Bug #4: read namespace from config instead of hardcoding
+    const namespace = config.msg91Namespace || "";
     const components = contactName.trim()
       ? { body_customer_name: { type: "text", value: contactName.trim(), parameter_name: "customer_name" } }
       : {};
@@ -733,7 +735,7 @@ const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, co
           template: {
             name:              templateName.trim(),
             language:          { code: languageCode || "en", policy: "deterministic" },
-            namespace,
+            ...(namespace ? { namespace } : {}),
             to_and_components: [{ to: [cleanPhone], components }],
           },
         },

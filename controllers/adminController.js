@@ -537,6 +537,7 @@ const getMsg91Config = async (req, res) => {
     res.json({
       connected:        hasAuthKey && hasWaNumber,
       integratedNumber: waConfig?.msg91IntegratedNumber || "",
+      namespace:        waConfig?.msg91Namespace        || "",
       // Return masked indicator so frontend knows a key exists without exposing it
       authKeySet:       hasAuthKey,
     });
@@ -551,7 +552,7 @@ const getMsg91Config = async (req, res) => {
 const saveMsg91Config = async (req, res) => {
   try {
     const companyId      = req.admin?.company?._id || req.admin?.company;
-    const { authKey, integratedNumber } = req.body;
+    const { authKey, integratedNumber, namespace } = req.body;
     if (!authKey || !authKey.trim()) {
       return res.status(400).json({ message: "MSG91 Auth Key is required" });
     }
@@ -564,7 +565,14 @@ const saveMsg91Config = async (req, res) => {
     // Save to WhatsApp config — scoped to this company only
     await WhatsAppConfig.findOneAndUpdate(
       { company: companyId },
-      { company: companyId, provider: "msg91", msg91AuthKey: authKey.trim(), msg91IntegratedNumber: integratedNumber.trim(), isActive: true },
+      {
+        company: companyId,
+        provider: "msg91",
+        msg91AuthKey: authKey.trim(),
+        msg91IntegratedNumber: integratedNumber.trim(),
+        msg91Namespace: (namespace || "").trim(),
+        isActive: true,
+      },
       { upsert: true, new: true }
     );
 

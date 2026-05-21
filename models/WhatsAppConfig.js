@@ -37,6 +37,15 @@ const whatsAppConfigSchema = new mongoose.Schema(
       // Example: "919876543210"  (country code + number, no +)
     },
 
+    // ── MSG91 WhatsApp namespace (from MSG91 / Meta Business dashboard) ───────
+    // Each company has a unique namespace tied to their WABA account.
+    // Previously this was hardcoded in the controller — Bug #4 fix.
+    msg91Namespace: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
     // ── Meta Cloud API fields (provider === "meta") ───────────────────────────
     phoneNumberId: {
       type: String,
