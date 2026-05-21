@@ -91,12 +91,14 @@ const login = async (req, res) => {
       }
 
       res.json({
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        company: user.company._id,
-        role: user.role,
-        token: generateToken(user._id, user.role || "employee"),
+        _id:       user._id,
+        name:      user.name,
+        email:     user.email,
+        company:   user.company._id,
+        companyId: user.company._id,  // include companyId for chat widget
+        createdBy: user.createdBy,    // include createdBy for chat widget
+        role:      user.role,
+        token:     generateToken(user._id, user.role || "employee"),
       });
     } else {
       res.status(401).json({ message: "Invalid email or password" });
@@ -152,7 +154,7 @@ const loginUnified = async (req, res) => {
       return res.json({
         _id: user._id, name: user.name, email: user.email,
         role: user.role || "employee",
-        companyId: user.company,
+        companyId: user.company._id,  // always send ObjectId, not the populated object
         createdBy: user.createdBy,   // needed by UserChatWidget to resolve the admin chat thread
         token: generateToken(user._id, user.role || "employee"),
       });
