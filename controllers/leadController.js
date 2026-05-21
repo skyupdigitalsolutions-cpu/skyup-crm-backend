@@ -172,20 +172,21 @@ const adminCreateLead = async (req, res) => {
           });
     }
     const lead = await Lead.create({
-      name: req.body.name,
-      mobile: req.body.mobile,
-      source: req.body.source || "Web Form",
+      name:     req.body.name,
+      mobile:   req.body.mobile,
+      email:    req.body.email  || "",   // ← FIX: was being dropped, autoTemplate needs it
+      source:   req.body.source   || "Web Form",
       campaign: req.body.campaign || null,
-      status: req.body.status || "New",
-      date: req.body.date || new Date(),
-      remark: req.body.remark || "Manually added",
+      status:   req.body.status   || "New",
+      date:     req.body.date     || new Date(),
+      remark:   req.body.remark   || "Manually added",
       temperature: req.body.temperature || computeQuality({
-        name:  req.body.name   || "",
+        name:   req.body.name   || "",
         mobile: req.body.mobile || "",
         email:  req.body.email  || "",
         _extraAnswers: [],
       }, 0),
-      user: assignedUser,
+      user:    assignedUser,
       company: companyId,
     });
     const populated = await Lead.findById(lead._id)
@@ -219,7 +220,8 @@ const adminCreateLead = async (req, res) => {
     );
 
     // ── Auto-send WhatsApp / Email / SMS template if enabled ─────────────────
-    autoSendTemplates(lead, companyId);
+    // FIX: pass `populated` not `lead` — populated has all fields including email
+    autoSendTemplates(populated, companyId);
 
     res.status(201).json(populated);
   } catch (error) {
