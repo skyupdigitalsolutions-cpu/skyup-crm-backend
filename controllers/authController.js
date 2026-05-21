@@ -153,7 +153,7 @@ const loginUnified = async (req, res) => {
         _id: user._id, name: user.name, email: user.email,
         role: user.role || "employee",
         companyId: user.company,
-        createdBy: user.createdBy,  
+        createdBy: user.createdBy,   // needed by UserChatWidget to resolve the admin chat thread
         token: generateToken(user._id, user.role || "employee"),
       });
     }
