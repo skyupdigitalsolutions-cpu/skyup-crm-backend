@@ -8,6 +8,7 @@ const {
   getTwilioTranscription,
   transcribeMobileCall,
   getMobileTranscription,
+  getLeadCombinedSummary,
 } = require('../controllers/transcriptionController');
 
 // ── Twilio recordings (admin only — Twilio SID is admin-visible data) ─────────
@@ -20,5 +21,9 @@ router.get('/twilio/:recordingSid',  protectAdmin, getTwilioTranscription);
 // to trigger transcription — but the original route used protect (user-only).
 router.post('/mobile/:callLogId/:recordingId', protectAny, transcribeMobileCall);
 router.get('/mobile/:callLogId/:recordingId',  protectAny, getMobileTranscription);
+
+// ── Lead combined summary (admin or user) ─────────────────────────────────────
+// Aggregates all transcribed call summaries for a lead into one master summary.
+router.get('/lead/:leadId/summary', protectAny, getLeadCombinedSummary);
 
 module.exports = router;
