@@ -179,20 +179,51 @@ const getCallLogs = async (req, res) => {
 };
 
 // ── GET /api/call-logs/today ──────────────────────────────────────────────────
+// Role-aware:
+//   • Regular agent (protect)  → returns only their own logs
+//   • Admin / super_admin (protectAny) → returns ALL agents' logs for the
+//     company, merged and sorted by time. Optional ?userId= to filter to
+//     one specific agent. Optional ?date=YYYY-MM-DD to query a past day.
 const getTodayCallLogs = async (req, res) => {
   try {
-    const now      = new Date();
-    const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
-    const dayEnd   = new Date(now); dayEnd.setHours(23, 59, 59, 999);
+    // Determine date window
+    const dateParam = req.query.date;
+    let dayStart, dayEnd;
+    if (dateParam) {
+      dayStart = new Date(dateParam); dayStart.setHours(0, 0, 0, 0);
+      dayEnd   = new Date(dateParam); dayEnd.setHours(23, 59, 59, 999);
+    } else {
+      const now = new Date();
+      dayStart  = new Date(now); dayStart.setHours(0, 0, 0, 0);
+      dayEnd    = new Date(now); dayEnd.setHours(23, 59, 59, 999);
+    }
 
-    const logs = await MobileCallLog.find({
-      user:      req.user._id,
-      timestamp: { $gte: dayStart, $lte: dayEnd },
-    })
+    const isAdmin = !!(req.admin || req.callerCompany);
+    const company = req.callerCompany || req.user?.company;
+
+    let filter;
+    if (isAdmin) {
+      // Admin: scope by company so ALL agents' logs are merged
+      if (!company) return res.status(400).json({ message: 'Company not resolved for admin token' });
+      filter = { company, timestamp: { $gte: dayStart, $lte: dayEnd } };
+      // Optional drill-down: ?userId=<agentId>
+      if (req.query.userId) filter.user = req.query.userId;
+    } else {
+      // Regular agent: only their own logs
+      filter = { user: req.user._id, timestamp: { $gte: dayStart, $lte: dayEnd } };
+    }
+
+    const logs = await MobileCallLog.find(filter)
       .sort({ timestamp: -1 })
-      .populate('matchedLead', 'name mobile status');
+      .populate('matchedLead', 'name mobile status')
+      .populate('user', 'name email');
 
-    res.json({ logs, date: now.toISOString().slice(0, 10), count: logs.length });
+    res.json({
+      logs,
+      date:    (dateParam || new Date().toISOString()).slice(0, 10),
+      count:   logs.length,
+      scoped:  isAdmin ? 'company' : 'user',
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -205,11 +236,21 @@ const matchPhone = async (req, res) => {
     if (!phone) return res.status(400).json({ message: 'phone query param required' });
 
     const normalized = normalizePhone(phone);
-    // Use indexed query instead of loading all leads
+    // BUG FIX: was using raw 'phone' in the query — must use 'normalized'
+    // so "918722992405" matches a lead stored as "8722992405" and vice versa.
+    // Also search both normalized AND raw to cover all storage formats.
     const lead = await Lead.findOne(
-      { company: req.user.company },
+      {
+        company: req.user.company,
+        $or: [
+          { mobile: normalized },
+          { mobile: phone },
+          { mobile: '0' + normalized },
+          { mobile: '91' + normalized },
+        ],
+      },
       { mobile: 1, name: 1, status: 1 }
-    ).where('mobile').equals(phone).lean();
+    ).lean();
 
     if (!lead) return res.json({ matched: false });
     res.json({ matched: true, leadId: lead._id, name: lead.name, status: lead.status, mobile: lead.mobile });
