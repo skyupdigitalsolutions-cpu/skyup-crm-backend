@@ -102,8 +102,15 @@ const initSocket = (io) => {
         payload = { username: payload };
       }
 
-      const { username, userId, company, adminId, displayName } = payload;
+      const { username, userId, company, displayName } = payload;
+      let { adminId } = payload;
       if (!username) return;
+
+      // If adminId is missing (old login response), look it up from the User record
+      if (!adminId && userId) {
+        const userDoc = await User.findById(userId).lean();
+        if (userDoc?.createdBy) adminId = String(userDoc.createdBy);
+      }
 
       const identity = {
         username,
@@ -115,7 +122,7 @@ const initSocket = (io) => {
       };
       onlineUsers[socket.id] = identity;
 
-      // Upsert ChatUser
+      // Upsert ChatUser (always write adminId so it's correct going forward)
       await ChatUser.findOneAndUpdate(
         { username },
         { lastSeen: new Date(), company, role: 'employee', adminId, userId, displayName: identity.displayName },
@@ -468,23 +475,63 @@ async function canSendTo(role, adminId, company, toUsername) {
  *
  * super_admin  → all regular admins + all employees in the company
  * admin        → super_admin + their own employees
+ *
+ * Queries the real User/Admin collections so contacts appear even before
+ * those users have connected via socket for the first time.
+ * Upserts a ChatUser record for each so the rest of the system works.
  */
 async function buildContactList(role, adminId, company) {
   const contacts = [];
 
   if (role === 'super_admin') {
-    // All admins (not super_admin themselves)
-    const admins = await ChatUser.find({ company, role: 'admin' }).lean();
-    // All employees
-    const employees = await ChatUser.find({ company, role: 'employee' }).lean();
-    contacts.push(...admins, ...employees);
+    // All regular admins in this company
+    const admins = await Admin.find({ company, role: 'admin' }).lean();
+    for (const a of admins) {
+      const username = `admin:${a._id}`;
+      const doc = await ChatUser.findOneAndUpdate(
+        { username },
+        { username, company, role: 'admin', adminId: a._id, userId: a._id, displayName: a.name, lastSeen: new Date() },
+        { upsert: true, new: true }
+      ).lean();
+      contacts.push(doc);
+    }
+
+    // All employees in this company
+    const employees = await User.find({ company }).lean();
+    for (const u of employees) {
+      const username = u.name;
+      const doc = await ChatUser.findOneAndUpdate(
+        { username },
+        { username, company, role: 'employee', adminId: u.createdBy || null, userId: u._id, displayName: u.name, lastSeen: new Date() },
+        { upsert: true, new: true }
+      ).lean();
+      contacts.push(doc);
+    }
+
   } else if (role === 'admin') {
-    // The super_admin of the company
-    const superAdmin = await ChatUser.findOne({ company, role: 'super_admin' }).lean();
-    if (superAdmin) contacts.push(superAdmin);
-    // Their own employees
-    const employees = await ChatUser.find({ company, adminId, role: 'employee' }).lean();
-    contacts.push(...employees);
+    // Super admin of this company
+    const superAdminDoc = await Admin.findOne({ company, role: 'super_admin' }).lean();
+    if (superAdminDoc) {
+      const username = `superadmin:${superAdminDoc._id}`;
+      const doc = await ChatUser.findOneAndUpdate(
+        { username },
+        { username, company, role: 'super_admin', adminId: superAdminDoc._id, userId: superAdminDoc._id, displayName: superAdminDoc.name, lastSeen: new Date() },
+        { upsert: true, new: true }
+      ).lean();
+      contacts.push(doc);
+    }
+
+    // Employees created by this admin
+    const employees = await User.find({ company, createdBy: adminId }).lean();
+    for (const u of employees) {
+      const username = u.name;
+      const doc = await ChatUser.findOneAndUpdate(
+        { username },
+        { username, company, role: 'employee', adminId: u.createdBy || adminId, userId: u._id, displayName: u.name, lastSeen: new Date() },
+        { upsert: true, new: true }
+      ).lean();
+      contacts.push(doc);
+    }
   }
 
   return contacts;
