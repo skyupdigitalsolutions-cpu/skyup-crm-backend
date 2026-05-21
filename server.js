@@ -146,6 +146,8 @@ app.use(generalLimiter);
 // recordingUrl in DB is: /recordings/<filename>
 // This makes <audio src="https://backend/recordings/xxx.mp3"> work.
 app.use('/recordings', express.static(path.join(__dirname, 'uploads/recordings')));
+// ── Serve logo uploads (company branding from admin + developer panels) ────────
+app.use('/uploads/logos', express.static(path.join(__dirname, 'public/uploads/logos')));
 
 app.get('/', (req, res) => res.send('Server is running'));
 
