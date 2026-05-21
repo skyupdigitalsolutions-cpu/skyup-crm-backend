@@ -2,7 +2,7 @@ const express = require("express");
 const router  = express.Router();
 
 const {
-  getLead, getLeads, getLeadsByCampaign,
+  getLead, getLeads, getLeadsByCampaign, getDistinctCampaigns,
   createLead, adminCreateLead, adminCreateLeadsBulk,
   adminImportCSV, userImportCSV,
   updateLead, patchLead, patchLeadTemperature,
@@ -34,6 +34,7 @@ router.get("/admin/follow-up-alerts", protectAdmin, getFollowUpAlerts);
 router.get("/admin/all",   protectAdmin, adminGetAllLeads); // all company leads for admin
 router.get("/my-leads",    protect,      getMyLeads);
 router.get("/by-campaign", protectAdmin, getLeadsByCampaign);
+router.get("/distinct-campaigns", protectAdmin, getDistinctCampaigns);
 router.get("/",            protect,      getLeads);
 router.get("/:id",         protect,      getLead);
 
