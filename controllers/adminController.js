@@ -192,11 +192,19 @@ const createCompanyUser = async (req, res) => {
 // Get all users in same company
 const getCompanyUsers = async (req, res) => {
   try {
-    const filter = { company: req.admin.company._id };
-    // Superadmin sees all company users; a regular admin sees only their own.
-    if (req.admin.role !== "super_admin") filter.createdBy = req.admin._id;
-    const users = await User.find(filter).select("-password");
-    res.status(200).json(users);
+    const companyId = req.admin.company._id;
+    const filter = { company: companyId };
+    // Superadmin and regular admins both see only their own created users in the list,
+    // BUT we always return the total company-wide count for accurate slot display.
+    const ownFilter = { company: companyId };
+    if (req.admin.role !== "super_admin") ownFilter.createdBy = req.admin._id;
+
+    const [users, totalCompanyUsers] = await Promise.all([
+      User.find(ownFilter).select("-password"),
+      User.countDocuments(filter), // always count ALL company users for slot bar
+    ]);
+
+    res.status(200).json({ users, totalCompanyUsers });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
