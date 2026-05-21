@@ -11,12 +11,14 @@ const SmsLog    = require("../models/SmsLog");
 const SmsConfig = require("../models/SmsConfig"); // ← NEW
 
 // ── Helper: get auth key + sender ID for a company ───────────────────────────
-// Reads from SmsConfig (DB) first, falls back to .env
+// Reads ONLY from SmsConfig (DB) — strictly company-scoped.
+// No .env fallback: each company must configure their own MSG91 credentials
+// so one company's key never leaks into another company's SMS sends.
 async function getCompanySmsCredentials(companyId) {
   const config = await SmsConfig.findOne({ company: companyId });
   return {
-    authKey:  config?.msg91AuthKey  || process.env.MSG91_AUTH_KEY  || "",
-    senderId: config?.msg91SenderId || process.env.MSG91_SENDER_ID || "SKYCRM",
+    authKey:  config?.msg91AuthKey  || "",
+    senderId: config?.msg91SenderId || "SKYCRM",
   };
 }
 
