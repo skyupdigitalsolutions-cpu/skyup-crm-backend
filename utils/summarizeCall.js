@@ -1,42 +1,36 @@
 // utils/summarizeCall.js
-// Uses AssemblyAI LLM Gateway (replaces deprecated LeMUR — deprecated March 31, 2026).
-// LLM Gateway is OpenAI-compatible: same base URL swap, same response format.
+// Uses AssemblyAI LLM Gateway (OpenAI-compatible endpoint).
+// Docs: https://www.assemblyai.com/docs/llm-gateway/overview
 const axios = require('axios');
 
-const ASSEMBLYAI_API_KEY = () => process.env.ASSEMBLYAI_API_KEY;
+// LLM Gateway — OpenAI-compatible base URL
+const LLM_GATEWAY_URL = 'https://llm-gateway.assemblyai.com/v1/chat/completions';
 
-// LLM Gateway base URL + model
-// claude-haiku-4-5-20251001 = fast + cheap (Claude 3.0 Haiku retired April 20, 2026)
-// Swap to 'claude-sonnet-4-20250514' for higher quality summaries
-const LLM_GATEWAY_URL = 'https://api.assemblyai.com/lemur/v3/generate/task';
-const LLM_MODEL       = 'anthropic/claude-haiku-4-5-20251001';
+// Model to use — claude-haiku-4-5-20251001 = fast + cheap
+// Swap to 'claude-sonnet-4-20250514' for higher quality
+const LLM_MODEL = 'claude-haiku-4-5-20251001';
 
 // ── Internal helper: call LLM Gateway ────────────────────────────────────────
-// transcriptIds: array of AssemblyAI transcript IDs (preferred — Gateway fetches text itself)
-// inputText:     raw text fallback when no transcript IDs available
-async function callLLMGateway({ prompt, transcriptIds = null, inputText = null, maxTokens = 600 }) {
-  const body = {
-    prompt,
-    final_model: LLM_MODEL,
-    max_output_size: maxTokens,
-  };
-
-  if (transcriptIds && transcriptIds.length > 0) {
-    body.transcript_ids = transcriptIds;
-  } else if (inputText) {
-    body.input_text = inputText;
-  } else {
-    throw new Error('callLLMGateway requires either transcriptIds or inputText');
-  }
-
-  const { data } = await axios.post(LLM_GATEWAY_URL, body, {
-    headers: {
-      authorization: ASSEMBLYAI_API_KEY(),
-      'content-type': 'application/json',
+async function callLLM(systemPrompt, userContent, maxTokens = 600) {
+  const { data } = await axios.post(
+    LLM_GATEWAY_URL,
+    {
+      model:      LLM_MODEL,
+      max_tokens: maxTokens,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: userContent  },
+      ],
     },
-  });
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.ASSEMBLYAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
 
-  return (data.response || '').trim();
+  return (data.choices?.[0]?.message?.content || '').trim();
 }
 
 // ── Summarize a single call transcript ────────────────────────────────────────
@@ -51,23 +45,24 @@ async function summarizeCallTranscript(transcript, contactName = 'the customer',
     };
   }
 
-  const prompt = `Analyze this sales call transcript for contact "${contactName}".
+  const raw = await callLLM(
+    'You are a CRM assistant. Always respond with valid JSON only. No markdown, no extra text.',
+    `Analyze this sales call transcript for contact "${contactName}":
 
-Respond ONLY with this JSON (no markdown, no extra text):
+"""
+${transcript}
+"""
+
+Respond ONLY with this JSON:
 {
   "summary": "2-3 sentence summary of the call",
   "keyPoints": ["point 1", "point 2"],
   "sentiment": "Positive" | "Neutral" | "Negative",
   "nextAction": "specific next step for the agent",
   "suggestedTemp": "Hot" | "Warm" | "Cold" | null
-}`;
-
-  const raw = await callLLMGateway({
-    prompt,
-    transcriptIds: transcriptId ? [transcriptId] : null,
-    inputText:     transcriptId ? null : transcript,
-    maxTokens:     600,
-  });
+}`,
+    600
+  );
 
   const clean = raw.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
 
@@ -94,7 +89,7 @@ Respond ONLY with this JSON (no markdown, no extra text):
 }
 
 // ── Combine all per-call summaries for a lead into one master summary ─────────
-// summaries: array of { summary, keyPoints[], sentiment, nextAction, suggestedTemp, calledAt? }
+// summaries: [{ summary, keyPoints[], sentiment, nextAction, suggestedTemp, calledAt? }]
 async function combineLeadSummaries(summaries, contactName = 'the customer') {
   if (!summaries || summaries.length === 0) {
     return {
@@ -111,9 +106,9 @@ async function combineLeadSummaries(summaries, contactName = 'the customer') {
   if (summaries.length === 1) {
     const s = summaries[0];
     return {
-      overallSummary:        s.summary || 'Single call summary.',
-      keyInsights:           s.keyPoints || [],
-      overallSentiment:      s.sentiment || 'Neutral',
+      overallSummary:        s.summary    || 'Single call summary.',
+      keyInsights:           s.keyPoints  || [],
+      overallSentiment:      s.sentiment  || 'Neutral',
       relationshipStatus:    'Only one call recorded so far.',
       recommendedNextAction: s.nextAction || 'Follow up.',
       suggestedTemp:         s.suggestedTemp || null,
@@ -121,6 +116,7 @@ async function combineLeadSummaries(summaries, contactName = 'the customer') {
     };
   }
 
+  // Build compact text block — one entry per call
   const callsText = summaries
     .map((s, i) => {
       const date   = s.calledAt ? new Date(s.calledAt).toLocaleDateString('en-IN') : `Call ${i + 1}`;
@@ -129,21 +125,22 @@ async function combineLeadSummaries(summaries, contactName = 'the customer') {
         : '';
       return [
         `[Call ${i + 1} — ${date}]`,
-        `Summary: ${s.summary || 'N/A'}`,
+        `Summary: ${s.summary    || 'N/A'}`,
         points ? `Key Points:\n${points}` : '',
-        `Sentiment: ${s.sentiment || 'Neutral'}`,
+        `Sentiment: ${s.sentiment  || 'Neutral'}`,
         `Next Action: ${s.nextAction || 'N/A'}`,
         s.suggestedTemp ? `Temperature: ${s.suggestedTemp}` : '',
       ].filter(Boolean).join('\n');
     })
     .join('\n\n');
 
-  const raw = await callLLMGateway({
-    prompt: `Below are AI summaries of ${summaries.length} calls with lead "${contactName}". Synthesize into one master summary.
+  const raw = await callLLM(
+    'You are a CRM assistant. Always respond with valid JSON only. No markdown, no extra text.',
+    `Below are AI summaries of ${summaries.length} calls with lead "${contactName}". Synthesize into one master summary.
 
 ${callsText}
 
-Respond ONLY with this JSON (no markdown, no extra text):
+Respond ONLY with this JSON:
 {
   "overallSummary": "3-4 sentence synthesis of the entire relationship so far",
   "keyInsights": ["insight 1", "insight 2", "insight 3"],
@@ -152,9 +149,8 @@ Respond ONLY with this JSON (no markdown, no extra text):
   "recommendedNextAction": "the single best next step for the agent",
   "suggestedTemp": "Hot" | "Warm" | "Cold" | null
 }`,
-    inputText: callsText,
-    maxTokens: 800,
-  });
+    800
+  );
 
   const clean = raw.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
 
