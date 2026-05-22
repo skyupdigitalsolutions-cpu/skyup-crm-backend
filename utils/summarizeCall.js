@@ -1,13 +1,45 @@
 // utils/summarizeCall.js
-// Uses AssemblyAI LeMUR — no OpenAI dependency required.
-const { AssemblyAI } = require('assemblyai');
-const client = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY });
+// Uses AssemblyAI LLM Gateway (replaces deprecated LeMUR — deprecated March 31, 2026).
+// LLM Gateway is OpenAI-compatible: same base URL swap, same response format.
+const axios = require('axios');
 
-// ── LeMUR model to use ────────────────────────────────────────────────────────
-// Options: 'anthropic/claude-sonnet-4-5' | 'anthropic/claude-haiku-3-5' (cheaper/faster)
-const LLM_MODEL = 'anthropic/claude-haiku-4-5-20251001';
+const ASSEMBLYAI_API_KEY = () => process.env.ASSEMBLYAI_API_KEY;
 
-// ── Summarize a single call transcript via LeMUR ──────────────────────────────
+// LLM Gateway base URL + model
+// claude-haiku-4-5-20251001 = fast + cheap (Claude 3.0 Haiku retired April 20, 2026)
+// Swap to 'claude-sonnet-4-20250514' for higher quality summaries
+const LLM_GATEWAY_URL = 'https://api.assemblyai.com/lemur/v3/generate/task';
+const LLM_MODEL       = 'anthropic/claude-haiku-4-5-20251001';
+
+// ── Internal helper: call LLM Gateway ────────────────────────────────────────
+// transcriptIds: array of AssemblyAI transcript IDs (preferred — Gateway fetches text itself)
+// inputText:     raw text fallback when no transcript IDs available
+async function callLLMGateway({ prompt, transcriptIds = null, inputText = null, maxTokens = 600 }) {
+  const body = {
+    prompt,
+    final_model: LLM_MODEL,
+    max_output_size: maxTokens,
+  };
+
+  if (transcriptIds && transcriptIds.length > 0) {
+    body.transcript_ids = transcriptIds;
+  } else if (inputText) {
+    body.input_text = inputText;
+  } else {
+    throw new Error('callLLMGateway requires either transcriptIds or inputText');
+  }
+
+  const { data } = await axios.post(LLM_GATEWAY_URL, body, {
+    headers: {
+      authorization: ASSEMBLYAI_API_KEY(),
+      'content-type': 'application/json',
+    },
+  });
+
+  return (data.response || '').trim();
+}
+
+// ── Summarize a single call transcript ────────────────────────────────────────
 async function summarizeCallTranscript(transcript, contactName = 'the customer', transcriptId = null) {
   if (!transcript || transcript.trim().length < 20) {
     return {
@@ -19,22 +51,7 @@ async function summarizeCallTranscript(transcript, contactName = 'the customer',
     };
   }
 
-  // If we have a transcriptId (from AssemblyAI), use LeMUR directly.
-  // Fallback: supply transcript text as context if no ID available.
-  const lemurParams = transcriptId
-    ? {
-        transcript_ids: [transcriptId],
-        final_model: LEMUR_MODEL,
-        max_output_size: 600,
-      }
-    : {
-        // LeMUR "input_text" mode — pass raw text when no transcript_id exists
-        input_text: transcript,
-        final_model: LEMUR_MODEL,
-        max_output_size: 600,
-      };
-
-  lemurParams.prompt = `Analyze this sales call transcript for contact "${contactName}".
+  const prompt = `Analyze this sales call transcript for contact "${contactName}".
 
 Respond ONLY with this JSON (no markdown, no extra text):
 {
@@ -45,8 +62,13 @@ Respond ONLY with this JSON (no markdown, no extra text):
   "suggestedTemp": "Hot" | "Warm" | "Cold" | null
 }`;
 
-  const { response } = await client.lemur.task(lemurParams);
-  const raw   = (response || '').trim();
+  const raw = await callLLMGateway({
+    prompt,
+    transcriptIds: transcriptId ? [transcriptId] : null,
+    inputText:     transcriptId ? null : transcript,
+    maxTokens:     600,
+  });
+
   const clean = raw.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
 
   let parsed;
@@ -72,7 +94,7 @@ Respond ONLY with this JSON (no markdown, no extra text):
 }
 
 // ── Combine all per-call summaries for a lead into one master summary ─────────
-// `summaries` is an array of { summary, keyPoints[], sentiment, nextAction, suggestedTemp, calledAt? }
+// summaries: array of { summary, keyPoints[], sentiment, nextAction, suggestedTemp, calledAt? }
 async function combineLeadSummaries(summaries, contactName = 'the customer') {
   if (!summaries || summaries.length === 0) {
     return {
@@ -99,10 +121,9 @@ async function combineLeadSummaries(summaries, contactName = 'the customer') {
     };
   }
 
-  // Build a compact text block — one numbered entry per call
   const callsText = summaries
     .map((s, i) => {
-      const date = s.calledAt ? new Date(s.calledAt).toLocaleDateString('en-IN') : `Call ${i + 1}`;
+      const date   = s.calledAt ? new Date(s.calledAt).toLocaleDateString('en-IN') : `Call ${i + 1}`;
       const points = Array.isArray(s.keyPoints) && s.keyPoints.length
         ? s.keyPoints.map(p => `  • ${p}`).join('\n')
         : '';
@@ -117,11 +138,10 @@ async function combineLeadSummaries(summaries, contactName = 'the customer') {
     })
     .join('\n\n');
 
-  const { response } = await client.lemur.task({
-    input_text:     callsText,   // pass the pre-built text directly (no transcript IDs needed here)
-    final_model:    LEMUR_MODEL,
-    max_output_size: 800,
-    prompt: `Below are AI summaries of ${summaries.length} calls with lead "${contactName}". Synthesize them into one master summary.
+  const raw = await callLLMGateway({
+    prompt: `Below are AI summaries of ${summaries.length} calls with lead "${contactName}". Synthesize into one master summary.
+
+${callsText}
 
 Respond ONLY with this JSON (no markdown, no extra text):
 {
@@ -132,9 +152,10 @@ Respond ONLY with this JSON (no markdown, no extra text):
   "recommendedNextAction": "the single best next step for the agent",
   "suggestedTemp": "Hot" | "Warm" | "Cold" | null
 }`,
+    inputText: callsText,
+    maxTokens: 800,
   });
 
-  const raw   = (response || '').trim();
   const clean = raw.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
 
   let parsed;
