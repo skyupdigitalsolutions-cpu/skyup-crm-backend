@@ -123,9 +123,16 @@ const loginUnified = async (req, res) => {
       });
     }
 
-    // 2) Check Admin (includes super_admin)
+    // 2) Check Admin — but NEVER allow super_admin through this endpoint
     const admin = await Admin.findOne({ email }).populate("company");
     if (admin && (await admin.matchPassword(password))) {
+      // super_admin must always use /superadmin/login (which has OTP verification)
+      if (admin.role === "super_admin" || admin.role === "superadmin") {
+        return res.status(403).json({
+          message: "Super Admin accounts require secure login. Please use the Super Admin login page.",
+          redirectTo: "/superadmin/login",
+        });
+      }
       if (!admin.company?.isActive)
         return res.status(403).json({ message: "Company is suspended" });
       return res.json({
