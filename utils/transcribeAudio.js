@@ -16,7 +16,7 @@ async function runAssemblyAI(audioInput) {
 
   const transcript = await client.transcripts.transcribe({
     audio:        audioInput,
-    speech_model: 'universal-2',   // required by AssemblyAI v2 API
+    speech_models: ['universal-3-pro', 'universal-2'],   // required by AssemblyAI v2 API
     // Remove language_code below if your calls are in Hindi / mixed language.
     // AssemblyAI will then auto-detect the language.
     language_code: 'en',
