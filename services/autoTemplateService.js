@@ -27,7 +27,7 @@ function normalizePhone(raw) {
 
 // ─── 1. WhatsApp ─────────────────────────────────────────────────────────────
 async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
-  const { templateName = "crm_lead_followup", languageCode = "en_US" } = whatsappSettings;
+  const { templateName = "skyup_greeting", languageCode = "en_US" } = whatsappSettings;
 
   console.log(`[autoTemplate] WA → looking up WhatsAppConfig for company ${companyId}`);
 

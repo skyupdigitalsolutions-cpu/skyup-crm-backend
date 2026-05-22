@@ -97,7 +97,7 @@ const companySchema = mongoose.Schema(
     autoTemplate: {
       whatsapp: {
         enabled:      { type: Boolean, default: false },
-        templateName: { type: String,  default: "crm_lead_followup" },
+        templateName: { type: String,  default: "skyup_greeting" },
         languageCode: { type: String,  default: "en_US" },
       },
       email: {
