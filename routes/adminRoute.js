@@ -19,8 +19,8 @@ const {
   getCompanyBrand,
   updateCompanyBrand,
   deleteCompanyLogo,
-  getBrevoStatus,
-  saveBrevoConfig,
+  // getBrevoStatus,
+  // saveBrevoConfig,
   // ── New integration config handlers ──────────────────────────────────────
   getBrevoConfig,
   saveBrevoFullConfig,
@@ -66,7 +66,7 @@ router.put("/company/msg91-config",    protectAdmin, requireCompanySuperAdmin, s
 router.delete("/company/msg91-config", protectAdmin, requireCompanySuperAdmin, deleteMsg91Config);
 
 // ── Legacy brevo-status (kept for backward compat) ───────────────────────────
-router.get("/company/brevo-status",  protectAdmin, getBrevoStatus);
+// router.get("/company/brevo-status",  protectAdmin, getBrevoStatus);
 
 // ── Admin CRUD (protected) ────────────────────────────────────────────────────
 router.get("/",  protectAdmin, getAdmins);
