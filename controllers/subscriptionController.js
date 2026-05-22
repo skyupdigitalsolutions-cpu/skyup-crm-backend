@@ -31,13 +31,17 @@ const PLANS = {
 };
 
 // ── Helper: days remaining for a company ──────────────────────────────────────
+// Uses Math.floor so "2.9 days left" shows as 2, not 3 — avoids showing
+// a count that looks wrong compared to the actual expiry date displayed.
 function calcDaysRemaining(company) {
   const now = Date.now();
   if (company.subscriptionStatus === 'active' && company.subscriptionExpiry) {
-    return Math.max(0, Math.ceil((new Date(company.subscriptionExpiry) - now) / 86400000));
+    const ms = new Date(company.subscriptionExpiry) - now;
+    return ms <= 0 ? 0 : Math.floor(ms / 86400000);
   }
   if (company.subscriptionStatus === 'trial' && company.trialEndsAt) {
-    return Math.max(0, Math.ceil((new Date(company.trialEndsAt) - now) / 86400000));
+    const ms = new Date(company.trialEndsAt) - now;
+    return ms <= 0 ? 0 : Math.floor(ms / 86400000);
   }
   return 0;
 }
