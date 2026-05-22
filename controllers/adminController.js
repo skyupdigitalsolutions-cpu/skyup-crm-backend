@@ -251,7 +251,8 @@ const deleteCompanyUser = async (req, res) => {
 // ── GET /api/admin/dashboard-stats ───────────────────────────────────────────
 const getDashboardStats = async (req, res) => {
   try {
-    const companyId = req.admin.company._id;
+    // Support both admin (company object populated) and super_admin (may be plain id)
+    const companyId = req.admin?.company?._id || req.admin?.company;
 
     const [
       totalLeads,
@@ -283,6 +284,45 @@ const getDashboardStats = async (req, res) => {
       .select("name mobile phoneRevealCount")
       .lean();
 
+    // ── Build byAdmin reveal breakdown (for SuperAdmin PhoneRevealModal) ──────
+    let byAdmin = [];
+    if (req.admin?.role === "super_admin") {
+      const leadsWithReveals = await Lead.find({
+        company: companyId,
+        "phoneRevealLog.0": { $exists: true },
+      }).select("name mobile phoneRevealLog phoneRevealCount").lean();
+
+      // Group by user (employee) who revealed - since phoneRevealLog has userId/userName
+      const userMap = {};
+      leadsWithReveals.forEach((lead) => {
+        (lead.phoneRevealLog || []).forEach((entry) => {
+          const uid = entry.userId?.toString() || "unknown";
+          if (!userMap[uid]) {
+            userMap[uid] = {
+              adminName: entry.userName || "Unknown User",
+              totalReveals: 0,
+              leadsRevealed: new Set(),
+              leads: {},
+            };
+          }
+          userMap[uid].totalReveals += 1;
+          userMap[uid].leadsRevealed.add(lead._id.toString());
+          const lid = lead._id.toString();
+          if (!userMap[uid].leads[lid]) {
+            userMap[uid].leads[lid] = { name: lead.name, mobile: lead.mobile, count: 0 };
+          }
+          userMap[uid].leads[lid].count += 1;
+        });
+      });
+
+      byAdmin = Object.values(userMap).map((a) => ({
+        adminName:     a.adminName,
+        totalReveals:  a.totalReveals,
+        leadsRevealed: a.leadsRevealed.size,
+        leads:         Object.values(a.leads),
+      }));
+    }
+
     res.status(200).json({
       totalLeads,
       quality: { hot: hotLeads, warm: warmLeads, cold: coldLeads },
@@ -294,6 +334,7 @@ const getDashboardStats = async (req, res) => {
           mobile: l.mobile,
           count:  l.phoneRevealCount,
         })),
+        byAdmin,
       },
     });
   } catch (error) {
