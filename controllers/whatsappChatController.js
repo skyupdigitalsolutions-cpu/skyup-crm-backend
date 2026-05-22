@@ -81,8 +81,23 @@ const getMessages = async (req, res) => {
     const conversation = await WhatsAppConversation.findById(conversationId);
     if (!conversation) return res.status(404).json({ error: "Conversation not found" });
 
-    if (role !== "admin" && conversation.assignedAgent?.toString() !== userId) {
-      return res.status(403).json({ error: "Not authorised" });
+    if (role !== "admin" && role !== "super_admin") {
+      const isAssigned = conversation.assignedAgent?.toString() === userId;
+      // Also allow if the employee owns the lead linked to this conversation
+      // (handles the case where the webhook assigned a different round-robin agent
+      //  but the conversation belongs to this employee's lead)
+      let ownsLead = false;
+      if (!isAssigned && conversation.lead) {
+        const lead = await Lead.findOne({ _id: conversation.lead, user: userId, company: companyId }).lean();
+        ownsLead = !!lead;
+      }
+      if (!isAssigned && !ownsLead) {
+        return res.status(403).json({ error: "Not authorised" });
+      }
+      // If employee owns the lead but isn't the assigned agent, fix that now
+      if (!isAssigned && ownsLead) {
+        await WhatsAppConversation.findByIdAndUpdate(conversationId, { assignedAgent: userId });
+      }
     }
 
     const messages = await WhatsAppMessage.find({ conversation: conversationId })
