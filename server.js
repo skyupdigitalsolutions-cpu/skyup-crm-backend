@@ -44,6 +44,9 @@ const attendanceRoute      = require('./routes/attendanceRoute');
 const emailCampaignRoute   = require('./routes/emailCampaign');
 const emailHistoryRoute    = require('./routes/emailHistory');
 
+// ── Subscription Expiry Email Job ─────────────────────────────────────────────
+const { startSubscriptionExpiryJob } = require('./jobs/subscriptionExpiryJob');
+
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute = require('./routes/smsCampaign');
 const smsHistoryRoute  = require('./routes/smsHistory');
@@ -249,6 +252,9 @@ connectDB().then(() => {
     console.log(`🔐 BIP39 zero-knowledge encryption: enabled`);
     console.log(`📋 Privacy API:      /api/privacy`);
     console.log(`💳 Subscription API: /api/subscription`);
+
+    // ── Start daily subscription expiry email job ─────────────────────────────
+    startSubscriptionExpiryJob();
   });
 });
 

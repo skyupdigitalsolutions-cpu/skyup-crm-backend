@@ -9,6 +9,9 @@ const Company       = require("../models/Company");
 const Admin         = require("../models/Admin");
 const User          = require("../models/Users");
 const generateToken = require("../utils/generateToken");
+// ── Email ──────────────────────────────────────────────────────────────────────
+const { sendEmail }             = require("../utils/brevoMailer");
+const { companyWelcomeEmail }   = require("../utils/emailTemplates");
 
 // ── Cloudinary config ─────────────────────────────────────────────────────────
 cloudinary.config({
@@ -127,6 +130,28 @@ const _createCompanyHandler = async (req, res) => {
       companyData.headerLogoUrl = req.files.headerLogo[0].path;
 
     const company = await Company.create(companyData);
+
+    // ── Fire welcome email (non-blocking — never fail the HTTP response) ───────
+    setImmediate(async () => {
+      try {
+        const template = companyWelcomeEmail({
+          companyName: company.name,
+          plan:        company.plan,
+        });
+        await sendEmail({
+          to:      company.email,
+          toName:  company.name,
+          subject: template.subject,
+          html:    template.html,
+          text:    template.text,
+        });
+        console.log(`[createCompany] ✉  Welcome email sent to ${company.email}`);
+      } catch (mailErr) {
+        // Log the error but don't surface it — company is already created
+        console.error(`[createCompany] ✗  Welcome email failed for ${company.email}:`, mailErr.message);
+      }
+    });
+
     res.status(201).json(company);
   } catch (error) {
     res.status(500).json({ message: error.message });
