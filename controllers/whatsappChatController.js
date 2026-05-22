@@ -248,7 +248,7 @@ const sendMessage = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const sendTemplate = async (req, res) => {
   try {
-    const { conversationId, templateName, languageCode = "en_US", components = [] } = req.body;
+    const { conversationId, templateName, languageCode = "en_US", components: reqComponents = [] } = req.body;
     const { companyId, userId } = req.user;
 
     const conversation = await WhatsAppConversation.findById(conversationId);
@@ -268,14 +268,30 @@ const sendTemplate = async (req, res) => {
     try {
       if (provider === "msg91") {
         if (!authKey || !senderNumber) {
-          return res.status(500).json({ error: "MSG91 credentials missing in .env" });
+          return res.status(500).json({ error: "MSG91 credentials not configured. Go to Communications → Integrations → WhatsApp/SMS and connect MSG91." });
         }
         const resolvedLangCode = languageCode || "en";
-        // FIX Bug #4: read namespace from config instead of hardcoding
         const namespace = config.msg91Namespace || "";
-        const components = conversation.contactName
-          ? { body_customer_name: { type: "text", value: conversation.contactName, parameter_name: "customer_name" } }
-          : {};
+
+        // BUG FIX: Build components for MSG91 — use the contact name from the conversation.
+        // Do NOT shadow or discard reqComponents from the request body.
+        // MSG91 expects components as an OBJECT (key-value map), not an array.
+        // If the template has no variables, send an empty object {}.
+        let msg91Components = {};
+        if (conversation.contactName && conversation.contactName.trim()) {
+          msg91Components = {
+            body_customer_name: {
+              type:           "text",
+              value:          conversation.contactName.trim(),
+              parameter_name: "customer_name",
+            },
+          };
+        }
+        // If caller explicitly passed structured components, prefer those
+        if (reqComponents && Array.isArray(reqComponents) && reqComponents.length > 0) {
+          // Convert Meta-style array components to MSG91 object format if needed
+          msg91Components = reqComponents;
+        }
 
         const requestPayload = {
           integrated_number: senderNumber,
@@ -284,18 +300,20 @@ const sendTemplate = async (req, res) => {
             messaging_product: "whatsapp",
             type:              "template",
             template: {
-              name:              templateName,
-              language:          { code: resolvedLangCode, policy: "deterministic" },
+              name:     templateName,
+              language: { code: resolvedLangCode, policy: "deterministic" },
               ...(namespace ? { namespace } : {}),
-              to_and_components: [{ to: [recipientPhone], components }],
+              to_and_components: [{ to: [recipientPhone], components: msg91Components }],
             },
           },
         };
 
         console.log("📤 MSG91 sendTemplate request:", JSON.stringify(requestPayload, null, 2));
 
+        // BUG FIX: Use control.msg91.com (same host as plain-text send) — api.msg91.com
+        // returns authentication errors for many accounts even with valid keys.
         const msg91Response = await axios.post(
-          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+          "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
           requestPayload,
           { headers: { authkey: authKey, "Content-Type": "application/json" } }
         );
@@ -304,7 +322,7 @@ const sendTemplate = async (req, res) => {
       } else {
         const apiUrl = `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`;
         const metaTmpl = { name: templateName, language: { code: languageCode } };
-        if (components && components.length > 0) metaTmpl.components = components;
+        if (reqComponents && reqComponents.length > 0) metaTmpl.components = reqComponents;
         const metaResponse = await axios.post(
           apiUrl,
           { messaging_product: "whatsapp", to: recipientPhone, type: "template", template: metaTmpl },
@@ -316,6 +334,7 @@ const sendTemplate = async (req, res) => {
       const errData = apiErr.response?.data;
       const errMsg  = errData?.message || errData?.error?.message || apiErr.message;
       console.error("❌ WA template send error:", JSON.stringify(errData || errMsg));
+      console.error("❌ HTTP status:", apiErr.response?.status);
       return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
     }
 
@@ -349,9 +368,6 @@ const sendTemplate = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PATCH /api/whatsapp/conversations/:id/assign
-// ─────────────────────────────────────────────────────────────────────────────
 const assignConversation = async (req, res) => {
   try {
     const { id }      = req.params;
@@ -561,17 +577,30 @@ const startConversation = async (req, res) => {
 
     const lead = await Lead.findOne({ mobile: { $regex: cleanPhone.slice(-10) } });
 
+
     let waMessageId;
     try {
       if (provider === "msg91") {
-        // MSG91 correct payload — namespace required, to must be array, components is an object
         const resolvedLangCode = languageCode || "en";
-        // FIX Bug #4: namespace was hardcoded to one company's value.
-        // Now read from WhatsAppConfig so every company uses their own namespace.
         const namespace = config.msg91Namespace || "";
-        const components = contactName.trim()
-          ? { body_customer_name: { type: "text", value: contactName.trim(), parameter_name: "customer_name" } }
-          : {};
+
+        // BUG FIX: `components` from req.body was being shadowed by a new `const components`
+        // built from contactName. This meant the frontend's component values were lost.
+        // Now we build msg91Components correctly without shadowing the outer variable.
+        let msg91Components = {};
+        if (contactName && contactName.trim()) {
+          msg91Components = {
+            body_customer_name: {
+              type:           "text",
+              value:          contactName.trim(),
+              parameter_name: "customer_name",
+            },
+          };
+        }
+        // If caller passed explicit components array (e.g. from bulk panel), prefer those
+        if (components && Array.isArray(components) && components.length > 0) {
+          msg91Components = components;
+        }
 
         const requestPayload = {
           integrated_number: senderNumber,
@@ -580,18 +609,19 @@ const startConversation = async (req, res) => {
             messaging_product: "whatsapp",
             type:              "template",
             template: {
-              name:              templateName.trim(),
-              language:          { code: resolvedLangCode, policy: "deterministic" },
+              name:     templateName.trim(),
+              language: { code: resolvedLangCode, policy: "deterministic" },
               ...(namespace ? { namespace } : {}),
-              to_and_components: [{ to: [cleanPhone], components }],
+              to_and_components: [{ to: [cleanPhone], components: msg91Components }],
             },
           },
         };
 
         console.log("📤 MSG91 start-conversation request:", JSON.stringify(requestPayload, null, 2));
 
+        // BUG FIX: Use control.msg91.com — api.msg91.com returns auth errors for many accounts.
         const msg91Response = await axios.post(
-          "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+          "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
           requestPayload,
           {
             headers: {
@@ -637,6 +667,7 @@ const startConversation = async (req, res) => {
       console.error("❌ Error message:", errMsg);
       return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
     }
+
 
     let conversation = await WhatsAppConversation.findOne({
       waPhone:  cleanPhone,
@@ -714,18 +745,24 @@ const startConversation = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helper: send a template to one phone number via MSG91 / Meta
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared helper: send a template to one phone number via MSG91 / Meta
+// ─────────────────────────────────────────────────────────────────────────────
 const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, config, authKey, senderNumber, contactName = "" }) => {
   const provider = config.provider || "msg91";
 
   if (provider === "msg91") {
-    // FIX Bug #4: read namespace from config instead of hardcoding
     const namespace = config.msg91Namespace || "";
-    const components = contactName.trim()
+    // BUG FIX: Use named variable msg91Components to avoid any shadowing confusion.
+    // MSG91 expects components as an OBJECT (key-value map), not an array.
+    // Empty object {} is correct when template has no variables.
+    const msg91Components = contactName.trim()
       ? { body_customer_name: { type: "text", value: contactName.trim(), parameter_name: "customer_name" } }
       : {};
 
+    // BUG FIX: Use control.msg91.com — api.msg91.com was causing auth failures.
     const resp = await axios.post(
-      "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+      "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
       {
         integrated_number: senderNumber,
         content_type:      "template",
@@ -733,10 +770,10 @@ const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, co
           messaging_product: "whatsapp",
           type:              "template",
           template: {
-            name:              templateName.trim(),
-            language:          { code: languageCode || "en", policy: "deterministic" },
+            name:     templateName.trim(),
+            language: { code: languageCode || "en", policy: "deterministic" },
             ...(namespace ? { namespace } : {}),
-            to_and_components: [{ to: [cleanPhone], components }],
+            to_and_components: [{ to: [cleanPhone], components: msg91Components }],
           },
         },
       },
@@ -763,9 +800,6 @@ const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, co
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared helper: save conversation + message record after successful send
-// ─────────────────────────────────────────────────────────────────────────────
 const _saveConversationAndMessage = async ({ cleanPhone, contactName, companyId, userId, leadId, templateName, waMessageId }) => {
   const templatePreview = `[Template: ${templateName}]`;
 
