@@ -27,7 +27,7 @@ function normalizePhone(raw) {
 
 // ─── 1. WhatsApp ─────────────────────────────────────────────────────────────
 async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
-  const { templateName = "skyup_greeting", languageCode = "en_US" } = whatsappSettings;
+  const { templateName = "crm_followup_leads", languageCode = "en" } = whatsappSettings;
 
   console.log(`[autoTemplate] WA → looking up WhatsAppConfig for company ${companyId}`);
 
@@ -67,7 +67,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
 
     const templateBlock = {
       name:              templateName.trim(),
-      language:          { code: languageCode || "en_US", policy: "deterministic" },
+      language:          { code: languageCode || "en", policy: "deterministic" },
       to_and_components: [{ to: [cleanPhone], components }],
     };
     if (namespace) templateBlock.namespace = namespace;
@@ -110,7 +110,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
       messaging_product: "whatsapp",
       to:   cleanPhone,
       type: "template",
-      template: { name: templateName.trim(), language: { code: languageCode || "en_US" } },
+      template: { name: templateName.trim(), language: { code: languageCode || "en" } },
     };
 
     console.log(`[autoTemplate] 📤 WA Meta request → phone=${cleanPhone} template="${templateName}"`);

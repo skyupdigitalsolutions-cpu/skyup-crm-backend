@@ -390,9 +390,16 @@ const updateAutoTemplateSettings = async (req, res) => {
 // GET /api/admin/company/brand  →  { name, logoUrl }
 const getCompanyBrand = async (req, res) => {
   try {
-    const companyId = req.admin?.company?._id || req.admin?.company;
-    const company   = await Company.findById(companyId).select("brandName brandLogoUrl").lean();
-    res.json({ name: company?.brandName || "", logoUrl: company?.brandLogoUrl || "" });
+    const companyId = req.companyId || req.admin?.company?._id || req.admin?.company;
+    const company   = await Company.findById(companyId)
+      .select("brandName brandLogoUrl headerName headerLogoUrl")
+      .lean();
+    res.json({
+      name:          company?.brandName     || "",
+      logoUrl:       company?.brandLogoUrl  || "",
+      headerName:    company?.headerName    || "",
+      headerLogoUrl: company?.headerLogoUrl || "",
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

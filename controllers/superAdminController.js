@@ -404,15 +404,28 @@ const getAdminDetails = async (req, res) => {
     const admin = await Admin.findOne({ _id: adminId, company: companyId }).select("-password").lean();
     if (!admin) return res.status(404).json({ message: "Admin not found" });
 
+    // Users created by this admin
     const users = await User.find({ company: companyId, createdBy: adminId })
       .select("-password")
       .lean();
 
-    const leads = await Lead.find({ company: companyId, assignedAdmin: adminId })
+    const userIds = users.map((u) => u._id.toString());
+
+    // Leads: find by assignedAdmin OR by user (employee) belonging to this admin
+    // This handles both direct admin assignment and user-level assignment
+    const leadsQuery = {
+      company: companyId,
+      $or: [
+        { assignedAdmin: adminId },
+        ...(userIds.length > 0 ? [{ user: { $in: userIds } }] : []),
+      ],
+    };
+
+    const leads = await Lead.find(leadsQuery)
       .select("name mobile email status source campaign temperature phoneRevealCount assignedAdmin user date remark")
       .lean();
 
-    const userIds = users.map((u) => u._id.toString());
+    // Phone reveals: look for reveals made by users under this admin
     const leadsWithRevealsByAdmin = await Lead.find({
       company: companyId,
       "phoneRevealLog.0": { $exists: true },
@@ -424,7 +437,9 @@ const getAdminDetails = async (req, res) => {
     const revealedLeads = [];
     leadsWithRevealsByAdmin.forEach((lead) => {
       const adminReveals = lead.phoneRevealLog.filter(
-        (entry) => userIds.includes(entry.userId?.toString())
+        (entry) =>
+          userIds.includes(entry.userId?.toString()) ||
+          entry.userId?.toString() === adminId
       );
       if (adminReveals.length > 0) {
         totalRevealsByAdmin += adminReveals.length;
@@ -481,9 +496,21 @@ const getAllAdminsWithStats = async (req, res) => {
 
     const adminsWithStats = await Promise.all(
       admins.map(async (admin) => {
+        const adminUsers = await User.find(
+          { company: companyId, createdBy: admin._id },
+          { _id: 1 }
+        ).lean();
+        const userIds = adminUsers.map((u) => u._id);
+
         const [userCount, leadCount] = await Promise.all([
-          User.countDocuments({ company: companyId, createdBy: admin._id }),
-          Lead.countDocuments({ company: companyId, assignedAdmin: admin._id }),
+          Promise.resolve(userIds.length),
+          Lead.countDocuments({
+            company: companyId,
+            $or: [
+              { assignedAdmin: admin._id },
+              ...(userIds.length > 0 ? [{ user: { $in: userIds } }] : []),
+            ],
+          }),
         ]);
         return { ...admin, userCount, leadCount };
       })
