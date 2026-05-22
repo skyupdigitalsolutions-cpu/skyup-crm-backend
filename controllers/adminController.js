@@ -394,8 +394,12 @@ const updateAutoTemplateSettings = async (req, res) => {
 // GET /api/admin/company/brand  →  { name, logoUrl }
 const getCompanyBrand = async (req, res) => {
   try {
-    // FIX: Cannot mix || and ?? without parentheses — wrapping ?? operands in parens
-    const raw       = req.companyId || (req.admin?.company?._id ?? req.admin?.company);
+    // Resolve companyId from admin token (admin/super_admin) OR employee/user token
+    const raw =
+      req.companyId ||
+      (req.admin?.company?._id ?? req.admin?.company) ||
+      req.user?.company ||
+      req.user?.companyId;
     const companyId = raw ? raw.toString() : null;
     const company   = await Company.findById(companyId)
       .select("brandName brandLogoUrl headerName headerLogoUrl")
