@@ -332,12 +332,13 @@ const getDashboardStats = async (req, res) => {
 
     if (companyId) {
       // Scoped stats for a specific company's super_admin
-      const [users, leads, admins] = await Promise.all([
+      const [users, leads, admins, totalCompanies] = await Promise.all([
         User.countDocuments({ company: companyId }),
         Lead.countDocuments({ company: companyId }),
         Admin.countDocuments({ company: companyId, role: "admin" }),
+        Company.countDocuments(), // total companies across platform (for superadmin header)
       ]);
-      return res.json({ users, leads, admins });
+      return res.json({ users, leads, admins, totalCompanies });
     }
 
     // Platform-wide stats (legacy, for old SuperAdmin flow)
