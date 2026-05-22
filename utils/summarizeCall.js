@@ -1,8 +1,14 @@
 // utils/summarizeCall.js
-const OpenAI = require('openai');
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Uses AssemblyAI LeMUR — no OpenAI dependency required.
+const { AssemblyAI } = require('assemblyai');
+const client = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY });
 
-async function summarizeCallTranscript(transcript, contactName = 'the customer') {
+// ── LeMUR model to use ────────────────────────────────────────────────────────
+// Options: 'anthropic/claude-sonnet-4-5' | 'anthropic/claude-haiku-3-5' (cheaper/faster)
+const LEMUR_MODEL = 'anthropic/claude-haiku-3-5';
+
+// ── Summarize a single call transcript via LeMUR ──────────────────────────────
+async function summarizeCallTranscript(transcript, contactName = 'the customer', transcriptId = null) {
   if (!transcript || transcript.trim().length < 20) {
     return {
       summary:       'Transcript too short to summarize.',
@@ -13,35 +19,34 @@ async function summarizeCallTranscript(transcript, contactName = 'the customer')
     };
   }
 
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',   // cheapest — works great. Use 'gpt-4o' for better quality
-    max_tokens: 600,
-    messages: [
-      {
-        role: 'system',
-        content: 'You are a CRM assistant. Always respond with valid JSON only. No markdown, no extra text.',
-      },
-      {
-        role: 'user',
-        content: `Analyze this sales call transcript for contact "${contactName}":
+  // If we have a transcriptId (from AssemblyAI), use LeMUR directly.
+  // Fallback: supply transcript text as context if no ID available.
+  const lemurParams = transcriptId
+    ? {
+        transcript_ids: [transcriptId],
+        final_model: LEMUR_MODEL,
+        max_output_size: 600,
+      }
+    : {
+        // LeMUR "input_text" mode — pass raw text when no transcript_id exists
+        input_text: transcript,
+        final_model: LEMUR_MODEL,
+        max_output_size: 600,
+      };
 
-"""
-${transcript}
-"""
+  lemurParams.prompt = `Analyze this sales call transcript for contact "${contactName}".
 
-Respond ONLY with this JSON:
+Respond ONLY with this JSON (no markdown, no extra text):
 {
   "summary": "2-3 sentence summary of the call",
   "keyPoints": ["point 1", "point 2"],
   "sentiment": "Positive" | "Neutral" | "Negative",
   "nextAction": "specific next step for the agent",
   "suggestedTemp": "Hot" | "Warm" | "Cold" | null
-}`,
-      },
-    ],
-  });
+}`;
 
-  const raw = response.choices[0]?.message?.content?.trim() || '';
+  const { response } = await client.lemur.task(lemurParams);
+  const raw   = (response || '').trim();
   const clean = raw.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
 
   let parsed;
@@ -66,18 +71,18 @@ Respond ONLY with this JSON:
   };
 }
 
-// ── Combine all per-call summaries for a lead into one final summary ───────────
-// `summaries` is an array of summary objects: { summary, keyPoints[], sentiment, nextAction, suggestedTemp, calledAt? }
+// ── Combine all per-call summaries for a lead into one master summary ─────────
+// `summaries` is an array of { summary, keyPoints[], sentiment, nextAction, suggestedTemp, calledAt? }
 async function combineLeadSummaries(summaries, contactName = 'the customer') {
   if (!summaries || summaries.length === 0) {
     return {
-      overallSummary:  'No call summaries available for this lead.',
-      keyInsights:     [],
-      overallSentiment:'Neutral',
-      relationshipStatus: 'No interactions recorded.',
+      overallSummary:        'No call summaries available for this lead.',
+      keyInsights:           [],
+      overallSentiment:      'Neutral',
+      relationshipStatus:    'No interactions recorded.',
       recommendedNextAction: 'Initiate first contact.',
-      suggestedTemp:   null,
-      totalCalls:      0,
+      suggestedTemp:         null,
+      totalCalls:            0,
     };
   }
 
@@ -112,21 +117,13 @@ async function combineLeadSummaries(summaries, contactName = 'the customer') {
     })
     .join('\n\n');
 
-  const response = await client.chat.completions.create({
-    model:      'gpt-4o-mini',
-    max_tokens: 800,
-    messages: [
-      {
-        role:    'system',
-        content: 'You are a CRM assistant. Always respond with valid JSON only. No markdown, no extra text.',
-      },
-      {
-        role: 'user',
-        content: `Below are AI summaries of ${summaries.length} calls with lead "${contactName}". Synthesize them into one master summary.
+  const { response } = await client.lemur.task({
+    input_text:     callsText,   // pass the pre-built text directly (no transcript IDs needed here)
+    final_model:    LEMUR_MODEL,
+    max_output_size: 800,
+    prompt: `Below are AI summaries of ${summaries.length} calls with lead "${contactName}". Synthesize them into one master summary.
 
-${callsText}
-
-Respond ONLY with this JSON:
+Respond ONLY with this JSON (no markdown, no extra text):
 {
   "overallSummary": "3-4 sentence synthesis of the entire relationship so far",
   "keyInsights": ["insight 1", "insight 2", "insight 3"],
@@ -135,11 +132,9 @@ Respond ONLY with this JSON:
   "recommendedNextAction": "the single best next step for the agent",
   "suggestedTemp": "Hot" | "Warm" | "Cold" | null
 }`,
-      },
-    ],
   });
 
-  const raw   = response.choices[0]?.message?.content?.trim() || '';
+  const raw   = (response || '').trim();
   const clean = raw.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
 
   let parsed;
