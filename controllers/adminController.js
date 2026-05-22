@@ -66,13 +66,12 @@ const getAdmin = async (req, res) => {
   }
 };
 
-// FIX: Create admin — enforce plan limit before creating
+// Create admin — enforce plan limit before creating
 const createAdmin = async (req, res) => {
   try {
     const { name, email, password } = req.body;
     const companyId = req.admin.company._id;
 
-    // FIX: Check plan limit server-side
     const company = await Company.findById(companyId);
     if (!company) return res.status(404).json({ message: "Company not found" });
 
@@ -111,8 +110,7 @@ const deleteAdmin = async (req, res) => {
     const admin = await Admin.findOne({ _id: req.params.id, company: req.admin.company._id });
     if (!admin) return res.status(404).json({ message: "Admin Not Found" });
 
-    // Guard: never delete a company's last superadmin (would lock the company
-    // out of all admin-team management).
+    // Guard: never delete a company's last superadmin
     if (admin.role === "super_admin") {
       const superCount = await Admin.countDocuments({
         company: req.admin.company._id,
@@ -161,6 +159,7 @@ const updateAdmin = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+
 // Create a user (agent) owned by the calling admin
 const createCompanyUser = async (req, res) => {
   try {
@@ -198,19 +197,18 @@ const createCompanyUser = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+
 // Get all users in same company
 const getCompanyUsers = async (req, res) => {
   try {
     const companyId = req.admin.company._id;
     const filter = { company: companyId };
-    // Superadmin and regular admins both see only their own created users in the list,
-    // BUT we always return the total company-wide count for accurate slot display.
     const ownFilter = { company: companyId };
     if (req.admin.role !== "super_admin") ownFilter.createdBy = req.admin._id;
 
     const [users, totalCompanyUsers] = await Promise.all([
       User.find(ownFilter).select("-password"),
-      User.countDocuments(filter), // always count ALL company users for slot bar
+      User.countDocuments(filter),
     ]);
 
     res.status(200).json({ users, totalCompanyUsers });
@@ -243,10 +241,10 @@ const getCompanyLeads = async (req, res) => {
   }
 };
 
-// FIX: Delete user — with company check
+// Delete user — with company check
 const deleteCompanyUser = async (req, res) => {
   try {
-   const query = { _id: req.params.id, company: req.admin.company._id };
+    const query = { _id: req.params.id, company: req.admin.company._id };
     if (req.admin.role !== "super_admin") query.createdBy = req.admin._id;
     const user = await User.findOne(query);
     if (!user) return res.status(404).json({ message: "User not found" });
@@ -260,7 +258,6 @@ const deleteCompanyUser = async (req, res) => {
 // ── GET /api/admin/dashboard-stats ───────────────────────────────────────────
 const getDashboardStats = async (req, res) => {
   try {
-    // Support both admin (company object populated) and super_admin (may be plain id)
     const companyId = req.admin?.company?._id || req.admin?.company;
 
     const [
@@ -293,7 +290,6 @@ const getDashboardStats = async (req, res) => {
       .select("name mobile phoneRevealCount")
       .lean();
 
-    // ── Build byAdmin reveal breakdown (for SuperAdmin PhoneRevealModal) ──────
     let byAdmin = [];
     if (req.admin?.role === "super_admin") {
       const leadsWithReveals = await Lead.find({
@@ -301,7 +297,6 @@ const getDashboardStats = async (req, res) => {
         "phoneRevealLog.0": { $exists: true },
       }).select("name mobile phoneRevealLog phoneRevealCount").lean();
 
-      // Group by user (employee) who revealed - since phoneRevealLog has userId/userName
       const userMap = {};
       leadsWithReveals.forEach((lead) => {
         (lead.phoneRevealLog || []).forEach((entry) => {
@@ -399,7 +394,8 @@ const updateAutoTemplateSettings = async (req, res) => {
 // GET /api/admin/company/brand  →  { name, logoUrl }
 const getCompanyBrand = async (req, res) => {
   try {
-    const raw       = req.companyId || req.admin?.company?._id ?? req.admin?.company;
+    // FIX: Cannot mix || and ?? without parentheses — wrapping ?? operands in parens
+    const raw       = req.companyId || (req.admin?.company?._id ?? req.admin?.company);
     const companyId = raw ? raw.toString() : null;
     const company   = await Company.findById(companyId)
       .select("brandName brandLogoUrl headerName headerLogoUrl")
@@ -425,10 +421,9 @@ const brandStorage = new CloudinaryStorage({
     return {
       folder:          "skyup-crm/logos",
       resource_type:   "image",
-      // public_id includes companyId + timestamp → unique per upload, no browser caching issues
       public_id:       `logo_${cid}_${Date.now()}`,
       allowed_formats: ["jpg", "jpeg", "png", "svg", "webp"],
-      transformation:  [{ width: 400, height: 400, crop: "limit" }], // keep reasonable size
+      transformation:  [{ width: 400, height: 400, crop: "limit" }],
     };
   },
 });
@@ -479,55 +474,7 @@ const deleteCompanyLogo = async (req, res) => {
   }
 };
 
-// ── Brevo (email blast) connection ────────────────────────────────────────────
-// GET /api/admin/company/brevo-status  →  { connected: bool }
-const getBrevoStatus = async (req, res) => {
-  try {
-    const companyId = req.admin?.company?._id || req.admin?.company;
-    const company   = await Company.findById(companyId).select("+brevoApiKey").lean();
-    res.json({ connected: !!(company?.brevoApiKey) });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-};
-
-// PUT /api/admin/company/brevo-config  →  { apiKey }
-const saveBrevoConfig = async (req, res) => {
-  try {
-    const companyId = req.admin?.company?._id || req.admin?.company;
-    const { apiKey } = req.body;
-    if (!apiKey || !apiKey.trim()) {
-      return res.status(400).json({ message: "Brevo API key is required" });
-    }
-    await Company.findByIdAndUpdate(companyId, { brevoApiKey: apiKey.trim() });
-    res.json({ success: true, connected: true });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-};
-
-module.exports = {
-  getMyCompany,
-  getAdmin,
-  getAdmins,
-  createAdmin,
-  deleteAdmin,
-  updateAdmin,
-  getCompanyUsers,
-  getCompanyLeads,
-  createCompanyUser,
-  deleteCompanyUser,
-  getDashboardStats,
-  getAutoTemplateSettings,
-  updateAutoTemplateSettings,
-  getCompanyBrand,
-  updateCompanyBrand,
-  deleteCompanyLogo,
-  getBrevoStatus,
-  saveBrevoConfig,
-};
-
-// ── Brevo full config (replaces legacy getBrevoStatus + saveBrevoConfig) ──────
+// ── Brevo full config ─────────────────────────────────────────────────────────
 // GET /api/admin/company/brevo-config
 const getBrevoConfig = async (req, res) => {
   try {
@@ -559,7 +506,12 @@ const saveBrevoFullConfig = async (req, res) => {
       brevoSenderEmail: senderEmail.trim(),
       brevoSenderName:  (senderName || "CRM").trim(),
     });
-    res.json({ success: true, connected: true, senderEmail: senderEmail.trim(), senderName: (senderName || "CRM").trim() });
+    res.json({
+      success:     true,
+      connected:   true,
+      senderEmail: senderEmail.trim(),
+      senderName:  (senderName || "CRM").trim(),
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -570,7 +522,7 @@ const deleteBrevoConfig = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     await Company.findByIdAndUpdate(companyId, {
-      brevoApiKey: "",
+      brevoApiKey:      "",
       brevoSenderEmail: "",
       brevoSenderName:  "",
     });
@@ -582,10 +534,6 @@ const deleteBrevoConfig = async (req, res) => {
 
 // ── MSG91 (WhatsApp + SMS) config ─────────────────────────────────────────────
 // GET /api/admin/company/msg91-config
-// GET /api/admin/company/msg91-config
-// ── STRICT company isolation: only returns credentials stored for THIS company.
-//    Never falls back to .env globals — that would leak one company's config
-//    into another company's integrations page.
 const getMsg91Config = async (req, res) => {
   try {
     const companyId      = req.admin?.company?._id || req.admin?.company;
@@ -595,8 +543,6 @@ const getMsg91Config = async (req, res) => {
     const waConfig  = await WhatsAppConfig.findOne({ company: companyId }).lean();
     const smsConfig = await SmsConfig.findOne({ company: companyId }).lean();
 
-    // "connected" requires BOTH WhatsApp number AND auth key saved for THIS company.
-    // No .env fallback — each company must configure their own credentials.
     const hasAuthKey  = !!(waConfig?.msg91AuthKey || smsConfig?.msg91AuthKey);
     const hasWaNumber = !!(waConfig?.msg91IntegratedNumber);
 
@@ -604,7 +550,6 @@ const getMsg91Config = async (req, res) => {
       connected:        hasAuthKey && hasWaNumber,
       integratedNumber: waConfig?.msg91IntegratedNumber || "",
       namespace:        waConfig?.msg91Namespace        || "",
-      // Return masked indicator so frontend knows a key exists without exposing it
       authKeySet:       hasAuthKey,
     });
   } catch (err) {
@@ -613,8 +558,6 @@ const getMsg91Config = async (req, res) => {
 };
 
 // PUT /api/admin/company/msg91-config
-// ── Saves MSG91 credentials strictly for THIS company only.
-//    One key enables both WhatsApp AND SMS for this company — isolated from others.
 const saveMsg91Config = async (req, res) => {
   try {
     const companyId      = req.admin?.company?._id || req.admin?.company;
@@ -628,7 +571,6 @@ const saveMsg91Config = async (req, res) => {
     const WhatsAppConfig = require("../models/WhatsAppConfig");
     const SmsConfig      = require("../models/SmsConfig");
 
-    // Save to WhatsApp config — scoped to this company only
     await WhatsAppConfig.findOneAndUpdate(
       { company: companyId },
       {
@@ -642,7 +584,6 @@ const saveMsg91Config = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // Mirror auth key to SmsConfig — same key, separate collection, same company scope
     await SmsConfig.findOneAndUpdate(
       { company: companyId },
       { company: companyId, msg91AuthKey: authKey.trim(), isActive: true },
@@ -661,17 +602,42 @@ const deleteMsg91Config = async (req, res) => {
     const companyId      = req.admin?.company?._id || req.admin?.company;
     const WhatsAppConfig = require("../models/WhatsAppConfig");
     const SmsConfig      = require("../models/SmsConfig");
-    await WhatsAppConfig.findOneAndUpdate({ company: companyId }, { msg91AuthKey: "", msg91IntegratedNumber: "", isActive: false });
-    await SmsConfig.findOneAndUpdate({ company: companyId }, { msg91AuthKey: "", isActive: false });
+    await WhatsAppConfig.findOneAndUpdate(
+      { company: companyId },
+      { msg91AuthKey: "", msg91IntegratedNumber: "", isActive: false }
+    );
+    await SmsConfig.findOneAndUpdate(
+      { company: companyId },
+      { msg91AuthKey: "", isActive: false }
+    );
     res.json({ success: true, connected: false });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
 
-module.exports.getBrevoConfig      = getBrevoConfig;
-module.exports.saveBrevoFullConfig = saveBrevoFullConfig;
-module.exports.deleteBrevoConfig   = deleteBrevoConfig;
-module.exports.getMsg91Config      = getMsg91Config;
-module.exports.saveMsg91Config     = saveMsg91Config;
-module.exports.deleteMsg91Config   = deleteMsg91Config;
+// ── Single clean export block ─────────────────────────────────────────────────
+module.exports = {
+  getMyCompany,
+  getAdmin,
+  getAdmins,
+  createAdmin,
+  deleteAdmin,
+  updateAdmin,
+  getCompanyUsers,
+  getCompanyLeads,
+  createCompanyUser,
+  deleteCompanyUser,
+  getDashboardStats,
+  getAutoTemplateSettings,
+  updateAutoTemplateSettings,
+  getCompanyBrand,
+  updateCompanyBrand,
+  deleteCompanyLogo,
+  getBrevoConfig,
+  saveBrevoFullConfig,
+  deleteBrevoConfig,
+  getMsg91Config,
+  saveMsg91Config,
+  deleteMsg91Config,
+};
