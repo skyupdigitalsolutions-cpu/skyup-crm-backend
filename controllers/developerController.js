@@ -2,25 +2,35 @@
 const path          = require("path");
 const fs            = require("fs");
 const multer        = require("multer");
+const cloudinary             = require("cloudinary").v2;
+const { CloudinaryStorage }  = require("multer-storage-cloudinary");
 const Developer     = require("../models/Developer");
 const Company       = require("../models/Company");
 const Admin         = require("../models/Admin");
 const User          = require("../models/Users");
 const generateToken = require("../utils/generateToken");
 
-// ── Multer for company logo uploads (developer panel) ─────────────────────────
+// ── Cloudinary config ─────────────────────────────────────────────────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// ── Cloudinary storage for company logo uploads (developer panel) ─────────────
 // Handles two optional fields: "logo" (sidebar/general) and "headerLogo" (header bar)
-const logoStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = path.join(__dirname, "../public/uploads/logos");
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const ext    = path.extname(file.originalname);
+const logoStorage = new CloudinaryStorage({
+  cloudinary,
+  params: async (req, file) => {
     const id     = req.params.id || Date.now();
     const prefix = file.fieldname === "headerLogo" ? "company_header_logo" : "company_logo";
-    cb(null, `${prefix}_${id}${ext}`);
+    return {
+      folder:          "skyup-crm/logos",
+      resource_type:   "image",
+      public_id:       `${prefix}_${id}_${Date.now()}`,
+      allowed_formats: ["jpg", "jpeg", "png", "svg", "webp"],
+      transformation:  [{ width: 400, height: 400, crop: "limit" }],
+    };
   },
 });
 
@@ -105,16 +115,16 @@ const _createCompanyHandler = async (req, res) => {
       createdBy: req.user._id,
     };
 
-    // General / sidebar logo
+    // General / sidebar logo — Cloudinary returns full CDN URL in .path
     if (req.files?.logo?.[0]) {
-      companyData.logo = `/uploads/logos/${req.files.logo[0].filename}`;
+      companyData.logo = req.files.logo[0].path;
     }
 
     // Header branding (set by developer for each company)
     if (headerName !== undefined && String(headerName).trim())
       companyData.headerName = String(headerName).trim().slice(0, 40);
     if (req.files?.headerLogo?.[0])
-      companyData.headerLogoUrl = `/uploads/logos/${req.files.headerLogo[0].filename}`;
+      companyData.headerLogoUrl = req.files.headerLogo[0].path;
 
     const company = await Company.create(companyData);
     res.status(201).json(company);
@@ -186,11 +196,11 @@ const _updateCompanyHandler = async (req, res) => {
     // Header branding fields
     if (headerName !== undefined) company.headerName = String(headerName).trim().slice(0, 40);
 
-    // Logos uploaded via multer (multipart/form-data)
+    // Logos uploaded via multer — Cloudinary returns full CDN URL in .path
     if (req.files?.logo?.[0])
-      company.logo = `/uploads/logos/${req.files.logo[0].filename}`;
+      company.logo = req.files.logo[0].path;
     if (req.files?.headerLogo?.[0])
-      company.headerLogoUrl = `/uploads/logos/${req.files.headerLogo[0].filename}`;
+      company.headerLogoUrl = req.files.headerLogo[0].path;
 
     await company.save();
     res.json(company);

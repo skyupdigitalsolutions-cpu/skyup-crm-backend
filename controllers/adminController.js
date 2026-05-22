@@ -5,6 +5,15 @@ const Company = require("../models/Company");
 const multer  = require("multer");
 const path    = require("path");
 const fs      = require("fs");
+const cloudinary             = require("cloudinary").v2;
+const { CloudinaryStorage }  = require("multer-storage-cloudinary");
+
+// ── Cloudinary config (uses same env vars as the rest of the app) ─────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 // Plan limits — single source of truth on the backend
 // Must match UpgradePlan.jsx and UserManagement.jsx
@@ -390,10 +399,12 @@ const updateAutoTemplateSettings = async (req, res) => {
 // GET /api/admin/company/brand  →  { name, logoUrl }
 const getCompanyBrand = async (req, res) => {
   try {
-    const companyId = req.companyId || req.admin?.company?._id || req.admin?.company;
+    const raw       = req.companyId || req.admin?.company?._id ?? req.admin?.company;
+    const companyId = raw ? raw.toString() : null;
     const company   = await Company.findById(companyId)
       .select("brandName brandLogoUrl headerName headerLogoUrl")
       .lean();
+    // Cloudinary URLs are always absolute — return as-is
     res.json({
       name:          company?.brandName     || "",
       logoUrl:       company?.brandLogoUrl  || "",
@@ -405,19 +416,23 @@ const getCompanyBrand = async (req, res) => {
   }
 };
 
-// Multer storage for logo uploads
-const brandStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = path.join(__dirname, "../public/uploads/logos");
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const cid = req.admin?.company?._id || req.admin?.company;
-    cb(null, `logo_${cid}${ext}`);
+// ── Cloudinary storage for company logo uploads ──────────────────────────────
+const brandStorage = new CloudinaryStorage({
+  cloudinary,
+  params: async (req, file) => {
+    const raw = req.admin?.company?._id ?? req.admin?.company;
+    const cid = raw ? raw.toString() : "unknown";
+    return {
+      folder:          "skyup-crm/logos",
+      resource_type:   "image",
+      // public_id includes companyId + timestamp → unique per upload, no browser caching issues
+      public_id:       `logo_${cid}_${Date.now()}`,
+      allowed_formats: ["jpg", "jpeg", "png", "svg", "webp"],
+      transformation:  [{ width: 400, height: 400, crop: "limit" }], // keep reasonable size
+    };
   },
 });
+
 const brandUpload = multer({
   storage: brandStorage,
   limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
@@ -432,14 +447,17 @@ const updateCompanyBrand = (req, res) => {
   brandUpload(req, res, async (err) => {
     if (err) return res.status(400).json({ message: err.message });
     try {
-      const companyId = req.admin?.company?._id || req.admin?.company;
-      const updates   = {};
+      const raw       = req.admin?.company?._id ?? req.admin?.company;
+      const companyId = raw ? raw.toString() : null;
+      if (!companyId) return res.status(400).json({ message: "Company not found on request" });
+
+      const updates = {};
       if (req.body.name !== undefined) {
         updates.brandName = req.body.name.trim().slice(0, 40);
       }
       if (req.file) {
-        // Adjust this URL prefix to match your server / CDN setup
-        updates.brandLogoUrl = `/uploads/logos/${req.file.filename}`;
+        // Cloudinary returns the full CDN URL directly in req.file.path
+        updates.brandLogoUrl = req.file.path;
       }
       const company = await Company.findByIdAndUpdate(companyId, updates, { new: true })
         .select("brandName brandLogoUrl");
