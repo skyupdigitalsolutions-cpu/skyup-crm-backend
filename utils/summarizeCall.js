@@ -5,7 +5,7 @@ const client = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY });
 
 // ── LeMUR model to use ────────────────────────────────────────────────────────
 // Options: 'anthropic/claude-sonnet-4-5' | 'anthropic/claude-haiku-3-5' (cheaper/faster)
-const LEMUR_MODEL = 'anthropic/claude-haiku-3-5';
+const LLM_MODEL = 'anthropic/claude-haiku-4-5-20251001';
 
 // ── Summarize a single call transcript via LeMUR ──────────────────────────────
 async function summarizeCallTranscript(transcript, contactName = 'the customer', transcriptId = null) {
