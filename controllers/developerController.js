@@ -9,6 +9,7 @@ const User          = require("../models/Users");
 const generateToken = require("../utils/generateToken");
 
 // ── Multer for company logo uploads (developer panel) ─────────────────────────
+// Handles two optional fields: "logo" (sidebar/general) and "headerLogo" (header bar)
 const logoStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     const dir = path.join(__dirname, "../public/uploads/logos");
@@ -16,8 +17,10 @@ const logoStorage = multer.diskStorage({
     cb(null, dir);
   },
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `company_logo_${req.params.id || Date.now()}${ext}`);
+    const ext    = path.extname(file.originalname);
+    const id     = req.params.id || Date.now();
+    const prefix = file.fieldname === "headerLogo" ? "company_header_logo" : "company_logo";
+    cb(null, `${prefix}_${id}${ext}`);
   },
 });
 
@@ -28,7 +31,10 @@ const logoUpload = multer({
     if (file.mimetype.startsWith("image/")) cb(null, true);
     else cb(new Error("Only image files are allowed"));
   },
-}).single("logo");
+}).fields([
+  { name: "logo",       maxCount: 1 }, // general / sidebar logo
+  { name: "headerLogo", maxCount: 1 }, // header bar logo
+]);
 
 // Wrapper: parses multipart if a file is present, otherwise falls through
 // (express.json() already parsed the body for JSON requests)
@@ -92,14 +98,23 @@ const _createCompanyHandler = async (req, res) => {
     if (exists)
       return res.status(400).json({ message: "A company with this email already exists" });
 
+    const { headerName } = body;
+
     const companyData = {
       name, email, phone, plan,
       createdBy: req.user._id,
     };
 
-    if (req.file) {
-      companyData.logo = `/uploads/logos/${req.file.filename}`;
+    // General / sidebar logo
+    if (req.files?.logo?.[0]) {
+      companyData.logo = `/uploads/logos/${req.files.logo[0].filename}`;
     }
+
+    // Header branding (set by developer for each company)
+    if (headerName !== undefined && String(headerName).trim())
+      companyData.headerName = String(headerName).trim().slice(0, 40);
+    if (req.files?.headerLogo?.[0])
+      companyData.headerLogoUrl = `/uploads/logos/${req.files.headerLogo[0].filename}`;
 
     const company = await Company.create(companyData);
     res.status(201).json(company);
@@ -154,7 +169,7 @@ const _updateCompanyHandler = async (req, res) => {
     // req.body may be undefined when multer hasn't parsed it yet for non-multipart
     // requests — guard with nullish coalescing so we never crash on destructure.
     const body  = req.body || {};
-    const { name, email, phone, plan } = body;
+    const { name, email, phone, plan, headerName } = body;
 
     // Check email uniqueness only if email changed
     if (email && email !== company.email) {
@@ -168,11 +183,14 @@ const _updateCompanyHandler = async (req, res) => {
     if (phone !== undefined) company.phone = phone;
     if (plan && ["basic","pro","enterprise"].includes(plan)) company.plan = plan;
 
-    // Logo uploaded via multer (multipart/form-data)
-    if (req.file) {
-      // Store relative URL served from /uploads/logos/
-      company.logo = `/uploads/logos/${req.file.filename}`;
-    }
+    // Header branding fields
+    if (headerName !== undefined) company.headerName = String(headerName).trim().slice(0, 40);
+
+    // Logos uploaded via multer (multipart/form-data)
+    if (req.files?.logo?.[0])
+      company.logo = `/uploads/logos/${req.files.logo[0].filename}`;
+    if (req.files?.headerLogo?.[0])
+      company.headerLogoUrl = `/uploads/logos/${req.files.headerLogo[0].filename}`;
 
     await company.save();
     res.json(company);
