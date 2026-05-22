@@ -53,6 +53,20 @@ const companySchema = mongoose.Schema(
       trim: true,
     },
 
+    // ── Header Bar Branding (set by Developer per-company) ────────────────────
+    // Shown in the sticky top header bar for that company's users/admins.
+    // The sidebar always shows the platform logo (SKYUP); only the header differs.
+    headerName: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    headerLogoUrl: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
     // ── NEW: Extended Branding & Media ────────────────────────────────────────
     logo:    { type: String, default: "" },
     favicon: { type: String, default: "" },
@@ -97,8 +111,8 @@ const companySchema = mongoose.Schema(
     autoTemplate: {
       whatsapp: {
         enabled:      { type: Boolean, default: false },
-        templateName: { type: String,  default: "crm_followup_leads" },
-        languageCode: { type: String,  default: "en" },
+        templateName: { type: String,  default: "skyup_greeting" },
+        languageCode: { type: String,  default: "en_US" },
       },
       email: {
         enabled:      { type: Boolean, default: false },
