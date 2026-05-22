@@ -17,6 +17,7 @@ const {
   bulkSendToLeads,
   bulkSendCSV,
   getLeadsForWhatsApp,
+  employeeBulkSend,
 } = require("../controllers/whatsappChatController");
 
 const { protect, protectAny }            = require("../middlewares/authMiddleware");
@@ -54,5 +55,8 @@ router.post("/bulk-send-csv", adminProtect, bulkSendCSV);
 
 // ─── Get all leads for WhatsApp panel (Leads tab) ────────────────────────────
 router.get("/leads", protectAny, getLeadsForWhatsApp);
+
+// ─── Employee WhatsApp blast — only their own assigned leads ─────────────────
+router.post("/employee-bulk-send", protect, employeeBulkSend);
 
 module.exports = router;

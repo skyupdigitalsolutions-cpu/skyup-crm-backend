@@ -1055,6 +1055,89 @@ const getLeadsForWhatsApp = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/whatsapp/employee-bulk-send
+// Employee sends a WhatsApp template blast to ONLY their own assigned leads.
+// Body: { templateName, languageCode? }
+// Auth: user/employee token (protect middleware)
+// ─────────────────────────────────────────────────────────────────────────────
+const employeeBulkSend = async (req, res) => {
+  try {
+    const { templateName, languageCode = "en_US" } = req.body;
+    const { _id: userId, company: companyId } = req.user;
+
+    if (!templateName?.trim()) {
+      return res.status(400).json({ error: "templateName is required" });
+    }
+
+    // Use the company's shared WhatsApp config (set up by admin)
+    const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
+    if (!config) {
+      return res.status(400).json({ error: "WhatsApp is not configured for this company. Ask your admin to set it up." });
+    }
+
+    const authKey      = config.msg91AuthKey;
+    const senderNumber = config.msg91IntegratedNumber;
+
+    if (!authKey || !senderNumber) {
+      return res.status(500).json({ error: "MSG91 credentials missing in company config" });
+    }
+
+    // Fetch ONLY leads assigned to this employee
+    const leads = await Lead.find({
+      company: companyId,
+      user:    userId,
+      mobile:  { $exists: true, $ne: "" },
+    }).lean();
+
+    if (leads.length === 0) {
+      return res.json({ success: true, sent: 0, failed: 0, total: 0, results: [] });
+    }
+
+    const results = [];
+    let sent   = 0;
+    let failed = 0;
+
+    for (const lead of leads) {
+      const cleanPhone = normalizePhone(lead.mobile);
+      if (cleanPhone.length < 10) {
+        results.push({ leadId: lead._id, name: lead.name, phone: lead.mobile, status: "skipped", reason: "Invalid phone number" });
+        failed++;
+        continue;
+      }
+
+      try {
+        const waMessageId = await _sendTemplateToPhone({
+          cleanPhone, templateName, languageCode, config, authKey, senderNumber,
+          contactName: lead.name,
+        });
+
+        await _saveConversationAndMessage({
+          cleanPhone, contactName: lead.name, companyId, userId,
+          leadId: lead._id, templateName, waMessageId,
+        });
+
+        results.push({ leadId: lead._id, name: lead.name, phone: cleanPhone, status: "sent" });
+        sent++;
+      } catch (err) {
+        const errMsg = err.response?.data?.message || err.message;
+        results.push({ leadId: lead._id, name: lead.name, phone: cleanPhone, status: "failed", reason: errMsg });
+        failed++;
+      }
+
+      // Small delay to respect MSG91 rate limits
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    console.log(`📣 Employee WA blast [user:${userId}]: ${sent} sent, ${failed} failed out of ${leads.length} leads`);
+    res.json({ success: true, sent, failed, total: leads.length, results });
+
+  } catch (err) {
+    console.error("employeeBulkSend error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getConversations,
   getMessages,
@@ -1069,4 +1152,5 @@ module.exports = {
   bulkSendToLeads,
   bulkSendCSV,
   getLeadsForWhatsApp,
+  employeeBulkSend,
 };
