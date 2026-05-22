@@ -35,6 +35,7 @@ const {
   logoutAdmin,
 } = require("../controllers/adminAuthController");
 const { protectAdmin, requireCompanySuperAdmin } = require("../middlewares/adminAuthMiddleware");
+const { protectAny } = require("../middlewares/authMiddleware");
 const { authLimiter }  = require("../middlewares/rateLimiter");
 
 // ── Auth (public) ─────────────────────────────────────────────────────────────
@@ -50,8 +51,9 @@ router.get("/dashboard-stats",   protectAdmin, getDashboardStats);
 router.get("/company/auto-template", protectAdmin, getAutoTemplateSettings);
 router.put("/company/auto-template", protectAdmin, updateAutoTemplateSettings);
 
-// ── Company Branding (SuperAdmin only) ────────────────────────────────────────
+// ── Company Branding (SuperAdmin only to modify; any authenticated user can read) ──
 router.get("/company/brand",         protectAdmin, getCompanyBrand);
+router.get("/company/brand/public",  protectAny,   getCompanyBrand);   // accessible to employee (user) tokens
 router.put("/company/brand",         protectAdmin, requireCompanySuperAdmin, updateCompanyBrand);
 router.delete("/company/brand/logo", protectAdmin, requireCompanySuperAdmin, deleteCompanyLogo);
 
