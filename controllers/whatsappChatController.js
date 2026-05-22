@@ -280,10 +280,10 @@ const sendTemplate = async (req, res) => {
         let msg91Components = {};
         if (conversation.contactName && conversation.contactName.trim()) {
           msg91Components = {
-            body_customer_name: {
+            body_1: {
               type:           "text",
               value:          conversation.contactName.trim(),
-              parameter_name: "customer_name",
+              
             },
           };
         }
@@ -590,10 +590,10 @@ const startConversation = async (req, res) => {
         let msg91Components = {};
         if (contactName && contactName.trim()) {
           msg91Components = {
-            body_customer_name: {
+            body_1: {
               type:           "text",
               value:          contactName.trim(),
-              parameter_name: "customer_name",
+              
             },
           };
         }
@@ -757,7 +757,7 @@ const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, co
     // MSG91 expects components as an OBJECT (key-value map), not an array.
     // Empty object {} is correct when template has no variables.
     const msg91Components = contactName.trim()
-      ? { body_customer_name: { type: "text", value: contactName.trim(), parameter_name: "customer_name" } }
+      ? { body_1: { type: "text", value: contactName.trim() } }
       : {};
 
     // BUG FIX: Use control.msg91.com — api.msg91.com was causing auth failures.
