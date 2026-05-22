@@ -24,7 +24,7 @@ async function callLLM(systemPrompt, userContent, maxTokens = 600) {
     },
     {
       headers: {
-        Authorization: `Bearer ${process.env.ASSEMBLYAI_API_KEY}`,
+        authorization: process.env.ASSEMBLYAI_API_KEY,
         'Content-Type': 'application/json',
       },
     }
