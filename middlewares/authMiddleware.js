@@ -100,10 +100,25 @@ const protectAny = async (req, res, next) => {
           .populate("company");
         if (!req.admin) return res.status(401).json({ message: "Admin not found" });
         req.callerCompany = req.admin.company?._id || req.admin.company;
+        // Normalize so controllers can always read req.user.companyId / .userId / .role
+        req.user = {
+          id:        req.admin._id.toString(),
+          userId:    req.admin._id.toString(),
+          companyId: (req.admin.company?._id || req.admin.company)?.toString(),
+          role:      req.admin.role || "admin",
+          name:      req.admin.name,
+        };
       } else {
-        req.user = await User.findById(decoded.id).select("-password");
-        if (!req.user) return res.status(401).json({ message: "User not found" });
-        req.callerCompany = req.user.company;
+        const userDoc = await User.findById(decoded.id).select("-password");
+        if (!userDoc) return res.status(401).json({ message: "User not found" });
+        req.callerCompany = userDoc.company;
+        // Normalize — controllers expect companyId/userId/role, User doc has company/_id/role
+        req.user = {
+          ...userDoc.toObject(),
+          userId:    userDoc._id.toString(),
+          companyId: userDoc.company?.toString(),
+          role:      userDoc.role || "user",
+        };
       }
 
       return next();

@@ -1056,6 +1056,41 @@ const getLeadsForWhatsApp = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/whatsapp/conversation-by-lead/:leadId
+// Returns the WhatsApp conversation for a given lead (if one exists).
+// Used by the employee chat panel — leads from /lead/my-leads have no
+// conversationId directly, so the frontend must look it up here.
+// Auth: protectAny (admin or employee token)
+// ─────────────────────────────────────────────────────────────────────────────
+const getConversationByLead = async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    const { companyId, userId, role } = req.user;
+
+    const conversation = await WhatsAppConversation.findOne({
+      lead:    leadId,
+      company: companyId,
+    }).sort({ createdAt: -1 });
+
+    if (!conversation) {
+      // No conversation yet — that's fine; return null so frontend knows to show "no chat yet"
+      return res.json({ success: true, conversation: null });
+    }
+
+    // Employees can only see conversations for their own leads
+    if (role !== "admin" && role !== "super_admin") {
+      const lead = await Lead.findOne({ _id: leadId, user: userId, company: companyId }).lean();
+      if (!lead) return res.status(403).json({ error: "This lead is not assigned to you" });
+    }
+
+    res.json({ success: true, conversation });
+  } catch (err) {
+    console.error("getConversationByLead error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/whatsapp/employee-bulk-send
 // Employee sends a WhatsApp template blast to ONLY their own assigned leads.
 // Body: { templateName, languageCode? }
@@ -1153,4 +1188,5 @@ module.exports = {
   bulkSendCSV,
   getLeadsForWhatsApp,
   employeeBulkSend,
+  getConversationByLead,
 };

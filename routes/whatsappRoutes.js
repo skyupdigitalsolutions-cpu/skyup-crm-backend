@@ -18,6 +18,7 @@ const {
   bulkSendCSV,
   getLeadsForWhatsApp,
   employeeBulkSend,
+  getConversationByLead,
 } = require("../controllers/whatsappChatController");
 
 const { protect, protectAny }            = require("../middlewares/authMiddleware");
@@ -33,13 +34,18 @@ router.post("/config",   adminProtect, saveConfig);
 
 // ─── Conversations ────────────────────────────────────────────────────────────
 router.get("/conversations",                            adminProtect, getConversations);
-router.get("/conversations/:conversationId/messages",   adminProtect, getMessages);
+// protectAny — both admin and employee can fetch messages & send in the 24h window
+router.get("/conversations/:conversationId/messages",   protectAny, getMessages);
 router.patch("/conversations/:id/assign",               adminProtect, assignConversation);
 router.patch("/conversations/:id/close",                adminProtect, closeConversation);
 
 // ─── Sending messages ─────────────────────────────────────────────────────────
-router.post("/send",               adminProtect, sendMessage);
+// protectAny — employees need to send text replies within an open 24h session
+router.post("/send",               protectAny, sendMessage);
 router.post("/send-template",      adminProtect, sendTemplate);
+
+// ─── Look up conversation by lead ID (employee chat) ─────────────────────────
+router.get("/conversation-by-lead/:leadId", protectAny, getConversationByLead);
 
 // ─── Admin or agent starts a fresh conversation with any client number ────────
 router.post("/start-conversation", protectAny, startConversation);
