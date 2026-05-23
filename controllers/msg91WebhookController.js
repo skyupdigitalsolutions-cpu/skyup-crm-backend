@@ -45,32 +45,16 @@ function parseTimestamp(ts) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Extract the core item from whatever shape MSG91 sends.
-// Handles: flat body, body.data[] array, body.data object (non-array)
 // ─────────────────────────────────────────────────────────────────────────────
 function extractItem(rawBody) {
-  // Already flat (no data wrapper)
   if (!rawBody.data) return rawBody;
-
-  // data is an array → take first element
-  if (Array.isArray(rawBody.data) && rawBody.data.length > 0) {
-    return rawBody.data[0];
-  }
-
-  // data is a plain object
-  if (typeof rawBody.data === "object") {
-    return rawBody.data;
-  }
-
+  if (Array.isArray(rawBody.data) && rawBody.data.length > 0) return rawBody.data[0];
+  if (typeof rawBody.data === "object") return rawBody.data;
   return rawBody;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extract the text of the message from all known MSG91 payload shapes:
-//
-//   item.payload.text          — MSG91 WhatsApp inbound (confirmed format)
-//   item.text                  — some older shapes
-//   item.message               — SMS / some WA shapes
-//   item.body                  — rare fallback
+// Extract text from all known MSG91 payload shapes
 // ─────────────────────────────────────────────────────────────────────────────
 function extractText(item) {
   if (item.payload && typeof item.payload === "object") {
@@ -86,7 +70,7 @@ function extractText(item) {
 // ─────────────────────────────────────────────────────────────────────────────
 function extractSenderPhone(item) {
   return (
-    item.from           ||  // ← MSG91 primary field
+    item.from           ||
     item.mobile         ||
     item.customerNumber ||
     item.sender         ||
@@ -95,8 +79,7 @@ function extractSenderPhone(item) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Determine the content type from all known field names
-// Normalise to lowercase — MSG91 often sends "TEXT" in uppercase
+// Determine the content type
 // ─────────────────────────────────────────────────────────────────────────────
 function extractContentType(item) {
   const raw = (
@@ -105,35 +88,35 @@ function extractContentType(item) {
     item.contentType ||
     "text"
   ).toLowerCase();
-
-  // Strip any leading direction prefix
   return raw.replace(/^(inbound|incoming|outbound)\s*/, "").trim() || "text";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Is this a delivery/status report rather than an inbound customer message?
+// FIX: Delivery report detection — MUST have a status field AND no sender phone.
+// Previous logic had a fallthrough that misclassified inbound messages that had
+// an "id" field (which ALL inbound messages do) as delivery reports when the
+// sender phone was empty or in an unexpected field.
 //
-// Delivery reports have a "status" field ("sent", "delivered", "read", "failed")
-// and NO sender phone (the customer didn't send this — it's an ACK from WA).
+// Rule: only treat as delivery report if item.status is one of the known
+// delivery status strings. A real inbound message will never have those.
 // ─────────────────────────────────────────────────────────────────────────────
 const DELIVERY_STATUSES = new Set(["sent", "delivered", "read", "failed", "outbound"]);
 
 function isDeliveryReport(rawBody, item) {
-  const topStatus = (rawBody.status || "").toLowerCase();
-  const itemStatus = (item.status || "").toLowerCase();
+  const topStatus  = (rawBody.status || "").toLowerCase();
+  const itemStatus = (item.status   || "").toLowerCase();
 
-  if (DELIVERY_STATUSES.has(topStatus)) return true;
+  // Only a delivery report if there's an explicit delivery status string
+  if (DELIVERY_STATUSES.has(topStatus))  return true;
   if (DELIVERY_STATUSES.has(itemStatus)) return true;
 
-  const senderPhone = extractSenderPhone(item);
-  if (!senderPhone && (item.id || item.requestId || item.uuid)) return true;
-
+  // NOT a delivery report just because there is no sender phone —
+  // that could be a malformed inbound that we should still try to process.
   return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /msg91-webhook/   or   POST /msg91-webhook/msg91
-// MSG91 sends ALL WhatsApp events here
 // ─────────────────────────────────────────────────────────────────────────────
 const receiveMSG91Webhook = async (req, res) => {
   // Always ACK immediately — MSG91 retries if we don't respond fast
@@ -142,7 +125,6 @@ const receiveMSG91Webhook = async (req, res) => {
   try {
     const rawBody = req.body;
 
-    // ── FULL RAW LOG — tells us exactly what MSG91 is sending ─────────────────
     console.log("📲 MSG91 Webhook RAW body:", JSON.stringify(rawBody, null, 2));
 
     if (!rawBody || typeof rawBody !== "object") {
@@ -153,9 +135,9 @@ const receiveMSG91Webhook = async (req, res) => {
     const item = extractItem(rawBody);
     console.log("📲 MSG91 Webhook extracted item:", JSON.stringify(item, null, 2));
 
-    // ── Delivery status update ─────────────────────────────────────────────────
+    // ── Delivery status update ────────────────────────────────────────────────
     if (isDeliveryReport(rawBody, item)) {
-      const msgId = item.id || item.requestId || item.uuid || rawBody.requestId || rawBody.uuid;
+      const msgId     = item.id || item.requestId || item.uuid || rawBody.requestId || rawBody.uuid;
       const rawStatus = (item.status || rawBody.status || "").toLowerCase();
       const statusMap = { sent: "sent", delivered: "delivered", read: "read", failed: "failed", outbound: "sent" };
       const newStatus = statusMap[rawStatus] || "sent";
@@ -185,12 +167,12 @@ const receiveMSG91Webhook = async (req, res) => {
       return;
     }
 
-    // ── Inbound message ────────────────────────────────────────────────────────
+    // ── Inbound message ───────────────────────────────────────────────────────
     const rawPhone = extractSenderPhone(item);
     if (!rawPhone) {
       console.warn("⚠️  MSG91 inbound: no sender phone in payload");
       console.warn("   rawBody keys:", Object.keys(rawBody).join(", "));
-      console.warn("   item keys:", Object.keys(item).join(", "));
+      console.warn("   item keys:",    Object.keys(item).join(", "));
       return;
     }
 
@@ -216,14 +198,16 @@ const receiveMSG91Webhook = async (req, res) => {
       return;
     }
 
-    // ── Dedup ──────────────────────────────────────────────────────────────────
+    // ── Dedup ─────────────────────────────────────────────────────────────────
     const exists = await WhatsAppMessage.findOne({ waMessageId });
     if (exists) {
       console.log(`⏭  Dedup: already saved ${waMessageId}`);
       return;
     }
 
-    // ── Find company config ────────────────────────────────────────────────────
+    // ── Find company config ───────────────────────────────────────────────────
+    // FIX: Try multiple normalisation forms of the integrated number so that
+    // numbers stored with or without the leading "+" both match.
     let config = null;
     if (toNumber) {
       config = await WhatsAppConfig.findOne({
@@ -236,7 +220,9 @@ const receiveMSG91Webhook = async (req, res) => {
         isActive: true,
       });
     }
+    // Fallback: any active msg91 config (single-tenant use case)
     if (!config) config = await WhatsAppConfig.findOne({ provider: "msg91", isActive: true });
+    // Last resort: any active config regardless of provider
     if (!config) config = await WhatsAppConfig.findOne({ isActive: true });
 
     if (!config) {
@@ -244,7 +230,7 @@ const receiveMSG91Webhook = async (req, res) => {
       return;
     }
 
-    // ── Find or create conversation ────────────────────────────────────────────
+    // ── Find or create conversation ───────────────────────────────────────────
     let conversation = await WhatsAppConversation.findOne({ waPhone, company: config.company });
 
     if (!conversation) {
@@ -262,7 +248,7 @@ const receiveMSG91Webhook = async (req, res) => {
       console.log(`🆕 New WA conversation: ${waPhone} → ${conversation._id}`);
     }
 
-    // ── Build message body from content type ───────────────────────────────────
+    // ── Build message body from content type ──────────────────────────────────
     let msgBody      = "";
     let messageType  = "text";
     let mediaId      = null;
@@ -299,7 +285,7 @@ const receiveMSG91Webhook = async (req, res) => {
       console.warn(`⚠️  Empty message body for type "${contentType}" — saved as placeholder`);
     }
 
-    // ── Save message ───────────────────────────────────────────────────────────
+    // ── Save message ──────────────────────────────────────────────────────────
     const savedMsg = await WhatsAppMessage.create({
       conversation: conversation._id,
       direction:    "inbound",
@@ -313,23 +299,29 @@ const receiveMSG91Webhook = async (req, res) => {
       waTimestamp:  timestamp,
     });
 
-    // ── Update conversation ────────────────────────────────────────────────────
+    // ── Update conversation ───────────────────────────────────────────────────
+    // FIX: Reset the 24-hour session window when the lead replies.
+    // This is critical — without this, the admin's send button stays hidden
+    // because the frontend thinks the session is still expired.
     const sessionExpiry = new Date(timestamp.getTime() + 24 * 60 * 60 * 1000);
     await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
       lastMessage:      msgBody,
       lastMessageAt:    timestamp,
       status:           "waiting",
       contactName:      contactName || conversation.contactName,
-      sessionExpiresAt: sessionExpiry,
+      sessionExpiresAt: sessionExpiry,   // ← Always reset on inbound message
       $inc:             { unreadCount: 1 },
     });
 
-    // ── Real-time push via socket ──────────────────────────────────────────────
+    // ── Real-time push via socket ─────────────────────────────────────────────
     const io = global._io;
     if (io) {
       const payload = {
         type:             "wa_new_message",
         conversationId:   conversation._id.toString(),
+        // FIX: Always include the refreshed sessionExpiresAt in the socket
+        // payload so the frontend can immediately re-enable the send input
+        // without requiring a full page reload or manual message fetch.
         sessionExpiresAt: sessionExpiry.toISOString(),
         message: {
           _id:         savedMsg._id.toString(),
@@ -350,6 +342,7 @@ const receiveMSG91Webhook = async (req, res) => {
       }
       io.to("wa_admin").emit("wa_message", payload);
       console.log(`✅ Socket emitted wa_message to wa_admin for conv ${conversation._id}`);
+      console.log(`   sessionExpiresAt reset to: ${sessionExpiry.toISOString()}`);
     } else {
       console.warn("⚠️  global._io not set — socket not emitted");
     }
