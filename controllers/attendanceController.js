@@ -239,11 +239,11 @@ const getCompanyAttendance = async (req, res) => {
       userQuery.createdBy = req.admin._id;
     }
 
-    const users   = await User.find(userQuery).select("name email ipAddress appName appVersion platform deviceModel osVersion").lean();
+    const users   = await User.find(userQuery).select("name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory").lean();
     const userIds = users.map(u => u._id);
 
     const records = await Attendance.find({ company: companyId, date, user: { $in: userIds } })
-      .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion").lean();
+      .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory").lean();
 
     const recordMap = {};
     records.forEach(r => { recordMap[String(r.user?._id || r.user)] = r; });
@@ -310,7 +310,7 @@ const getAttendanceReport = async (req, res) => {
     // Fetch records
     const [records, total] = await Promise.all([
       Attendance.find(query)
-        .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion")
+        .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory")
         .sort({ date: -1, createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(Number(limit))
@@ -467,7 +467,7 @@ const getCompanyUsers = async (req, res) => {
       userQuery.createdBy = req.admin._id;
     }
     const users = await User.find(userQuery)
-      .select("name email ipAddress appName appVersion platform deviceModel osVersion").lean();
+      .select("name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory").lean();
     res.status(200).json(users);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
