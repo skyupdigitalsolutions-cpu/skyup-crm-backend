@@ -163,16 +163,22 @@ const receiveMSG91Webhook = async (req, res) => {
 
     if (toNumber) {
       config = await WhatsAppConfig.findOne({
-        provider:              "msg91",
-        msg91IntegratedNumber: toNumber,
-        isActive:              true,
+        provider: "msg91",
+        $or: [
+          { msg91IntegratedNumber: toNumber },
+          { msg91IntegratedNumber: "+" + toNumber },
+          { msg91IntegratedNumber: toNumber.replace(/^\+/, "") },
+        ],
+        isActive: true,
       });
     }
 
+    // Fallback: first active MSG91 config regardless of number match
     if (!config) {
       config = await WhatsAppConfig.findOne({ provider: "msg91", isActive: true });
     }
 
+    // Last resort: any active config
     if (!config) {
       config = await WhatsAppConfig.findOne({ isActive: true });
     }
