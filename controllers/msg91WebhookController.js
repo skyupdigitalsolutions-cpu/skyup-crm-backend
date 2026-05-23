@@ -1,21 +1,19 @@
 // controllers/msg91WebhookController.js
 // Handles ALL incoming WhatsApp events from MSG91
 //
-// MSG91 WhatsApp inbound webhook — ACTUAL payload structure:
+// ACTUAL MSG91 flat payload (confirmed from production logs 2026-05-23):
 // {
-//   "data": [{
-//     "from": "919591327778",        ← sender phone
-//     "to":   "919538281XXX1",       ← your integrated number
-//     "type": "TEXT",                ← message type (may be uppercase)
-//     "payload": { "text": "hello" },← message body is NESTED here
-//     "id":   "wamid.xxx",           ← WhatsApp message ID
-//     "timestamp": "1748001234",
-//     "name": "Contact Name"
-//   }]
+//   "customerNumber":  "919538281101",   ← sender (lead's phone)
+//   "integratedNumber":"919591327778",   ← your WA number
+//   "customerName":    "SJSJASSS",
+//   "contentType":     "text",
+//   "text":            "Hello",          ← message text (flat, NOT nested)
+//   "uuid":            "wamid.xxx",      ← message ID
+//   "ts":              "2026-05-23T...", ← timestamp
+//   "messageType":     "text"
 // }
 //
-// Delivery/status updates arrive as a SEPARATE payload shape:
-// { "data": [{ "id": "...", "status": "delivered", "timestamp": "..." }] }
+// Delivery/status updates have a "status" field: "delivered", "read", etc.
 
 const WhatsAppConfig       = require("../models/WhatsAppConfig");
 const WhatsAppConversation = require("../models/WhatsAppConversation");
@@ -37,14 +35,17 @@ function normalizePhone(raw) {
 
 function parseTimestamp(ts) {
   if (!ts) return new Date();
-  const unix = parseInt(ts);
-  if (!isNaN(unix) && unix > 1000000000) return new Date(unix * 1000);
+  // ISO string (e.g. "2026-05-23T14:43:32+05:30")
   const d = new Date(ts);
-  return isNaN(d.getTime()) ? new Date() : d;
+  if (!isNaN(d.getTime())) return d;
+  // Unix epoch seconds
+  const unix = parseInt(ts);
+  if (!isNaN(unix) && unix > 1_000_000_000) return new Date(unix * 1000);
+  return new Date();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extract the core item from whatever shape MSG91 sends.
+// Extract the core item — handles both flat payloads and data[] wrapped ones
 // ─────────────────────────────────────────────────────────────────────────────
 function extractItem(rawBody) {
   if (!rawBody.data) return rawBody;
@@ -54,81 +55,122 @@ function extractItem(rawBody) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extract text from all known MSG91 payload shapes
-// ─────────────────────────────────────────────────────────────────────────────
-function extractText(item) {
-  if (item.payload && typeof item.payload === "object") {
-    if (item.payload.text)    return item.payload.text;
-    if (item.payload.caption) return item.payload.caption;
-    if (item.payload.url)     return item.payload.url;
-  }
-  return item.text || item.message || item.body || "";
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Determine the sender phone from all known field names
+// Extract sender phone — covers all known MSG91 field names
 // ─────────────────────────────────────────────────────────────────────────────
 function extractSenderPhone(item) {
   return (
+    item.customerNumber ||   // ← confirmed field in production payload
     item.from           ||
     item.mobile         ||
-    item.customerNumber ||
     item.sender         ||
     ""
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Determine the content type
+// Extract recipient (your integrated number)
+// ─────────────────────────────────────────────────────────────────────────────
+function extractRecipientNumber(item, rawBody) {
+  return (
+    item.integratedNumber ||  // ← confirmed field in production payload
+    item.to               ||
+    item.recipient        ||
+    rawBody.integratedNumber ||
+    rawBody.to            ||
+    ""
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extract message text — flat "text" field confirmed in production
+// ─────────────────────────────────────────────────────────────────────────────
+function extractText(item) {
+  // Flat text field (confirmed production format)
+  if (item.text && typeof item.text === "string" && item.text.trim()) return item.text.trim();
+  // Nested payload object (older/alternate format)
+  if (item.payload && typeof item.payload === "object") {
+    if (item.payload.text)    return item.payload.text;
+    if (item.payload.caption) return item.payload.caption;
+    if (item.payload.url)     return item.payload.url;
+  }
+  return item.message || item.body || item.caption || "";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extract content type — "contentType" confirmed in production payload
 // ─────────────────────────────────────────────────────────────────────────────
 function extractContentType(item) {
   const raw = (
+    item.contentType ||   // ← confirmed field in production payload
     item.type        ||
     item.messageType ||
-    item.contentType ||
     "text"
   ).toLowerCase();
   return raw.replace(/^(inbound|incoming|outbound)\s*/, "").trim() || "text";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FIX: Delivery report detection — MUST have a status field AND no sender phone.
-// Previous logic had a fallthrough that misclassified inbound messages that had
-// an "id" field (which ALL inbound messages do) as delivery reports when the
-// sender phone was empty or in an unexpected field.
-//
-// Rule: only treat as delivery report if item.status is one of the known
-// delivery status strings. A real inbound message will never have those.
+// Extract message ID — "uuid" confirmed in production payload
+// ─────────────────────────────────────────────────────────────────────────────
+function extractMessageId(item, rawBody, waPhone) {
+  return (
+    item.uuid       ||   // ← confirmed field in production payload
+    item.id         ||
+    item.messageId  ||
+    item.requestId  ||
+    rawBody.uuid    ||
+    rawBody.requestId ||
+    `msg91_${Date.now()}_${waPhone}`
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extract contact name — "customerName" confirmed in production payload
+// ─────────────────────────────────────────────────────────────────────────────
+function extractContactName(item) {
+  return item.customerName || item.name || item.senderName || "";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extract timestamp — "ts" confirmed in production payload
+// ─────────────────────────────────────────────────────────────────────────────
+function extractTimestamp(item, rawBody) {
+  return parseTimestamp(
+    item.ts        ||   // ← confirmed field in production payload
+    item.timestamp ||
+    rawBody.ts     ||
+    rawBody.timestamp ||
+    rawBody.requestedAt ||
+    null
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Is this a delivery/status report?
+// ONLY treat as delivery report if there is an explicit delivery status value.
+// Never use the absence of a sender phone as a signal — real inbound messages
+// may have phone in customerNumber which was historically not checked first.
 // ─────────────────────────────────────────────────────────────────────────────
 const DELIVERY_STATUSES = new Set(["sent", "delivered", "read", "failed", "outbound"]);
 
 function isDeliveryReport(rawBody, item) {
   const topStatus  = (rawBody.status || "").toLowerCase();
   const itemStatus = (item.status   || "").toLowerCase();
-
-  // Only a delivery report if there's an explicit delivery status string
-  if (DELIVERY_STATUSES.has(topStatus))  return true;
-  if (DELIVERY_STATUSES.has(itemStatus)) return true;
-
-  // NOT a delivery report just because there is no sender phone —
-  // that could be a malformed inbound that we should still try to process.
-  return false;
+  return DELIVERY_STATUSES.has(topStatus) || DELIVERY_STATUSES.has(itemStatus);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /msg91-webhook/   or   POST /msg91-webhook/msg91
 // ─────────────────────────────────────────────────────────────────────────────
 const receiveMSG91Webhook = async (req, res) => {
-  // Always ACK immediately — MSG91 retries if we don't respond fast
-  res.sendStatus(200);
+  res.sendStatus(200); // ACK immediately
 
   try {
     const rawBody = req.body;
-
     console.log("📲 MSG91 Webhook RAW body:", JSON.stringify(rawBody, null, 2));
 
     if (!rawBody || typeof rawBody !== "object") {
-      console.warn("⚠️  MSG91 webhook: empty or non-JSON body received");
+      console.warn("⚠️  MSG91 webhook: empty or non-JSON body");
       return;
     }
 
@@ -137,7 +179,7 @@ const receiveMSG91Webhook = async (req, res) => {
 
     // ── Delivery status update ────────────────────────────────────────────────
     if (isDeliveryReport(rawBody, item)) {
-      const msgId     = item.id || item.requestId || item.uuid || rawBody.requestId || rawBody.uuid;
+      const msgId     = item.uuid || item.id || item.requestId || rawBody.uuid || rawBody.requestId;
       const rawStatus = (item.status || rawBody.status || "").toLowerCase();
       const statusMap = { sent: "sent", delivered: "delivered", read: "read", failed: "failed", outbound: "sent" };
       const newStatus = statusMap[rawStatus] || "sent";
@@ -151,17 +193,15 @@ const receiveMSG91Webhook = async (req, res) => {
           { new: true }
         );
         if (updated) {
-          console.log(`✅ Updated message ${msgId} → ${newStatus}`);
           const io = global._io;
           if (io) {
             io.to("wa_admin").emit("wa_message_status", {
-              waMessageId: msgId,
-              status: newStatus,
+              waMessageId:    msgId,
+              status:         newStatus,
               conversationId: updated.conversation?.toString(),
             });
           }
-        } else {
-          console.log(`ℹ️  Delivery report for unknown message ${msgId} — skipping`);
+          console.log(`✅ Updated message ${msgId} → ${newStatus}`);
         }
       }
       return;
@@ -170,26 +210,18 @@ const receiveMSG91Webhook = async (req, res) => {
     // ── Inbound message ───────────────────────────────────────────────────────
     const rawPhone = extractSenderPhone(item);
     if (!rawPhone) {
-      console.warn("⚠️  MSG91 inbound: no sender phone in payload");
-      console.warn("   rawBody keys:", Object.keys(rawBody).join(", "));
-      console.warn("   item keys:",    Object.keys(item).join(", "));
+      console.warn("⚠️  MSG91 inbound: no sender phone — rawBody keys:", Object.keys(rawBody).join(", "));
       return;
     }
 
     const waPhone     = normalizePhone(rawPhone);
-    const toNumber    = normalizePhone(item.to || item.integratedNumber || item.recipient || rawBody.to || "");
-    const contactName = item.name || item.customerName || item.senderName || "";
+    const toRaw       = extractRecipientNumber(item, rawBody);
+    const toNumber    = normalizePhone(toRaw);
+    const contactName = extractContactName(item);
     const msgText     = extractText(item);
     const contentType = extractContentType(item);
-    const waMessageId =
-      item.id         ||
-      item.messageId  ||
-      item.requestId  ||
-      item.uuid       ||
-      rawBody.requestId ||
-      `msg91_${Date.now()}_${waPhone}`;
-
-    const timestamp = parseTimestamp(item.timestamp || rawBody.timestamp);
+    const waMessageId = extractMessageId(item, rawBody, waPhone);
+    const timestamp   = extractTimestamp(item, rawBody);
 
     console.log(`📩 MSG91 inbound: from=${waPhone} to=${toNumber} type=${contentType} text="${msgText}" id=${waMessageId}`);
 
@@ -206,8 +238,6 @@ const receiveMSG91Webhook = async (req, res) => {
     }
 
     // ── Find company config ───────────────────────────────────────────────────
-    // FIX: Try multiple normalisation forms of the integrated number so that
-    // numbers stored with or without the leading "+" both match.
     let config = null;
     if (toNumber) {
       config = await WhatsAppConfig.findOne({
@@ -220,9 +250,7 @@ const receiveMSG91Webhook = async (req, res) => {
         isActive: true,
       });
     }
-    // Fallback: any active msg91 config (single-tenant use case)
     if (!config) config = await WhatsAppConfig.findOne({ provider: "msg91", isActive: true });
-    // Last resort: any active config regardless of provider
     if (!config) config = await WhatsAppConfig.findOne({ isActive: true });
 
     if (!config) {
@@ -230,8 +258,32 @@ const receiveMSG91Webhook = async (req, res) => {
       return;
     }
 
-    // ── Find or create conversation ───────────────────────────────────────────
-    let conversation = await WhatsAppConversation.findOne({ waPhone, company: config.company });
+    // ── Find conversation — deduplicate if multiple exist for same phone ───────
+    // FIX: When there are duplicate conversations for the same waPhone (which
+    // can happen if the admin started one via startConversation and the webhook
+    // created another), always pick the MOST RECENTLY ACTIVE one so both the
+    // admin's sent messages and the lead's reply live in the same conversation.
+    const allConversations = await WhatsAppConversation.find({
+      waPhone,
+      company: config.company,
+    }).sort({ lastMessageAt: -1, createdAt: -1 });
+
+    let conversation = allConversations[0] || null;
+
+    // If multiple conversations exist for this phone, merge duplicates:
+    // keep the most recent one, delete the rest (they were empty/stale)
+    if (allConversations.length > 1) {
+      console.warn(`⚠️  Found ${allConversations.length} conversations for ${waPhone} — using most recent: ${conversation._id}`);
+      const staleIds = allConversations.slice(1).map(c => c._id);
+      // Only delete truly empty ones (no messages) to avoid data loss
+      for (const staleId of staleIds) {
+        const msgCount = await WhatsAppMessage.countDocuments({ conversation: staleId });
+        if (msgCount === 0) {
+          await WhatsAppConversation.findByIdAndDelete(staleId);
+          console.log(`🗑  Deleted empty duplicate conversation ${staleId}`);
+        }
+      }
+    }
 
     if (!conversation) {
       const lead          = await findLeadByPhone(waPhone, config.company);
@@ -248,10 +300,10 @@ const receiveMSG91Webhook = async (req, res) => {
       console.log(`🆕 New WA conversation: ${waPhone} → ${conversation._id}`);
     }
 
-    // ── Build message body from content type ──────────────────────────────────
-    let msgBody      = "";
-    let messageType  = "text";
-    let mediaId      = null;
+    // ── Build message body ────────────────────────────────────────────────────
+    let msgBody     = "";
+    let messageType = "text";
+    let mediaId     = null;
     let mediaCaption = null;
 
     if (["text", "inbound", "incoming"].includes(contentType)) {
@@ -259,22 +311,17 @@ const receiveMSG91Webhook = async (req, res) => {
       messageType = "text";
     } else if (["image", "document", "audio", "video", "sticker"].includes(contentType)) {
       messageType  = contentType;
-      mediaCaption = item.payload?.caption || item.caption || null;
-      mediaId      = item.payload?.url || item.payload?.id || item.url || null;
+      mediaCaption = item.caption || item.payload?.caption || null;
+      mediaId      = item.url || item.payload?.url || item.payload?.id || null;
       msgBody      = mediaCaption || mediaId || `[${contentType}]`;
     } else if (contentType === "location") {
       messageType = "location";
-      const lat = item.payload?.latitude  || item.latitude  || "?";
-      const lng = item.payload?.longitude || item.longitude || "?";
+      const lat = item.latitude  || item.payload?.latitude  || "?";
+      const lng = item.longitude || item.payload?.longitude || "?";
       msgBody = `📍 Location: ${lat}, ${lng}`;
     } else if (["button", "interactive", "list_reply", "button_reply"].includes(contentType)) {
       messageType = "text";
-      msgBody =
-        item.payload?.title       ||
-        item.payload?.text        ||
-        item.payload?.button_text ||
-        msgText ||
-        `[${contentType} reply]`;
+      msgBody = item.button || item.payload?.title || item.payload?.text || msgText || `[${contentType} reply]`;
     } else {
       messageType = "text";
       msgBody = msgText || `[${contentType}]`;
@@ -299,29 +346,23 @@ const receiveMSG91Webhook = async (req, res) => {
       waTimestamp:  timestamp,
     });
 
-    // ── Update conversation ───────────────────────────────────────────────────
-    // FIX: Reset the 24-hour session window when the lead replies.
-    // This is critical — without this, the admin's send button stays hidden
-    // because the frontend thinks the session is still expired.
+    // ── Update conversation — reset 24h session window ────────────────────────
     const sessionExpiry = new Date(timestamp.getTime() + 24 * 60 * 60 * 1000);
     await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
       lastMessage:      msgBody,
       lastMessageAt:    timestamp,
       status:           "waiting",
       contactName:      contactName || conversation.contactName,
-      sessionExpiresAt: sessionExpiry,   // ← Always reset on inbound message
+      sessionExpiresAt: sessionExpiry,
       $inc:             { unreadCount: 1 },
     });
 
-    // ── Real-time push via socket ─────────────────────────────────────────────
+    // ── Socket push ───────────────────────────────────────────────────────────
     const io = global._io;
     if (io) {
-      const payload = {
+      const socketPayload = {
         type:             "wa_new_message",
         conversationId:   conversation._id.toString(),
-        // FIX: Always include the refreshed sessionExpiresAt in the socket
-        // payload so the frontend can immediately re-enable the send input
-        // without requiring a full page reload or manual message fetch.
         sessionExpiresAt: sessionExpiry.toISOString(),
         message: {
           _id:         savedMsg._id.toString(),
@@ -338,9 +379,9 @@ const receiveMSG91Webhook = async (req, res) => {
       };
 
       if (conversation.assignedAgent) {
-        io.to(`wa_agent_${conversation.assignedAgent.toString()}`).emit("wa_message", payload);
+        io.to(`wa_agent_${conversation.assignedAgent.toString()}`).emit("wa_message", socketPayload);
       }
-      io.to("wa_admin").emit("wa_message", payload);
+      io.to("wa_admin").emit("wa_message", socketPayload);
       console.log(`✅ Socket emitted wa_message to wa_admin for conv ${conversation._id}`);
       console.log(`   sessionExpiresAt reset to: ${sessionExpiry.toISOString()}`);
     } else {
@@ -355,8 +396,6 @@ const receiveMSG91Webhook = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 async function findLeadByPhone(waPhone, companyId) {
   const lastTen = waPhone.slice(-10);
