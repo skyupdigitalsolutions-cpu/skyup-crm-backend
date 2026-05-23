@@ -750,12 +750,18 @@ const startConversation = async (req, res) => {
 
     const io = global._io;
     if (io) {
-      io.to("wa_admin").emit("wa_new_conversation", {
-        conversation: await WhatsAppConversation.findById(conversation._id)
-          .populate("lead",          "name mobile email status")
-          .populate("assignedAgent", "name email"),
-      });
-      io.to("wa_admin").emit("wa_message", {
+      const populatedConv = await WhatsAppConversation.findById(conversation._id)
+        .populate("lead",          "name mobile email status")
+        .populate("assignedAgent", "name email");
+
+      const convPayload = { conversation: populatedConv };
+      io.to("wa_admin").emit("wa_new_conversation", convPayload);
+      // FIX: also notify the assigned agent so the conversation appears in their sidebar
+      if (userId) {
+        io.to(`wa_agent_${userId}`).emit("wa_new_conversation", convPayload);
+      }
+
+      const msgPayload = {
         type:           "wa_new_message",
         conversationId: conversation._id.toString(),
         message: {
@@ -765,11 +771,17 @@ const startConversation = async (req, res) => {
           messageType: "template",
           waTimestamp: new Date(),
           status:      "sent",
-          sentBy:      { _id: userId, name: req.admin?.name || req.user?.name || 'Admin' },
+          sentBy:      { _id: userId, name: req.admin?.name || req.user?.name || 'Agent' },
         },
-        waPhone:   cleanPhone,
-        companyId: companyId.toString(),
-      });
+        waPhone:       cleanPhone,
+        companyId:     companyId.toString(),
+        assignedAgent: userId?.toString(),
+      };
+      io.to("wa_admin").emit("wa_message", msgPayload);
+      // FIX: also push the outbound template message to the agent so they see it immediately
+      if (userId) {
+        io.to(`wa_agent_${userId}`).emit("wa_message", msgPayload);
+      }
     }
 
     res.json({ success: true, conversation, message: savedMsg });
@@ -1132,18 +1144,13 @@ const getConversationByLead = async (req, res) => {
       if (digits.length === 10) digits = "91" + digits;
       const lastTen = digits.slice(-10);
 
-      // Find ALL matching conversations, then prefer any that already have a
-      // lead reference — these are the ones the webhook also targets.
-      const phoneCandidates = await WhatsAppConversation.find({
+      conversation = await WhatsAppConversation.findOne({
         company: companyId,
         $or: [
           { waPhone: digits },
           { waPhone: lastTen },
         ],
       }).sort({ lastMessageAt: -1, createdAt: -1 });
-
-      const linked = phoneCandidates.find(c => c.lead != null);
-      conversation = linked || phoneCandidates[0] || null;
 
       // Backfill the lead reference so future lookups use the fast path
       if (conversation && !conversation.lead) {
