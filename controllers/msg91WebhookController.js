@@ -259,21 +259,23 @@ const receiveMSG91Webhook = async (req, res) => {
     }
 
     // ── Find conversation — deduplicate if multiple exist for same phone ───────
-    // FIX: When there are duplicate conversations for the same waPhone (which
-    // can happen if the admin started one via startConversation and the webhook
-    // created another), always pick the MOST RECENTLY ACTIVE one so both the
-    // admin's sent messages and the lead's reply live in the same conversation.
+    // CRITICAL FIX: When multiple conversations exist for the same waPhone,
+    // PREFER the one that has a lead reference (i.e., the one started by the
+    // employee via startConversation / getConversationByLead). The frontend's
+    // getConversationByLead searches by lead._id, so inbound messages MUST land
+    // in the lead-linked conversation or the employee will never see them.
+    // Fall back to most-recently-active only if no lead-linked conversation exists.
     const allConversations = await WhatsAppConversation.find({
       waPhone,
       company: config.company,
     }).sort({ lastMessageAt: -1, createdAt: -1 });
 
-    let conversation = allConversations[0] || null;
+    const linkedConv = allConversations.find(c => c.lead != null);
+    let conversation = linkedConv || allConversations[0] || null;
 
-    // If multiple conversations exist for this phone, merge duplicates:
-    // keep the most recent one, delete the rest (they were empty/stale)
+    // If multiple conversations exist for this phone, clean up empty duplicates:
     if (allConversations.length > 1) {
-      console.warn(`⚠️  Found ${allConversations.length} conversations for ${waPhone} — using most recent: ${conversation._id}`);
+      console.warn(`⚠️  Found ${allConversations.length} conversations for ${waPhone} — using ${linkedConv ? "lead-linked" : "most-recent"}: ${conversation._id}`);
       const staleIds = allConversations.slice(1).map(c => c._id);
       // Only delete truly empty ones (no messages) to avoid data loss
       for (const staleId of staleIds) {
@@ -286,26 +288,43 @@ const receiveMSG91Webhook = async (req, res) => {
     }
 
     if (!conversation) {
-      const lead          = await findLeadByPhone(waPhone, config.company);
-      const assignedAgent = await getAvailableAgent(config.company);
+      const lead = await findLeadByPhone(waPhone, config.company);
+
+      // CRITICAL FIX: prefer the lead's assigned employee (lead.user) over
+      // round-robin so the right employee receives the socket notification
+      // via their wa_agent_<userId> room.
+      const agentId = lead?.user || (await getAvailableAgent(config.company))?._id || null;
 
       conversation = await WhatsAppConversation.create({
         waPhone,
         contactName,
         lead:          lead?._id || null,
-        assignedAgent: assignedAgent?._id || null,
+        assignedAgent: agentId,
         company:       config.company,
         status:        "open",
       });
-      console.log(`🆕 New WA conversation: ${waPhone} → ${conversation._id}`);
+      console.log(`🆕 New WA conversation: ${waPhone} → ${conversation._id} (agent: ${agentId})`);
     } else if (!conversation.lead) {
-      // FIX: backfill the lead reference if startConversation saved it with lead:null
-      // (happened due to missing company scope in the lead lookup).
+      // Backfill the lead reference if it was saved with lead:null
       const lead = await findLeadByPhone(waPhone, config.company);
       if (lead) {
-        await WhatsAppConversation.findByIdAndUpdate(conversation._id, { lead: lead._id });
-        conversation = { ...conversation.toObject(), lead: lead._id };
-        console.log(`🔗 Backfilled lead ${lead._id} on conversation ${conversation._id}`);
+        const patch = { lead: lead._id };
+        // Also backfill assignedAgent from lead.user if missing
+        if (!conversation.assignedAgent && lead.user) {
+          patch.assignedAgent = lead.user;
+        }
+        await WhatsAppConversation.findByIdAndUpdate(conversation._id, patch);
+        conversation = { ...conversation.toObject(), ...patch };
+        console.log(`🔗 Backfilled lead ${lead._id} (agent: ${patch.assignedAgent || "unchanged"}) on conversation ${conversation._id}`);
+      }
+    } else if (!conversation.assignedAgent) {
+      // Conversation has a lead but no agent — backfill from lead.user
+      const lead = await findLeadByPhone(waPhone, config.company);
+      const agentId = lead?.user || (await getAvailableAgent(config.company))?._id || null;
+      if (agentId) {
+        await WhatsAppConversation.findByIdAndUpdate(conversation._id, { assignedAgent: agentId });
+        conversation = { ...conversation.toObject(), assignedAgent: agentId };
+        console.log(`🔗 Backfilled assignedAgent ${agentId} on conversation ${conversation._id}`);
       }
     }
 

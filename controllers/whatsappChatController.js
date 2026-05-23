@@ -1132,13 +1132,18 @@ const getConversationByLead = async (req, res) => {
       if (digits.length === 10) digits = "91" + digits;
       const lastTen = digits.slice(-10);
 
-      conversation = await WhatsAppConversation.findOne({
+      // Find ALL matching conversations, then prefer any that already have a
+      // lead reference — these are the ones the webhook also targets.
+      const phoneCandidates = await WhatsAppConversation.find({
         company: companyId,
         $or: [
           { waPhone: digits },
           { waPhone: lastTen },
         ],
       }).sort({ lastMessageAt: -1, createdAt: -1 });
+
+      const linked = phoneCandidates.find(c => c.lead != null);
+      conversation = linked || phoneCandidates[0] || null;
 
       // Backfill the lead reference so future lookups use the fast path
       if (conversation && !conversation.lead) {
