@@ -298,6 +298,15 @@ const receiveMSG91Webhook = async (req, res) => {
         status:        "open",
       });
       console.log(`🆕 New WA conversation: ${waPhone} → ${conversation._id}`);
+    } else if (!conversation.lead) {
+      // FIX: backfill the lead reference if startConversation saved it with lead:null
+      // (happened due to missing company scope in the lead lookup).
+      const lead = await findLeadByPhone(waPhone, config.company);
+      if (lead) {
+        await WhatsAppConversation.findByIdAndUpdate(conversation._id, { lead: lead._id });
+        conversation = { ...conversation.toObject(), lead: lead._id };
+        console.log(`🔗 Backfilled lead ${lead._id} on conversation ${conversation._id}`);
+      }
     }
 
     // ── Build message body ────────────────────────────────────────────────────

@@ -54,7 +54,7 @@ const getConversations = async (req, res) => {
 
     const filter = { company: companyId };
 
-    if (role !== "admin" && role !== "super_admin") {
+    if (role !== "admin") {
       filter.assignedAgent = userId;
     }
 
@@ -435,7 +435,7 @@ const deleteConversation = async (req, res) => {
     const { id } = req.params;
     const { role } = req.user;
 
-    if (role !== "admin" && role !== "super_admin") {
+    if (role !== "admin") {
       return res.status(403).json({ error: "Only admins can delete conversations" });
     }
 
@@ -590,7 +590,17 @@ const startConversation = async (req, res) => {
       return res.status(500).json({ error: "MSG91 credentials missing" });
     }
 
-    const lead = await Lead.findOne({ mobile: { $regex: cleanPhone.slice(-10) } });
+    // FIX: always scope lead lookup to this company; the regex previously had no company
+    // filter and could return a lead from a different tenant, or null when it shouldn't.
+    const lastTen = cleanPhone.slice(-10);
+    const lead = await Lead.findOne({
+      company: companyId,
+      $or: [
+        { mobile: cleanPhone },
+        { mobile: lastTen },
+        { mobile: `+${cleanPhone}` },
+      ],
+    });
 
 
     let waMessageId;
@@ -701,6 +711,18 @@ const startConversation = async (req, res) => {
         lastMessageAt:    new Date(),
         sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       });
+    } else {
+      // FIX: backfill lead and assignedAgent if the existing conversation is missing them.
+      // This happens when a previous startConversation failed to find the lead (null company
+      // filter bug) or when the webhook created the conversation before the employee opened it.
+      const patch = {};
+      if (!conversation.lead && lead?._id)    patch.lead          = lead._id;
+      if (!conversation.assignedAgent && userId) patch.assignedAgent = userId;
+      if (Object.keys(patch).length) {
+        await WhatsAppConversation.findByIdAndUpdate(conversation._id, patch);
+        const convPlain = typeof conversation.toObject === "function" ? conversation.toObject() : conversation;
+        conversation = Object.assign({}, convPlain, patch);
+      }
     }
 
     const templatePreview = `[Template: ${templateName}]`;
@@ -1082,20 +1104,53 @@ const getConversationByLead = async (req, res) => {
     const { leadId } = req.params;
     const { companyId, userId, role } = req.user;
 
-    const conversation = await WhatsAppConversation.findOne({
-      lead:    leadId,
-      company: companyId,
-    }).sort({ createdAt: -1 });
+    // Employees can only see conversations for their own leads
+    const lead = await Lead.findOne({ _id: leadId, company: companyId }).lean();
+    if (!lead) return res.status(404).json({ error: "Lead not found" });
 
-    if (!conversation) {
-      // No conversation yet — that's fine; return null so frontend knows to show "no chat yet"
-      return res.json({ success: true, conversation: null });
+    if (role !== "admin" && role !== "super_admin") {
+      if (lead.user?.toString() !== userId) {
+        return res.status(403).json({ error: "This lead is not assigned to you" });
+      }
     }
 
-    // Employees can only see conversations for their own leads
-    if (role !== "admin" && role !== "super_admin") {
-      const lead = await Lead.findOne({ _id: leadId, user: userId, company: companyId }).lean();
-      if (!lead) return res.status(403).json({ error: "This lead is not assigned to you" });
+    // FIX: search by lead._id first, then fall back to phone number match.
+    // Conversations created via startConversation may have lead: null if the
+    // original lead lookup failed (missing company scope bug). In that case,
+    // find the conversation by the lead's normalised phone number so employees
+    // can always open their chat history after a page refresh.
+    let conversation = await WhatsAppConversation.findOne({
+      lead:    leadId,
+      company: companyId,
+    }).sort({ lastMessageAt: -1, createdAt: -1 });
+
+    if (!conversation && lead.mobile) {
+      // Normalise the phone the same way the rest of the system does
+      let digits = String(lead.mobile).replace(/\D/g, "");
+      if (digits.startsWith("0091")) digits = digits.slice(4);
+      if (digits.startsWith("0") && digits.length === 11) digits = digits.slice(1);
+      if (digits.length === 10) digits = "91" + digits;
+      const lastTen = digits.slice(-10);
+
+      conversation = await WhatsAppConversation.findOne({
+        company: companyId,
+        $or: [
+          { waPhone: digits },
+          { waPhone: lastTen },
+        ],
+      }).sort({ lastMessageAt: -1, createdAt: -1 });
+
+      // Backfill the lead reference so future lookups use the fast path
+      if (conversation && !conversation.lead) {
+        await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
+          lead: leadId,
+          ...(!conversation.assignedAgent && userId ? { assignedAgent: userId } : {}),
+        });
+      }
+    }
+
+    if (!conversation) {
+      return res.json({ success: true, conversation: null });
     }
 
     res.json({ success: true, conversation });
