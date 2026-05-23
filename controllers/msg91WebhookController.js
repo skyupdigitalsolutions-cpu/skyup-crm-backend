@@ -52,9 +52,9 @@ const receiveMSG91Webhook = async (req, res) => {
     // webhookType / type / event can be:
     //   inbound / incoming / message   → client sent us a message
     //   outbound / sent / delivered / read / failed → delivery status update for our outbound message
-    const webhookType = (
-      body.webhookType || body.type || body.event || ""
-    ).toLowerCase();
+    const webhookType    = (body.webhookType || body.type || body.event || "").toLowerCase();
+    const directionField = (body.direction   || "").toLowerCase();
+    const statusField    = (body.status      || "").toLowerCase();
 
     const isDeliveryReport = (
       webhookType === "outbound"  ||
@@ -62,6 +62,15 @@ const receiveMSG91Webhook = async (req, res) => {
       webhookType === "delivered" ||
       webhookType === "read"      ||
       webhookType === "failed"    ||
+      // direction field explicitly says outbound
+      directionField === "outbound" ||
+      // status-only payloads (no actual message text) → delivery report
+      statusField === "sent"      ||
+      statusField === "delivered" ||
+      statusField === "read"      ||
+      statusField === "failed"    ||
+      // payload has a status field but no message text → delivery report
+      (body.status && !body.text && !body.message && !body.body) ||
       // MSG91 sometimes sends delivery reports with a requestId but no customerNumber
       (!body.customerNumber && (body.requestId || body.uuid) && !body.text)
     );
@@ -80,7 +89,7 @@ const receiveMSG91Webhook = async (req, res) => {
           failed:    "failed",
           outbound:  "sent",
         };
-        const newStatus = statusMap[webhookType] || "sent";
+        const newStatus = statusMap[webhookType] || statusMap[statusField] || "sent";
 
         // Update message status in DB if we have a record
         const updated = await WhatsAppMessage.findOneAndUpdate(
