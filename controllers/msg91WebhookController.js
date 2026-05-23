@@ -36,6 +36,34 @@ function parseTimestamp(ts, messagesStr) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MSG91 sends inbound WhatsApp messages wrapped in a "data" array:
+//
+//   { data: [{ mobile: "919...", message: "Hello", type: "text", ... }] }
+//
+// Delivery/status reports come at the top level:
+//   { requestId: "...", status: "delivered", ... }
+//   { type: "outbound", uuid: "...", ... }
+//
+// This helper normalises BOTH shapes into a flat object so the rest of the
+// controller only has to deal with one consistent structure.
+// ─────────────────────────────────────────────────────────────────────────────
+function extractPayload(body) {
+  // If MSG91 wrapped the inbound message in a data array, unwrap it.
+  if (
+    body.data &&
+    Array.isArray(body.data) &&
+    body.data.length > 0 &&
+    typeof body.data[0] === "object"
+  ) {
+    const item = body.data[0];
+    // Merge top-level keys (webhookType, event, etc.) with the nested item.
+    // Item fields win so that mobile / message from the nested object are used.
+    return { ...body, ...item };
+  }
+  return body;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /msg91-webhook/msg91
 // MSG91 sends ALL WhatsApp events here — inbound messages AND delivery reports
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,8 +72,11 @@ const receiveMSG91Webhook = async (req, res) => {
   res.sendStatus(200);
 
   try {
-    const body = req.body;
-    console.log("📲 MSG91 Webhook received:", JSON.stringify(body, null, 2));
+    const rawBody = req.body;
+    console.log("📲 MSG91 Webhook received:", JSON.stringify(rawBody, null, 2));
+
+    // ── Normalise payload — handles both flat and data-array shapes ───────────
+    const body = extractPayload(rawBody);
 
     // ── Detect event type ─────────────────────────────────────────────────────
     // MSG91 sends different shapes for inbound messages vs delivery reports.
@@ -56,23 +87,23 @@ const receiveMSG91Webhook = async (req, res) => {
     const directionField = (body.direction   || "").toLowerCase();
     const statusField    = (body.status      || "").toLowerCase();
 
+    // "text", "image", "audio" etc. are inbound content types — NOT delivery statuses
+    const DELIVERY_STATUSES = new Set(["outbound", "sent", "delivered", "read", "failed"]);
+    const INBOUND_CONTENT_TYPES = new Set([
+      "text", "image", "document", "audio", "video",
+      "sticker", "location", "button", "interactive",
+      "inbound", "incoming", "message",
+    ]);
+
     const isDeliveryReport = (
-      webhookType === "outbound"  ||
-      webhookType === "sent"      ||
-      webhookType === "delivered" ||
-      webhookType === "read"      ||
-      webhookType === "failed"    ||
-      // direction field explicitly says outbound
-      directionField === "outbound" ||
-      // status-only payloads (no actual message text) → delivery report
-      statusField === "sent"      ||
-      statusField === "delivered" ||
-      statusField === "read"      ||
-      statusField === "failed"    ||
+      DELIVERY_STATUSES.has(webhookType)   ||
+      directionField === "outbound"        ||
+      DELIVERY_STATUSES.has(statusField)   ||
       // payload has a status field but no message text → delivery report
-      (body.status && !body.text && !body.message && !body.body) ||
-      // MSG91 sometimes sends delivery reports with a requestId but no customerNumber
-      (!body.customerNumber && (body.requestId || body.uuid) && !body.text)
+      (body.status && !body.text && !body.message && !body.body && !body.mobile) ||
+      // MSG91 sometimes sends delivery reports with a requestId but no sender phone
+      (!body.customerNumber && !body.mobile && !body.from && !body.sender &&
+       (body.requestId || body.uuid) && !body.text)
     );
 
     // ── Handle delivery status update (outbound report) ───────────────────────
@@ -117,33 +148,33 @@ const receiveMSG91Webhook = async (req, res) => {
     }
 
     // ── Handle inbound message ────────────────────────────────────────────────
-    // MSG91 payload fields for inbound:
-    //   customerNumber  — sender's phone (the client)
-    //   integratedNumber — your WhatsApp business number
-    //   text            — message text
-    //   messageType / contentType — type of message
-    //   uuid / requestId — unique message id
+    // MSG91 payload fields for inbound (after extractPayload normalisation):
+    //   mobile / customerNumber / from / sender — sender's phone (the lead)
+    //   integratedNumber / waNumber / to        — your WhatsApp business number
+    //   message / text / body                   — message text
+    //   type / messageType / contentType        — content type (text / image / …)
+    //   uuid / requestId / messageId            — unique message id
 
-    // Some MSG91 payload shapes use different field names — handle all variants
     const rawPhone =
+      body.mobile         ||   // ← MSG91 primary field inside data[]
       body.customerNumber ||
       body.from           ||
       body.sender         ||
-      body.mobile         ||
       "";
 
     if (!rawPhone) {
       console.warn("⚠️  MSG91 webhook: no sender phone found in payload, skipping");
       console.warn("Payload keys:", Object.keys(body).join(", "));
+      console.warn("Raw body keys:", Object.keys(rawBody).join(", "));
       return;
     }
 
     const waPhone     = normalizePhone(rawPhone);
     const toNumber    = normalizePhone(
-      body.integratedNumber || body.to || body.recipient || ""
+      body.integratedNumber || body.waNumber || body.to || body.recipient || ""
     );
     const contactName = body.customerName || body.name || body.senderName || "";
-    const msgText     = body.text || body.message || body.body || "";
+    const msgText     = body.message || body.text || body.body || "";  // MSG91 uses "message" field
     const msgType     = (
       body.messageType || body.contentType || body.type || "text"
     ).toLowerCase();
