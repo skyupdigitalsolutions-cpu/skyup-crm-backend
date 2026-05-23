@@ -54,7 +54,7 @@ const getConversations = async (req, res) => {
 
     const filter = { company: companyId };
 
-    if (role !== "admin") {
+    if (role !== "admin" && role !== "super_admin") {
       filter.assignedAgent = userId;
     }
 
@@ -435,7 +435,7 @@ const deleteConversation = async (req, res) => {
     const { id } = req.params;
     const { role } = req.user;
 
-    if (role !== "admin") {
+    if (role !== "admin" && role !== "super_admin") {
       return res.status(403).json({ error: "Only admins can delete conversations" });
     }
 

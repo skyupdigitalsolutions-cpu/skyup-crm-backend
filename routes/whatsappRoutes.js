@@ -33,7 +33,9 @@ router.get( "/config",   adminProtect, getConfig);
 router.post("/config",   adminProtect, saveConfig);
 
 // ─── Conversations ────────────────────────────────────────────────────────────
-router.get("/conversations",                            adminProtect, getConversations);
+// protectAny — employees need to list their own assigned conversations too.
+// getConversations already scopes results to assignedAgent when role !== "admin".
+router.get("/conversations",                            protectAny, getConversations);
 // protectAny — both admin and employee can fetch messages & send in the 24h window
 router.get("/conversations/:conversationId/messages",   protectAny, getMessages);
 router.patch("/conversations/:id/assign",               adminProtect, assignConversation);
