@@ -10,6 +10,10 @@ const recordingSchema = new mongoose.Schema(
     name:       { type: String, default: '' },     // original filename
     size:       { type: Number, default: 0 },      // bytes
     uploadedAt: { type: Date,   default: Date.now },
+    // FIX: fileKey for server-side dedup — format: normalizedPhone::filename::mtimeMs
+    // Matches the key format used by the mobile app's uploadedSet (uploaded_recordings_v4).
+    // If fileKey already exists in recordings[], the upload is rejected as a duplicate.
+    fileKey:    { type: String, default: null, index: true },
 
     // ── AI Transcription & Summary ──────────────────────────────────────────
     transcript:       { type: String, default: null },

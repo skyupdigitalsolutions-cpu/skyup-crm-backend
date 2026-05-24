@@ -263,7 +263,7 @@ const matchPhone = async (req, res) => {
 const uploadRecording = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
-    const { phoneNumber, timestamp, remark, leadId } = req.body;
+    const { phoneNumber, timestamp, remark, leadId, fileKey } = req.body;
     const fileUrl = req.file.path || req.file.secure_url || req.file.url;
     const ts = timestamp ? new Date(parseInt(timestamp)) : null;
 
@@ -273,11 +273,34 @@ const uploadRecording = async (req, res) => {
       if (lead) resolvedLeadId = lead._id;
     }
 
+    // ── FIX: Server-side dedup by fileKey ─────────────────────────────────────
+    // The mobile app sends fileKey = normalizedPhone::filename::mtimeMs.
+    // If a recording with this exact fileKey already exists in the log's
+    // recordings array, reject the upload immediately — the file was already
+    // uploaded (by auto-sync or a previous manual tap) and Cloudinary has it.
+    // This prevents duplicate entries in MongoDB even if the mobile-side dedup
+    // (AsyncStorage) is cleared, app is reinstalled, or two devices upload
+    // the same file simultaneously.
+    if (fileKey) {
+      const existing = await MobileCallLog.findOne({
+        user:    req.user._id,
+        company: req.user.company,
+        phoneNumber,
+        'recordings.fileKey': fileKey,
+      });
+      if (existing) {
+        const dup = existing.recordings.find(r => r.fileKey === fileKey);
+        return res.json({ message: 'Already uploaded', duplicate: true, log: existing, recording: dup });
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     const newRecording = {
-      url:  fileUrl,
-      name: req.file.originalname,
-      size: req.file.size,
+      url:       fileUrl,
+      name:      req.file.originalname,
+      size:      req.file.size,
       uploadedAt: new Date(),
+      fileKey:   fileKey || null,   // FIX: store fileKey for future dedup checks
     };
 
     const updated = await MobileCallLog.findOneAndUpdate(
@@ -363,8 +386,9 @@ const getCompanyRecordings = async (req, res) => {
 const getCallLogsForLead = async (req, res) => {
   try {
     const company = req.callerCompany || req.user?.company;
+    const limit   = parseInt(req.query.limit || 20);
     const logs = await MobileCallLog.find({ matchedLead: req.params.leadId, company })
-      .sort({ timestamp: -1 }).populate('user', 'name email');
+      .sort({ timestamp: -1 }).limit(limit).populate('user', 'name email');
     res.json({ logs });
   } catch (error) {
     res.status(500).json({ message: error.message });
