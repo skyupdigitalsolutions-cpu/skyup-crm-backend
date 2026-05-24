@@ -91,6 +91,12 @@ const initSocket = (io) => {
     // ── WhatsApp rooms (unchanged) ───────────────────────────────────────────
     socket.on('wa_admin_join',        ()           => socket.join('wa_admin'));
     socket.on('wa_agent_join',        ({ agentId }) => agentId && socket.join(`wa_agent_${agentId}`));
+    // Company-wide WhatsApp room — every employee joins their company's room
+    // and receives every inbound/outbound for the company. The frontend filters
+    // by which leads belong to the logged-in user. This mirrors the admin's
+    // wa_admin firehose so employees don't depend on conversation.assignedAgent
+    // being perfectly in sync with lead ownership.
+    socket.on('wa_company_join',      ({ companyId }) => companyId && socket.join(`wa_company_${companyId}`));
 
     // ════════════════════════════════════════════════════════════════════════
     // EMPLOYEE joins

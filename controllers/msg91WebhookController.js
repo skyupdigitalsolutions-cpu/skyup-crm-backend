@@ -285,15 +285,25 @@ const receiveMSG91Webhook = async (req, res) => {
       }
     }
 
-    // ── Resolve lead + owner — ALWAYS do this, not just for new convs.
-    // The lead's assigned user (lead.user) is the source of truth for who
-    // should receive real-time messages. Conversation.assignedAgent gets
-    // realigned to match, otherwise the wrong agent's socket room is targeted.
-    const lead = await findLeadByPhone(waPhone, config.company);
+    // ── Resolve lead + owners — find ALL leads with this phone in this company.
+    // findLeadByPhone returns only one; if duplicates exist (same phone owned
+    // by multiple employees), we want every owner to receive the inbound on
+    // their socket. Collect all distinct user IDs across all matching leads.
+    const matchingLeads = await findLeadsByPhone(waPhone, config.company);
+    const leadOwnerIds = [...new Set(
+      matchingLeads
+        .map((l) => l.user?.toString())
+        .filter(Boolean)
+    )];
+    // Primary lead — preferred for the conversation's `lead` ref. If we have
+    // multiple, pick the most recently updated.
+    const lead = matchingLeads
+      .slice()
+      .sort((a, b) => (new Date(b.updatedAt || 0)) - (new Date(a.updatedAt || 0)))[0] || null;
     const leadOwnerId = lead?.user ? lead.user.toString() : null;
 
     if (!conversation) {
-      // Prefer the lead's assigned user as the agent; fall back to
+      // Prefer the primary lead's assigned user as the agent; fall back to
       // load-balanced picker only when there is no lead.
       let assignedAgentId = leadOwnerId;
       if (!assignedAgentId) {
@@ -311,17 +321,20 @@ const receiveMSG91Webhook = async (req, res) => {
       });
       console.log(`🆕 New WA conversation: ${waPhone} → ${conversation._id} (agent=${assignedAgentId})`);
     } else {
-      // Existing conversation — backfill BOTH lead and realign assignedAgent
-      // when they're stale. This is the fix for the lead-owner mismatch bug:
-      // a webhook-created conv may have been auto-assigned to a different
-      // agent than the one the lead is now assigned to.
+      // Existing conversation — backfill lead ref if missing. Do NOT
+      // aggressively realign assignedAgent: if the current value is one of
+      // the lead owners (or it was set by an admin via startConversation),
+      // leave it alone. Only realign when it points at someone who isn't
+      // among the lead owners (stale round-robin assignment).
       const patch = {};
       if (!conversation.lead && lead?._id) patch.lead = lead._id;
 
       const currentAgentId = conversation.assignedAgent?.toString() || null;
-      if (leadOwnerId && currentAgentId !== leadOwnerId) {
+      const currentIsValid = currentAgentId && leadOwnerIds.includes(currentAgentId);
+
+      if (!currentIsValid && leadOwnerId) {
         patch.assignedAgent = leadOwnerId;
-        console.log(`🔁 Realigning conv ${conversation._id} assignedAgent ${currentAgentId || "null"} → ${leadOwnerId} (lead owner)`);
+        console.log(`🔁 Realigning conv ${conversation._id} assignedAgent ${currentAgentId || "null"} → ${leadOwnerId} (primary lead owner)`);
       }
 
       if (Object.keys(patch).length) {
@@ -398,19 +411,19 @@ const receiveMSG91Webhook = async (req, res) => {
       const freshConv = await WhatsAppConversation.findById(conversation._id).lean();
       const assignedAgentId = freshConv?.assignedAgent?.toString() || conversation.assignedAgent?.toString();
 
-      // Build the set of agent rooms to notify. We always emit to the conversation's
-      // assignedAgent, AND to the lead's owner (lead.user) when they differ. This is
-      // the fix for the "outgoing shows but incoming disappears" bug — historically
-      // the conv could have been auto-assigned to a different agent than the lead's
-      // owner, so the lead-owning employee never received the socket push.
+      // Build the set of agent rooms to notify. Include:
+      //   • the conversation's current assignedAgent
+      //   • every distinct owner across ALL leads sharing this phone
+      // Whoever is logged in and watching this contact gets the message,
+      // even if there are duplicate leads owned by different employees.
       const agentRooms = new Set();
       if (assignedAgentId) agentRooms.add(assignedAgentId);
-      if (leadOwnerId)     agentRooms.add(leadOwnerId);
+      leadOwnerIds.forEach((id) => agentRooms.add(id));
 
       if (agentRooms.size) {
         console.log(`📡 Socket: notifying ${[...agentRooms].map(id => `wa_agent_${id}`).join(", ")} for conv ${conversation._id}`);
       } else {
-        console.warn(`⚠️  No assignedAgent or leadOwner on conv ${conversation._id} — only emitting to wa_admin`);
+        console.warn(`⚠️  No assignedAgent or leadOwner on conv ${conversation._id} — only emitting to wa_admin + wa_company`);
       }
 
       const socketPayload = {
@@ -429,14 +442,22 @@ const receiveMSG91Webhook = async (req, res) => {
         contactName:   contactName || conversation.contactName,
         companyId:     config.company.toString(),
         assignedAgent: assignedAgentId,
-        leadOwner:     leadOwnerId,
+        leadOwners:    leadOwnerIds,
       };
 
+      // Per-agent rooms (legacy targeted delivery — kept for compatibility)
       agentRooms.forEach(agentId => {
         io.to(`wa_agent_${agentId}`).emit("wa_message", socketPayload);
       });
+      // Admin firehose (every admin in the system)
       io.to("wa_admin").emit("wa_message", socketPayload);
-      console.log(`✅ Socket emitted wa_message to wa_admin + ${agentRooms.size} agent room(s) for conv ${conversation._id}`);
+      // Company firehose — every employee currently logged in for this
+      // company receives the event. The frontend decides whether to display
+      // based on which leads belong to the user. This is the fix for the
+      // assignedAgent / lead-owner mismatch: even if the DB rooms are wrong,
+      // the message still reaches the right employee's browser.
+      io.to(`wa_company_${config.company.toString()}`).emit("wa_message", socketPayload);
+      console.log(`✅ Socket emitted wa_message → wa_admin + wa_company_${config.company} + ${agentRooms.size} agent room(s) for conv ${conversation._id}`);
       console.log(`   sessionExpiresAt reset to: ${sessionExpiry.toISOString()}`);
     } else {
       console.warn("⚠️  global._io not set — socket not emitted");
@@ -461,6 +482,24 @@ async function findLeadByPhone(waPhone, companyId) {
       { mobile: `+${waPhone}` },
     ],
   });
+}
+
+// Plural variant — returns EVERY matching lead so the webhook can collect
+// all the distinct `user` IDs across duplicates. Without this, if the same
+// phone is saved under two leads (e.g. one assigned to divzz, one to another
+// employee), the webhook only notifies one of them and the other never sees
+// the inbound reply.
+async function findLeadsByPhone(waPhone, companyId) {
+  if (!waPhone) return [];
+  const lastTen = waPhone.slice(-10);
+  return Lead.find({
+    company: companyId,
+    $or: [
+      { mobile: waPhone },
+      { mobile: lastTen },
+      { mobile: `+${waPhone}` },
+    ],
+  }).select("user mobile name updatedAt").lean();
 }
 
 async function getAvailableAgent(companyId) {

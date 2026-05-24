@@ -248,6 +248,8 @@ const sendMessage = async (req, res) => {
       };
       io.to("wa_admin").emit("wa_message", payload);
       io.to(`wa_agent_${conversation.assignedAgent?.toString()}`).emit("wa_message", payload);
+      // Company firehose — every employee in the company gets it, frontend filters by lead
+      io.to(`wa_company_${companyId.toString()}`).emit("wa_message", payload);
     }
 
     res.json({ success: true, message: savedMsg });
@@ -760,6 +762,8 @@ const startConversation = async (req, res) => {
       if (userId) {
         io.to(`wa_agent_${userId}`).emit("wa_new_conversation", convPayload);
       }
+      // Company firehose
+      io.to(`wa_company_${companyId.toString()}`).emit("wa_new_conversation", convPayload);
 
       const msgPayload = {
         type:           "wa_new_message",
@@ -782,6 +786,8 @@ const startConversation = async (req, res) => {
       if (userId) {
         io.to(`wa_agent_${userId}`).emit("wa_message", msgPayload);
       }
+      // Company firehose
+      io.to(`wa_company_${companyId.toString()}`).emit("wa_message", msgPayload);
     }
 
     res.json({ success: true, conversation, message: savedMsg });
