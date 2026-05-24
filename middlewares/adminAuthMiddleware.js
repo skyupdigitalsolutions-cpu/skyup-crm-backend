@@ -90,16 +90,58 @@ const protectAdmin = async (req, res, next) => {
         return res.status(401).json({ message: "Admin not found" });
       }
 
-      if (!req.admin.company || !req.admin.company.isActive) {
-        return res.status(403).json({ message: "Your company is deactivated" });
+      if (!req.admin.company) {
+        return res.status(403).json({ message: "Company not found" });
+      }
+
+      const company = req.admin.company;
+
+      // ── Auto-suspend: mark expired if validity has passed ─────────────────
+      const now = new Date();
+      if (company.subscriptionStatus === "active" && company.subscriptionExpiry && now > company.subscriptionExpiry) {
+        await Company.findByIdAndUpdate(company._id, { subscriptionStatus: "expired", isActive: false });
+        company.subscriptionStatus = "expired";
+        company.isActive = false;
+      }
+      if (company.subscriptionStatus === "trial" && company.trialEndsAt && now > company.trialEndsAt) {
+        await Company.findByIdAndUpdate(company._id, { subscriptionStatus: "expired", isActive: false });
+        company.subscriptionStatus = "expired";
+        company.isActive = false;
+      }
+
+      // ── Block suspended/expired companies — but allow UpgradePlan routes ──
+      const isSubscriptionRoute = req.path?.startsWith("/company/brand") ||
+        req.originalUrl?.includes("/subscription") ||
+        req.originalUrl?.includes("/razorpay");
+
+      if (!company.isActive && !isSubscriptionRoute) {
+        return res.status(403).json({
+          message: "Your subscription has expired. Please renew to continue.",
+          code: "SUBSCRIPTION_EXPIRED",
+          suspended: true,
+        });
+      }
+
+      // ── Compute days remaining for expiry warning ─────────────────────────
+      let daysRemaining = null;
+      if (company.subscriptionStatus === "active" && company.subscriptionExpiry) {
+        const nowMid    = Date.UTC(now.getUTCFullYear(),    now.getUTCMonth(),    now.getUTCDate());
+        const expMid    = Date.UTC(new Date(company.subscriptionExpiry).getUTCFullYear(), new Date(company.subscriptionExpiry).getUTCMonth(), new Date(company.subscriptionExpiry).getUTCDate());
+        daysRemaining   = Math.round((expMid - nowMid) / 86_400_000);
+      } else if (company.subscriptionStatus === "trial" && company.trialEndsAt) {
+        const nowMid    = Date.UTC(now.getUTCFullYear(),    now.getUTCMonth(),    now.getUTCDate());
+        const expMid    = Date.UTC(new Date(company.trialEndsAt).getUTCFullYear(), new Date(company.trialEndsAt).getUTCMonth(), new Date(company.trialEndsAt).getUTCDate());
+        daysRemaining   = Math.round((expMid - nowMid) / 86_400_000);
       }
 
       req.user = {
-        id:        req.admin._id.toString(),
-        userId:    req.admin._id.toString(),
-        companyId: req.admin.company._id.toString(),
-        role:      req.admin.role,
-        name:      req.admin.name,
+        id:           req.admin._id.toString(),
+        userId:       req.admin._id.toString(),
+        companyId:    company._id.toString(),
+        role:         req.admin.role,
+        name:         req.admin.name,
+        daysRemaining,
+        expiringSoon: daysRemaining !== null && daysRemaining <= 5 && daysRemaining > 0,
       };
 
       return next();

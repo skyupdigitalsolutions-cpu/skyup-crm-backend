@@ -19,7 +19,11 @@ const {
   cancelSubscription,
   extendTrial,
   getCompanySubscription,
+  updatePlanFeatures,
+  getMySubscriptionStatus,
 } = require('../controllers/subscriptionController');
+
+const { protectAdmin } = require('../middlewares/adminAuthMiddleware');
 
 // ── Middleware: allow either super_admin OR developer ─────────────────────────
 // FIX: previous version chained protectSuperAdmin → protectDeveloper, but
@@ -69,11 +73,15 @@ const protectPrivileged = async (req, res, next) => {
 // ── Public ────────────────────────────────────────────────────────────────────
 router.get('/plans', getPlans);
 
+// ── Admin/SuperAdmin: get own subscription status + features ─────────────────
+router.get('/my/status', protectAdmin, getMySubscriptionStatus);
+
 // ── Privileged (superadmin or developer) ─────────────────────────────────────
 router.get('/all',                          protectPrivileged, getAllSubscriptions);
 router.get('/:companyId',                   protectPrivileged, getCompanySubscription);
 router.post('/activate/:companyId',         protectPrivileged, activateSubscription);
 router.post('/cancel/:companyId',           protectPrivileged, cancelSubscription);
 router.post('/extend-trial/:companyId',     protectPrivileged, extendTrial);
+router.put('/features/:companyId',          protectPrivileged, updatePlanFeatures);
 
 module.exports = router;

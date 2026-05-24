@@ -50,15 +50,44 @@ async function findLeadByPhone(waPhone, companyId) {
     process.exit(1);
   }
 
+  // Mask credentials before printing — show host + db only
+  const masked = uri.replace(/:\/\/[^@]+@/, "://***:***@");
+  console.log(`🔗  URI: ${masked}`);
+
   await mongoose.connect(uri);
-  console.log(`✅  Connected to Mongo  (mode: ${APPLY ? "APPLY" : "DRY-RUN"})`);
+
+  const conn = mongoose.connection;
+  console.log(`✅  Connected — host=${conn.host}  db=${conn.name}  (mode: ${APPLY ? "APPLY" : "DRY-RUN"})`);
+
+  // Diagnostics: list collections + their doc counts so we can immediately
+  // tell whether we're pointed at the right database.
+  const colls = await conn.db.listCollections().toArray();
+  console.log(`🗂   ${colls.length} collections in this DB:`);
+  for (const c of colls) {
+    const count = await conn.db.collection(c.name).countDocuments();
+    const star  = /whatsapp|lead/i.test(c.name) ? "  ⭐" : "";
+    console.log(`     ${c.name.padEnd(40)} ${String(count).padStart(6)} docs${star}`);
+  }
 
   // Pull EVERY conversation — we'll resolve the lead by phone for any missing refs.
   const convs = await WhatsAppConversation.find({})
     .select("_id waPhone assignedAgent lead company")
     .lean();
 
-  console.log(`📋  Found ${convs.length} conversations total`);
+  console.log(`\n📋  Found ${convs.length} conversations total (via WhatsAppConversation model)\n`);
+
+  if (convs.length === 0) {
+    console.warn("⚠️   Zero conversations found. Likely causes:");
+    console.warn("     1. .env MONGO_URI points to a different database than production");
+    console.warn("     2. The DB name in the URI path is missing or wrong");
+    console.warn("        (URI format: mongodb+srv://user:pass@cluster/<DB_NAME>?...)");
+    console.warn("     3. The convs live in a collection named differently than 'whatsappconversations'");
+    console.warn("     Check the collection list above — if you see 'whatsappconversations'");
+    console.warn("     with docs, but this query returned 0, run with .env pointing at the");
+    console.warn("     production URI.");
+    await mongoose.disconnect();
+    process.exit(0);
+  }
 
   let leadBackfilled  = 0;
   let agentRealigned  = 0;
@@ -91,25 +120,20 @@ async function findLeadByPhone(waPhone, companyId) {
     const currentAgent = conv.assignedAgent?.toString() || null;
 
     if (!leadOwnerId) {
-      // We can still backfill the lead ref even if there's no owner yet.
       noOwner++;
     } else if (currentAgent !== leadOwnerId) {
       patch.assignedAgent = leadOwnerId;
     } else {
-      // Agent already correct — only count it as "already" when there's
-      // also no lead-ref backfill needed.
       if (!patch.lead) alreadyCorrect++;
     }
 
     if (!Object.keys(patch).length) continue;
 
     const tags = [];
-    if (patch.lead)          { tags.push(`lead=${lead._id}`);                       leadBackfilled++; }
-    if (patch.assignedAgent) { tags.push(`agent ${currentAgent || "null"} → ${leadOwnerId}`); agentRealigned++; }
+    if (patch.lead)          { tags.push(`lead=${lead._id}`);                                       leadBackfilled++; }
+    if (patch.assignedAgent) { tags.push(`agent ${currentAgent || "null"} → ${leadOwnerId}`);       agentRealigned++; }
 
-    console.log(
-      `🔁  Conv ${conv._id}  (${lead.name || conv.waPhone})  ${tags.join("  |  ")}`
-    );
+    console.log(`🔁  Conv ${conv._id}  (${lead.name || conv.waPhone})  ${tags.join("  |  ")}`);
 
     if (APPLY) {
       await WhatsAppConversation.updateOne({ _id: conv._id }, { $set: patch });

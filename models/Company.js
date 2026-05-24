@@ -82,6 +82,13 @@ const companySchema = mongoose.Schema(
     maxUsers: { type: Number, default: 10 },
     maxLeads: { type: Number, default: 1000 },
 
+    // ── Plan feature overrides (set by Developer per-company) ─────────────────
+    // Array of { key: String, enabled: Boolean } — merged onto plan defaults
+    planFeatures: {
+      type: [{ key: String, enabled: Boolean }],
+      default: [],
+    },
+
     // ── NEW: Audit — which Developer account created this company ─────────────
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
