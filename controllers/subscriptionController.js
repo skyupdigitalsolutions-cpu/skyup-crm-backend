@@ -1,5 +1,6 @@
 // backend/controllers/subscriptionController.js
-const Company = require('../models/Company');
+const Company    = require('../models/Company');
+const PlanConfig = require('../models/PlanConfig');
 
 // ── Plan feature definitions — developer can override per-company via planFeatures ──
 const DEFAULT_PLAN_FEATURES = {
@@ -109,8 +110,30 @@ function resolvePlanFeatures(planKey, savedOverrides) {
 // stored on a "master config" (we store them on a sentinel Company doc or env, but
 // simplest: store in a separate PlanConfig collection). For now we return defaults +
 // any overrides stored in process-level cache set by the developer.
-const getPlans = (req, res) => {
-  res.json({ success: true, plans: DEFAULT_PLAN_FEATURES });
+const getPlans = async (req, res) => {
+  try {
+    const dbPlans = await PlanConfig.find({ isActive: true }).sort({ sortOrder: 1, createdAt: 1 });
+    if (dbPlans.length > 0) {
+      // Convert array to keyed object so existing clients work unchanged
+      const plansMap = {};
+      for (const p of dbPlans) {
+        plansMap[p.planKey] = {
+          name:     p.name,
+          price:    p.price,
+          color:    p.color,
+          maxUsers: p.maxUsers,
+          maxLeads: p.maxLeads,
+          features: p.features,
+        };
+      }
+      return res.json({ success: true, plans: plansMap });
+    }
+    // Fallback: no DB plans yet — return hardcoded defaults
+    res.json({ success: true, plans: DEFAULT_PLAN_FEATURES });
+  } catch (err) {
+    // Graceful degradation
+    res.json({ success: true, plans: DEFAULT_PLAN_FEATURES });
+  }
 };
 
 // ── GET /api/subscription/all ─────────────────────────────────────────────────

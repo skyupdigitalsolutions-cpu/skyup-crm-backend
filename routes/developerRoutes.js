@@ -14,6 +14,14 @@ const {
   updateSubscription,
 } = require("../controllers/developerController");
 
+const {
+  getPlans,
+  createPlan,
+  updatePlan,
+  deletePlan,
+  getPlan,
+} = require("../controllers/planController");
+
 // ── Public ────────────────────────────────────────────────────────────────────
 router.post("/login", developerLogin);
 
@@ -32,5 +40,13 @@ router.put("/companies/:id",                   updateCompany);
 router.put("/companies/:id/toggle",            toggleCompanyStatus);
 router.get("/subscriptions",                   getSubscriptions);
 router.put("/subscriptions/:companyId",        updateSubscription);
+
+
+// ── Plan CRUD — developer only ────────────────────────────────────────────────
+router.get("/plans",        getPlans);
+router.post("/plans",       createPlan);
+router.get("/plans/:id",    getPlan);
+router.put("/plans/:id",    updatePlan);
+router.delete("/plans/:id", deletePlan);
 
 module.exports = router;
