@@ -1173,10 +1173,26 @@ const getConversationByLead = async (req, res) => {
       return res.json({ success: true, conversation: null });
     }
 
-    // Backfill lead + assignedAgent if missing so future lookups stay on the fast path
+    // Backfill lead + realign assignedAgent so future webhook events land in
+    // the correct agent's socket room. The previous logic only patched
+    // assignedAgent when it was null — but a webhook-created conv may have
+    // been auto-assigned to a different (less busy) agent than the lead's
+    // actual owner, so realtime inbound messages were routed to the wrong
+    // employee's socket. Now: if a lead has an owner (lead.user), the
+    // conversation's assignedAgent gets pinned to that owner.
     const patch = {};
     if (!conversation.lead) patch.lead = leadId;
-    if (!conversation.assignedAgent && userId) patch.assignedAgent = userId;
+
+    const leadOwnerId  = lead.user ? lead.user.toString() : null;
+    const currentAgent = conversation.assignedAgent?.toString() || null;
+    if (leadOwnerId && currentAgent !== leadOwnerId) {
+      patch.assignedAgent = leadOwnerId;
+    } else if (!conversation.assignedAgent && userId) {
+      // No lead owner and no agent → fall back to the requester (employee
+      // opening the chat). Keeps existing behavior for edge cases.
+      patch.assignedAgent = userId;
+    }
+
     if (Object.keys(patch).length) {
       await WhatsAppConversation.findByIdAndUpdate(conversation._id, patch);
       conversation = { ...conversation, ...patch };

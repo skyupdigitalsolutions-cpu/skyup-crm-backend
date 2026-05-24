@@ -285,27 +285,49 @@ const receiveMSG91Webhook = async (req, res) => {
       }
     }
 
+    // ── Resolve lead + owner — ALWAYS do this, not just for new convs.
+    // The lead's assigned user (lead.user) is the source of truth for who
+    // should receive real-time messages. Conversation.assignedAgent gets
+    // realigned to match, otherwise the wrong agent's socket room is targeted.
+    const lead = await findLeadByPhone(waPhone, config.company);
+    const leadOwnerId = lead?.user ? lead.user.toString() : null;
+
     if (!conversation) {
-      const lead          = await findLeadByPhone(waPhone, config.company);
-      const assignedAgent = await getAvailableAgent(config.company);
+      // Prefer the lead's assigned user as the agent; fall back to
+      // load-balanced picker only when there is no lead.
+      let assignedAgentId = leadOwnerId;
+      if (!assignedAgentId) {
+        const fallback = await getAvailableAgent(config.company);
+        assignedAgentId = fallback?._id?.toString() || null;
+      }
 
       conversation = await WhatsAppConversation.create({
         waPhone,
         contactName,
         lead:          lead?._id || null,
-        assignedAgent: assignedAgent?._id || null,
+        assignedAgent: assignedAgentId,
         company:       config.company,
         status:        "open",
       });
-      console.log(`🆕 New WA conversation: ${waPhone} → ${conversation._id}`);
-    } else if (!conversation.lead) {
-      // FIX: backfill the lead reference if startConversation saved it with lead:null
-      // (happened due to missing company scope in the lead lookup).
-      const lead = await findLeadByPhone(waPhone, config.company);
-      if (lead) {
-        await WhatsAppConversation.findByIdAndUpdate(conversation._id, { lead: lead._id });
-        conversation = { ...conversation.toObject(), lead: lead._id };
-        console.log(`🔗 Backfilled lead ${lead._id} on conversation ${conversation._id}`);
+      console.log(`🆕 New WA conversation: ${waPhone} → ${conversation._id} (agent=${assignedAgentId})`);
+    } else {
+      // Existing conversation — backfill BOTH lead and realign assignedAgent
+      // when they're stale. This is the fix for the lead-owner mismatch bug:
+      // a webhook-created conv may have been auto-assigned to a different
+      // agent than the one the lead is now assigned to.
+      const patch = {};
+      if (!conversation.lead && lead?._id) patch.lead = lead._id;
+
+      const currentAgentId = conversation.assignedAgent?.toString() || null;
+      if (leadOwnerId && currentAgentId !== leadOwnerId) {
+        patch.assignedAgent = leadOwnerId;
+        console.log(`🔁 Realigning conv ${conversation._id} assignedAgent ${currentAgentId || "null"} → ${leadOwnerId} (lead owner)`);
+      }
+
+      if (Object.keys(patch).length) {
+        await WhatsAppConversation.findByIdAndUpdate(conversation._id, patch);
+        const plain = typeof conversation.toObject === "function" ? conversation.toObject() : conversation;
+        conversation = { ...plain, ...patch };
       }
     }
 
@@ -376,10 +398,19 @@ const receiveMSG91Webhook = async (req, res) => {
       const freshConv = await WhatsAppConversation.findById(conversation._id).lean();
       const assignedAgentId = freshConv?.assignedAgent?.toString() || conversation.assignedAgent?.toString();
 
-      if (assignedAgentId) {
-        console.log(`📡 Socket: notifying wa_agent_${assignedAgentId} for conv ${conversation._id}`);
+      // Build the set of agent rooms to notify. We always emit to the conversation's
+      // assignedAgent, AND to the lead's owner (lead.user) when they differ. This is
+      // the fix for the "outgoing shows but incoming disappears" bug — historically
+      // the conv could have been auto-assigned to a different agent than the lead's
+      // owner, so the lead-owning employee never received the socket push.
+      const agentRooms = new Set();
+      if (assignedAgentId) agentRooms.add(assignedAgentId);
+      if (leadOwnerId)     agentRooms.add(leadOwnerId);
+
+      if (agentRooms.size) {
+        console.log(`📡 Socket: notifying ${[...agentRooms].map(id => `wa_agent_${id}`).join(", ")} for conv ${conversation._id}`);
       } else {
-        console.warn(`⚠️  No assignedAgent on conv ${conversation._id} — only emitting to wa_admin`);
+        console.warn(`⚠️  No assignedAgent or leadOwner on conv ${conversation._id} — only emitting to wa_admin`);
       }
 
       const socketPayload = {
@@ -398,13 +429,14 @@ const receiveMSG91Webhook = async (req, res) => {
         contactName:   contactName || conversation.contactName,
         companyId:     config.company.toString(),
         assignedAgent: assignedAgentId,
+        leadOwner:     leadOwnerId,
       };
 
-      if (assignedAgentId) {
-        io.to(`wa_agent_${assignedAgentId}`).emit("wa_message", socketPayload);
-      }
+      agentRooms.forEach(agentId => {
+        io.to(`wa_agent_${agentId}`).emit("wa_message", socketPayload);
+      });
       io.to("wa_admin").emit("wa_message", socketPayload);
-      console.log(`✅ Socket emitted wa_message to wa_admin for conv ${conversation._id}`);
+      console.log(`✅ Socket emitted wa_message to wa_admin + ${agentRooms.size} agent room(s) for conv ${conversation._id}`);
       console.log(`   sessionExpiresAt reset to: ${sessionExpiry.toISOString()}`);
     } else {
       console.warn("⚠️  global._io not set — socket not emitted");
