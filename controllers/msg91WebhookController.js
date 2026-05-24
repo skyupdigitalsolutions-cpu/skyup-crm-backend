@@ -451,13 +451,35 @@ const receiveMSG91Webhook = async (req, res) => {
       });
       // Admin firehose (every admin in the system)
       io.to("wa_admin").emit("wa_message", socketPayload);
-      // Company firehose — every employee currently logged in for this
-      // company receives the event. The frontend decides whether to display
-      // based on which leads belong to the user. This is the fix for the
-      // assignedAgent / lead-owner mismatch: even if the DB rooms are wrong,
-      // the message still reaches the right employee's browser.
-      io.to(`wa_company_${config.company.toString()}`).emit("wa_message", socketPayload);
-      console.log(`✅ Socket emitted wa_message → wa_admin + wa_company_${config.company} + ${agentRooms.size} agent room(s) for conv ${conversation._id}`);
+
+      // Company firehose — collect ALL company IDs that should receive this event.
+      // FIX: The WhatsAppConfig.company may differ from the lead owner's user.company
+      // (e.g. if the config was created under a super-admin company while employees
+      // belong to a sub-company). We emit to BOTH so the message always arrives.
+      const companyRooms = new Set([config.company.toString()]);
+
+      // Add each lead owner's own company to the broadcast set
+      if (leadOwnerIds.length > 0) {
+        const ownerDocs = await User.find(
+          { _id: { $in: leadOwnerIds } },
+          { company: 1 }
+        ).lean();
+        ownerDocs.forEach(u => {
+          if (u.company) companyRooms.add(u.company.toString());
+        });
+      }
+
+      // Also add the assigned agent's company (covers non-lead conversations)
+      if (assignedAgentId) {
+        const agentDoc = await User.findById(assignedAgentId, { company: 1 }).lean();
+        if (agentDoc?.company) companyRooms.add(agentDoc.company.toString());
+      }
+
+      companyRooms.forEach(cid => {
+        io.to(`wa_company_${cid}`).emit("wa_message", socketPayload);
+      });
+
+      console.log(`✅ Socket emitted wa_message → wa_admin + wa_company_[${[...companyRooms].join(",")}] + ${agentRooms.size} agent room(s) for conv ${conversation._id}`);
       console.log(`   sessionExpiresAt reset to: ${sessionExpiry.toISOString()}`);
     } else {
       console.warn("⚠️  global._io not set — socket not emitted");
