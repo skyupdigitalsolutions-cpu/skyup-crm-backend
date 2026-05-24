@@ -1126,43 +1126,60 @@ const getConversationByLead = async (req, res) => {
       }
     }
 
-    // FIX: search by lead._id first, then fall back to phone number match.
-    // Conversations created via startConversation may have lead: null if the
-    // original lead lookup failed (missing company scope bug). In that case,
-    // find the conversation by the lead's normalised phone number so employees
-    // can always open their chat history after a page refresh.
-    let conversation = await WhatsAppConversation.findOne({
+    // FIX: find ALL conversations for this lead's phone and pick the most recently
+    // active one — exactly the same ordering the webhook uses.  This ensures the
+    // frontend and the webhook always agree on which conversation is "current",
+    // preventing the conversation-ID mismatch that caused inbound replies to be
+    // silently dropped on the employee's chat screen.
+    let digits = String(lead.mobile || "").replace(/\D/g, "");
+    if (digits.startsWith("0091")) digits = digits.slice(4);
+    if (digits.startsWith("0") && digits.length === 11) digits = digits.slice(1);
+    if (digits.length === 10) digits = "91" + digits;
+    const lastTen = digits.slice(-10);
+
+    // Search by lead._id reference first, then fall back to phone
+    const candidatesByLead = await WhatsAppConversation.find({
       lead:    leadId,
       company: companyId,
-    }).sort({ lastMessageAt: -1, createdAt: -1 });
+    }).sort({ lastMessageAt: -1, createdAt: -1 }).lean();
 
-    if (!conversation && lead.mobile) {
-      // Normalise the phone the same way the rest of the system does
-      let digits = String(lead.mobile).replace(/\D/g, "");
-      if (digits.startsWith("0091")) digits = digits.slice(4);
-      if (digits.startsWith("0") && digits.length === 11) digits = digits.slice(1);
-      if (digits.length === 10) digits = "91" + digits;
-      const lastTen = digits.slice(-10);
+    const candidatesByPhone = digits
+      ? await WhatsAppConversation.find({
+          company: companyId,
+          $or: [
+            { waPhone: digits },
+            { waPhone: lastTen },
+            { waPhone: `+${digits}` },
+          ],
+        }).sort({ lastMessageAt: -1, createdAt: -1 }).lean()
+      : [];
 
-      conversation = await WhatsAppConversation.findOne({
-        company: companyId,
-        $or: [
-          { waPhone: digits },
-          { waPhone: lastTen },
-        ],
-      }).sort({ lastMessageAt: -1, createdAt: -1 });
+    // Merge, deduplicate, and sort by lastMessageAt descending
+    const seen = new Set();
+    const allCandidates = [...candidatesByLead, ...candidatesByPhone].filter((c) => {
+      const id = String(c._id);
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    }).sort((a, b) => {
+      const ta = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+      const tb = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
+      return tb - ta;
+    });
 
-      // Backfill the lead reference so future lookups use the fast path
-      if (conversation && !conversation.lead) {
-        await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
-          lead: leadId,
-          ...(!conversation.assignedAgent && userId ? { assignedAgent: userId } : {}),
-        });
-      }
-    }
+    let conversation = allCandidates[0] || null;
 
     if (!conversation) {
       return res.json({ success: true, conversation: null });
+    }
+
+    // Backfill lead + assignedAgent if missing so future lookups stay on the fast path
+    const patch = {};
+    if (!conversation.lead) patch.lead = leadId;
+    if (!conversation.assignedAgent && userId) patch.assignedAgent = userId;
+    if (Object.keys(patch).length) {
+      await WhatsAppConversation.findByIdAndUpdate(conversation._id, patch);
+      conversation = { ...conversation, ...patch };
     }
 
     res.json({ success: true, conversation });
