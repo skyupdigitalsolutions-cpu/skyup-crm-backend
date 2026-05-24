@@ -43,7 +43,7 @@ const getPlans = async (req, res) => {
 // ── POST /api/developer/plans ─────────────────────────────────────────────────
 const createPlan = async (req, res) => {
   try {
-    const { planKey, name, description, color, price, maxUsers, maxLeads, features, sortOrder, isActive } = req.body;
+    const { planKey, name, description, color, price, maxUsers, maxAdmins, maxLeads, features, sortOrder, isActive } = req.body;
 
     if (!planKey || !name) {
       return res.status(400).json({ success: false, message: 'planKey and name are required.' });
@@ -66,8 +66,9 @@ const createPlan = async (req, res) => {
         monthly: Number(price?.monthly ?? 0),
         yearly:  Number(price?.yearly  ?? 0),
       },
-      maxUsers: Number(maxUsers ?? 5),
-      maxLeads: Number(maxLeads ?? 1000),
+      maxUsers:  Number(maxUsers  ?? 5),
+      maxAdmins: Number(maxAdmins ?? 2),
+      maxLeads:  Number(maxLeads  ?? 1000),
       features: features || [],
       sortOrder: Number(sortOrder ?? 99),
       isActive:  isActive !== undefined ? Boolean(isActive) : true,
@@ -88,12 +89,13 @@ const updatePlan = async (req, res) => {
     const plan = await PlanConfig.findById(req.params.id);
     if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
 
-    const { name, description, color, price, maxUsers, maxLeads, features, sortOrder, isActive } = req.body;
+    const { name, description, color, price, maxUsers, maxAdmins, maxLeads, features, sortOrder, isActive } = req.body;
 
     if (name       !== undefined) plan.name        = name.trim();
     if (description!== undefined) plan.description = description.trim();
     if (color      !== undefined) plan.color        = color;
     if (maxUsers   !== undefined) plan.maxUsers     = Number(maxUsers);
+    if (maxAdmins  !== undefined) plan.maxAdmins    = Number(maxAdmins);
     if (maxLeads   !== undefined) plan.maxLeads     = Number(maxLeads);
     if (features   !== undefined) plan.features     = features;
     if (sortOrder  !== undefined) plan.sortOrder    = Number(sortOrder);

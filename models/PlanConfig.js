@@ -51,8 +51,9 @@ const planConfigSchema = new mongoose.Schema(
     },
 
     // Tenant limits
-    maxUsers: { type: Number, default: 5,    min: 1 },
-    maxLeads: { type: Number, default: 1000, min: 1 },
+    maxUsers:  { type: Number, default: 5,    min: 1 },
+    maxAdmins: { type: Number, default: 2,    min: 1 },
+    maxLeads:  { type: Number, default: 1000, min: 0 },  // 0 = no limit
 
     // Feature list — same keys as DEFAULT_PLAN_FEATURES
     features: { type: [featureSchema], default: [] },
