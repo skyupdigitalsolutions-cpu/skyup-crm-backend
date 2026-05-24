@@ -3,6 +3,7 @@ const Lead    = require("../models/Leads");
 const User    = require("../models/Users");
 const Company = require("../models/Company");
 const { computeQuality } = require("../utils/qualityHelper");
+const { sendNewLeadNotification, sendReassignedLeadNotification } = require('../services/fcmService');
 
 // ── UPDATED: Resolve companyId from req — prefers req.companyId (companyIsolation middleware)
 //    then falls back to existing req.admin / req.user patterns for backward compatibility ──
@@ -212,6 +213,17 @@ const adminCreateLead = async (req, res) => {
           existingConversationStatus: null,
         },
       });
+
+      // ── NEW: emit to agent's personal socket room so LeadsScreen can refetch ──
+      // The mobile app joins `agent:<userId>` on socket connect (see mobile patch).
+      // This lets the app instantly refetch leads without waiting for FCM delivery.
+      if (assignedUser) {
+        io.to(`agent:${assignedUser}`).emit('new_lead_assigned', {
+          leadId:   String(lead._id),
+          leadName: lead.name,
+          source:   lead.source || 'Web Form',
+        });
+      }
     }
 
     // ── Notify admin on WhatsApp ──────────────────────────────────────────────
@@ -222,6 +234,15 @@ const adminCreateLead = async (req, res) => {
     // ── Auto-send WhatsApp / Email / SMS template if enabled ─────────────────
     // FIX: pass `populated` not `lead` — populated has all fields including email
     autoSendTemplates(populated, companyId);
+
+    // ── NEW: FCM push notification to the assigned agent's device ────────────
+    // Fire-and-forget — never blocks the HTTP response.
+    // sendNewLeadNotification is a no-op if FCM is not configured.
+    if (assignedUser) {
+      sendNewLeadNotification(assignedUser, lead).catch((e) =>
+        console.error('[FCM] adminCreateLead push error:', e.message),
+      );
+    }
 
     res.status(201).json(populated);
   } catch (error) {
@@ -470,16 +491,48 @@ const updateLead = async (req, res) => {
   }
 };
 
+// ── CHANGE 4: adminUpdateLead — notify agent when admin manually reassigns ────
 const adminUpdateLead = async (req, res) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
     const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
+
+    // Capture old assignee before update so we can detect a reassignment
+    const previousUserId = lead.user ? String(lead.user) : null;
+
     const { company, user, leadgenId, ...safeBody } = req.body;
-    const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, {
+
+    // ── NEW: allow admin to manually reassign by passing `user` in body ──────
+    // The old code stripped `user` from safeBody, preventing reassignment from
+    // the admin panel. We now handle it explicitly and cleanly.
+    const updatePayload = { ...safeBody };
+    let newUserId = null;
+    if (user && String(user) !== previousUserId) {
+      updatePayload.user = user;
+      newUserId = String(user);
+    }
+
+    const updatedLead = await Lead.findByIdAndUpdate(id, updatePayload, {
       new: true,
     }).populate("user", "name email").populate("previousAgents", "name email");
+
+    // ── NEW: notify newly assigned agent if lead was reassigned ──────────────
+    if (newUserId) {
+      const _io = global._io;
+      if (_io) {
+        _io.to(`agent:${newUserId}`).emit('new_lead_assigned', {
+          leadId:   String(updatedLead._id),
+          leadName: updatedLead.name,
+          source:   updatedLead.source || '',
+        });
+      }
+      sendNewLeadNotification(newUserId, updatedLead).catch((e) =>
+        console.error('[FCM] adminUpdateLead push error:', e.message),
+      );
+    }
+
     return res.status(200).json(updatedLead);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -743,6 +796,23 @@ const markNotInterested = async (req, res) => {
       : nextUserId
         ? `Lead reassigned to ${updatedLead.user?.name || "another agent"} with 3 scheduled calls.`
         : "No other agent available; lead kept with you. 3 follow-up calls scheduled.";
+
+    // ── NEW: socket push to newly assigned agent ──────────────────────────────
+    if (!isSecondNI && nextUserId) {
+      const _io = global._io;
+      if (_io) {
+        _io.to(`agent:${nextUserId}`).emit('new_lead_assigned', {
+          leadId:   String(updatedLead._id),
+          leadName: updatedLead.name,
+          source:   updatedLead.source || '',
+        });
+      }
+
+      // ── NEW: FCM push notification to the newly assigned agent ───────────
+      sendReassignedLeadNotification(nextUserId, updatedLead).catch((e) =>
+        console.error('[FCM] reassign push error:', e.message),
+      );
+    }
 
     return res.status(200).json({
       lead: updatedLead,

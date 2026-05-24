@@ -91,6 +91,18 @@ const initSocket = (io) => {
     // ── WhatsApp rooms (unchanged) ───────────────────────────────────────────
     socket.on('wa_admin_join',        ()           => socket.join('wa_admin'));
     socket.on('wa_agent_join',        ({ agentId }) => agentId && socket.join(`wa_agent_${agentId}`));
+
+    // ── Agent personal room — for new_lead_assigned push ─────────────────────
+    // Mobile app emits 'agent_join' with { userId } on connect/reconnect.
+    // Backend uses this room in leadController to push new_lead_assigned events
+    // directly to the right agent's socket without broadcasting to everyone.
+    socket.on('agent_join', ({ userId }) => {
+      if (userId) {
+        socket.join(`agent:${userId}`);
+        console.log(`[Socket] Agent ${userId} joined personal room agent:${userId}`);
+      }
+    });
+
     // Company-wide WhatsApp room — every employee joins their company's room
     // and receives every inbound/outbound for the company. The frontend filters
     // by which leads belong to the logged-in user. This mirrors the admin's
