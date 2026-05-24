@@ -12,9 +12,9 @@ const initSocket          = require('./socket/socketHandler');
 // ── CRM Routes ────────────────────────────────────────────────────────────────
 const superAdminRoute   = require('./routes/superAdminRoute');
 const developerRoutes   = require('./routes/developerRoutes');
-const adminRoute      = require('./routes/adminRoute');
-const authRoute       = require('./routes/authRoutes');
-const leadRoute       = require('./routes/leadRoute');
+const adminRoute        = require('./routes/adminRoute');
+const authRoute         = require('./routes/authRoutes');
+const leadRoute         = require('./routes/leadRoute');
 
 // ── Privacy & Subscription Routes ────────────────────────────────────────────
 const privacyRoute      = require('./routes/privacyRoute');
@@ -26,8 +26,6 @@ const chatRoutes = require('./routes/chatRoutes');
 // ── Meta Routes ───────────────────────────────────────────────────────────────
 const metaWebhookRoute = require('./routes/metaWebhook');
 const metaConfigRoute  = require('./routes/metaConfig');
-
-// Twilio removed — using mobile app native calls instead
 
 // ── Razorpay Routes ───────────────────────────────────────────────────────────
 const razorpayRoute = require('./routes/razorpayRoute');
@@ -58,27 +56,24 @@ const saanviProxyRoute = require('./routes/saanviProxy');
 const whatsappRoutes    = require('./routes/whatsappRoutes');
 const msg91WebhookRoute = require('./routes/msg91Webhook');
 
-const app    = express();
+const app = express();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CRITICAL: trust proxy — Render/Heroku/any reverse proxy ke peeche chal rahe ho.
-//
-// Iske bina:
-//   • req.ip = Render ke internal proxy IP (saare clients ka same)
-//   • Rate limiter saare users ko ek hi bucket me daal deta hai
-//   • Office ke 5 users 5 min me poori company ka 100/15min limit thok dete hain
-//
-// '1' ka matlab: 1 hop ka X-Forwarded-For trust karo (Render hi 1 proxy hai).
-// Kabhi 'true' mat karna — wo IP spoofing allow kar deta hai.
+// Trust proxy — Render sits behind 1 hop of its own reverse proxy.
+// '1' = trust only the first X-Forwarded-For entry (prevents IP spoofing).
 // ─────────────────────────────────────────────────────────────────────────────
 app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 
-// ── Static origins always allowed ─────────────────────────────────────────────
+// ── Allowed origins ───────────────────────────────────────────────────────────
+// When SERVE_FRONTEND=true the Express server itself serves the React build,
+// so frontend and backend share one domain — CORS is not needed for the CRM UI.
+// We still need CORS for third-party origins (website widgets, webhooks, etc).
 const staticAllowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:5174",
+  "http://localhost:5173",   // Vite dev server
+  "http://localhost:4173",   // Vite preview
+  "http://localhost:5000",   // backend itself (for SSR / proxy testing)
   "https://skyup-crm-frontend.onrender.com",
 ];
 
@@ -130,7 +125,7 @@ const io = new Server(server, {
 
 // ── CORS must be first ────────────────────────────────────────────────────────
 app.use(cors(corsOptions));
-app.options(/(.*)/, cors(corsOptions)); // Handle all preflight OPTIONS requests
+app.options(/(.*)/, cors(corsOptions));
 
 // ── Body parsers ──────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -138,29 +133,51 @@ app.use((req, res, next) => {
     verify: (req, res, buf) => { req.rawBody = buf; },
   })(req, res, next);
 });
-
 app.use(express.urlencoded({ extended: true }));
 app.use(express.text({ type: "text/plain", limit: "5mb" }));
 
 app.use(generalLimiter);
 
-// ── Serve call recording audio files (uploaded from mobile app) ───────────────
-// Files are stored at: uploads/recordings/<filename>
-// recordingUrl in DB is: /recordings/<filename>
-// This makes <audio src="https://backend/recordings/xxx.mp3"> work.
-app.use('/recordings', express.static(path.join(__dirname, 'uploads/recordings')));
-// ── Serve logo uploads (company branding from admin + developer panels) ────────
+// ── Static file serving ───────────────────────────────────────────────────────
+app.use('/recordings',    express.static(path.join(__dirname, 'uploads/recordings')));
 app.use('/uploads/logos', express.static(path.join(__dirname, 'public/uploads/logos')));
 
-app.get('/', (req, res) => res.send('Server is running'));
+// ─────────────────────────────────────────────────────────────────────────────
+// OPTIONAL: Serve the React frontend build from the backend.
+// Set SERVE_FRONTEND=true in your Render environment variables.
+//
+// When enabled:
+//   • Copy the `dist/` folder from the frontend build into the backend root.
+//     In your Render build command use:
+//       cd ../frontend && npm ci && npm run build && cp -r dist ../backend/dist
+//   • Both frontend and backend run on the same Render service → same domain.
+//   • CORS is no longer needed for the CRM UI (only for webhooks/widgets).
+//   • All /api/* requests go straight to Express (no proxy needed).
+// ─────────────────────────────────────────────────────────────────────────────
+const SERVE_FRONTEND = process.env.SERVE_FRONTEND === 'true';
 
-// ── Health check for mobile app connectivity test ─────────────────────────────
-app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+if (SERVE_FRONTEND) {
+  const distPath = path.join(__dirname, 'dist');
+  app.use(express.static(distPath));
+  console.log(`🌐 Serving React frontend from: ${distPath}`);
+}
 
-// ── Webhook Routes (public — no auth)
-app.use('/meta',           metaWebhookRoute);
-app.use('/msg91-webhook',  msg91WebhookRoute);   // MSG91 WhatsApp inbound webhook
-app.use('/wa-webhook',     whatsappRoutes);      // Meta WhatsApp webhook (kept for compatibility)
+app.get('/', (req, res) => {
+  if (SERVE_FRONTEND) {
+    return res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+  }
+  res.send('Server is running');
+});
+
+// ── Health check ──────────────────────────────────────────────────────────────
+app.get('/api/health', (req, res) =>
+  res.json({ status: 'ok', timestamp: new Date().toISOString() })
+);
+
+// ── Webhook Routes (public — no auth) ────────────────────────────────────────
+app.use('/meta',          metaWebhookRoute);
+app.use('/msg91-webhook', msg91WebhookRoute);
+app.use('/wa-webhook',    whatsappRoutes);
 
 app.use('/website-webhook', (req, res, next) => {
   const origin = req.headers.origin || '';
@@ -191,52 +208,42 @@ app.use('/website-webhook', (req, res, next) => {
   next();
 }, websiteWebhookRoute);
 
-// ── API Routes 
-app.use('/api/meta-config', metaConfigRoute);
-
-app.use('/api/superadmin', superAdminRoute);
-app.use('/api/developer', developerRoutes);
-app.use('/api/admin',      adminRoute);
-app.use('/api/auth',       authRoute);
-app.use('/api/lead',       leadRoute);
-
-app.use('/api/attendance', attendanceRoute);
-
-// /api/twilio removed — mobile app uses native phone calls
-app.use('/api/razorpay', razorpayRoute);
-
+// ── API Routes ────────────────────────────────────────────────────────────────
+app.use('/api/meta-config',       metaConfigRoute);
+app.use('/api/superadmin',        superAdminRoute);
+app.use('/api/developer',         developerRoutes);
+app.use('/api/admin',             adminRoute);
+app.use('/api/auth',              authRoute);
+app.use('/api/lead',              leadRoute);
+app.use('/api/attendance',        attendanceRoute);
+app.use('/api/razorpay',          razorpayRoute);
 app.use('/api/google-ads-config', googleAdsConfigRoute);
 app.use('/',                      googleWebhookRoute);
+app.use('/api/website-config',    websiteConfigRoute);
+app.use('/api/chat',              chatRoutes);
+app.use('/api/email-campaign',    emailCampaignRoute);
+app.use('/api/email',             emailHistoryRoute);
+app.use('/api/sms-campaign',      smsCampaignRoute);
+app.use('/api/sms',               smsHistoryRoute);
+app.use('/api/sms-config',        require('./routes/smsConfig'));
+app.use('/api/privacy',           privacyRoute);
+app.use('/api/subscription',      subscriptionRoute);
+app.use('/api/saanvi',            saanviProxyRoute);
+app.use('/api/whatsapp',          whatsappRoutes);
+app.use('/api/reports',           require('./routes/reportRoutes'));
+app.use('/api/call-logs',         require('./routes/mobileCallLog'));
+app.use('/api/transcription',     require('./routes/transcription'));
 
-app.use('/api/website-config', websiteConfigRoute);
-app.use('/api/chat',           chatRoutes);
-app.use('/api/email-campaign', emailCampaignRoute);
-app.use('/api/email',          emailHistoryRoute);
-app.use('/api/sms-campaign',   smsCampaignRoute);
-app.use('/api/sms',            smsHistoryRoute);
-app.use('/api/sms-config',     require('./routes/smsConfig'));   // ← SMS Auth Key config per company
-
-// ── Privacy & Subscription (BIP39 zero-knowledge encryption) ─────────────────
-app.use('/api/privacy',      privacyRoute);
-app.use('/api/subscription', subscriptionRoute);
-
-// ── Saanvi Voicebot Proxy ─────────────────────────────────────────────────────
-app.use('/api/saanvi', saanviProxyRoute);
-
-// ── WhatsApp API (conversations, send, config) ────────────────────────────────
-app.use('/api/whatsapp', whatsappRoutes);
-
-// ── Reports — unified daily / employee / campaign reports ─────────────────────
-const reportRoutes = require('./routes/reportRoutes');
-app.use('/api/reports', reportRoutes);
-
-// ── Mobile App: Call Log Sync & Recordings ────────────────────────────────────
-const mobileCallLogRoute = require('./routes/mobileCallLog');
-app.use('/api/call-logs', mobileCallLogRoute);
-
-// ── AI Transcription & Summarization ─────────────────────────────────────────
-const transcriptionRoute = require('./routes/transcription');
-app.use('/api/transcription', transcriptionRoute);
+// ─────────────────────────────────────────────────────────────────────────────
+// SPA fallback — must be LAST.
+// When SERVE_FRONTEND=true, any route that isn't an API or static file returns
+// index.html so React Router handles it client-side.
+// ─────────────────────────────────────────────────────────────────────────────
+if (SERVE_FRONTEND) {
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+  });
+}
 
 app.set("io", io);
 global._io = io;
@@ -247,22 +254,17 @@ connectDB().then(() => {
   const PORT = process.env.PORT || 5000;
   server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`🛡️  Trust proxy:      enabled (1 hop)`);
+    console.log(`🛡️  Trust proxy:       enabled (1 hop)`);
     console.log(`🎙️  Recordings served at: /recordings/`);
     console.log(`🔐 BIP39 zero-knowledge encryption: enabled`);
-    console.log(`📋 Privacy API:      /api/privacy`);
-    console.log(`💳 Subscription API: /api/subscription`);
-
-    // ── Start daily subscription expiry email job ─────────────────────────────
+    console.log(`📋 Privacy API:       /api/privacy`);
+    console.log(`💳 Subscription API:  /api/subscription`);
+    console.log(`🌐 Frontend served:   ${SERVE_FRONTEND ? 'YES (from dist/)' : 'NO (separate Render service)'}`);
     startSubscriptionExpiryJob();
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Graceful shutdown — close Redis before the process exits.
-// Without this, Render/Heroku sends SIGTERM and the connection is dropped
-// abruptly, leaving stale connections on the Redis server.
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
 const { redisClient } = require('./middlewares/rateLimiter');
 
 async function gracefulShutdown(signal) {
