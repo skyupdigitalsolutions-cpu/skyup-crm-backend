@@ -1,16 +1,57 @@
 // utils/transcribeAudio.js
-// ── Replaced AssemblyAI with ElevenLabs Scribe v2 ────────────────────────────
-// Docs: https://elevenlabs.io/docs/speech-to-text
+// ── ElevenLabs Scribe v2 for transcription + OpenAI for English translation ───
 
 const fs    = require('fs');
 const path  = require('path');
 const os    = require('os');
 const axios = require('axios');
 
-const SCRIBE_URL         = 'https://api.elevenlabs.io/v1/speech-to-text';
+const SCRIBE_URL    = 'https://api.elevenlabs.io/v1/speech-to-text';
+const OPENAI_URL    = 'https://api.openai.com/v1/chat/completions';
+
+// ── Translate any language text to English using OpenAI ───────────────────────
+async function translateToEnglish(text, detectedLanguage) {
+  // If already English, skip translation
+  if (detectedLanguage === 'en' || detectedLanguage === 'eng') {
+    return text;
+  }
+
+  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+  if (!OPENAI_API_KEY) {
+    console.warn('[Translation] OPENAI_API_KEY not set — returning original text.');
+    return text;
+  }
+
+  console.log(`[Translation] Translating from ${detectedLanguage} → English`);
+
+  const { data } = await axios.post(
+    OPENAI_URL,
+    {
+      model: 'gpt-4o-mini',
+      max_tokens: 2000,
+      messages: [
+        {
+          role: 'system',
+          content: `You are a professional translator. Translate the following ${detectedLanguage} text to English. 
+Keep the meaning accurate and natural. 
+If the text already contains some English words (code-switching), keep them as-is.
+Return ONLY the translated text, nothing else.`,
+        },
+        { role: 'user', content: text },
+      ],
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  return (data.choices?.[0]?.message?.content || text).trim();
+}
 
 // ── Core ElevenLabs Scribe call ───────────────────────────────────────────────
-// audioInput: local file path (string) OR a public URL (string)
 async function runElevenLabsScribe(audioInput) {
   const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
   if (!ELEVENLABS_API_KEY) {
@@ -21,37 +62,23 @@ async function runElevenLabsScribe(audioInput) {
   let fileBuffer;
   let fileName;
 
-  // If it's a URL, download first (same pattern as before for Twilio URLs)
   if (typeof audioInput === 'string' && audioInput.startsWith('http')) {
     const response = await axios.get(audioInput, { responseType: 'arraybuffer' });
     fileBuffer = Buffer.from(response.data);
     fileName   = 'audio.mp3';
   } else {
-    // Local file path
     fileBuffer = fs.readFileSync(audioInput);
     fileName   = path.basename(audioInput);
   }
 
-  // Build multipart/form-data request
   const FormData = require('form-data');
   const form     = new FormData();
 
   form.append('file', fileBuffer, { filename: fileName });
-
-  // ── Language settings ──────────────────────────────────────────────────────
-  // ElevenLabs Scribe v2 supports: hi (Hindi), kn (Kannada), te (Telugu),
-  // ta (Tamil), en (English), and 90+ more.
-  // Set to null / remove to enable auto-detection (recommended for mixed speech).
-  // Examples:
-  //   form.append('language_code', 'hi');   // Hindi only
-  //   form.append('language_code', 'kn');   // Kannada only
-  //   form.append('language_code', 'en');   // English only
-  // For mixed / code-switch audio, omit language_code (auto-detect):
-  // form.append('language_code', 'auto');  // or just don't append it
-
-  form.append('model_id', 'scribe_v2');           // Use Scribe v2 (best accuracy)
-  form.append('diarize', 'true');                 // Speaker identification (same as before)
-  form.append('timestamps_granularity', 'word');  // Word-level timestamps
+  form.append('model_id', 'scribe_v2');
+  form.append('diarize', 'true');
+  form.append('timestamps_granularity', 'word');
+  // No language_code → auto-detect (best for Hindi/Kannada/Telugu/Tamil/English)
 
   const { data } = await axios.post(SCRIBE_URL, form, {
     headers: {
@@ -62,19 +89,25 @@ async function runElevenLabsScribe(audioInput) {
     maxContentLength: Infinity,
   });
 
-  // ElevenLabs returns: { text, words: [...], language_code, language_probability }
   if (!data || !data.text) {
     throw new Error('ElevenLabs Scribe returned an empty transcription.');
   }
 
-  return {
-    text: data.text.trim(),
-    // No transcriptId needed — summarization now uses the raw text directly via Claude API
-  };
+  const originalText      = data.text.trim();
+  const detectedLanguage  = data.language_code || 'unknown';
+
+  console.log(`[ElevenLabs] Detected language: ${detectedLanguage}`);
+  console.log(`[ElevenLabs] Original transcript (first 100 chars): ${originalText.slice(0, 100)}`);
+
+  // ── Translate to English if needed ────────────────────────────────────────
+  const englishText = await translateToEnglish(originalText, detectedLanguage);
+
+  console.log(`[ElevenLabs] English transcript (first 100 chars): ${englishText.slice(0, 100)}`);
+
+  return { text: englishText };
 }
 
 // ── Transcribe a Twilio recording ─────────────────────────────────────────────
-// Twilio URLs require HTTP Basic Auth — download first, then send to Scribe.
 async function transcribeTwilioRecording(recordingSid) {
   const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Recordings/${recordingSid}.mp3`;
   const tmpPath   = path.join(os.tmpdir(), `twilio_${recordingSid}.mp3`);
@@ -98,19 +131,12 @@ async function transcribeTwilioRecording(recordingSid) {
 }
 
 // ── Transcribe a mobile recording ─────────────────────────────────────────────
-// relativeUrl may be:
-//   "/recordings/userId_ts_file.mp3"   ← stored on server disk
-//   "https://..."                        ← external URL (S3, CDN, Cloudinary, etc.)
-//
-// For external URLs, we still download then upload (Scribe requires multipart).
 async function transcribeMobileRecording(relativeUrl) {
-  // ── Case 1: Full external URL ─────────────────────────────────────────────
   if (relativeUrl && relativeUrl.startsWith('http')) {
     const { text } = await runElevenLabsScribe(relativeUrl);
     return { transcript: text };
   }
 
-  // ── Case 2: Relative path on disk ─────────────────────────────────────────
   const clean      = (relativeUrl || '').replace(/^\/+/, '');
   const candidate1 = path.join(__dirname, '..', 'uploads', clean);
   const candidate2 = path.join(__dirname, '..', clean);
