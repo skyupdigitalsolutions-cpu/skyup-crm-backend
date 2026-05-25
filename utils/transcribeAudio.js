@@ -7,15 +7,16 @@ const path  = require('path');
 const os    = require('os');
 const axios = require('axios');
 
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const SCRIBE_URL         = 'https://api.elevenlabs.io/v1/speech-to-text';
 
 // ── Core ElevenLabs Scribe call ───────────────────────────────────────────────
 // audioInput: local file path (string) OR a public URL (string)
 async function runElevenLabsScribe(audioInput) {
+  const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
   if (!ELEVENLABS_API_KEY) {
     throw new Error('ELEVENLABS_API_KEY is not set. Add it to your environment variables.');
   }
+  console.log('[ElevenLabs] Using key ending in:', ELEVENLABS_API_KEY.slice(-6));
 
   let fileBuffer;
   let fileName;
