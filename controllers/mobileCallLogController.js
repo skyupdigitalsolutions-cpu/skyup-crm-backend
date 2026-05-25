@@ -25,15 +25,39 @@ const cloudinaryStorage = new CloudinaryStorage({
   cloudinary,
   params: async (req, file) => ({
     folder:          'skyup-crm/recordings',
-    resource_type:   'video',
+    // FIX: use 'auto' instead of 'video' — Cloudinary's 'video' type handles audio,
+    // but 'auto' lets Cloudinary detect the correct type from the file content
+    // rather than the MIME header, which is more reliable when Android OEMs
+    // send wrong MIME types (e.g. video/mp4 for .m4a files).
+    resource_type:   'auto',
     public_id:       `${req.user._id}_${Date.now()}`,
-    allowed_formats: ['mp3', 'm4a', 'aac', 'wav', 'amr', '3gp', 'ogg', 'opus'],
+    allowed_formats: ['mp3', 'm4a', 'aac', 'wav', 'amr', '3gp', 'ogg', 'opus', 'mp4', '3g2'],
   }),
 });
 
+// FIX: Expanded MIME allowlist — Android OEMs (Samsung, Xiaomi, MIUI) send
+// non-standard MIME types for the same audio formats. e.g.:
+//   .m4a → 'audio/x-m4a' OR 'video/mp4' (Samsung uses video/mp4 for m4a)
+//   .3gp → 'audio/3gpp' OR 'video/3gpp' OR 'video/3gpp2'
+//   .amr → 'audio/amr' OR 'audio/amr-nb' OR 'audio/amr-wb'
+// Without these, the fileFilter cb(new Error(...), false) silently rejects
+// the upload and the controller receives req.file = undefined, causing
+// "No file uploaded" 400 errors even when the file is correctly attached.
 const allowedMimes = [
-  'audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/wav',
-  'audio/amr', 'audio/3gpp', 'audio/ogg', 'audio/x-m4a',
+  // MP3
+  'audio/mpeg', 'audio/mp3',
+  // M4A / AAC (Samsung sends video/mp4 for .m4a files)
+  'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/x-aac', 'video/mp4',
+  // WAV
+  'audio/wav', 'audio/x-wav', 'audio/wave',
+  // AMR (narrow and wide band)
+  'audio/amr', 'audio/amr-nb', 'audio/amr-wb',
+  // 3GP (audio-only and video container — many dialers use video/3gpp)
+  'audio/3gpp', 'audio/3gpp2', 'video/3gpp', 'video/3gpp2',
+  // OGG / Opus
+  'audio/ogg', 'audio/opus', 'audio/x-opus+ogg',
+  // Generic fallbacks
+  'application/octet-stream', 'binary/octet-stream',
 ];
 
 const upload = multer({
