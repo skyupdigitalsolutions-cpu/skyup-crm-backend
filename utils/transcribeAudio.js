@@ -97,12 +97,50 @@ async function runElevenLabsScribe(audioInput) {
 
   const originalText      = data.text.trim();
   const detectedLanguage  = data.language_code || 'unknown';
+  const words             = data.words || [];
 
   console.log(`[ElevenLabs] Detected language: ${detectedLanguage}`);
   console.log(`[ElevenLabs] Original transcript (first 100 chars): ${originalText.slice(0, 100)}`);
 
-  // ── Translate to English if needed ────────────────────────────────────────
-  const englishText = await translateToEnglish(originalText, detectedLanguage);
+  // ── Build speaker-labelled dialogue from word-level diarization ───────────
+  // ElevenLabs returns words with speaker_id: "speaker_0", "speaker_1", etc.
+  let dialogueText = '';
+  if (words.length > 0 && words.some(w => w.speaker_id)) {
+    const segments = [];
+    let currentSpeaker = null;
+    let currentWords   = [];
+
+    for (const word of words) {
+      if (word.type !== 'word') continue; // skip punctuation tokens
+      const spk = word.speaker_id || 'speaker_0';
+      if (spk !== currentSpeaker) {
+        if (currentWords.length > 0) {
+          segments.push({ speaker: currentSpeaker, text: currentWords.join(' ') });
+        }
+        currentSpeaker = spk;
+        currentWords   = [word.text];
+      } else {
+        currentWords.push(word.text);
+      }
+    }
+    if (currentWords.length > 0) {
+      segments.push({ speaker: currentSpeaker, text: currentWords.join(' ') });
+    }
+
+    // Map speaker_0 → Speaker 1, speaker_1 → Speaker 2 etc.
+    const speakerMap = {};
+    let speakerCount = 1;
+    dialogueText = segments.map(seg => {
+      if (!speakerMap[seg.speaker]) {
+        speakerMap[seg.speaker] = `Speaker ${speakerCount++}`;
+      }
+      return `${speakerMap[seg.speaker]}: ${seg.text}`;
+    }).join('\n');
+  }
+
+  // ── Transliterate to Roman script if needed ────────────────────────────────
+  const textToTransliterate = dialogueText || originalText;
+  const englishText = await translateToEnglish(textToTransliterate, detectedLanguage);
 
   console.log(`[Transliteration] Roman transcript (first 100 chars): ${englishText.slice(0, 100)}`);
 
