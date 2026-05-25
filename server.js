@@ -44,7 +44,7 @@ const emailHistoryRoute    = require('./routes/emailHistory');
 
 // ── Subscription Expiry Email Job ─────────────────────────────────────────────
 const { startSubscriptionExpiryJob } = require('./jobs/subscriptionExpiryJob');
-
+const { startIdleJob } = require('./jobs/markIdleJob');
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute = require('./routes/smsCampaign');
 const smsHistoryRoute  = require('./routes/smsHistory');
@@ -263,6 +263,9 @@ connectDB().then(() => {
     startSubscriptionExpiryJob();
   });
 });
+
+// Line ~265 (inside connectDB().then callback, after startSubscriptionExpiryJob()):
+startIdleJob();
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 const { redisClient } = require('./middlewares/rateLimiter');
