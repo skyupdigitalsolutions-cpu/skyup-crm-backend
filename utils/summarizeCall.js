@@ -1,40 +1,43 @@
 // utils/summarizeCall.js
-// Uses AssemblyAI LLM Gateway (OpenAI-compatible endpoint).
-// Docs: https://www.assemblyai.com/docs/llm-gateway/overview
+// ── Replaced AssemblyAI LLM Gateway with direct Anthropic Claude API ──────────
+// Docs: https://docs.anthropic.com/en/api/messages
+
 const axios = require('axios');
 
-// LLM Gateway — OpenAI-compatible base URL
-const LLM_GATEWAY_URL = 'https://llm-gateway.assemblyai.com/v1/chat/completions';
+const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const CLAUDE_MODEL      = 'claude-haiku-4-5-20251001'; // Fast + cheap. Swap to 'claude-sonnet-4-20250514' for higher quality.
 
-// Model to use — claude-haiku-4-5-20251001 = fast + cheap
-// Swap to 'claude-sonnet-4-20250514' for higher quality
-const LLM_MODEL = 'claude-haiku-4-5-20251001';
-
-// ── Internal helper: call LLM Gateway ────────────────────────────────────────
+// ── Internal helper: call Claude directly ─────────────────────────────────────
 async function callLLM(systemPrompt, userContent, maxTokens = 600) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY is not set. Add it to your environment variables.');
+  }
+
   const { data } = await axios.post(
-    LLM_GATEWAY_URL,
+    ANTHROPIC_API_URL,
     {
-      model:      LLM_MODEL,
+      model:      CLAUDE_MODEL,
       max_tokens: maxTokens,
+      system:     systemPrompt,
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: userContent  },
+        { role: 'user', content: userContent },
       ],
     },
     {
       headers: {
-        authorization: process.env.ASSEMBLYAI_API_KEY,
-        'Content-Type': 'application/json',
+        'x-api-key':         process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Type':      'application/json',
       },
     }
   );
 
-  return (data.choices?.[0]?.message?.content || '').trim();
+  // Anthropic returns: { content: [{ type: 'text', text: '...' }] }
+  return (data.content?.[0]?.text || '').trim();
 }
 
 // ── Summarize a single call transcript ────────────────────────────────────────
-async function summarizeCallTranscript(transcript, contactName = 'the customer', transcriptId = null) {
+async function summarizeCallTranscript(transcript, contactName = 'the customer') {
   if (!transcript || transcript.trim().length < 20) {
     return {
       summary:       'Transcript too short to summarize.',
@@ -116,7 +119,6 @@ async function combineLeadSummaries(summaries, contactName = 'the customer') {
     };
   }
 
-  // Build compact text block — one entry per call
   const callsText = summaries
     .map((s, i) => {
       const date   = s.calledAt ? new Date(s.calledAt).toLocaleDateString('en-IN') : `Call ${i + 1}`;
