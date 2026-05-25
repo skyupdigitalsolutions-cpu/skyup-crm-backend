@@ -528,7 +528,10 @@ const adminUpdateLead = async (req, res) => {
           source:   updatedLead.source || '',
         });
       }
-      sendNewLeadNotification(newUserId, updatedLead).catch((e) =>
+      // ✅ FIX BUG 3: Use sendReassignedLeadNotification (not sendNewLeadNotification)
+      // for manual admin reassignments — matches the correct notification title
+      // "🔄 Lead Reassigned to You" instead of "📋 New Lead Assigned".
+      sendReassignedLeadNotification(newUserId, updatedLead).catch((e) =>
         console.error('[FCM] adminUpdateLead push error:', e.message),
       );
     }
