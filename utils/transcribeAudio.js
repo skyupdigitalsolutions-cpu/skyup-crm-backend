@@ -18,11 +18,11 @@ async function translateToEnglish(text, detectedLanguage) {
 
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   if (!OPENAI_API_KEY) {
-    console.warn('[Translation] OPENAI_API_KEY not set — returning original text.');
+    console.warn('[Transliteration] OPENAI_API_KEY not set — returning original text.');
     return text;
   }
 
-  console.log(`[Translation] Translating from ${detectedLanguage} → English`);
+  console.log(`[Transliteration] Converting ${detectedLanguage} → Roman script`);
 
   const { data } = await axios.post(
     OPENAI_URL,
@@ -32,10 +32,12 @@ async function translateToEnglish(text, detectedLanguage) {
       messages: [
         {
           role: 'system',
-          content: `You are a professional translator. Translate the following ${detectedLanguage} text to English. 
-Keep the meaning accurate and natural. 
-If the text already contains some English words (code-switching), keep them as-is.
-Return ONLY the translated text, nothing else.`,
+          content: `You are a transliteration expert. Convert the following ${detectedLanguage} text into Roman (English) script — keep the SAME words and pronunciation, just write them in English letters.
+Do NOT translate the meaning. Do NOT change the words.
+Example: "अभी मैं थोड़ा बिजी हूं" → "abi mein thoda busy hu"
+Example: "ನಾನು ಸ್ವಲ್ಪ ಬ್ಯುಸಿ ಇದ್ದೀನಿ" → "naanu svalpa busy iddini"
+If the text already has English/Roman words, keep them exactly as-is.
+Return ONLY the transliterated text, nothing else.`,
         },
         { role: 'user', content: text },
       ],
@@ -102,7 +104,7 @@ async function runElevenLabsScribe(audioInput) {
   // ── Translate to English if needed ────────────────────────────────────────
   const englishText = await translateToEnglish(originalText, detectedLanguage);
 
-  console.log(`[ElevenLabs] English transcript (first 100 chars): ${englishText.slice(0, 100)}`);
+  console.log(`[Transliteration] Roman transcript (first 100 chars): ${englishText.slice(0, 100)}`);
 
   return { text: englishText };
 }
