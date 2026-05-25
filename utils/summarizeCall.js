@@ -1,39 +1,37 @@
 // utils/summarizeCall.js
-// ── Replaced AssemblyAI LLM Gateway with direct Anthropic Claude API ──────────
-// Docs: https://docs.anthropic.com/en/api/messages
+// Summarization via OpenAI GPT
+// Docs: https://platform.openai.com/docs/api-reference/chat
 
 const axios = require('axios');
+const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
+const OPENAI_MODEL   = 'gpt-4o-mini'; // Fast + cheap. Swap to 'gpt-4o' for higher quality.
 
-const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const CLAUDE_MODEL      = 'claude-haiku-4-5-20251001'; // Fast + cheap. Swap to 'claude-sonnet-4-20250514' for higher quality.
-
-// ── Internal helper: call Claude directly ─────────────────────────────────────
+// Internal helper: call OpenAI
 async function callLLM(systemPrompt, userContent, maxTokens = 600) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY is not set. Add it to your environment variables.');
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is not set. Add it to your environment variables.');
   }
 
   const { data } = await axios.post(
-    ANTHROPIC_API_URL,
+    OPENAI_API_URL,
     {
-      model:      CLAUDE_MODEL,
+      model:      OPENAI_MODEL,
       max_tokens: maxTokens,
-      system:     systemPrompt,
       messages: [
-        { role: 'user', content: userContent },
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: userContent  },
       ],
     },
     {
       headers: {
-        'x-api-key':         process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'Content-Type':      'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type':  'application/json',
       },
     }
   );
 
-  // Anthropic returns: { content: [{ type: 'text', text: '...' }] }
-  return (data.content?.[0]?.text || '').trim();
+  // OpenAI returns: { choices: [{ message: { content: '...' } }] }
+  return (data.choices?.[0]?.message?.content || '').trim();
 }
 
 // ── Summarize a single call transcript ────────────────────────────────────────
@@ -92,7 +90,6 @@ Respond ONLY with this JSON:
 }
 
 // ── Combine all per-call summaries for a lead into one master summary ─────────
-// summaries: [{ summary, keyPoints[], sentiment, nextAction, suggestedTemp, calledAt? }]
 async function combineLeadSummaries(summaries, contactName = 'the customer') {
   if (!summaries || summaries.length === 0) {
     return {
