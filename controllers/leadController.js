@@ -6,10 +6,13 @@ const { computeQuality } = require("../utils/qualityHelper");
 const { sendNewLeadNotification, sendReassignedLeadNotification } = require('../services/fcmService');
 
 // ── UPDATED: Resolve companyId from req — prefers req.companyId (companyIsolation middleware)
-//    then falls back to existing req.admin / req.user patterns for backward compatibility ──
+//    then falls back to existing req.admin / req.superAdmin / req.user patterns.
+// FIX: added req.superAdmin check so PUT /lead/superadmin/:id (protectSuperAdmin)
+//      no longer returns null → 404 "Lead Not Found".
 const getCompanyId = (req) =>
   req.companyId ||
-  (req.admin ? (req.admin.company?._id || req.admin.company) : null) ||
+  (req.admin      ? (req.admin.company?._id      || req.admin.company)      : null) ||
+  (req.superAdmin ? (req.superAdmin.company?._id || req.superAdmin.company) : null) ||
   req.user?.company ||
   null;
 
@@ -496,7 +499,12 @@ const adminUpdateLead = async (req, res) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
-    const lead = await Lead.findOne({ _id: id, company: companyId });
+    // FIX: mirror adminDeleteLead — if companyId resolved to null (e.g. legacy
+    // SuperAdmin token where protectSuperAdmin sets req.superAdmin but the
+    // SuperAdmin document has no company field), fall back to an id-only query
+    // so the lead is still found and the update proceeds.
+    const leadQuery = companyId ? { _id: id, company: companyId } : { _id: id };
+    const lead = await Lead.findOne(leadQuery);
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     // Capture old assignee before update so we can detect a reassignment
