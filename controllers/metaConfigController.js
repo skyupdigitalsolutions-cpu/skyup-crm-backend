@@ -78,9 +78,21 @@ const addConfig = async (req, res) => {
     }
 
     const formIdValue = req.body.formId?.trim() || "";
-    const existing = await MetaConfig.findOne({ pageId, formId: formIdValue });
+
+    // BUG FIX: When formId is blank (catch-all config), two ad sets on the same
+    // page both have formId="" which incorrectly triggered a collision even though
+    // they're different campaigns/ad sets. Now we scope the duplicate check:
+    //   - formId present  → block same (pageId, formId) pair (true duplicate)
+    //   - formId blank    → block same (pageId, campaignName) pair only
+    let existing;
+    if (formIdValue) {
+      existing = await MetaConfig.findOne({ pageId, formId: formIdValue });
+    } else {
+      const campaignNameVal = (req.body.campaignName || "").trim();
+      existing = await MetaConfig.findOne({ pageId, formId: "", campaignName: campaignNameVal });
+    }
     if (existing) {
-      return res.status(400).json({ message: "This Meta page is already connected" });
+      return res.status(400).json({ message: "This Meta campaign / ad set is already connected" });
     }
 
     // BUG FIX: persist per-campaign appSecret & verifyToken so the webhook
