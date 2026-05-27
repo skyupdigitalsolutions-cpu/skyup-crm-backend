@@ -266,13 +266,11 @@ connectDB().then(() => {
     console.log(`💳 Subscription API:  /api/subscription`);
     console.log(`🌐 Frontend served:   ${SERVE_FRONTEND ? 'YES (from dist/)' : 'NO (separate Render service)'}`);
     startSubscriptionExpiryJob();
+    startIdleJob();
     const { checkFCMHealth } = require('./services/fcmService');
-checkFCMHealth();
+    checkFCMHealth();
   });
 });
-
-// Line ~265 (inside connectDB().then callback, after startSubscriptionExpiryJob()):
-startIdleJob();
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 const { redisClient } = require('./middlewares/rateLimiter');
