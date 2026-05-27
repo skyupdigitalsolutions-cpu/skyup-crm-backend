@@ -290,23 +290,16 @@ const sendTemplate = async (req, res) => {
         const resolvedLangCode = languageCode || "en";
         const namespace = config.msg91Namespace || "";
 
-        // BUG FIX: Build components for MSG91 — use the contact name from the conversation.
-        // Do NOT shadow or discard reqComponents from the request body.
+        // Build components for MSG91.
+        // If the template has a document header (e.g. brochure), include header_1.
         // MSG91 expects components as an OBJECT (key-value map), not an array.
-        // If the template has no variables, send an empty object {}.
-        let msg91Components = {};
-        if (conversation.contactName && conversation.contactName.trim()) {
-          msg91Components = {
-            body_1: {
-              type:           "text",
-              value:          conversation.contactName.trim(),
-              
-            },
-          };
-        }
+        const brochureUrl = config.msg91BrochureUrl || "";
+        let msg91Components = {
+          ...(brochureUrl ? { header_1: { type: "document", value: brochureUrl, filename: "Brochure.pdf" } } : {}),
+          ...(conversation.contactName?.trim() ? { body_1: { type: "text", value: conversation.contactName.trim() } } : {}),
+        };
         // If caller explicitly passed structured components, prefer those
         if (reqComponents && Array.isArray(reqComponents) && reqComponents.length > 0) {
-          // Convert Meta-style array components to MSG91 object format if needed
           msg91Components = reqComponents;
         }
 
@@ -611,19 +604,13 @@ const startConversation = async (req, res) => {
         const resolvedLangCode = languageCode || "en";
         const namespace = config.msg91Namespace || "";
 
-        // BUG FIX: `components` from req.body was being shadowed by a new `const components`
-        // built from contactName. This meant the frontend's component values were lost.
-        // Now we build msg91Components correctly without shadowing the outer variable.
-        let msg91Components = {};
-        if (contactName && contactName.trim()) {
-          msg91Components = {
-            body_1: {
-              type:           "text",
-              value:          contactName.trim(),
-              
-            },
-          };
-        }
+        // Build components for MSG91.
+        // If the template has a document header (e.g. brochure), include header_1.
+        const brochureUrl = config.msg91BrochureUrl || "";
+        let msg91Components = {
+          ...(brochureUrl ? { header_1: { type: "document", value: brochureUrl, filename: "Brochure.pdf" } } : {}),
+          ...(contactName?.trim() ? { body_1: { type: "text", value: contactName.trim() } } : {}),
+        };
         // If caller passed explicit components array (e.g. from bulk panel), prefer those
         if (components && Array.isArray(components) && components.length > 0) {
           msg91Components = components;
@@ -808,12 +795,14 @@ const _sendTemplateToPhone = async ({ cleanPhone, templateName, languageCode, co
 
   if (provider === "msg91") {
     const namespace = config.msg91Namespace || "";
-    // BUG FIX: Use named variable msg91Components to avoid any shadowing confusion.
+    // Build components for MSG91.
+    // If the template has a document header (e.g. brochure), include header_1.
     // MSG91 expects components as an OBJECT (key-value map), not an array.
-    // Empty object {} is correct when template has no variables.
-    const msg91Components = contactName.trim()
-      ? { body_1: { type: "text", value: contactName.trim() } }
-      : {};
+    const brochureUrl = config.msg91BrochureUrl || "";
+    const msg91Components = {
+      ...(brochureUrl ? { header_1: { type: "document", value: brochureUrl, filename: "Brochure.pdf" } } : {}),
+      ...(contactName.trim() ? { body_1: { type: "text", value: contactName.trim() } } : {}),
+    };
 
     // BUG FIX: Use control.msg91.com — api.msg91.com was causing auth failures.
     const resp = await axios.post(
