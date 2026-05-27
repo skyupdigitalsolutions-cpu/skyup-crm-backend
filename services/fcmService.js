@@ -6,16 +6,26 @@
 //  1. npm install firebase-admin
 //  2. Go to Firebase Console → Project Settings → Service Accounts
 //     → Generate new private key  → save the JSON file
-//  3. Set ONE of these env vars:
+//  3. Set this env var on your server / Render dashboard:
 //
-//     Local (.env):
-//       GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/serviceAccount.json
-//
-//     Render / cloud (paste the whole JSON as the value):
 //       FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"..."}
 //
-//  The file is safe to deploy without Firebase — it silently no-ops when
-//  the env vars are missing, so the server never crashes.
+//     Paste the ENTIRE contents of the downloaded JSON as the value.
+//     Alternatively set GOOGLE_APPLICATION_CREDENTIALS to the absolute path
+//     of the JSON file (local dev only — Render uses the JSON string approach).
+//
+//  FIX BUG 3: The previous implementation silently returned null when credentials
+//  were missing, making it impossible to distinguish "FCM configured but broken"
+//  from "FCM never configured". Every sendNewLeadNotification call would silently
+//  no-op without any visible error after the initial startup warn.
+//
+//  New behaviour:
+//    • On startup, immediately try to initialise Firebase Admin.
+//    • If credentials are missing: log a clear WARNING (not a crash — the server
+//      can still run for non-FCM features). _initFailed is set so every send
+//      call logs a visible per-call warning instead of silently returning.
+//    • Call checkFCMHealth() from server.js during startup to surface the
+//      problem clearly in the logs before any HTTP traffic starts.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const User = require('../models/Users');
@@ -23,6 +33,7 @@ const User = require('../models/Users');
 // ── Lazy Firebase init ────────────────────────────────────────────────────────
 let _messaging  = null;
 let _initFailed = false;
+let _initError  = null;   // FIX BUG 3: store the reason so per-send logs are useful
 
 function getMessaging() {
   if (_messaging)  return _messaging;
@@ -35,18 +46,41 @@ function getMessaging() {
       const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 
       if (serviceAccountJson) {
+        let parsed;
+        try {
+          parsed = JSON.parse(serviceAccountJson);
+        } catch (parseErr) {
+          // FIX BUG 3: JSON parse failure used to produce a cryptic error later.
+          // Now we surface a clear message pointing to the env var.
+          _initError  = `FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON: ${parseErr.message}`;
+          _initFailed = true;
+          console.error('[FCM] ❌', _initError);
+          return null;
+        }
+
         admin.initializeApp({
-          credential: admin.credential.cert(JSON.parse(serviceAccountJson)),
+          credential: admin.credential.cert(parsed),
         });
         console.log('[FCM] ✅ Firebase Admin initialized from FIREBASE_SERVICE_ACCOUNT_JSON');
+
       } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
         admin.initializeApp({
           credential: admin.credential.applicationDefault(),
         });
         console.log('[FCM] ✅ Firebase Admin initialized from GOOGLE_APPLICATION_CREDENTIALS');
+
       } else {
-        console.warn('[FCM] ⚠️  No Firebase credentials set — push notifications disabled.');
+        // FIX BUG 3: Previously this was a warn() that was easy to miss and
+        // then every send silently returned without explanation.
+        // Now: store the reason so each send() call can log it explicitly.
+        _initError = (
+          'Neither FIREBASE_SERVICE_ACCOUNT_JSON nor GOOGLE_APPLICATION_CREDENTIALS is set.\n' +
+          '  → Push notifications are DISABLED.\n' +
+          '  → Set FIREBASE_SERVICE_ACCOUNT_JSON in your Render environment variables.\n' +
+          '  → Value = entire contents of the Firebase service account JSON file.'
+        );
         _initFailed = true;
+        console.error('[FCM] ❌', _initError);
         return null;
       }
     }
@@ -54,9 +88,29 @@ function getMessaging() {
     _messaging = admin.messaging();
     return _messaging;
   } catch (err) {
-    console.warn('[FCM] ⚠️  Firebase Admin init failed:', err.message);
+    _initError  = err.message;
     _initFailed = true;
+    console.error('[FCM] ❌ Firebase Admin init failed:', err.message);
     return null;
+  }
+}
+
+// ── FIX BUG 3: Health check — call this from server.js after connectDB() ─────
+// Prints a clear startup message so the problem is visible in Render logs
+// without having to wait for the first notification attempt.
+//
+// Usage in server.js (add after startSubscriptionExpiryJob()):
+//   const { checkFCMHealth } = require('./services/fcmService');
+//   checkFCMHealth();
+function checkFCMHealth() {
+  const m = getMessaging();
+  if (m) {
+    console.log('[FCM] ✅ Health check passed — push notifications are active.');
+  } else {
+    console.error(
+      '[FCM] ❌ Health check FAILED — push notifications will not be sent.\n' +
+      '  Reason:', _initError || 'unknown'
+    );
   }
 }
 
@@ -72,11 +126,22 @@ async function clearStaleToken(userId) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function sendNewLeadNotification(userId, lead) {
   const messaging = getMessaging();
-  if (!messaging) return;
+  if (!messaging) {
+    // FIX BUG 3: Log the reason so it's visible in per-request logs,
+    // not just once at startup. Keeps the original silent-return behaviour
+    // (server doesn't crash) but makes the problem undeniable in logs.
+    if (_initFailed) {
+      console.warn('[FCM] sendNewLeadNotification skipped — FCM not initialised:', _initError);
+    }
+    return;
+  }
 
   try {
     const user = await User.findById(userId).select('fcmToken name').lean();
-    if (!user?.fcmToken) return;
+    if (!user?.fcmToken) {
+      console.warn(`[FCM] sendNewLeadNotification: user ${userId} has no fcmToken — mobile app may not have registered yet`);
+      return;
+    }
 
     const leadName   = lead.name   || 'New Lead';
     const leadSource = lead.source || 'Web Form';
@@ -138,11 +203,19 @@ async function sendNewLeadNotification(userId, lead) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function sendReassignedLeadNotification(userId, lead) {
   const messaging = getMessaging();
-  if (!messaging) return;
+  if (!messaging) {
+    if (_initFailed) {
+      console.warn('[FCM] sendReassignedLeadNotification skipped — FCM not initialised:', _initError);
+    }
+    return;
+  }
 
   try {
     const user = await User.findById(userId).select('fcmToken name').lean();
-    if (!user?.fcmToken) return;
+    if (!user?.fcmToken) {
+      console.warn(`[FCM] sendReassignedLeadNotification: user ${userId} has no fcmToken`);
+      return;
+    }
 
     const leadName = lead.name || 'Lead';
 
@@ -196,4 +269,4 @@ async function sendReassignedLeadNotification(userId, lead) {
   }
 }
 
-module.exports = { sendNewLeadNotification, sendReassignedLeadNotification };
+module.exports = { sendNewLeadNotification, sendReassignedLeadNotification, checkFCMHealth };
