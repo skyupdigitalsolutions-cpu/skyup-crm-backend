@@ -225,8 +225,6 @@ const adminCreateLead = async (req, res) => {
           leadId:    String(lead._id),
           leadName:  lead.name,
           source:    lead.source || 'Web Form',
-          // FIX: eventType lets the mobile app show the correct notification
-          // title — 'new' → "🎯 New Lead Assigned"
           eventType: 'new',
         });
       }
@@ -537,7 +535,6 @@ const adminUpdateLead = async (req, res) => {
           leadId:    String(updatedLead._id),
           leadName:  updatedLead.name,
           source:    updatedLead.source || '',
-          // FIX: eventType 'reassigned' → mobile shows "🔄 Lead Reassigned to You"
           eventType: 'reassigned',
         });
       }
@@ -821,7 +818,6 @@ const markNotInterested = async (req, res) => {
           leadId:    String(updatedLead._id),
           leadName:  updatedLead.name,
           source:    updatedLead.source || '',
-          // FIX: eventType 'reassigned' → mobile shows "🔄 Lead Reassigned to You"
           eventType: 'reassigned',
         });
       }
