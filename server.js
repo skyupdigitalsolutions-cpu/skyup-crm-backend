@@ -121,6 +121,11 @@ const io = new Server(server, {
     },
     credentials: true,
   },
+
+  allowUpgrades: true,
+  transports: ['websocket', 'polling'],  // allow both so Render can negotiate
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
 // ── CORS must be first ────────────────────────────────────────────────────────
