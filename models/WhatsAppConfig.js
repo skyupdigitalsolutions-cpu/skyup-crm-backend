@@ -46,6 +46,14 @@ const whatsAppConfigSchema = new mongoose.Schema(
       trim: true,
     },
 
+    // URL of the brochure/document attached as a header in MSG91 templates.
+    // Leave empty if the template has no document header.
+    msg91BrochureUrl: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
     // ── Meta Cloud API fields (provider === "meta") ───────────────────────────
     phoneNumberId: {
       type: String,
