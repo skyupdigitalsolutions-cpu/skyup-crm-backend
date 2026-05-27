@@ -13,7 +13,7 @@ const MetaConfig = require("../models/MetaConfig");
  */
 const syncFromMeta = async (req, res) => {
   try {
-    const { pageId, pageAccessToken, graphApiVersion = "v21.0" } = req.body;
+    const { pageId, pageAccessToken, graphApiVersion = "v22.0" } = req.body;
     const companyId = req.admin?.company?._id || req.admin?.company;
 
     if (!pageId || !pageAccessToken) {
