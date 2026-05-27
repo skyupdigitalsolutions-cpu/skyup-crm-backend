@@ -222,9 +222,12 @@ const adminCreateLead = async (req, res) => {
       // This lets the app instantly refetch leads without waiting for FCM delivery.
       if (assignedUser) {
         io.to(`agent:${assignedUser}`).emit('new_lead_assigned', {
-          leadId:   String(lead._id),
-          leadName: lead.name,
-          source:   lead.source || 'Web Form',
+          leadId:    String(lead._id),
+          leadName:  lead.name,
+          source:    lead.source || 'Web Form',
+          // FIX: eventType lets the mobile app show the correct notification
+          // title — 'new' → "🎯 New Lead Assigned"
+          eventType: 'new',
         });
       }
     }
@@ -531,9 +534,11 @@ const adminUpdateLead = async (req, res) => {
       const _io = global._io;
       if (_io) {
         _io.to(`agent:${newUserId}`).emit('new_lead_assigned', {
-          leadId:   String(updatedLead._id),
-          leadName: updatedLead.name,
-          source:   updatedLead.source || '',
+          leadId:    String(updatedLead._id),
+          leadName:  updatedLead.name,
+          source:    updatedLead.source || '',
+          // FIX: eventType 'reassigned' → mobile shows "🔄 Lead Reassigned to You"
+          eventType: 'reassigned',
         });
       }
       // ✅ FIX BUG 3: Use sendReassignedLeadNotification (not sendNewLeadNotification)
@@ -813,9 +818,11 @@ const markNotInterested = async (req, res) => {
       const _io = global._io;
       if (_io) {
         _io.to(`agent:${nextUserId}`).emit('new_lead_assigned', {
-          leadId:   String(updatedLead._id),
-          leadName: updatedLead.name,
-          source:   updatedLead.source || '',
+          leadId:    String(updatedLead._id),
+          leadName:  updatedLead.name,
+          source:    updatedLead.source || '',
+          // FIX: eventType 'reassigned' → mobile shows "🔄 Lead Reassigned to You"
+          eventType: 'reassigned',
         });
       }
 
