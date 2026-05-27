@@ -266,6 +266,8 @@ connectDB().then(() => {
     console.log(`💳 Subscription API:  /api/subscription`);
     console.log(`🌐 Frontend served:   ${SERVE_FRONTEND ? 'YES (from dist/)' : 'NO (separate Render service)'}`);
     startSubscriptionExpiryJob();
+    const { checkFCMHealth } = require('./services/fcmService');
+checkFCMHealth();
   });
 });
 
