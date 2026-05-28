@@ -67,13 +67,10 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 
 // ── Allowed origins ───────────────────────────────────────────────────────────
-// When SERVE_FRONTEND=true the Express server itself serves the React build,
-// so frontend and backend share one domain — CORS is not needed for the CRM UI.
-// We still need CORS for third-party origins (website widgets, webhooks, etc).
 const staticAllowedOrigins = [
-  "http://localhost:5173",   // Vite dev server
-  "http://localhost:4173",   // Vite preview
-  "http://localhost:5000",   // backend itself (for SSR / proxy testing)
+  "http://localhost:5173",
+  "http://localhost:4173",
+  "http://localhost:5000",
   "https://skyup-crm-frontend.onrender.com",
 ];
 
@@ -121,9 +118,8 @@ const io = new Server(server, {
     },
     credentials: true,
   },
-
   allowUpgrades: true,
-  transports: ['websocket', 'polling'],  // allow both so Render can negotiate
+  transports: ['websocket', 'polling'],
   pingTimeout: 60000,
   pingInterval: 25000,
 });
@@ -149,15 +145,6 @@ app.use('/uploads/logos', express.static(path.join(__dirname, 'public/uploads/lo
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OPTIONAL: Serve the React frontend build from the backend.
-// Set SERVE_FRONTEND=true in your Render environment variables.
-//
-// When enabled:
-//   • Copy the `dist/` folder from the frontend build into the backend root.
-//     In your Render build command use:
-//       cd ../frontend && npm ci && npm run build && cp -r dist ../backend/dist
-//   • Both frontend and backend run on the same Render service → same domain.
-//   • CORS is no longer needed for the CRM UI (only for webhooks/widgets).
-//   • All /api/* requests go straight to Express (no proxy needed).
 // ─────────────────────────────────────────────────────────────────────────────
 const SERVE_FRONTEND = process.env.SERVE_FRONTEND === 'true';
 
@@ -239,10 +226,55 @@ app.use('/api/reports',           require('./routes/reportRoutes'));
 app.use('/api/call-logs',         require('./routes/mobileCallLog'));
 app.use('/api/transcription',     require('./routes/transcription'));
 
+// ── APK Download Routes ───────────────────────────────────────────────────────
+app.get('/download', (req, res) => {
+  const apkPath = path.join(__dirname, 'public', 'skyupcrm.apk');
+  res.download(apkPath, 'SkyUpCRM.apk', (err) => {
+    if (err) res.status(404).json({ message: 'APK not found' });
+  });
+});
+
+app.get('/install', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Install SkyUp CRM</title>
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body { font-family: Arial, sans-serif; background: #f0f4ff; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+          .card { background: white; padding: 35px 30px; border-radius: 20px; max-width: 400px; width: 100%; box-shadow: 0 8px 30px rgba(0,0,0,0.12); text-align: center; }
+          .logo { font-size: 48px; margin-bottom: 10px; }
+          h1 { color: #1a1a2e; font-size: 24px; margin-bottom: 5px; }
+          .version { color: #999; font-size: 13px; margin-bottom: 25px; }
+          .btn { background: #4f46e5; color: white; padding: 16px 40px; border-radius: 12px; text-decoration: none; font-size: 18px; font-weight: bold; display: inline-block; margin-bottom: 25px; }
+          .steps { text-align: left; background: #f8f9ff; padding: 20px; border-radius: 12px; }
+          .steps p { font-weight: bold; margin-bottom: 10px; color: #333; }
+          .step { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; color: #555; font-size: 15px; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="logo">📱</div>
+          <h1>SkyUp CRM</h1>
+          <p class="version">Version 1.0.0 • Android</p>
+          <a class="btn" href="/download">⬇️ Download App</a>
+          <div class="steps">
+            <p>📋 How to Install:</p>
+            <div class="step">1️⃣ Tap Download App above</div>
+            <div class="step">2️⃣ Open the downloaded APK file</div>
+            <div class="step">3️⃣ Allow unknown sources if asked</div>
+            <div class="step">4️⃣ Tap Install ✅</div>
+          </div>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SPA fallback — must be LAST.
-// When SERVE_FRONTEND=true, any route that isn't an API or static file returns
-// index.html so React Router handles it client-side.
 // ─────────────────────────────────────────────────────────────────────────────
 if (SERVE_FRONTEND) {
   app.get('*', (req, res) => {
