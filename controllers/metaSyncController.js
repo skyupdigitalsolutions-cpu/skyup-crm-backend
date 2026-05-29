@@ -10,6 +10,11 @@ const MetaConfig = require("../models/MetaConfig");
  *  2. GET /{pageId}/leadgen_forms  → forms with adset_id, adset_name, campaign_name
  *  3. For forms missing adset_name, fetch /{adset_id}?fields=name,campaign_id,campaign{name}
  *  4. Upsert one MetaConfig per unique (pageId, formId)
+ *
+ * FIX: parentCampaignName is now always set to the Meta campaign name so that
+ * the frontend can group ad-set cards under their parent campaign header.
+ * campaignName is built as "CampaignName › AdSetName" so each config has a
+ * unique, human-readable name while still being linkable to its parent.
  */
 const syncFromMeta = async (req, res) => {
   try {
@@ -64,6 +69,9 @@ const syncFromMeta = async (req, res) => {
     }
 
     // ── Step 3: Enrich forms that are missing adset_name / campaign_name ───────
+    // Meta's leadgen_forms endpoint sometimes omits campaign_name/adset_name.
+    // When missing, we fetch the ad set directly to get the campaign name —
+    // this is critical because parentCampaignName depends on campaign_name.
     const enrichedForms = await Promise.all(
       allForms.map(async (form) => {
         if (form.adset_name && form.campaign_name) return form;
@@ -101,25 +109,52 @@ const syncFromMeta = async (req, res) => {
 
     for (const form of enrichedForms) {
       const existing = await MetaConfig.findOne({ pageId, formId: form.id });
+
+      // FIX: Derive parentCampaignName and adSetName first so we can use them
+      // in both the "skipped" result and the "created" document consistently.
+      const parentCampaignName = (form.campaign_name || "").trim();
+      const adSetName          = (form.adset_name    || "").trim();
+
+      // Build a unique, human-readable campaignName:
+      //   • Both present → "CampaignName › AdSetName"   (groups + labels correctly)
+      //   • Only campaign → use campaign name as-is
+      //   • Neither       → fall back to the form name
+      let campaignName;
+      if (parentCampaignName && adSetName) {
+        campaignName = `${parentCampaignName} › ${adSetName}`;
+      } else if (parentCampaignName) {
+        campaignName = parentCampaignName;
+      } else {
+        campaignName = form.name || "Meta Campaign";
+      }
+
       if (existing) {
+        // FIX: also update parentCampaignName / adSetName on skipped records
+        // so that re-syncing fixes previously broken grouping data.
+        if (!existing.parentCampaignName && parentCampaignName) {
+          await MetaConfig.findByIdAndUpdate(existing._id, {
+            parentCampaignName,
+            adSetName: existing.adSetName || adSetName,
+          });
+          console.log(`🔄 Updated parentCampaignName for existing config: "${existing.campaignName}"`);
+        }
+
         skipped++;
         results.push({
-          formId:       form.id,
-          formName:     form.name,
-          campaignName: form.campaign_name || form.name,
-          adSetName:    form.adset_name || "",
-          status:       "skipped (already exists)",
+          formId:             form.id,
+          formName:           form.name,
+          campaignName:       existing.campaignName,
+          adSetName:          existing.adSetName || adSetName,
+          parentCampaignName: existing.parentCampaignName || parentCampaignName,
+          status:             "skipped (already exists)",
         });
         continue;
       }
 
-      const campaignName = form.campaign_name || form.name || "Meta Campaign";
-      const adSetName    = form.adset_name    || "";
-
       await MetaConfig.create({
         campaignName,
         adSetName,
-        parentCampaignName: form.campaign_name || "",
+        parentCampaignName,   // ← Always the Meta campaign name; "" only if Meta truly has none
         pageId,
         pageAccessToken,
         formId:          form.id,
@@ -134,11 +169,12 @@ const syncFromMeta = async (req, res) => {
 
       created++;
       results.push({
-        formId:       form.id,
-        formName:     form.name,
+        formId:             form.id,
+        formName:           form.name,
         campaignName,
         adSetName,
-        status:       "created",
+        parentCampaignName,
+        status:             "created",
       });
     }
 
