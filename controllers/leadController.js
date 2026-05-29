@@ -1058,8 +1058,81 @@ const getFollowUpAlerts = async (req, res) => {
   }
 };
 
+// ── Helper: merge duplicate lead INTO primary lead ────────────────────────────
+// Combines callHistory, scheduledCalls, additionalNumbers, previousAgents,
+// phoneRevealLog from `duplicate` into `primary`, then soft-deletes the
+// duplicate (isClosed=true, mergedInto=primary._id).
+async function performMerge(primary, duplicate, actorId) {
+  const now = new Date();
+
+  // Collect additional numbers from duplicate (primary number + its additionals)
+  const incomingNumbers = [
+    { number: duplicate.mobile, label: "Merged primary", addedBy: actorId, addedAt: now },
+    ...(duplicate.additionalNumbers || []).map(n => ({ ...n, addedBy: actorId, addedAt: now })),
+  ].filter(n => {
+    // Skip numbers already on the primary (by normalized last-10 comparison)
+    const norm = String(n.number).replace(/\D/g, "").slice(-10);
+    const primNorm = String(primary.mobile).replace(/\D/g, "").slice(-10);
+    if (norm === primNorm) return false;
+    return !(primary.additionalNumbers || []).some(
+      e => String(e.number).replace(/\D/g, "").slice(-10) === norm
+    );
+  });
+
+  // Deduplicate previousAgents
+  const existingAgentIds = new Set((primary.previousAgents || []).map(String));
+  const newAgents = (duplicate.previousAgents || []).filter(
+    id => !existingAgentIds.has(String(id))
+  );
+
+  // Build the timeline entry for the merge event
+  const mergeNote = `Merged from duplicate lead "${duplicate.name}" (${duplicate.mobile})`;
+
+  await Lead.findByIdAndUpdate(primary._id, {
+    $push: {
+      callHistory:      { $each: duplicate.callHistory      || [] },
+      scheduledCalls:   { $each: duplicate.scheduledCalls   || [] },
+      additionalNumbers:{ $each: incomingNumbers },
+      previousAgents:   { $each: newAgents },
+      phoneRevealLog:   { $each: duplicate.phoneRevealLog   || [] },
+      mergedFrom:       duplicate._id,
+      activityTimeline: {
+        action:      "merged",
+        performedBy: actorId,
+        role:        "system",
+        timestamp:   now,
+        note:        mergeNote,
+      },
+    },
+    $inc: { phoneRevealCount: duplicate.phoneRevealCount || 0 },
+  });
+
+  // Soft-close the duplicate
+  await Lead.findByIdAndUpdate(duplicate._id, {
+    $set: {
+      isClosed:    true,
+      closeReason: mergeNote,
+      closedAt:    now,
+      closedBy:    actorId,
+      mergedInto:  primary._id,
+    },
+    $push: {
+      activityTimeline: {
+        action:      "merged",
+        performedBy: actorId,
+        role:        "system",
+        timestamp:   now,
+        note:        `This lead was merged into "${primary.name}" (${primary.mobile})`,
+      },
+    },
+  });
+}
+
 // ── POST /lead/:id/additional-numbers ─────────────────────────────────────────
 // Add an alternate number to a lead.  Works for both user & admin tokens.
+// AUTO-MERGE: if the added number is the primary number of another lead in the
+// same company, the two leads are automatically merged and the response includes
+// { merged: true, mergedLeadId }.
 const addAdditionalNumber = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1067,26 +1140,97 @@ const addAdditionalNumber = async (req, res) => {
     if (!number || !String(number).trim()) {
       return res.status(400).json({ message: "number is required" });
     }
-    const addedBy = req.user?._id || req.admin?._id || null;
-    const companyId =
-      req.user?.company || req.admin?.company?._id || req.admin?.company || null;
+    const actorId   = req.user?._id   || req.admin?._id   || null;
+    const companyId = req.user?.company || req.admin?.company?._id || req.admin?.company || null;
 
     const lead = await Lead.findOne({ _id: id, ...(companyId ? { company: companyId } : {}) });
     if (!lead) return res.status(404).json({ message: "Lead not found" });
 
-    // Prevent duplicates
+    // Normalize the incoming number (last 10 digits)
+    const normalizedIncoming = String(number).replace(/\D/g, "").slice(-10);
+
+    // Prevent adding own primary number
+    const ownNorm = String(lead.mobile).replace(/\D/g, "").slice(-10);
+    if (normalizedIncoming === ownNorm) {
+      return res.status(409).json({ message: "This is already the primary number of this lead" });
+    }
+
+    // Prevent duplicate additional number on same lead
     const already = lead.additionalNumbers.some(
-      n => String(n.number).replace(/\s/g, "") === String(number).trim().replace(/\s/g, "")
+      n => String(n.number).replace(/\D/g, "").slice(-10) === normalizedIncoming
     );
     if (already) return res.status(409).json({ message: "Number already linked to this lead" });
 
-    lead.additionalNumbers.push({ number: String(number).trim(), label, addedBy });
+    // ── AUTO-MERGE CHECK ──────────────────────────────────────────────────────
+    // Look for another lead in the same company whose primary normalizedPhone
+    // matches the number being added. If found, merge it in.
+    const duplicateLead = companyId
+      ? await Lead.findOne({
+          company:         companyId,
+          normalizedPhone: normalizedIncoming,
+          _id:             { $ne: id },
+          isClosed:        { $ne: true },
+        })
+      : null;
+
+    if (duplicateLead) {
+      await performMerge(lead, duplicateLead, actorId);
+      const updatedLead = await Lead.findById(lead._id)
+        .populate("user", "name email")
+        .populate("previousAgents", "name email");
+      return res.json({
+        success:       true,
+        merged:        true,
+        mergedLeadId:  String(duplicateLead._id),
+        mergedLeadName: duplicateLead.name,
+        additionalNumbers: updatedLead.additionalNumbers,
+        lead: updatedLead,
+      });
+    }
+
+    // ── No duplicate — just add the number normally ───────────────────────────
+    lead.additionalNumbers.push({ number: String(number).trim(), label, addedBy: actorId });
     await lead.save();
 
-    return res.json({ success: true, additionalNumbers: lead.additionalNumbers });
+    return res.json({ success: true, merged: false, additionalNumbers: lead.additionalNumbers });
   } catch (err) {
     console.error("[addAdditionalNumber]", err.message);
     return res.status(500).json({ message: err.message });
+  }
+};
+
+// ── POST /lead/admin/:id/merge/:duplicateId ───────────────────────────────────
+// Manual merge: admin explicitly merges duplicateId INTO :id (the keeper).
+const mergeLeads = async (req, res) => {
+  try {
+    const { id, duplicateId } = req.params;
+    if (id === duplicateId) return res.status(400).json({ message: "Cannot merge a lead into itself" });
+
+    const companyId = getCompanyId(req);
+    const q = companyId ? { company: companyId } : {};
+
+    const [primary, duplicate] = await Promise.all([
+      Lead.findOne({ _id: id,          ...q }),
+      Lead.findOne({ _id: duplicateId, ...q }),
+    ]);
+    if (!primary)   return res.status(404).json({ message: "Primary lead not found" });
+    if (!duplicate) return res.status(404).json({ message: "Duplicate lead not found" });
+    if (duplicate.isClosed) return res.status(409).json({ message: "Duplicate lead is already closed/merged" });
+
+    const actorId = req.admin?._id || req.superAdmin?._id || null;
+    await performMerge(primary, duplicate, actorId);
+
+    const updatedPrimary = await Lead.findById(primary._id)
+      .populate("user", "name email")
+      .populate("previousAgents", "name email");
+
+    return res.status(200).json({
+      success:      true,
+      lead:         updatedPrimary,
+      mergedLeadId: String(duplicate._id),
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 };
 
@@ -1183,6 +1327,7 @@ module.exports = {
   adminUpdateLead,
   adminDeleteLead,
   closeLeadWrongEntry,
+  mergeLeads,
   getMyLeads,
   updateLeadEmail,
   bulkUpdateEmails,
