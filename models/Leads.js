@@ -127,6 +127,19 @@ const leadSchema = mongoose.Schema(
       default: [],
     },
 
+    // ── Lead merge tracking ───────────────────────────────────────────────────
+    // mergedInto: set on the DUPLICATE lead — points to the surviving lead
+    mergedInto: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref:  "Lead",
+      default: null,
+    },
+    // mergedFrom: array on the SURVIVING lead — lists all duplicates absorbed
+    mergedFrom: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Lead" }],
+      default: [],
+    },
+
     // ── Close Lead (wrong entry) ──────────────────────────────────────────────
     isClosed: {
       type:    Boolean,
