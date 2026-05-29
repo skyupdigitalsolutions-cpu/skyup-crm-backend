@@ -38,6 +38,7 @@ const googleWebhookRoute   = require('./routes/googleWebhook');
 const websiteConfigRoute  = require('./routes/websiteConfig');
 const websiteWebhookRoute = require('./routes/websiteWebhook');
 
+const projectRoute         = require('./routes/projectRoute');
 const attendanceRoute      = require('./routes/attendanceRoute');
 const emailCampaignRoute   = require('./routes/emailCampaign');
 const emailHistoryRoute    = require('./routes/emailHistory');
@@ -207,6 +208,7 @@ app.use('/api/developer',         developerRoutes);
 app.use('/api/admin',             adminRoute);
 app.use('/api/auth',              authRoute);
 app.use('/api/lead',              leadRoute);
+app.use('/api/project',           projectRoute);
 app.use('/api/attendance',        attendanceRoute);
 app.use('/api/razorpay',          razorpayRoute);
 app.use('/api/google-ads-config', googleAdsConfigRoute);
