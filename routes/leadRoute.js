@@ -9,6 +9,7 @@ const {
   markNotInterested,
   deleteLead, adminUpdateLead, adminDeleteLead,
   closeLeadWrongEntry,
+  mergeLeads,
   getMyLeads,
   updateLeadEmail, bulkUpdateEmails,
   adminGetAllLeads,
@@ -72,6 +73,10 @@ router.put("/:id",            protect,           updateLead);
 
 // ── Close lead as wrong entry (admin only — no delete, just close + remark) ──
 router.patch("/admin/:id/close-wrong-entry", protectAdmin, closeLeadWrongEntry);
+
+// ── Manual lead merge (admin only) ───────────────────────────────────────────
+// Merges duplicateId INTO :id — :id is the keeper, duplicateId is soft-deleted.
+router.post("/admin/:id/merge/:duplicateId", protectAdmin, mergeLeads);
 
 // ── Additional / alternate phone numbers ─────────────────────────────────────
 router.post("/:id/additional-numbers",            protect,      addAdditionalNumber);
