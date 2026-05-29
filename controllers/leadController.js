@@ -511,7 +511,7 @@ const adminUpdateLead = async (req, res) => {
     // Capture old assignee before update so we can detect a reassignment
     const previousUserId = lead.user ? String(lead.user) : null;
 
-    const { company, user, leadgenId, ...safeBody } = req.body;
+    const { company, user, leadgenId, reassignReason, ...safeBody } = req.body;
 
     // ── NEW: allow admin to manually reassign by passing `user` in body ──────
     // The old code stripped `user` from safeBody, preventing reassignment from
@@ -521,6 +521,18 @@ const adminUpdateLead = async (req, res) => {
     if (user && String(user) !== previousUserId) {
       updatePayload.user = user;
       newUserId = String(user);
+    }
+
+    // ── Record reassign reason in activityTimeline ────────────────────────────
+    if (newUserId && reassignReason) {
+      if (!updatePayload.$push) updatePayload.$push = {};
+      updatePayload.$push.activityTimeline = {
+        action:      "reassigned",
+        performedBy: req.admin?._id || req.superAdmin?._id || null,
+        role:        req.admin ? "admin" : "superadmin",
+        timestamp:   new Date(),
+        note:        reassignReason.trim(),
+      };
     }
 
     const updatedLead = await Lead.findByIdAndUpdate(id, updatePayload, {
@@ -1046,6 +1058,113 @@ const getFollowUpAlerts = async (req, res) => {
   }
 };
 
+// ── POST /lead/:id/additional-numbers ─────────────────────────────────────────
+// Add an alternate number to a lead.  Works for both user & admin tokens.
+const addAdditionalNumber = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { number, label = "" } = req.body;
+    if (!number || !String(number).trim()) {
+      return res.status(400).json({ message: "number is required" });
+    }
+    const addedBy = req.user?._id || req.admin?._id || null;
+    const companyId =
+      req.user?.company || req.admin?.company?._id || req.admin?.company || null;
+
+    const lead = await Lead.findOne({ _id: id, ...(companyId ? { company: companyId } : {}) });
+    if (!lead) return res.status(404).json({ message: "Lead not found" });
+
+    // Prevent duplicates
+    const already = lead.additionalNumbers.some(
+      n => String(n.number).replace(/\s/g, "") === String(number).trim().replace(/\s/g, "")
+    );
+    if (already) return res.status(409).json({ message: "Number already linked to this lead" });
+
+    lead.additionalNumbers.push({ number: String(number).trim(), label, addedBy });
+    await lead.save();
+
+    return res.json({ success: true, additionalNumbers: lead.additionalNumbers });
+  } catch (err) {
+    console.error("[addAdditionalNumber]", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ── DELETE /lead/:id/additional-numbers/:index ────────────────────────────────
+// Remove an alternate number by its array index.
+const removeAdditionalNumber = async (req, res) => {
+  try {
+    const { id, index } = req.params;
+    const idx = parseInt(index, 10);
+    const companyId =
+      req.user?.company || req.admin?.company?._id || req.admin?.company || null;
+
+    const lead = await Lead.findOne({ _id: id, ...(companyId ? { company: companyId } : {}) });
+    if (!lead) return res.status(404).json({ message: "Lead not found" });
+
+    if (isNaN(idx) || idx < 0 || idx >= lead.additionalNumbers.length) {
+      return res.status(400).json({ message: "Invalid index" });
+    }
+
+    lead.additionalNumbers.splice(idx, 1);
+    await lead.save();
+
+    return res.json({ success: true, additionalNumbers: lead.additionalNumbers });
+  } catch (err) {
+    console.error("[removeAdditionalNumber]", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ── PATCH /lead/admin/:id/close-wrong-entry ───────────────────────────────────
+// Admin closes a lead as a wrong entry. Stores the remark, marks isClosed=true,
+// and appends an activityTimeline event. Does NOT delete the document — the
+// record is kept for audit purposes and filtered out of normal views.
+const closeLeadWrongEntry = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({ message: "A reason/remark is required to close this lead." });
+    }
+
+    const companyId = getCompanyId(req);
+    const leadQuery = companyId ? { _id: id, company: companyId } : { _id: id };
+    const lead = await Lead.findOne(leadQuery);
+    if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
+    if (lead.isClosed) return res.status(409).json({ message: "Lead is already closed." });
+
+    const actorId   = req.admin?._id || req.superAdmin?._id || null;
+    const actorRole = req.admin ? "admin" : "superadmin";
+
+    const updatedLead = await Lead.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          isClosed:    true,
+          closeReason: String(reason).trim(),
+          closedAt:    new Date(),
+          closedBy:    actorId,
+        },
+        $push: {
+          activityTimeline: {
+            action:      "closed_wrong_entry",
+            performedBy: actorId,
+            role:        actorRole,
+            timestamp:   new Date(),
+            note:        String(reason).trim(),
+          },
+        },
+      },
+      { new: true }
+    ).populate("user", "name email");
+
+    return res.status(200).json({ success: true, lead: updatedLead });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getLead,
   getLeads,
@@ -1063,6 +1182,7 @@ module.exports = {
   deleteLead,
   adminUpdateLead,
   adminDeleteLead,
+  closeLeadWrongEntry,
   getMyLeads,
   updateLeadEmail,
   bulkUpdateEmails,
@@ -1071,4 +1191,6 @@ module.exports = {
   logPhoneReveal,
   getFollowUpAlerts,
   autoSendTemplates,
+  addAdditionalNumber,
+  removeAdditionalNumber,
 };
