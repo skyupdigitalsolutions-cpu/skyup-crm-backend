@@ -8,12 +8,15 @@ const {
   updateLead, patchLead, patchLeadTemperature,
   markNotInterested,
   deleteLead, adminUpdateLead, adminDeleteLead,
+  closeLeadWrongEntry,
   getMyLeads,
   updateLeadEmail, bulkUpdateEmails,
   adminGetAllLeads,
   checkDuplicate,
   logPhoneReveal,
   getFollowUpAlerts,
+  addAdditionalNumber,
+  removeAdditionalNumber,
 } = require("../controllers/leadController");
 
 const { protect }           = require("../middlewares/authMiddleware");
@@ -66,6 +69,15 @@ router.patch("/:id",                protect, patchLead);
 router.put("/admin/:id",      protectAdmin,      adminUpdateLead);
 router.put("/superadmin/:id", protectSuperAdmin, adminUpdateLead);
 router.put("/:id",            protect,           updateLead);
+
+// ── Close lead as wrong entry (admin only — no delete, just close + remark) ──
+router.patch("/admin/:id/close-wrong-entry", protectAdmin, closeLeadWrongEntry);
+
+// ── Additional / alternate phone numbers ─────────────────────────────────────
+router.post("/:id/additional-numbers",            protect,      addAdditionalNumber);
+router.post("/admin/:id/additional-numbers",      protectAdmin, addAdditionalNumber);
+router.delete("/:id/additional-numbers/:index",         protect,      removeAdditionalNumber);
+router.delete("/admin/:id/additional-numbers/:index",   protectAdmin, removeAdditionalNumber);
 
 // ── DELETE ────────────────────────────────────────────────────────────────────
 router.delete("/admin/:id",      protectAdmin,      adminDeleteLead);
