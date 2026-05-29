@@ -159,6 +159,12 @@ const leadSchema = mongoose.Schema(
       default: null,
     },
 
+    // ── Projects assigned to this lead ───────────────────────────────────────
+    projects: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Project" }],
+      default: [],
+    },
+
     // ── Saanvi Voicebot fields ────────────────────────────────────────────────
     voiceBotSummary:    { type: String,  default: "" },
     voiceBotScore:      { type: Number,  default: null },
