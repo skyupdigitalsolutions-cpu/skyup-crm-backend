@@ -114,6 +114,38 @@ const leadSchema = mongoose.Schema(
     },
     phoneRevealCount: { type: Number, default: 0 },
 
+    // ── Additional / alternate phone numbers linked to this lead ─────────────
+    additionalNumbers: {
+      type: [
+        {
+          number:    { type: String, required: true, trim: true },
+          label:     { type: String, default: "" },   // e.g. "WhatsApp", "Office"
+          addedBy:   { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+          addedAt:   { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
+
+    // ── Close Lead (wrong entry) ──────────────────────────────────────────────
+    isClosed: {
+      type:    Boolean,
+      default: false,
+    },
+    closeReason: {
+      type:    String,
+      default: "",
+      trim:    true,
+    },
+    closedAt: {
+      type:    Date,
+      default: null,
+    },
+    closedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+
     // ── Saanvi Voicebot fields ────────────────────────────────────────────────
     voiceBotSummary:    { type: String,  default: "" },
     voiceBotScore:      { type: Number,  default: null },
