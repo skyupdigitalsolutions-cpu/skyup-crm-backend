@@ -3,7 +3,7 @@ const Lead    = require("../models/Leads");
 const User    = require("../models/Users");
 const Company = require("../models/Company");
 const { computeQuality } = require("../utils/qualityHelper");
-const { sendNewLeadNotification, sendReassignedLeadNotification } = require('../services/fcmService');
+const { sendNewLeadNotification, sendReassignedLeadNotification, notifySuperAdminReassignment } = require('../services/fcmService');
 
 // ── UPDATED: Resolve companyId from req — prefers req.companyId (companyIsolation middleware)
 //    then falls back to existing req.admin / req.superAdmin / req.user patterns.
@@ -521,6 +521,9 @@ const adminUpdateLead = async (req, res) => {
     if (user && String(user) !== previousUserId) {
       updatePayload.user = user;
       newUserId = String(user);
+      // Reset no-action alert flags — clock restarts for the new employee
+      updatePayload.noActionAlert1hSentAt = null;
+      updatePayload.noActionAlert2hSentAt = null;
     }
 
     // ── Record reassign reason in activityTimeline ────────────────────────────
@@ -556,6 +559,20 @@ const adminUpdateLead = async (req, res) => {
       sendReassignedLeadNotification(newUserId, updatedLead).catch((e) =>
         console.error('[FCM] adminUpdateLead push error:', e.message),
       );
+
+      // ── Notify super_admin of this company about the reassignment ─────────
+      if (companyId) {
+        const fromAdminName = req.admin?.name || req.superAdmin?.name || 'Admin';
+        const toUserName    = updatedLead.user?.name || 'Employee';
+        notifySuperAdminReassignment(companyId, {
+          lead:          updatedLead,
+          fromAdminName,
+          toUserName,
+          reason:        reassignReason || '',
+        }).catch((e) =>
+          console.error('[FCM] superadmin reassign notify error:', e.message),
+        );
+      }
     }
 
     return res.status(200).json(updatedLead);
