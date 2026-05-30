@@ -24,6 +24,11 @@ const adminSchema = mongoose.Schema(
     avatar:     { type: String, default: "" },
     department: { type: String, default: "" },
     isActive:   { type: Boolean, default: true },
+
+    // ── FCM push token — set by mobile/web app on login ──────────────────────
+    // Used by notifySuperAdminReassignment and sendNoActionAlert to send FCM
+    // push notifications to admin and super_admin devices.
+    fcmToken:   { type: String, default: null },
   },
   { timestamps: true }
 );
