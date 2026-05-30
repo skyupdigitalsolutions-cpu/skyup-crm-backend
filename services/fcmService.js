@@ -29,6 +29,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const User = require('../models/Users');
+const Admin = require('../models/Admin');
 
 // ── Lazy Firebase init ────────────────────────────────────────────────────────
 let _messaging  = null;
@@ -269,4 +270,228 @@ async function sendReassignedLeadNotification(userId, lead) {
   }
 }
 
-module.exports = { sendNewLeadNotification, sendReassignedLeadNotification, checkFCMHealth };
+// ─────────────────────────────────────────────────────────────────────────────
+//  notifySuperAdminReassignment(companyId, { lead, fromAdminName, toUserName, reason })
+//
+//  Called by adminUpdateLead whenever an admin manually reassigns a lead to a
+//  different employee.  Finds the super_admin of the company and notifies via:
+//    1. Socket.IO  → room  "superadmin:<superAdminId>"  (instant in-app)
+//    2. FCM push   → Admin.fcmToken  (mobile / background tab)
+// ─────────────────────────────────────────────────────────────────────────────
+async function notifySuperAdminReassignment(companyId, { lead, fromAdminName, toUserName, reason }) {
+  try {
+    // Find the super_admin for this company
+    const superAdmin = await Admin.findOne({ company: companyId, role: 'super_admin' })
+      .select('_id name fcmToken')
+      .lean();
+    if (!superAdmin) return; // No super_admin configured — silently skip
+
+    const leadName   = lead.name   || 'Lead';
+    const reasonText = reason      ? ` — Reason: ${reason}` : '';
+    const body       = `${leadName} reassigned from ${fromAdminName} to ${toUserName}${reasonText}`;
+
+    // ── 1. Socket push ────────────────────────────────────────────────────────
+    const _io = global._io;
+    if (_io) {
+      _io.to(`superadmin:${superAdmin._id}`).emit('lead_reassigned_notify', {
+        leadId:        String(lead._id),
+        leadName,
+        fromAdminName,
+        toUserName,
+        reason:        reason || '',
+        timestamp:     new Date().toISOString(),
+      });
+    }
+
+    // ── 2. FCM push ───────────────────────────────────────────────────────────
+    const messaging = getMessaging();
+    if (!messaging || !superAdmin.fcmToken) return;
+
+    await messaging.send({
+      token: superAdmin.fcmToken,
+      notification: {
+        title: '🔄 Lead Reassigned',
+        body,
+      },
+      data: {
+        type:          'lead_reassigned_notify',
+        leadId:        String(lead._id),
+        leadName,
+        fromAdminName,
+        toUserName,
+        reason:        reason || '',
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          channelId:             'new_lead_channel_v2',
+          priority:              'max',
+          defaultSound:          true,
+          defaultVibrateTimings: true,
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            alert: { title: '🔄 Lead Reassigned', body },
+            sound: 'default',
+            badge: 1,
+            'content-available': 1,
+          },
+        },
+        headers: { 'apns-priority': '10' },
+      },
+    });
+
+    console.log(`[FCM] ✅ Reassign alert sent to super_admin "${superAdmin.name}" for lead "${leadName}"`);
+  } catch (err) {
+    if (
+      err.code === 'messaging/registration-token-not-registered' ||
+      err.code === 'messaging/invalid-registration-token'
+    ) {
+      await Admin.findByIdAndUpdate(
+        (await Admin.findOne({ company: companyId, role: 'super_admin' }).select('_id').lean())?._id,
+        { $set: { fcmToken: null } }
+      ).catch(() => {});
+      console.warn('[FCM] Cleared stale FCM token for super_admin');
+    } else {
+      console.error('[FCM] notifySuperAdminReassignment error:', err.message);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  sendNoActionAlert(recipientId, recipientModel, leads)
+//
+//  Notifies an admin or superadmin that certain leads were assigned but have
+//  had zero agent interaction (empty callHistory) for more than 24 hours.
+//  recipientModel: 'Admin' (covers both admin and super_admin roles)
+// ─────────────────────────────────────────────────────────────────────────────
+async function sendNoActionAlert(recipient, leads, threshold = 'daily') {
+  try {
+    const messaging = getMessaging();
+    const count     = leads.length;
+
+    const thresholdLabel = threshold === '1h' ? '1 hour' : threshold === '2h' ? '2 hours' : '24 hours';
+    const urgency        = threshold === '2h' ? '🚨' : threshold === '1h' ? '⚠️' : '⚠️';
+    const title = `${urgency} ${count} Lead${count > 1 ? 's' : ''} — No Action in ${thresholdLabel}`;
+    const body  = count === 1
+      ? `"${leads[0].name}" was assigned ${thresholdLabel} ago with no call or remark yet.`
+      : `${count} leads assigned ${thresholdLabel} ago — still no agent activity.`;
+
+    // ── Socket ────────────────────────────────────────────────────────────────
+    const _io = global._io;
+    if (_io && recipient._id) {
+      const room = recipient.role === 'super_admin'
+        ? `superadmin:${recipient._id}`
+        : `admin:${recipient._id}`;
+      _io.to(room).emit('no_action_alert', {
+        count,
+        threshold,
+        leads: leads.map(l => ({ leadId: String(l._id), leadName: l.name, assignedTo: l.user?.name || '' })),
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // ── FCM ───────────────────────────────────────────────────────────────────
+    if (!messaging || !recipient.fcmToken) return;
+    await messaging.send({
+      token: recipient.fcmToken,
+      notification: { title, body },
+      data: {
+        type:  'no_action_alert',
+        threshold,
+        count: String(count),
+        leadIds: leads.map(l => String(l._id)).join(','),
+      },
+      android: {
+        priority: 'high',
+        notification: { channelId: 'new_lead_channel_v2', priority: 'max', defaultSound: true, defaultVibrateTimings: true },
+      },
+      apns: {
+        payload: { aps: { alert: { title, body }, sound: 'default', badge: count, 'content-available': 1 } },
+        headers: { 'apns-priority': '10' },
+      },
+    });
+    console.log(`[FCM] ✅ No-action alert sent to "${recipient.name}" — ${count} lead(s)`);
+  } catch (err) {
+    if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
+      await Admin.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
+      console.warn(`[FCM] Cleared stale FCM token for admin "${recipient.name}"`);
+    } else {
+      console.error('[FCM] sendNoActionAlert error:', err.message);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  sendFollowUpAlert(recipient, leads)
+//
+//  Notifies an admin or superadmin that certain leads have overdue or
+//  today-due scheduled follow-up calls that haven't been marked done.
+// ─────────────────────────────────────────────────────────────────────────────
+async function sendFollowUpAlert(recipient, leads, type = 'due') {
+  try {
+    const messaging = getMessaging();
+    const count     = leads.length;
+    const isOverdue = type === 'overdue';
+    const title     = isOverdue
+      ? `🔴 ${count} Overdue Follow-Up${count > 1 ? 's' : ''}`
+      : `🟡 ${count} Follow-Up${count > 1 ? 's' : ''} Due Today`;
+    const body = count === 1
+      ? `"${leads[0].name}" — ${isOverdue ? 'overdue follow-up missed' : 'follow-up due today'}.`
+      : `${count} leads need follow-up ${isOverdue ? '(overdue)' : 'today'}.`;
+
+    // ── Socket ────────────────────────────────────────────────────────────────
+    const _io = global._io;
+    if (_io && recipient._id) {
+      const room = recipient.role === 'super_admin'
+        ? `superadmin:${recipient._id}`
+        : `admin:${recipient._id}`;
+      _io.to(room).emit('follow_up_alert', {
+        type,
+        count,
+        leads: leads.map(l => ({ leadId: String(l._id), leadName: l.name })),
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // ── FCM ───────────────────────────────────────────────────────────────────
+    if (!messaging || !recipient.fcmToken) return;
+    await messaging.send({
+      token: recipient.fcmToken,
+      notification: { title, body },
+      data: {
+        type:    'follow_up_alert',
+        subType: type,
+        count:   String(count),
+        leadIds: leads.map(l => String(l._id)).join(','),
+      },
+      android: {
+        priority: 'high',
+        notification: { channelId: 'new_lead_channel_v2', priority: 'max', defaultSound: true, defaultVibrateTimings: true },
+      },
+      apns: {
+        payload: { aps: { alert: { title, body }, sound: 'default', badge: count, 'content-available': 1 } },
+        headers: { 'apns-priority': '10' },
+      },
+    });
+    console.log(`[FCM] ✅ Follow-up alert (${type}) sent to "${recipient.name}" — ${count} lead(s)`);
+  } catch (err) {
+    if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
+      await Admin.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
+      console.warn(`[FCM] Cleared stale FCM token for admin "${recipient.name}"`);
+    } else {
+      console.error('[FCM] sendFollowUpAlert error:', err.message);
+    }
+  }
+}
+
+module.exports = {
+  sendNewLeadNotification,
+  sendReassignedLeadNotification,
+  notifySuperAdminReassignment,
+  sendNoActionAlert,
+  sendFollowUpAlert,
+  checkFCMHealth,
+};
