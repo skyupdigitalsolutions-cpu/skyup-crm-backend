@@ -12,18 +12,44 @@ const getAllConfigs = async (req, res) => {
       .select("-pageAccessToken")
       .lean();
 
-    // Attach live lead counts for each campaign
+    // Attach live lead counts for each campaign config.
+    //
+    // BUG FIX: Ad-set configs were always showing 0 leads because the count
+    // query only matched `campaign: cfg.campaignName`.  When the Meta webhook
+    // fires it saves the lead with `campaign` = the campaignName of whichever
+    // MetaConfig *matched* the incoming formId.  For synced configs that
+    // campaignName is the composite "ParentCampaign › AdSetName" string; for
+    // manually-created configs it is whatever the user typed.
+    //
+    // To handle both cases we build a $or query that also accepts:
+    //   1. The composite "parentCampaignName › adSetName" form (sync path).
+    //   2. An exact adSetName match (catch-all / manual path).
+    // This guarantees every config finds its own leads regardless of which
+    // naming convention was used when the lead was stored.
     const enriched = await Promise.all(
       configs.map(async (cfg) => {
-        const leadCount = await Lead.countDocuments({
+        // Always include the stored campaignName itself.
+        const campaignMatchers = [cfg.campaignName];
+
+        // If parentCampaignName & adSetName are both set, also try the
+        // canonical composite form in case campaignName was saved differently.
+        if (cfg.parentCampaignName && cfg.adSetName) {
+          const composite = `${cfg.parentCampaignName} › ${cfg.adSetName}`;
+          if (composite !== cfg.campaignName) campaignMatchers.push(composite);
+
+          // Also try the plain adSetName in case an old record used just that.
+          campaignMatchers.push(cfg.adSetName);
+        }
+
+        const baseQuery = {
           company:  companyId,
-          campaign: cfg.campaignName,
-        });
-        const convertedCount = await Lead.countDocuments({
-          company:  companyId,
-          campaign: cfg.campaignName,
-          status:   "Converted",
-        });
+          campaign: campaignMatchers.length === 1
+            ? campaignMatchers[0]
+            : { $in: campaignMatchers },
+        };
+
+        const leadCount      = await Lead.countDocuments(baseQuery);
+        const convertedCount = await Lead.countDocuments({ ...baseQuery, status: "Converted" });
         return { ...cfg, leads: leadCount, converted: convertedCount };
       })
     );
