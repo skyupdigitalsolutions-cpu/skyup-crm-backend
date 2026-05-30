@@ -92,6 +92,12 @@ async function getDailyReport({ company, date, userId, campaign, status } = {}) 
           _id: 1, name: 1, mobile: 1, source: 1, campaign: 1,
           status: 1, date: 1, remark: 1, temperature: 1,
           user: 1, callHistory: 1, scheduledCalls: 1,
+          // ── Virtual-status resolution fields ────────────────────────────
+          isClosed:    1,
+          mergedInto:  1,
+          closeReason: 1,
+          // ── Project membership ────────────────────────────────────────
+          projects:    1,
           assignedUserName: { $arrayElemAt: ['$userInfo.name', 0] },
         },
       },
@@ -142,6 +148,9 @@ async function getDailyReport({ company, date, userId, campaign, status } = {}) 
   const newLeads      = todayLeads.filter(l => l.status === 'New').length;
   const contacted     = todayLeads.filter(l => l.status !== 'New').length;
   const unassigned    = todayLeads.filter(l => !l.user).length;
+  // Virtual status counts
+  const merged        = todayLeads.filter(l => !!l.mergedInto).length;
+  const closed        = todayLeads.filter(l => l.isClosed && !l.mergedInto).length;
 
   const prevData      = prevLeads[0] || { total: 0, converted: 0 };
   const trendTotal    = total - prevData.total;
@@ -244,6 +253,8 @@ async function getDailyReport({ company, date, userId, campaign, status } = {}) 
       contacted, unassigned, convRate,
       trendTotal, trendConverted,
       callsMadeToday: callsMadeToday.length,
+      merged,   // virtual: leads with mergedInto set
+      closed,   // virtual: leads with isClosed=true and no mergedInto
     },
     leads:      todayLeads,
     sources,
