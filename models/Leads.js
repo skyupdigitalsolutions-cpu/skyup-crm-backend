@@ -1,4 +1,4 @@
-// models/Leads.js — UPDATED (added assignedAdmin + activityTimeline; all existing fields unchanged)
+// models/Leads.js — MERGED (all fields from both versions)
 const mongoose = require("mongoose");
 const { normalizePhone } = require("../utils/normalizePhone");
 
@@ -57,14 +57,14 @@ const leadSchema = mongoose.Schema(
       required: true,
     },
 
-    // ── NEW: Admin who owns / manages this lead ───────────────────────────────
+    // ── Admin who owns / manages this lead ───────────────────────────────────
     assignedAdmin: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Admin",
       default: null,
     },
 
-    // ── NEW: Full audit trail of every action on this lead ────────────────────
+    // ── Full audit trail of every action on this lead ─────────────────────────
     activityTimeline: [
       {
         action:      { type: String },
@@ -105,7 +105,7 @@ const leadSchema = mongoose.Schema(
 
     // ── Phone reveal tracking ────────────────────────────────────────────────
     phoneRevealLog: {
-      type: [{ 
+      type: [{
         userId:     { type: mongoose.Schema.Types.ObjectId, ref: "User" },
         userName:   { type: String, default: "" },
         revealedAt: { type: Date, default: Date.now },
@@ -118,14 +118,20 @@ const leadSchema = mongoose.Schema(
     additionalNumbers: {
       type: [
         {
-          number:    { type: String, required: true, trim: true },
-          label:     { type: String, default: "" },   // e.g. "WhatsApp", "Office"
-          addedBy:   { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-          addedAt:   { type: Date, default: Date.now },
+          number:  { type: String, required: true, trim: true },
+          label:   { type: String, default: "" },   // e.g. "WhatsApp", "Office"
+          addedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+          addedAt: { type: Date, default: Date.now },
         },
       ],
       default: [],
     },
+
+    // ── No-action alert tracking (prevents duplicate alerts) ─────────────────
+    // Stores timestamps of when 1-hr and 2-hr no-action alerts were sent.
+    // Once set, the job skips this lead for that threshold permanently.
+    noActionAlert1hSentAt: { type: Date, default: null },
+    noActionAlert2hSentAt: { type: Date, default: null },
 
     // ── Lead merge tracking ───────────────────────────────────────────────────
     // mergedInto: set on the DUPLICATE lead — points to the surviving lead
