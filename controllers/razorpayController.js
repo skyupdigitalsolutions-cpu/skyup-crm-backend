@@ -150,7 +150,6 @@ const verifyPayment = async (req, res) => {
     // If company still has a future expiry, extend FROM that date (not today).
     // This ensures early renewals don't lose any remaining days.
     const company = await Company.findById(companyId).select('subscriptionExpiry subscriptionStatus');
-    const now = new Date();
     const currentExpiry = company?.subscriptionExpiry ? new Date(company.subscriptionExpiry) : null;
     const baseDate = (currentExpiry && currentExpiry > now) ? currentExpiry : now;
 
