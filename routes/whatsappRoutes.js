@@ -43,8 +43,9 @@ router.patch("/conversations/:id/close",                adminProtect, closeConve
 
 // ─── Sending messages ─────────────────────────────────────────────────────────
 // protectAny — employees need to send text replies within an open 24h session
+// protectAny — employees also need to send templates to re-engage expired sessions
 router.post("/send",               protectAny, sendMessage);
-router.post("/send-template",      adminProtect, sendTemplate);
+router.post("/send-template",      protectAny, sendTemplate);
 
 // ─── Look up conversation by lead ID (employee chat) ─────────────────────────
 router.get("/conversation-by-lead/:leadId", protectAny, getConversationByLead);
