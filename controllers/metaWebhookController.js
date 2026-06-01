@@ -1,5 +1,6 @@
 // controllers/metaWebhookController.js
 const MetaConfig         = require("../models/MetaConfig");
+const MetaQualification  = require("../models/MetaQualification");
 const Lead               = require("../models/Leads");
 const { notifyTelegram } = require("../utils/telegramNotifier");
 const { normalizePhone } = require("../utils/normalizePhone");
@@ -158,6 +159,73 @@ const receiveWebhook = async (req, res) => {
         const parsedFields   = parseFieldData(leadData.field_data);
         const assignedUserId = await getNextAssignedUser(config);
         const leadPayload    = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
+
+        // ── Qualification scoring ─────────────────────────────────────────────
+        // If this ad set has qualification rules configured, score the lead now
+        // so it arrives in the CRM already categorised as Hot / Warm / Cold.
+        try {
+          const qualification = await MetaQualification.findOne({
+            adSetConfig: config._id,
+            company:     config.company,
+          }).lean();
+
+          if (qualification && qualification.rules && qualification.rules.length > 0) {
+            // Calculate max possible score
+            const maxScore = qualification.rules.reduce((sum, rule) => {
+              const best = Math.max(...rule.answers.map((a) => a.score || 0), 0);
+              return sum + best;
+            }, 0);
+
+            // Calculate actual score by matching submitted answers to rules
+            let totalScore = 0;
+            const breakdown = [];
+
+            for (const rule of qualification.rules) {
+              // Try to find the submitted answer for this question
+              const submittedValue =
+                parsedFields[rule.questionKey] ||
+                parsedFields[rule.questionKey.toLowerCase().replace(/\s+/g, "_")] ||
+                "";
+
+              // Find the matching answer option (case-insensitive)
+              const matchedAnswer = rule.answers.find(
+                (a) => a.value.trim().toLowerCase() === String(submittedValue).trim().toLowerCase()
+              );
+
+              const awarded = matchedAnswer?.score || 0;
+              totalScore += awarded;
+
+              breakdown.push({
+                question: rule.questionLabel || rule.questionKey,
+                answer:   submittedValue || "(no answer)",
+                score:    awarded,
+              });
+            }
+
+            // Derive category from percentage thresholds
+            const pct  = maxScore > 0 ? (totalScore / maxScore) * 100 : 0;
+            const hot  = qualification.thresholds?.hot  ?? 70;
+            const warm = qualification.thresholds?.warm ?? 40;
+
+            let category;
+            if (pct >= hot)  category = "Hot";
+            else if (pct >= warm) category = "Warm";
+            else category = "Cold";
+
+            // Override the temperature that qualityHelper already set
+            leadPayload.temperature          = category;
+            leadPayload.leadScore            = totalScore;
+            leadPayload.leadCategory         = category;
+            leadPayload.qualificationBreakdown = breakdown;
+
+            console.log(
+              `   🎯 Qualification: score=${totalScore}/${maxScore} (${pct.toFixed(0)}%) → ${category}`
+            );
+          }
+        } catch (qualErr) {
+          // Never let scoring failure block lead creation
+          console.error("   ⚠️  Qualification scoring error (non-fatal):", qualErr.message);
+        }
 
         // ── Phone-based dedup ─────────────────────────────────────────────────
         const normPhone = normalizePhone(leadPayload.mobile);

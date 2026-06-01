@@ -9,10 +9,12 @@ const {
   deleteConfig,
 } = require("../controllers/metaConfigController");
 const { syncFromMeta } = require("../controllers/metaSyncController");
+const { getFormQuestions } = require("../controllers/metaQualificationController");
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 
 // All routes protected — company is derived from req.admin inside the controller
 router.get("/", protectAdmin, getAllConfigs);
+router.get("/:adSetId/form-questions", protectAdmin, getFormQuestions); // ← Qualification: fetch Meta form questions
 router.get("/:id", protectAdmin, getConfigById);
 router.post("/sync", protectAdmin, syncFromMeta);   // ← FIX: Auto-Sync from Meta
 router.post("/", protectAdmin, addConfig);

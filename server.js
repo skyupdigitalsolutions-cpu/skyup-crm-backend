@@ -24,8 +24,9 @@ const subscriptionRoute = require('./routes/subscriptionRoute');
 const chatRoutes = require('./routes/chatRoutes');
 
 // ── Meta Routes ───────────────────────────────────────────────────────────────
-const metaWebhookRoute = require('./routes/metaWebhook');
-const metaConfigRoute  = require('./routes/metaConfig');
+const metaWebhookRoute      = require('./routes/metaWebhook');
+const metaConfigRoute       = require('./routes/metaConfig');
+const metaQualificationRoute = require('./routes/metaQualification');
 
 // ── Razorpay Routes ───────────────────────────────────────────────────────────
 const razorpayRoute = require('./routes/razorpayRoute');
@@ -202,7 +203,8 @@ app.use('/website-webhook', (req, res, next) => {
 }, websiteWebhookRoute);
 
 // ── API Routes ────────────────────────────────────────────────────────────────
-app.use('/api/meta-config',       metaConfigRoute);
+app.use('/api/meta-config',         metaConfigRoute);
+app.use('/api/meta-qualification',  metaQualificationRoute);
 app.use('/api/superadmin',        superAdminRoute);
 app.use('/api/developer',         developerRoutes);
 app.use('/api/admin',             adminRoute);
