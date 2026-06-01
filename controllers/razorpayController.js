@@ -138,7 +138,7 @@ const verifyPayment = async (req, res) => {
       status: "paid",
     });
 
-    // ── Upgrade company plan ─────────────────────────────────────────────────
+    // ── Upgrade / Renew company plan + extend expiry ─────────────────────────
     // Map plan IDs to Company model enum values
     const planEnumMap = {
       starter: "basic",
@@ -146,8 +146,26 @@ const verifyPayment = async (req, res) => {
       enterprise: "enterprise",
     };
 
+    // Determine new expiry:
+    // If company still has a future expiry, extend FROM that date (not today).
+    // This ensures early renewals don't lose any remaining days.
+    const company = await Company.findById(companyId).select('subscriptionExpiry subscriptionStatus');
+    const now = new Date();
+    const currentExpiry = company?.subscriptionExpiry ? new Date(company.subscriptionExpiry) : null;
+    const baseDate = (currentExpiry && currentExpiry > now) ? currentExpiry : now;
+
+    const newExpiry = new Date(baseDate);
+    if (billing === 'yearly') {
+      newExpiry.setFullYear(newExpiry.getFullYear() + 1);
+    } else {
+      newExpiry.setMonth(newExpiry.getMonth() + 1);
+    }
+
     await Company.findByIdAndUpdate(companyId, {
-      plan: planEnumMap[planId] || "basic",
+      plan: planEnumMap[planId] || 'basic',
+      subscriptionStatus: 'active',
+      subscriptionExpiry: newExpiry,
+      isActive: true,
     });
 
     return res.status(200).json({
@@ -157,6 +175,7 @@ const verifyPayment = async (req, res) => {
       planName: plan.name,
       amount: amountPaid,
       billing,
+      newExpiry: newExpiry,
     });
   } catch (err) {
     console.error("[Razorpay] verify-payment error:", err);

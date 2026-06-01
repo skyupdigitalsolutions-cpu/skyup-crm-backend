@@ -214,8 +214,12 @@ const activateSubscription = async (req, res) => {
     if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
 
     const months = Math.max(1, parseInt(durationMonths || (billing === 'yearly' ? 12 : 1), 10));
-    // Calendar-accurate: same day next N months
-    const expiry = new Date();
+    // Calendar-accurate: extend from existing expiry if it is still in the future,
+    // so early renewals do not lose remaining days.
+    const now = new Date();
+    const currentExpiry = company.subscriptionExpiry ? new Date(company.subscriptionExpiry) : null;
+    const baseDate = (currentExpiry && currentExpiry > now) ? currentExpiry : now;
+    const expiry = new Date(baseDate);
     expiry.setMonth(expiry.getMonth() + months);
 
     company.plan               = plan;
