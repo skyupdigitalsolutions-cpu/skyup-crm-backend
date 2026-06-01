@@ -1,54 +1,45 @@
 // models/MetaQualification.js
-// Stores lead qualification rules for a specific Meta Ad Set (MetaConfig).
-// One document per MetaConfig._id.
+// Stores lead-qualification scoring rules for one Meta Ad Set config.
 const mongoose = require("mongoose");
 
 const answerScoreSchema = new mongoose.Schema(
   {
-    value: { type: String, default: "" },  // the answer text
-    score: { type: Number, default: 0 },   // points awarded if answer matches
+    value: { type: String, default: "" },  // answer text from the Meta form
+    score: { type: Number, default: 0 },   // points awarded when this answer is chosen
   },
   { _id: false }
 );
 
 const questionRuleSchema = new mongoose.Schema(
   {
-    questionKey:   { type: String, required: true }, // field key from Meta form
-    questionLabel: { type: String, default: "" },    // human-readable label
-    answers:       { type: [answerScoreSchema], default: [] },
+    questionKey:   { type: String, required: true }, // field_key from Meta lead-form
+    questionLabel: { type: String, default: "" },    // human-readable label shown in UI
+    answers:       [answerScoreSchema],
   },
   { _id: false }
 );
 
 const metaQualificationSchema = new mongoose.Schema(
   {
-    // The MetaConfig (ad set) this ruleset belongs to
-    adSetConfig: {
+    adSetId: {
       type:     mongoose.Schema.Types.ObjectId,
       ref:      "MetaConfig",
       required: true,
-      unique:   true,   // one qualification ruleset per ad set
+      unique:   true,   // one rule-set per ad set
     },
-
     adSetName: { type: String, default: "" },
     formId:    { type: String, default: "" },
-
     company: {
       type:     mongoose.Schema.Types.ObjectId,
       ref:      "Company",
       required: true,
     },
-
     // Per-question scoring rules
-    rules: { type: [questionRuleSchema], default: [] },
-
-    // Hot/Warm percentage thresholds (0-100)
-    // Score >= hot%   → Hot
-    // Score >= warm%  → Warm
-    // Score <  warm%  → Cold
+    rules: [questionRuleSchema],
+    // Percentage thresholds: score% >= hot → Hot, >= warm → Warm, else → Cold
     thresholds: {
-      hot:  { type: Number, default: 70, min: 0, max: 100 },
-      warm: { type: Number, default: 40, min: 0, max: 100 },
+      hot:  { type: Number, default: 70 },
+      warm: { type: Number, default: 40 },
     },
   },
   { timestamps: true }

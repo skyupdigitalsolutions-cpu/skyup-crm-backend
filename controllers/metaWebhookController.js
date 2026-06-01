@@ -5,6 +5,7 @@ const Lead               = require("../models/Leads");
 const { notifyTelegram } = require("../utils/telegramNotifier");
 const { normalizePhone } = require("../utils/normalizePhone");
 const { autoSendTemplates } = require("./leadController");
+const { scoreQualification } = require("../utils/qualificationScorer");
 const {
   fetchLeadData,
   parseFieldData,
@@ -161,70 +162,22 @@ const receiveWebhook = async (req, res) => {
         const leadPayload    = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
 
         // ── Qualification scoring ─────────────────────────────────────────────
-        // If this ad set has qualification rules configured, score the lead now
-        // so it arrives in the CRM already categorised as Hot / Warm / Cold.
+        // Look up saved rules for this ad set (config._id) and score the lead.
         try {
-          const qualification = await MetaQualification.findOne({
-            adSetConfig: config._id,
-            company:     config.company,
-          }).lean();
-
-          if (qualification && qualification.rules && qualification.rules.length > 0) {
-            // Calculate max possible score
-            const maxScore = qualification.rules.reduce((sum, rule) => {
-              const best = Math.max(...rule.answers.map((a) => a.score || 0), 0);
-              return sum + best;
-            }, 0);
-
-            // Calculate actual score by matching submitted answers to rules
-            let totalScore = 0;
-            const breakdown = [];
-
-            for (const rule of qualification.rules) {
-              // Try to find the submitted answer for this question
-              const submittedValue =
-                parsedFields[rule.questionKey] ||
-                parsedFields[rule.questionKey.toLowerCase().replace(/\s+/g, "_")] ||
-                "";
-
-              // Find the matching answer option (case-insensitive)
-              const matchedAnswer = rule.answers.find(
-                (a) => a.value.trim().toLowerCase() === String(submittedValue).trim().toLowerCase()
-              );
-
-              const awarded = matchedAnswer?.score || 0;
-              totalScore += awarded;
-
-              breakdown.push({
-                question: rule.questionLabel || rule.questionKey,
-                answer:   submittedValue || "(no answer)",
-                score:    awarded,
-              });
-            }
-
-            // Derive category from percentage thresholds
-            const pct  = maxScore > 0 ? (totalScore / maxScore) * 100 : 0;
-            const hot  = qualification.thresholds?.hot  ?? 70;
-            const warm = qualification.thresholds?.warm ?? 40;
-
-            let category;
-            if (pct >= hot)  category = "Hot";
-            else if (pct >= warm) category = "Warm";
-            else category = "Cold";
-
-            // Override the temperature that qualityHelper already set
-            leadPayload.temperature          = category;
-            leadPayload.leadScore            = totalScore;
-            leadPayload.leadCategory         = category;
-            leadPayload.qualificationBreakdown = breakdown;
-
-            console.log(
-              `   🎯 Qualification: score=${totalScore}/${maxScore} (${pct.toFixed(0)}%) → ${category}`
-            );
+          const qualDoc = await MetaQualification.findOne({ adSetId: config._id }).lean();
+          if (qualDoc && qualDoc.rules && qualDoc.rules.length > 0) {
+            const { leadScore, leadCategory, qualificationBreakdown } =
+              scoreQualification(leadData.field_data, qualDoc);
+            leadPayload.leadScore              = leadScore;
+            leadPayload.leadCategory           = leadCategory;
+            leadPayload.qualificationBreakdown = qualificationBreakdown;
+            // Also set temperature so existing UI badges reflect the category
+            if (leadCategory) leadPayload.temperature = leadCategory;
+            console.log(`   🎯 Qualification — score: ${leadScore}, category: ${leadCategory}`);
           }
         } catch (qualErr) {
-          // Never let scoring failure block lead creation
-          console.error("   ⚠️  Qualification scoring error (non-fatal):", qualErr.message);
+          // Non-fatal — lead is still saved without scoring
+          console.warn("   ⚠ Qualification scoring failed:", qualErr.message);
         }
 
         // ── Phone-based dedup ─────────────────────────────────────────────────

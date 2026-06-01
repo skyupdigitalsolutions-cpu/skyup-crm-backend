@@ -45,6 +45,22 @@ const leadSchema = mongoose.Schema(
       enum: ["Hot", "Warm", "Cold", null],
       default: null,
     },
+
+    // ── Qualification scoring (Meta Ad Set leads) ─────────────────────────────
+    leadScore: {
+      type:    Number,
+      default: null,
+    },
+    leadCategory: {
+      type:    String,
+      enum:    ["Hot", "Warm", "Cold", null],
+      default: null,
+    },
+    qualificationBreakdown: {
+      type:    Array,
+      default: [],
+    },
+
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -184,24 +200,6 @@ const leadSchema = mongoose.Schema(
     voiceBotDuration:   { type: Number,  default: null },
     voiceBotTranscript: { type: String,  default: "" },
     lastCalledByBot:    { type: Date,    default: null },
-
-    // ── Meta Ad Set qualification fields ──────────────────────────────────────
-    // Populated automatically when the lead arrives if qualification rules are
-    // configured for the matching Meta Ad Set.
-    leadScore: {
-      type:    Number,
-      default: null,
-    },
-    leadCategory: {
-      type:    String,
-      enum:    ["Hot", "Warm", "Cold", null],
-      default: null,
-    },
-    qualificationBreakdown: {
-      // Array of { question, answer, score } — one entry per scored question
-      type:    Array,
-      default: [],
-    },
   },
   { timestamps: true }
 );
