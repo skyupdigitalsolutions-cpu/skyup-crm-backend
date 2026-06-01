@@ -626,7 +626,8 @@ const getMyLeads = async (req, res) => {
         .skip(skip)
         .limit(limit)
         .populate("user", "name email")
-        .populate("previousAgents", "name email"),
+        .populate("previousAgents", "name email")
+        .populate("projects", "name color"),
       Lead.countDocuments(query),
     ]);
 
