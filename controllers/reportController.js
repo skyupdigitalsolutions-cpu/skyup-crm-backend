@@ -35,10 +35,12 @@ const dailyReport = async (req, res) => {
       report.leads = report.leads.map(l => ({
         ...l,
         mobile: maskPhone(l.mobile),
+        email:  maskEmail(l.email),
       }));
       report.followUps = report.followUps.map(f => ({
         ...f,
         mobile: maskPhone(f.mobile),
+        email:  maskEmail(f.email),
       }));
     }
 
@@ -88,6 +90,26 @@ function maskPhone(phone) {
   const s = String(phone);
   if (s.length <= 2) return '••••••••';
   return '•'.repeat(s.length - 2) + s.slice(-2);
+}
+
+function maskEmail(email) {
+  if (!email) return undefined;
+  const atIdx = email.indexOf('@');
+  if (atIdx < 0) return '•'.repeat(8);
+  const local  = email.slice(0, atIdx);
+  const domain = email.slice(atIdx + 1);
+  let maskedLocal;
+  if (local.length <= 2) {
+    maskedLocal = '•'.repeat(local.length);
+  } else {
+    const mid = Math.max(1, local.length - 4);
+    maskedLocal = local.slice(0, 2) + '•'.repeat(mid) + local.slice(-2);
+  }
+  const dotIdx = domain.lastIndexOf('.');
+  const maskedDomain = dotIdx > 0
+    ? '•'.repeat(dotIdx) + domain.slice(dotIdx)
+    : '•'.repeat(domain.length);
+  return `${maskedLocal}@${maskedDomain}`;
 }
 
 module.exports = { dailyReport, employeeReport, campaignReport };
