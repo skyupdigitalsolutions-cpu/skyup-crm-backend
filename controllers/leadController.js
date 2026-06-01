@@ -1326,6 +1326,127 @@ const closeLeadWrongEntry = async (req, res) => {
   }
 };
 
+
+// ── PATCH /api/lead/:id/cold-reassign ────────────────────────────────────────
+// Employee marks a lead Cold and triggers the same reassignment flow as
+// Not Interested:
+//   • lead temperature set to "Cold"
+//   • lead auto-reassigned round-robin to another agent (any admin, same or different)
+//   • 3 follow-up scheduled calls created (+3d, +7d, +30d)
+//   • socket + FCM push to newly assigned agent
+//   • 2nd cold-reassign: status reset to "New", no further reassignment
+const markColdReassign = async (req, res) => {
+  try {
+    const { id }    = req.params;
+    const { remark } = req.body;
+
+    if (!remark || !remark.trim())
+      return res.status(400).json({ message: "A remark/reason is required." });
+
+    const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
+    if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
+
+    const historyEntry = {
+      userId:   req.user._id,
+      userName: req.user.name || "",
+      remark:   remark.trim(),
+      outcome:  "Cold",
+      calledAt: new Date(),
+    };
+
+    const newScheduledCalls = [
+      {
+        type:        "follow-up",
+        scheduledAt: new Date(Date.now() + 3  * 24 * 60 * 60 * 1000),
+        done:        false,
+        note:        "Auto follow-up after Cold reassignment",
+      },
+      {
+        type:        "verification",
+        scheduledAt: new Date(Date.now() + 7  * 24 * 60 * 60 * 1000),
+        done:        false,
+        note:        "7-day verification call",
+      },
+      {
+        type:        "verification",
+        scheduledAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        done:        false,
+        note:        "1-month verification call",
+      },
+    ];
+
+    const currentColdCount = lead.coldReassignCount || 0;
+    const isSecondCold     = currentColdCount >= 1;
+
+    let nextUserId = null;
+    let newStatus  = lead.status; // keep existing status (don't force Not Interested)
+
+    if (!isSecondCold) {
+      // Exclude current agent + anyone who has already handled this lead
+      const excludeIds = [...(lead.previousAgents || []), req.user._id];
+      nextUserId = await getNextUser(req.user.company, excludeIds);
+    } else {
+      // 2nd cold: reset to New so it re-enters the pipeline fresh
+      newStatus = "New";
+    }
+
+    const updatePayload = {
+      $set: {
+        temperature:      "Cold",
+        status:           newStatus,
+        remark:           remark.trim(),
+        coldReassignCount: currentColdCount + 1,
+      },
+      $push: {
+        callHistory:    historyEntry,
+        scheduledCalls: { $each: newScheduledCalls },
+        previousAgents: req.user._id,
+      },
+    };
+
+    if (!isSecondCold && nextUserId) {
+      updatePayload.$set.user = nextUserId;
+    }
+
+    const updatedLead = await Lead.findByIdAndUpdate(id, updatePayload, { new: true })
+      .populate("user",           "name email")
+      .populate("previousAgents", "name email");
+
+    const message = isSecondCold
+      ? "Lead marked Cold again. Status reset to New — 3 follow-up calls scheduled."
+      : nextUserId
+        ? `Cold lead reassigned to ${updatedLead.user?.name || "another agent"} with 3 scheduled calls.`
+        : "No other agent available; lead kept with current agent. 3 follow-up calls scheduled.";
+
+    // ── Socket push to newly assigned agent ───────────────────────────────────
+    if (!isSecondCold && nextUserId) {
+      const _io = global._io;
+      if (_io) {
+        _io.to(`agent:${nextUserId}`).emit("new_lead_assigned", {
+          leadId:    String(updatedLead._id),
+          leadName:  updatedLead.name,
+          source:    updatedLead.source || "",
+          eventType: "cold_reassigned",
+        });
+      }
+      // FCM push to newly assigned agent
+      sendReassignedLeadNotification(nextUserId, updatedLead).catch((e) =>
+        console.error("[FCM] cold-reassign push error:", e.message),
+      );
+    }
+
+    return res.status(200).json({
+      lead:         updatedLead,
+      reassignedTo: isSecondCold ? null : updatedLead.user,
+      scheduledCalls: newScheduledCalls,
+      isSecondCold,
+      message,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getLead,
   getLeads,
@@ -1355,4 +1476,5 @@ module.exports = {
   autoSendTemplates,
   addAdditionalNumber,
   removeAdditionalNumber,
+  markColdReassign,
 };

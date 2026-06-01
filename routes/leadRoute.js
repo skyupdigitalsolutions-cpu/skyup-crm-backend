@@ -7,6 +7,7 @@ const {
   adminImportCSV, userImportCSV,
   updateLead, patchLead, patchLeadTemperature,
   markNotInterested,
+  markColdReassign,
   deleteLead, adminUpdateLead, adminDeleteLead,
   closeLeadWrongEntry,
   mergeLeads,
@@ -58,7 +59,8 @@ router.post("/import-csv",             protect,           userImportCSV);
 router.post("/",                       protect,           createLead);
 
 // ── PATCH ─────────────────────────────────────────────────────────────────────
-router.patch("/:id/not-interested", protect, markNotInterested);   // NEW
+router.patch("/:id/not-interested",  protect, markNotInterested);   // NI reassign
+router.patch("/:id/cold-reassign",    protect, markColdReassign);     // Cold reassign
 
 // ── Phone reveal tracking ────────────────────────────────────────────────────
 router.post("/:id/reveal-phone",       protect,      logPhoneReveal);

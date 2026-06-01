@@ -94,7 +94,10 @@ const leadSchema = mongoose.Schema(
     },
 
     // ── Reassignment counter ─────────────────────────────────────────────────
-    reassignCount: { type: Number, default: 0 },
+    reassignCount:     { type: Number, default: 0 },
+
+    // ── Cold reassignment counter (separate from NI reassign) ────────────────
+    coldReassignCount: { type: Number, default: 0 },
 
     // ── Normalized phone for deduplication ───────────────────────────────────
     normalizedPhone: {
