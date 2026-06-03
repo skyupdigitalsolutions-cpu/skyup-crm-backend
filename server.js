@@ -46,6 +46,7 @@ const emailHistoryRoute    = require('./routes/emailHistory');
 // ── Subscription Expiry Email Job ─────────────────────────────────────────────
 const { startSubscriptionExpiryJob } = require('./jobs/subscriptionExpiryJob');
 const { startIdleJob } = require('./jobs/markIdleJob');
+const { startLeadAlertsJob } = require('./jobs/leadAlertsJob');
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute = require('./routes/smsCampaign');
 const smsHistoryRoute  = require('./routes/smsHistory');
@@ -302,6 +303,7 @@ connectDB().then(() => {
     console.log(`🌐 Frontend served:   ${SERVE_FRONTEND ? 'YES (from dist/)' : 'NO (separate Render service)'}`);
     startSubscriptionExpiryJob();
     startIdleJob();
+    startLeadAlertsJob();
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();
   });

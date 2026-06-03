@@ -189,6 +189,8 @@ const initSocket = (io) => {
       // Legacy room kept for backward compat
       socket.join('admin');
       socket.join(`admin_room:${adminId}`);
+      // Named room used by fcmService socket push (no_action_alert, follow_up_alert)
+      socket.join(`admin:${adminId}`);
 
       await ChatUser.findOneAndUpdate(
         { username },
@@ -224,6 +226,8 @@ const initSocket = (io) => {
 
       socket.join('admin');
       socket.join(`admin_room:${adminId}`);
+      // Named room used by fcmService socket push (lead_reassigned_notify, no_action_alert, follow_up_alert)
+      socket.join(`superadmin:${adminId}`);
 
       await ChatUser.findOneAndUpdate(
         { username },
