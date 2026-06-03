@@ -114,6 +114,23 @@ const companySchema = mongoose.Schema(
       trim: true,
     },
 
+    // ── Telegram Notification Settings ───────────────────────────────────────
+    // Each company configures its own Telegram bot.
+    // Admin sets the bot token via @BotFather and the group/personal chat ID
+    // for admin-level alerts. Individual employees add their own chat IDs in
+    // their profile so they receive personal lead-assignment notifications.
+    telegramBotToken: {
+      type:    String,
+      default: "",
+      trim:    true,
+      select:  false, // never returned in normal queries
+    },
+    telegramAdminChatId: {
+      type:    String,
+      default: "",
+      trim:    true,
+    },
+
     // ── Auto-template settings for new leads ─────────────────────────────────
     autoTemplate: {
       whatsapp: {
