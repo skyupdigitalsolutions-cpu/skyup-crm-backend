@@ -28,6 +28,70 @@ const Message  = require('../models/Message');
 const ChatUser = require('../models/ChatUser');
 const Admin    = require('../models/Admin');
 const User     = require('../models/Users');
+const Lead     = require('../models/Leads');
+
+// ── Push pending follow-up alerts to a freshly connected admin/superadmin ─────
+// Called on every admin_join / super_admin_join so the bell is pre-populated
+// without waiting for the 9 AM cron tick.
+async function pushPendingFollowUps(socket, adminId, company, role) {
+  try {
+    const now        = new Date();
+    const todayEnd   = new Date(now); todayEnd.setHours(23, 59, 59, 999);
+    const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
+
+    const query = {
+      isClosed: { $ne: true },
+      status:   { $ne: 'Converted' },
+      company,
+      scheduledCalls: { $elemMatch: { done: false, scheduledAt: { $lte: todayEnd } } },
+    };
+
+    // Regular admin only sees leads they are responsible for
+    if (role === 'admin') {
+      query.assignedAdmin = adminId;
+    }
+
+    const leads = await Lead.find(query)
+      .select('_id name scheduledCalls')
+      .lean();
+
+    if (!leads.length) return;
+
+    const overdueLeads  = [];
+    const dueTodayLeads = [];
+
+    for (const lead of leads) {
+      const pending = lead.scheduledCalls
+        .filter(sc => !sc.done)
+        .map(sc => new Date(sc.scheduledAt))
+        .sort((a, b) => a - b);
+      if (!pending.length) continue;
+      if (pending[0] < todayStart) overdueLeads.push({ leadId: String(lead._id), leadName: lead.name });
+      else                          dueTodayLeads.push({ leadId: String(lead._id), leadName: lead.name });
+    }
+
+    const timestamp = now.toISOString();
+
+    if (overdueLeads.length) {
+      socket.emit('follow_up_alert', {
+        type: 'overdue',
+        count: overdueLeads.length,
+        leads: overdueLeads,
+        timestamp,
+      });
+    }
+    if (dueTodayLeads.length) {
+      socket.emit('follow_up_alert', {
+        type: 'due',
+        count: dueTodayLeads.length,
+        leads: dueTodayLeads,
+        timestamp,
+      });
+    }
+  } catch (err) {
+    console.error('[Socket] pushPendingFollowUps error:', err.message);
+  }
+}
 
 // socketId → identity object
 const onlineUsers = {};
@@ -203,6 +267,9 @@ const initSocket = (io) => {
       socket.emit('all_users_db', contactList);
 
       broadcastOnlineMap(io, company);
+
+      // Push any pending follow-up alerts immediately so the bell is pre-populated
+      pushPendingFollowUps(socket, adminId, company, 'admin');
     });
 
     // ════════════════════════════════════════════════════════════════════════
@@ -243,6 +310,9 @@ const initSocket = (io) => {
       socket.emit('users_list', onlineMap);
 
       broadcastOnlineMap(io, company);
+
+      // Push any pending follow-up alerts immediately so the bell is pre-populated
+      pushPendingFollowUps(socket, adminId, company, 'super_admin');
     });
 
     // ════════════════════════════════════════════════════════════════════════
