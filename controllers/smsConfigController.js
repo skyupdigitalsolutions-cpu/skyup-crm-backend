@@ -21,7 +21,12 @@ const getSmsConfig = async (req, res) => {
 const saveSmsConfig = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    const { msg91AuthKey, msg91SenderId } = req.body;
+    const {
+      msg91AuthKey,
+      msg91SenderId,
+      greetingsTemplateId,
+      greetingsSenderId,
+    } = req.body;
 
     if (!msg91AuthKey || !msg91AuthKey.trim()) {
       return res.status(400).json({ message: "MSG91 Auth Key is required" });
@@ -30,9 +35,16 @@ const saveSmsConfig = async (req, res) => {
     const config = await SmsConfig.findOneAndUpdate(
       { company: companyId },
       {
-        msg91AuthKey:  msg91AuthKey.trim(),
-        msg91SenderId: (msg91SenderId || "SKYCRM").trim().toUpperCase(),
-        isActive:      true,
+        msg91AuthKey:        msg91AuthKey.trim(),
+        msg91SenderId:       (msg91SenderId || "SKYCRM").trim().toUpperCase(),
+        isActive:            true,
+        // Skyup_greetings template — keep existing DB value if not sent in body
+        ...(greetingsTemplateId !== undefined && {
+          greetingsTemplateId: greetingsTemplateId.trim() || "1007503933418344595",
+        }),
+        ...(greetingsSenderId !== undefined && {
+          greetingsSenderId: greetingsSenderId.trim() || "695382",
+        }),
       },
       { upsert: true, new: true, runValidators: true }
     );

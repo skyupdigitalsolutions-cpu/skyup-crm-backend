@@ -29,6 +29,22 @@ const smsConfigSchema = new mongoose.Schema(
       trim: true,
     },
 
+    // ── Skyup_greetings approved DLT template ──────────────────────────────
+    // Sender ID registered with MSG91: 695382
+    // DLT Template ID: 1007503933418344595
+    // These are stored per-company so they can be overridden if needed.
+    greetingsTemplateId: {
+      type:    String,
+      default: "1007503933418344595",
+      trim:    true,
+    },
+
+    greetingsSenderId: {
+      type:    String,
+      default: "695382",
+      trim:    true,
+    },
+
     isActive: {
       type: Boolean,
       default: false,
