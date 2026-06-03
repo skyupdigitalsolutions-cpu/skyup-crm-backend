@@ -39,11 +39,15 @@ const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) 
     );
   }
 
-  // Normalize: strip all non-digits, then ensure 91 country code prefix
+  // Normalize: strip all non-digits
+  // - 10-digit bare number → prepend India country code 91
+  // - 11–13 digit number   → already has a country code, keep as-is
+  //   (e.g. 9807651234 = Nepal, 989123456789 = Iran — don't corrupt these)
+  // - Do NOT slice — trimming drops valid leading country-code digits
   let phone = mobile.replace(/\D/g, "");
-  if (phone.length === 10) phone = "91" + phone;
-  // If already has 91 prefix (12 digits), keep as-is
-  if (phone.length > 12) phone = phone.slice(-12); // safety trim
+  if (phone.startsWith("0091")) phone = phone.slice(4);
+  if (phone.startsWith("00"))   phone = phone.slice(2);
+  if (phone.length === 10)      phone = "91" + phone;
 
   // MSG91 v5 SMS API payload
   const payload = {
@@ -298,7 +302,7 @@ const sendSingleSms = async (req, res) => {
       errorMessage:  err.message,
       companyId:     req.admin.company._id,
     });
-    res.status(500).json({ message: "Failed to send SMS", error: err.message });
+    res.status(500).json({ message: err.message, error: err.message });
   }
 };
 

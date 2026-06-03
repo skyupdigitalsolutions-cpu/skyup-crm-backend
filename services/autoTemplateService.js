@@ -232,7 +232,9 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
   }
 
   let phone = (lead.mobile || "").replace(/\D/g, "");
-  if (phone.length === 10) phone = "91" + phone;
+  if (phone.startsWith("0091")) phone = phone.slice(4);
+  if (phone.startsWith("00"))   phone = phone.slice(2);
+  if (phone.length === 10)      phone = "91" + phone;
 
   if (phone.length < 12) {
     console.warn(`[autoTemplate] ❌ SMS skipped — invalid phone after normalise: "${phone}"`);
@@ -248,15 +250,18 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
     sender:  defaultSenderId,
     route:   "4",
     country: "91",
-    sms:     [{ message: body, to: [phone] }],
+    sms: [{
+      message: body,
+      to:      [phone],
+      ...(templateId ? { template_id: templateId } : {}),
+    }],
   };
-  if (templateId) payload.template_id = templateId;
 
   console.log(`[autoTemplate] 📤 SMS → ${phone} message="${body}"`);
 
   try {
     const { data } = await axios.post(
-      "https://api.msg91.com/api/v5/flow/",
+      "https://api.msg91.com/api/v5/textsms/send",
       payload,
       { headers: { authkey: authKey, "Content-Type": "application/json", Accept: "application/json" } }
     );
