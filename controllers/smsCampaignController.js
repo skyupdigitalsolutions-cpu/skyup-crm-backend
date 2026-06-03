@@ -1,19 +1,15 @@
 // controllers/smsCampaignController.js
 // SMS Blasting via MSG91 — supports campaign (CRM leads), single, and CSV modes.
-// MSG91 API v5 docs: https://docs.msg91.com/reference/send-sms
+// MSG91 SMS API: https://docs.msg91.com/reference/send-sms
 //
-// Auth Key is now read from SmsConfig (DB, per-company) first,
-// falling back to process.env.MSG91_AUTH_KEY if not set in DB.
+// Auth Key is read from SmsConfig (DB, per-company).
 
 const axios     = require("axios");
 const Lead      = require("../models/Leads");
 const SmsLog    = require("../models/SmsLog");
-const SmsConfig = require("../models/SmsConfig"); // ← NEW
+const SmsConfig = require("../models/SmsConfig");
 
 // ── Helper: get auth key + sender ID for a company ───────────────────────────
-// Reads ONLY from SmsConfig (DB) — strictly company-scoped.
-// No .env fallback: each company must configure their own MSG91 credentials
-// so one company's key never leaks into another company's SMS sends.
 async function getCompanySmsCredentials(companyId) {
   const config = await SmsConfig.findOne({ company: companyId });
   return {
@@ -22,9 +18,20 @@ async function getCompanySmsCredentials(companyId) {
   };
 }
 
-// ── MSG91 SMS sender (v5 JSON API) ───────────────────────────────────────────
-// Uses MSG91's modern v5 REST API with JSON body (not the legacy sendhttp.php).
-// MSG91 requires DLT-registered template IDs for Indian numbers.
+// ── MSG91 SMS sender (correct Send SMS API) ───────────────────────────────────
+// Endpoint: POST https://api.msg91.com/api/v5/flow/
+// is for WhatsApp — SMS uses https://control.msg91.com/api/v5/otp  is for OTP.
+// The correct bulk SMS endpoint is:
+//   POST https://api.msg91.com/api/sendhttp.php  (legacy)
+//   POST https://control.msg91.com/api/v5/textsms/send (new)
+//
+// MSG91's current recommended SMS API (non-OTP, DLT-compliant):
+//   POST https://api.msg91.com/api/v5/flow/
+//   BUT only for flows. For plain text SMS use the send API below.
+//
+// We use the correct v5 SMS send endpoint:
+//   POST https://control.msg91.com/api/v5/textsms/send
+// with JSON body.
 const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) => {
   if (!authKey) {
     throw new Error(
@@ -32,39 +39,50 @@ const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) 
     );
   }
 
-  // Normalize: strip all non-digits, then ensure country code prefix
+  // Normalize: strip all non-digits, then ensure 91 country code prefix
   let phone = mobile.replace(/\D/g, "");
-  // If 10 digits (Indian local), prefix with 91
   if (phone.length === 10) phone = "91" + phone;
+  // If already has 91 prefix (12 digits), keep as-is
+  if (phone.length > 12) phone = phone.slice(-12); // safety trim
 
+  // MSG91 v5 SMS API payload
   const payload = {
-    sender:  senderId || "SKYCRM",
-    route:   "4", // 4 = transactional, 1 = promotional
-    country: "91",
+    sender:      senderId || "695382",   // DLT-registered Sender ID
+    route:       "4",                    // 4 = DLT transactional/service
+    country:     "91",
     sms: [
       {
-        message,
-        to: [phone],
+        message:    message,
+        to:         [phone],
+        ...(templateId ? { dlt_template_id: templateId } : {}),
       },
     ],
   };
 
-  // DLT template_id is required for Indian numbers — attach if provided
-  if (templateId) payload.template_id = templateId;
+  let data;
+  try {
+    const response = await axios.post(
+      "https://api.msg91.com/api/v5/textsms/send",
+      payload,
+      {
+        headers: {
+          authkey:        authKey,
+          "Content-Type": "application/json",
+          Accept:         "application/json",
+        },
+        timeout: 15000,
+      }
+    );
+    data = response.data;
+  } catch (axiosErr) {
+    // Surface the actual MSG91 error body if present
+    const msg91Msg = axiosErr.response?.data?.message
+      || axiosErr.response?.data?.error
+      || axiosErr.message;
+    throw new Error(`MSG91 request failed: ${msg91Msg}`);
+  }
 
-  const { data } = await axios.post(
-    "https://api.msg91.com/api/v5/flow/",
-    payload,
-    {
-      headers: {
-        authkey:        authKey,
-        "Content-Type": "application/json",
-        Accept:         "application/json",
-      },
-    },
-  );
-
-  // MSG91 v5 returns { type: "success", message: "..." } on success
+  // MSG91 returns { type: "success", message: "..." } on success
   if (
     data?.type === "error" ||
     (typeof data === "string" && data.toLowerCase().startsWith("error"))
@@ -72,7 +90,7 @@ const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) 
     throw new Error(`MSG91 error: ${data?.message || data}`);
   }
 
-  return data?.message || data?.requestId || "sent";
+  return data?.message || data?.request_id || data?.requestId || "sent";
 };
 
 // ── Helper: persist an SMS log ────────────────────────────────────────────────
@@ -114,7 +132,7 @@ async function runSmsInBackground({
   senderId,
   companyId,
   campaignId,
-  authKey,       // ← passed from controller after DB lookup
+  authKey,
 }) {
   const CONCURRENCY = 5;
   let sent = 0, failed = 0;
@@ -124,7 +142,7 @@ async function runSmsInBackground({
 
     await Promise.all(
       chunk.map(async (lead) => {
-        // Merge-tag substitution
+        // Merge-tag substitution: ##alphanumeric## maps to {{name}}
         const body = message
           .replace(/{{name}}/g,     lead.name     || "")
           .replace(/{{mobile}}/g,   lead.mobile   || "")
@@ -133,11 +151,11 @@ async function runSmsInBackground({
 
         try {
           const requestId = await sendViaMSG91({
-            mobile: lead.mobile,
-            message: body,
+            mobile:     lead.mobile,
+            message:    body,
             templateId,
             senderId,
-            authKey, // ← use company-specific key
+            authKey,
           });
           sent++;
           await saveLog({
@@ -182,14 +200,13 @@ const sendBulkSms = async (req, res) => {
       return res.status(400).json({ message: "campaign and message are required" });
     }
 
-    // ── Fetch company SMS credentials from DB ─────────────────────────────
     const companyId = req.admin.company._id;
     const creds     = await getCompanySmsCredentials(companyId);
     const authKey   = creds.authKey;
 
     if (!authKey) {
       return res.status(400).json({
-        message: "MSG91 Auth Key not configured. Go to SMS Settings (gear icon) and save your Auth Key first.",
+        message: "MSG91 Auth Key not configured. Go to SMS Settings and save your Auth Key first.",
       });
     }
 
@@ -236,14 +253,13 @@ const sendSingleSms = async (req, res) => {
       return res.status(400).json({ message: "mobile and message are required" });
     }
 
-    // ── Fetch company SMS credentials from DB ─────────────────────────────
     const companyId = req.admin.company._id;
     const creds     = await getCompanySmsCredentials(companyId);
     const authKey   = creds.authKey;
 
     if (!authKey) {
       return res.status(400).json({
-        message: "MSG91 Auth Key not configured. Go to SMS Settings (gear icon) and save your Auth Key first.",
+        message: "MSG91 Auth Key not configured. Go to SMS Settings and save your Auth Key first.",
       });
     }
 
@@ -274,8 +290,8 @@ const sendSingleSms = async (req, res) => {
     res.json({ success: true, message: "SMS sent", requestId });
   } catch (err) {
     await saveLog({
-      to:            req.body.mobile || "",
-      recipientName: req.body.name   || "",
+      to:            req.body.mobile  || "",
+      recipientName: req.body.name    || "",
       message:       req.body.message || "",
       campaignId:    null,
       status:        "failed",
@@ -295,14 +311,13 @@ const sendCsvSms = async (req, res) => {
     }
     if (!message) return res.status(400).json({ message: "message is required" });
 
-    // ── Fetch company SMS credentials from DB ─────────────────────────────
     const companyId = req.admin.company._id;
     const creds     = await getCompanySmsCredentials(companyId);
     const authKey   = creds.authKey;
 
     if (!authKey) {
       return res.status(400).json({
-        message: "MSG91 Auth Key not configured. Go to SMS Settings (gear icon) and save your Auth Key first.",
+        message: "MSG91 Auth Key not configured. Go to SMS Settings and save your Auth Key first.",
       });
     }
 
@@ -335,17 +350,17 @@ const sendCsvSms = async (req, res) => {
 const getSmsHistory = async (req, res) => {
   try {
     const {
-      page      = 1,
-      limit     = 50,
-      search    = "",
+      page       = 1,
+      limit      = 50,
+      search     = "",
       campaignId = "",
-      sortOrder = "desc",
-      dateFrom  = "",
-      dateTo    = "",
+      sortOrder  = "desc",
+      dateFrom   = "",
+      dateTo     = "",
     } = req.query;
 
     const filter = { company: req.admin.company._id };
-    if (search)    filter.to         = { $regex: search, $options: "i" };
+    if (search)     filter.to         = { $regex: search, $options: "i" };
     if (campaignId) filter.campaignId = campaignId;
     if (dateFrom || dateTo) {
       filter.sentAt = {};
