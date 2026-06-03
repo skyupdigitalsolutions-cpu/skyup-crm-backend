@@ -176,8 +176,10 @@ const adminCreateLead = async (req, res) => {
           });
     }
     const lead = await Lead.create({
-      name:     req.body.name,
-      mobile:   req.body.mobile,
+      name:         req.body.name,
+      mobile:       req.body.mobile,
+      primaryPhone: req.body.primaryPhone || req.body.mobile,
+      secondaryPhone: req.body.secondaryPhone || null,
       email:    req.body.email  || "",   // ← FIX: was being dropped, autoTemplate needs it
       source:   req.body.source   || "Web Form",
       campaign: req.body.campaign || null,
@@ -343,19 +345,29 @@ const adminImportCSV = async (req, res) => {
       const row = rows[i];
       try {
         const assignedUser = users[i % users.length]._id;
-        const mobile = row.mobile || row.phone || "";
+        const mobile = row["Primary Number"] || row.mobile || row.phone || row["Primary Phone"] || "";
+        const secondaryPhone = row["Secondary Number"] || row.secondaryPhone || row["Secondary Phone"] || null;
+        const { normalizePhone } = require("../utils/normalizePhone");
+        const normPrimary   = normalizePhone(mobile);
+        const normSecondary = secondaryPhone ? normalizePhone(secondaryPhone) : null;
+        if (normSecondary && normSecondary === normPrimary) {
+          errors.push({ index: i, row: row.name || i, message: "Secondary phone same as primary — skipped" });
+          continue;
+        }
         const csvExtraAnswers = Object.keys(row)
-          .filter(k => !["name","mobile","phone","email","source","campaign","status","date","remark","leadgenId","user"].includes(k))
+          .filter(k => !["name","mobile","phone","email","source","campaign","status","date","remark","leadgenId","user","Primary Number","Secondary Number","Primary Phone","Secondary Phone","primaryPhone","secondaryPhone"].includes(k))
           .map(k => row[k]);
         const adminDoc = {
-          name: row.name || "Unknown",
+          name:           row.name || "Unknown",
           mobile,
-          email: row.email || "",
-          source: row.source || "CSV Import",
-          campaign: row.campaign || null,
-          status: row.status || "New",
-          date: row.date ? new Date(row.date) : new Date(),
-          remark: row.remark || "Imported via CSV",
+          primaryPhone:   mobile,
+          secondaryPhone: secondaryPhone || null,
+          email:          row.email || "",
+          source:         row.source || "Excel Import",
+          campaign:       row.campaign || null,
+          status:         row.status || "New",
+          date:           row.date ? new Date(row.date) : new Date(),
+          remark:         row.remark || row.notes || "Imported via Excel",
           temperature: row.temperature || computeQuality(
             { name: row.name || "", mobile, email: row.email || "", _extraAnswers: csvExtraAnswers },
             csvExtraAnswers.length
@@ -409,19 +421,29 @@ const userImportCSV = async (req, res) => {
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       try {
-        const mobile = row.mobile || row.phone || "";
+        const mobile = row["Primary Number"] || row.mobile || row.phone || row["Primary Phone"] || "";
+        const secondaryPhone = row["Secondary Number"] || row.secondaryPhone || row["Secondary Phone"] || null;
+        const { normalizePhone } = require("../utils/normalizePhone");
+        const normPrimary   = normalizePhone(mobile);
+        const normSecondary = secondaryPhone ? normalizePhone(secondaryPhone) : null;
+        if (normSecondary && normSecondary === normPrimary) {
+          errors.push({ index: i, row: row.name || i, message: "Secondary phone same as primary — skipped" });
+          continue;
+        }
         const csvExtraAnswers = Object.keys(row)
-          .filter(k => !["name","mobile","phone","email","source","campaign","status","date","remark","leadgenId","user"].includes(k))
+          .filter(k => !["name","mobile","phone","email","source","campaign","status","date","remark","leadgenId","user","Primary Number","Secondary Number","Primary Phone","Secondary Phone","primaryPhone","secondaryPhone"].includes(k))
           .map(k => row[k]);
         const userDoc = {
-          name: row.name || "Unknown",
+          name:           row.name || "Unknown",
           mobile,
-          email: row.email || "",
-          source: row.source || "CSV Import",
-          campaign: row.campaign || null,
-          status: row.status || "New",
-          date: row.date ? new Date(row.date) : new Date(),
-          remark: row.remark || "Imported via CSV",
+          primaryPhone:   mobile,
+          secondaryPhone: secondaryPhone || null,
+          email:          row.email || "",
+          source:         row.source || "Excel Import",
+          campaign:       row.campaign || null,
+          status:         row.status || "New",
+          date:           row.date ? new Date(row.date) : new Date(),
+          remark:         row.remark || row.notes || "Imported via Excel",
           temperature: row.temperature || computeQuality(
             { name: row.name || "", mobile, email: row.email || "", _extraAnswers: csvExtraAnswers },
             csvExtraAnswers.length
@@ -667,13 +689,17 @@ const patchLead = async (req, res) => {
 
     // ── Push call to callHistory ──────────────────────────────────────────────
     if (remark && remark.trim()) {
-      pushOps.callHistory = {
+      const histEntry = {
         userId:   req.user._id,
         userName: req.user.name || "",
         remark:   remark.trim(),
         outcome:  outcome || "Call Back",
         calledAt: new Date(),
       };
+      // Track which number was dialed (mobile app sends these)
+      if (req.body.calledNumber) histEntry.calledNumber = req.body.calledNumber;
+      if (req.body.numberType)   histEntry.numberType   = req.body.numberType;
+      pushOps.callHistory = histEntry;
     }
 
     // ── Mark the nearest pending follow-up as done (FIX: progress was stuck) ─
@@ -967,8 +993,11 @@ const checkDuplicate = async (req, res) => {
 
     const existing = await Lead.findOne({
       company: companyId,
-      normalizedPhone: normalized,
-    }).select("name mobile status user").populate("user", "name");
+      $or: [
+        { normalizedPhone:          normalized },
+        { normalizedSecondaryPhone: normalized },
+      ],
+    }).select("name mobile primaryPhone secondaryPhone status user").populate("user", "name");
 
     if (existing) {
       return res.status(200).json({ duplicate: true, lead: existing });
@@ -1451,6 +1480,80 @@ const markColdReassign = async (req, res) => {
   }
 };
 
+// ── PUT /lead/:id/secondary-phone ─────────────────────────────────────────────
+// Add or replace the secondary phone on a lead.
+const addSecondaryPhone = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { secondaryPhone } = req.body;
+    if (!secondaryPhone || !String(secondaryPhone).trim()) {
+      return res.status(400).json({ message: "secondaryPhone is required" });
+    }
+    const { normalizePhone } = require("../utils/normalizePhone");
+    const companyId = getCompanyId(req);
+    const lead = await Lead.findOne({ _id: id, ...(companyId ? { company: companyId } : {}) });
+    if (!lead) return res.status(404).json({ message: "Lead not found" });
+
+    const normPrimary   = normalizePhone(lead.mobile || "");
+    const normSecondary = normalizePhone(secondaryPhone);
+
+    if (normSecondary && normSecondary === normPrimary) {
+      return res.status(409).json({ message: "Secondary phone cannot be the same as primary phone" });
+    }
+
+    // Check if this number already belongs to another lead in the company
+    if (normSecondary && companyId) {
+      const conflict = await Lead.findOne({
+        company: companyId,
+        _id: { $ne: id },
+        $or: [
+          { normalizedPhone:          normSecondary },
+          { normalizedSecondaryPhone: normSecondary },
+        ],
+      });
+      if (conflict) {
+        return res.status(409).json({ message: `This number already belongs to lead "${conflict.name}"` });
+      }
+    }
+
+    const updated = await Lead.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          secondaryPhone,
+          normalizedSecondaryPhone: normSecondary || null,
+        },
+      },
+      { new: true }
+    ).populate("user", "name email");
+
+    return res.status(200).json({ success: true, lead: updated });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── DELETE /lead/:id/secondary-phone ──────────────────────────────────────────
+// Remove the secondary phone from a lead.
+const removeSecondaryPhone = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const companyId = getCompanyId(req);
+    const lead = await Lead.findOne({ _id: id, ...(companyId ? { company: companyId } : {}) });
+    if (!lead) return res.status(404).json({ message: "Lead not found" });
+
+    const updated = await Lead.findByIdAndUpdate(
+      id,
+      { $set: { secondaryPhone: null, normalizedSecondaryPhone: null } },
+      { new: true }
+    ).populate("user", "name email");
+
+    return res.status(200).json({ success: true, lead: updated });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getLead,
   getLeads,
@@ -1481,4 +1584,6 @@ module.exports = {
   addAdditionalNumber,
   removeAdditionalNumber,
   markColdReassign,
+  addSecondaryPhone,
+  removeSecondaryPhone,
 };

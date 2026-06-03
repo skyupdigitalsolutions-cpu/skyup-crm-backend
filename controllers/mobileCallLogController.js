@@ -90,35 +90,40 @@ const syncCallLogs = async (req, res) => {
 
     const batch = logs.slice(0, 500);
 
-    // ── FIX 4C: Load all company leads ONCE, build a phone-number Map ─────────
-    // BEFORE: findLeadByPhone() was called inside the map() below — one full
-    //         collection scan per log entry (N+1 pattern).
-    // AFTER:  Single query with projection, then O(1) Map lookup per log entry.
+    // ── Load all company leads ONCE, build phone Maps (primary + secondary) ──
     const companyLeads = await Lead.find(
       { company: req.user.company },
-      { mobile: 1, _id: 1, name: 1, status: 1 }
+      { mobile: 1, primaryPhone: 1, secondaryPhone: 1, normalizedPhone: 1, normalizedSecondaryPhone: 1, _id: 1, name: 1, status: 1 }
     ).lean();
 
-    const leadMap = new Map();
+    const leadMapByPrimary   = new Map();
+    const leadMapBySecondary = new Map();
+
     for (const lead of companyLeads) {
-      const normalized = normalizePhone(lead.mobile || '');
-      if (normalized) leadMap.set(normalized, lead);
+      const normP = lead.normalizedPhone || normalizePhone(lead.primaryPhone || lead.mobile || "");
+      const normS = lead.normalizedSecondaryPhone || (lead.secondaryPhone ? normalizePhone(lead.secondaryPhone) : null);
+      if (normP) leadMapByPrimary.set(normP,   { ...lead, _matchedAs: "Primary"   });
+      if (normS) leadMapBySecondary.set(normS, { ...lead, _matchedAs: "Secondary" });
     }
-    // ─────────────────────────────────────────────────────────────────────────
 
     const docs = batch.map((log) => {
       const normalized  = normalizePhone(log.phoneNumber || '');
-      const matchedLead = leadMap.get(normalized) || null; // O(1) lookup
+      // Prefer primary match; fall back to secondary
+      const matchedLead =
+        leadMapByPrimary.get(normalized) ||
+        leadMapBySecondary.get(normalized) ||
+        null;
       return {
-        user:        req.user._id,
-        company:     req.user.company,
-        phoneNumber: log.phoneNumber,
-        callType:    log.callType || 'unknown',
-        duration:    parseInt(log.duration || 0),
-        timestamp:   new Date(parseInt(log.timestamp)),
-        name:        log.name || '',
-        matchedLead: matchedLead?._id || null,
-        _leadObj:    matchedLead || null,
+        user:              req.user._id,
+        company:           req.user.company,
+        phoneNumber:       log.phoneNumber,
+        callType:          log.callType || 'unknown',
+        duration:          parseInt(log.duration || 0),
+        timestamp:         new Date(parseInt(log.timestamp)),
+        name:              log.name || '',
+        matchedLead:       matchedLead?._id || null,
+        matchedNumberType: matchedLead?._matchedAs || null,
+        _leadObj:          matchedLead || null,
       };
     });
 
@@ -145,6 +150,8 @@ const syncCallLogs = async (req, res) => {
         remark:   `${callTypeToOutcome(doc.callType)} from mobile app${durStr}`,
         outcome:  callTypeToOutcome(doc.callType),
         calledAt: doc.timestamp,
+        calledNumber: doc.phoneNumber || null,
+        numberType:   doc.matchedNumberType || 'Primary',
       });
     }
 
@@ -260,24 +267,38 @@ const matchPhone = async (req, res) => {
     if (!phone) return res.status(400).json({ message: 'phone query param required' });
 
     const normalized = normalizePhone(phone);
-    // BUG FIX: was using raw 'phone' in the query — must use 'normalized'
-    // so "918722992405" matches a lead stored as "8722992405" and vice versa.
-    // Also search both normalized AND raw to cover all storage formats.
+    const companyId  = req.user.company;
+
     const lead = await Lead.findOne(
       {
-        company: req.user.company,
+        company: companyId,
         $or: [
-          { mobile: normalized },
-          { mobile: phone },
-          { mobile: '0' + normalized },
-          { mobile: '91' + normalized },
+          { normalizedPhone:          normalized },
+          { normalizedSecondaryPhone: normalized },
+          { mobile:                   normalized },
+          { mobile:                   phone       },
+          { mobile:                   '0'  + normalized },
+          { mobile:                   '91' + normalized },
         ],
       },
-      { mobile: 1, name: 1, status: 1 }
+      { mobile: 1, primaryPhone: 1, secondaryPhone: 1, normalizedPhone: 1, normalizedSecondaryPhone: 1, name: 1, status: 1 }
     ).lean();
 
     if (!lead) return res.json({ matched: false });
-    res.json({ matched: true, leadId: lead._id, name: lead.name, status: lead.status, mobile: lead.mobile });
+
+    // Determine which number was matched
+    const numberType =
+      lead.normalizedPhone          === normalized ? 'Primary'   :
+      lead.normalizedSecondaryPhone === normalized ? 'Secondary' : 'Legacy';
+
+    res.json({
+      matched:    true,
+      leadId:     lead._id,
+      name:       lead.name,
+      status:     lead.status,
+      mobile:     lead.mobile,
+      numberType,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

@@ -256,28 +256,36 @@ async function handleStatusUpdate(status) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: Find an existing Lead by their WhatsApp phone number
-// Uses normalizedPhone index (O log n) — falls back to legacy mobile lookup
-// for records not yet migrated.
+// Searches normalizedPhone (primary) AND normalizedSecondaryPhone (secondary).
+// Falls back to legacy mobile lookup for records not yet migrated.
 // ─────────────────────────────────────────────────────────────────────────────
 const { normalizePhone: _normalizeWAPhone } = require("../utils/normalizePhone");
 
 async function findLeadByPhone(waPhone, companyId) {
-  const norm = _normalizeWAPhone(waPhone);
+  const norm    = _normalizeWAPhone(waPhone);
+  const lastTen = waPhone.slice(-10);
 
-  // Fast indexed lookup
+  // Fast indexed lookup — primary OR secondary
   if (norm) {
-    const lead = await Lead.findOne({ company: companyId, normalizedPhone: norm });
+    const lead = await Lead.findOne({
+      company: companyId,
+      $or: [
+        { normalizedPhone:          norm },
+        { normalizedSecondaryPhone: norm },
+      ],
+    });
     if (lead) return lead;
   }
 
   // Fallback for un-migrated records
-  const lastTen = waPhone.slice(-10);
   return Lead.findOne({
     company: companyId,
     $or: [
-      { mobile: waPhone },
-      { mobile: lastTen },
-      { mobile: `+${waPhone}` },
+      { mobile:         waPhone   },
+      { mobile:         lastTen   },
+      { mobile:         `+${waPhone}` },
+      { primaryPhone:   lastTen   },
+      { secondaryPhone: lastTen   },
     ],
   });
 }

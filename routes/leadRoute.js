@@ -19,6 +19,8 @@ const {
   getFollowUpAlerts,
   addAdditionalNumber,
   removeAdditionalNumber,
+  addSecondaryPhone,
+  removeSecondaryPhone,
 } = require("../controllers/leadController");
 
 const { protect }           = require("../middlewares/authMiddleware");
@@ -85,6 +87,12 @@ router.post("/:id/additional-numbers",            protect,      addAdditionalNum
 router.post("/admin/:id/additional-numbers",      protectAdmin, addAdditionalNumber);
 router.delete("/:id/additional-numbers/:index",         protect,      removeAdditionalNumber);
 router.delete("/admin/:id/additional-numbers/:index",   protectAdmin, removeAdditionalNumber);
+
+// ── Secondary phone management ────────────────────────────────────────────────
+router.put(   "/:id/secondary-phone",             protect,           addSecondaryPhone);
+router.put(   "/admin/:id/secondary-phone",       protectAdmin,      addSecondaryPhone);
+router.delete("/:id/secondary-phone",             protect,           removeSecondaryPhone);
+router.delete("/admin/:id/secondary-phone",       protectAdmin,      removeSecondaryPhone);
 
 // ── DELETE ────────────────────────────────────────────────────────────────────
 router.delete("/admin/:id",      protectAdmin,      adminDeleteLead);

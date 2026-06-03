@@ -183,10 +183,13 @@ const receiveWebhook = async (req, res) => {
         // ── Phone-based dedup ─────────────────────────────────────────────────
         const normPhone = normalizePhone(leadPayload.mobile);
         if (normPhone) {
-          const phoneDup = await Lead.findOne(
-            { company: config.company, normalizedPhone: normPhone },
-            { _id: 1, name: 1 }
-          ).lean();
+          const phoneDup = await Lead.findOne({
+            company: config.company,
+            $or: [
+              { normalizedPhone:          normPhone },
+              { normalizedSecondaryPhone: normPhone },
+            ],
+          }, { _id: 1, name: 1 }).lean();
           if (phoneDup) {
             console.log(`   ⏭ Phone duplicate — ${leadPayload.mobile} → ${normPhone}, exists as "${phoneDup.name}" (${phoneDup._id})`);
             await Lead.findByIdAndUpdate(phoneDup._id, {
@@ -206,7 +209,7 @@ const receiveWebhook = async (req, res) => {
 
         let newLead;
         try {
-          newLead = await Lead.create(leadPayload);
+          newLead = await Lead.create({ ...leadPayload, primaryPhone: leadPayload.mobile });
         } catch (createErr) {
           if (createErr.code === 11000) {
             console.log(`   ⚠ Race-condition duplicate for ${leadPayload.mobile} — skipping`);

@@ -12,6 +12,8 @@ const callHistorySchema = new mongoose.Schema(
     calledAt:      { type: Date, default: Date.now },
     recordingUrl:  { type: String, default: null },
     recordingName: { type: String, default: null },
+    calledNumber:  { type: String, default: null },
+    numberType:    { type: String, default: null },   // "Primary" | "Secondary"
   },
   { _id: false }
 );
@@ -115,8 +117,29 @@ const leadSchema = mongoose.Schema(
     // ── Cold reassignment counter (separate from NI reassign) ────────────────
     coldReassignCount: { type: Number, default: 0 },
 
+    // ── Primary phone (explicit field; mirrors mobile for backward compat) ────
+    primaryPhone: {
+      type:    String,
+      default: null,
+      trim:    true,
+    },
+
+    // ── Secondary / alternate phone number ────────────────────────────────────
+    secondaryPhone: {
+      type:    String,
+      default: null,
+      trim:    true,
+    },
+
     // ── Normalized phone for deduplication ───────────────────────────────────
     normalizedPhone: {
+      type:    String,
+      default: null,
+      trim:    true,
+    },
+
+    // ── Normalized secondary phone for deduplication ──────────────────────────
+    normalizedSecondaryPhone: {
       type:    String,
       default: null,
       trim:    true,
@@ -223,11 +246,21 @@ leadSchema.index(
 );
 leadSchema.index({ normalizedPhone: 1 }, { sparse: true });
 
+// ── Sparse index on normalizedSecondaryPhone ──────────────────────────────────
+leadSchema.index({ normalizedSecondaryPhone: 1 }, { sparse: true });
+leadSchema.index({ company: 1, normalizedSecondaryPhone: 1 }, { sparse: true });
+
 // ── Pre-validate hook: compute normalizedPhone automatically ─────────────────
 leadSchema.pre('validate', async function () {
   if (this.mobile) {
     const n = normalizePhone(this.mobile);
     this.normalizedPhone = n || null;
+    // If primaryPhone not yet set, mirror from mobile
+    if (!this.primaryPhone) this.primaryPhone = this.mobile;
+  }
+  if (this.secondaryPhone) {
+    const ns = normalizePhone(this.secondaryPhone);
+    this.normalizedSecondaryPhone = ns || null;
   }
 });
 
@@ -242,6 +275,16 @@ async function syncNormalizedPhoneOnUpdate() {
       const n = normalizePhone(mobile);
       if (!update.$set) update.$set = {};
       update.$set.normalizedPhone = n || null;
+      // Keep primaryPhone in sync with mobile if not explicitly set
+      if (!update.$set.primaryPhone) update.$set.primaryPhone = mobile;
+      this.setUpdate(update);
+    }
+    const secondary =
+      (update && update.$set && update.$set.secondaryPhone) ||
+      (update && update.secondaryPhone);
+    if (secondary !== undefined) {
+      if (!update.$set) update.$set = {};
+      update.$set.normalizedSecondaryPhone = secondary ? (normalizePhone(secondary) || null) : null;
       this.setUpdate(update);
     }
   } catch (err) {
