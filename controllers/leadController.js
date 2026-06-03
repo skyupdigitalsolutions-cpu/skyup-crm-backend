@@ -190,8 +190,9 @@ const adminCreateLead = async (req, res) => {
         email:  req.body.email  || "",
         _extraAnswers: [],
       }, 0),
-      user:    assignedUser,
-      company: companyId,
+      user:          assignedUser,
+      company:       companyId,
+      assignedAdmin: req.admin?._id || req.superAdmin?._id || null,
     });
     const populated = await Lead.findById(lead._id)
       .populate("user", "name email")
@@ -291,8 +292,9 @@ const adminCreateLeadsBulk = async (req, res) => {
           status: row.status || "New",
           date: row.date || new Date(),
           remark: row.remark || "Manually added",
-          user: assignedUser,
-          company: companyId,
+          user:          assignedUser,
+          company:       companyId,
+          assignedAdmin: req.admin?._id || req.superAdmin?._id || null,
         });
 
         // ── Notify admin on WhatsApp ────────────────────────────────────────
@@ -358,8 +360,9 @@ const adminImportCSV = async (req, res) => {
             { name: row.name || "", mobile, email: row.email || "", _extraAnswers: csvExtraAnswers },
             csvExtraAnswers.length
           ),
-          user: assignedUser,
-          company: companyId,
+          user:          assignedUser,
+          company:       companyId,
+          assignedAdmin: req.admin?._id || null,
         };
         if (row.leadgenId) adminDoc.leadgenId = row.leadgenId;
         const inserted = await Lead.collection.insertOne(adminDoc);

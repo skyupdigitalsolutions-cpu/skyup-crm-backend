@@ -193,11 +193,12 @@ const verifySuperAdminOtp = async (req, res) => {
 
     // Fallback: legacy SuperAdmin doc (real one, not shadow)
     return res.status(200).json({
-      _id:   otpDoc._id,
-      name:  otpDoc.name,
-      email: otpDoc.email,
-      role:  "super_admin",
-      token: generateToken(otpDoc._id, "super_admin"),
+      _id:       otpDoc._id,
+      name:      otpDoc.name,
+      email:     otpDoc.email,
+      role:      "super_admin",
+      companyId: otpDoc.company?._id || otpDoc.company || null,
+      token:     generateToken(otpDoc._id, "super_admin"),
     });
   } catch (error) {
     console.error("verifySuperAdminOtp error:", error);
