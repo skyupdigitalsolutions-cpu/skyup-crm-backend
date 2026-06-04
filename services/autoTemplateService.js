@@ -255,6 +255,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
     flow_id:   resolvedTemplateId,   // ✅ correct field name
     sender:    resolvedSenderId,     // DLT Sender ID (695382 for Skyup_greetings)
     short_url: "0",
+    route:     "4",
     mobiles:   phone,
     VAR1:      leadName,             // fills ##alphanumeric## slot in "Skyup_greetings" template
   };

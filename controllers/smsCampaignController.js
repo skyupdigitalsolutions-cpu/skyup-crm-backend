@@ -62,6 +62,7 @@ const sendViaMSG91 = async ({ mobile, name, templateId, senderId, authKey }) => 
     flow_id:   templateId,            // ✅ correct field name (not template_id)
     sender:    senderId || "695382",  // DLT Sender ID for Skyup_greetings
     short_url: "0",
+    route:     "4",
     mobiles:   phone,
     VAR1:      name || "there",       // fills ##alphanumeric## slot in the DLT template
   };
