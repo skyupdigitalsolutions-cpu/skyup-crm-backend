@@ -1,33 +1,36 @@
 // utils/transcribeAudio.js
-// ── ElevenLabs Scribe v2 for transcription + OpenAI for English translation ───
+// ── Groq Whisper large-v3 for transcription + Groq for transliteration ────────
 
-const fs    = require('fs');
-const path  = require('path');
-const os    = require('os');
-const axios = require('axios');
+const fs       = require('fs');
+const path     = require('path');
+const os       = require('os');
+const axios    = require('axios');
+const FormData = require('form-data');
 
-const SCRIBE_URL    = 'https://api.elevenlabs.io/v1/speech-to-text';
-const OPENAI_URL    = 'https://api.openai.com/v1/chat/completions';
+const GROQ_STT_URL  = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const WHISPER_MODEL = 'whisper-large-v3';
+const CHAT_MODEL    = 'llama3-8b-8192'; // fast Groq model for transliteration
 
-// ── Translate any language text to English using OpenAI ───────────────────────
+// ── Translate any language text to Roman script using Groq ────────────────────
 async function translateToEnglish(text, detectedLanguage) {
-  // If already English, skip translation
+  // If already English, skip transliteration
   if (detectedLanguage === 'en' || detectedLanguage === 'eng') {
     return text;
   }
 
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  if (!OPENAI_API_KEY) {
-    console.warn('[Transliteration] OPENAI_API_KEY not set — returning original text.');
+  const GROQ_API_KEY = process.env.GROQ_API_KEY;
+  if (!GROQ_API_KEY) {
+    console.warn('[Transliteration] GROQ_API_KEY not set — returning original text.');
     return text;
   }
 
   console.log(`[Transliteration] Converting ${detectedLanguage} → Roman script`);
 
   const { data } = await axios.post(
-    OPENAI_URL,
+    GROQ_CHAT_URL,
     {
-      model: 'gpt-4o-mini',
+      model: CHAT_MODEL,
       max_tokens: 2000,
       messages: [
         {
@@ -44,7 +47,7 @@ Return ONLY the transliterated text, nothing else.`,
     },
     {
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${GROQ_API_KEY}`,
         'Content-Type': 'application/json',
       },
     }
@@ -53,13 +56,13 @@ Return ONLY the transliterated text, nothing else.`,
   return (data.choices?.[0]?.message?.content || text).trim();
 }
 
-// ── Core ElevenLabs Scribe call ───────────────────────────────────────────────
-async function runElevenLabsScribe(audioInput) {
-  const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-  if (!ELEVENLABS_API_KEY) {
-    throw new Error('ELEVENLABS_API_KEY is not set. Add it to your environment variables.');
+// ── Core Groq Whisper large-v3 call ──────────────────────────────────────────
+async function runGroqWhisper(audioInput) {
+  const GROQ_API_KEY = process.env.GROQ_API_KEY;
+  if (!GROQ_API_KEY) {
+    throw new Error('GROQ_API_KEY is not set. Add it to your environment variables.');
   }
-  console.log('[ElevenLabs] Using key ending in:', ELEVENLABS_API_KEY.slice(-6));
+  console.log('[Groq] Using key ending in:', GROQ_API_KEY.slice(-6));
 
   let fileBuffer;
   let fileName;
@@ -73,18 +76,17 @@ async function runElevenLabsScribe(audioInput) {
     fileName   = path.basename(audioInput);
   }
 
-  const FormData = require('form-data');
-  const form     = new FormData();
-
+  const form = new FormData();
   form.append('file', fileBuffer, { filename: fileName });
-  form.append('model_id', 'scribe_v2');
-  form.append('diarize', 'true');
-  form.append('timestamps_granularity', 'word');
-  // No language_code → auto-detect (best for Hindi/Kannada/Telugu/Tamil/English)
+  form.append('model', WHISPER_MODEL);
+  form.append('response_format', 'verbose_json');
+  // timestamp_granularities requires response_format=verbose_json
+  form.append('timestamp_granularities[]', 'segment');
+  // No language param → auto-detect (handles Hindi/Kannada/Telugu/Tamil/English)
 
-  const { data } = await axios.post(SCRIBE_URL, form, {
+  const { data } = await axios.post(GROQ_STT_URL, form, {
     headers: {
-      'xi-api-key': ELEVENLABS_API_KEY,
+      Authorization: `Bearer ${GROQ_API_KEY}`,
       ...form.getHeaders(),
     },
     maxBodyLength: Infinity,
@@ -92,59 +94,43 @@ async function runElevenLabsScribe(audioInput) {
   });
 
   if (!data || !data.text) {
-    throw new Error('ElevenLabs Scribe returned an empty transcription.');
+    throw new Error('Groq Whisper returned an empty transcription.');
   }
 
-  const originalText      = data.text.trim();
-  const detectedLanguage  = data.language_code || 'unknown';
-  const words             = data.words || [];
+  const originalText     = data.text.trim();
+  const detectedLanguage = data.language || 'unknown';
+  const segments         = data.segments || [];
 
-  console.log(`[ElevenLabs] Detected language: ${detectedLanguage}`);
-  console.log(`[ElevenLabs] Original transcript (first 100 chars): ${originalText.slice(0, 100)}`);
+  console.log(`[Groq] Detected language: ${detectedLanguage}`);
+  console.log(`[Groq] Original transcript (first 100 chars): ${originalText.slice(0, 100)}`);
 
-  // ── Build speaker-labelled dialogue from word-level diarization ───────────
-  // ElevenLabs returns words with speaker_id: "speaker_0", "speaker_1", etc.
+  // ── Build readable dialogue from segments ─────────────────────────────────
+  // Whisper (via Groq) does not provide speaker diarization natively.
+  // We format as timestamped segments so context is preserved.
   let dialogueText = '';
-  if (words.length > 0 && words.some(w => w.speaker_id)) {
-    const segments = [];
-    let currentSpeaker = null;
-    let currentWords   = [];
-
-    for (const word of words) {
-      if (word.type !== 'word') continue; // skip punctuation tokens
-      const spk = word.speaker_id || 'speaker_0';
-      if (spk !== currentSpeaker) {
-        if (currentWords.length > 0) {
-          segments.push({ speaker: currentSpeaker, text: currentWords.join(' ') });
-        }
-        currentSpeaker = spk;
-        currentWords   = [word.text];
-      } else {
-        currentWords.push(word.text);
-      }
-    }
-    if (currentWords.length > 0) {
-      segments.push({ speaker: currentSpeaker, text: currentWords.join(' ') });
-    }
-
-    // Map speaker_0 → Speaker 1, speaker_1 → Speaker 2 etc.
-    const speakerMap = {};
-    let speakerCount = 1;
-    dialogueText = segments.map(seg => {
-      if (!speakerMap[seg.speaker]) {
-        speakerMap[seg.speaker] = `Speaker ${speakerCount++}`;
-      }
-      return `${speakerMap[seg.speaker]}: ${seg.text}`;
-    }).join('\n');
+  if (segments.length > 0) {
+    dialogueText = segments
+      .map(seg => {
+        const start = formatTime(seg.start);
+        return `[${start}] ${seg.text.trim()}`;
+      })
+      .join('\n');
   }
 
-  // ── Transliterate to Roman script if needed ────────────────────────────────
+  // ── Transliterate to Roman script if needed ───────────────────────────────
   const textToTransliterate = dialogueText || originalText;
   const englishText = await translateToEnglish(textToTransliterate, detectedLanguage);
 
   console.log(`[Transliteration] Roman transcript (first 100 chars): ${englishText.slice(0, 100)}`);
 
   return { text: englishText };
+}
+
+// Format seconds → MM:SS
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+  const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
 }
 
 // ── Transcribe a Twilio recording ─────────────────────────────────────────────
@@ -163,7 +149,7 @@ async function transcribeTwilioRecording(recordingSid) {
   fs.writeFileSync(tmpPath, response.data);
 
   try {
-    const { text } = await runElevenLabsScribe(tmpPath);
+    const { text } = await runGroqWhisper(tmpPath);
     return { transcript: text };
   } finally {
     fs.unlink(tmpPath, () => {});
@@ -173,7 +159,7 @@ async function transcribeTwilioRecording(recordingSid) {
 // ── Transcribe a mobile recording ─────────────────────────────────────────────
 async function transcribeMobileRecording(relativeUrl) {
   if (relativeUrl && relativeUrl.startsWith('http')) {
-    const { text } = await runElevenLabsScribe(relativeUrl);
+    const { text } = await runGroqWhisper(relativeUrl);
     return { transcript: text };
   }
 
@@ -192,7 +178,7 @@ async function transcribeMobileRecording(relativeUrl) {
     );
   }
 
-  const { text } = await runElevenLabsScribe(filePath);
+  const { text } = await runGroqWhisper(filePath);
   return { transcript: text };
 }
 
