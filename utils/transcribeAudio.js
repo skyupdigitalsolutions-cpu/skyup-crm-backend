@@ -1,5 +1,5 @@
 // utils/transcribeAudio.js
-// ── Groq Whisper large-v3 for transcription + Groq for transliteration ────────
+// ── Groq Whisper large-v3 for transcription + Groq LLM for transliteration ───
 
 const fs       = require('fs');
 const path     = require('path');
@@ -10,11 +10,11 @@ const FormData = require('form-data');
 const GROQ_STT_URL  = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const WHISPER_MODEL = 'whisper-large-v3';
-const CHAT_MODEL    = 'llama3-8b-8192'; // fast Groq model for transliteration
+const CHAT_MODEL    = 'llama-3.1-8b-instant'; // current supported Groq chat model
 
-// ── Translate any language text to Roman script using Groq ────────────────────
+// ── Transliterate non-English text to Roman script using Groq LLM ─────────────
 async function translateToEnglish(text, detectedLanguage) {
-  // If already English, skip transliteration
+  // If already English, skip
   if (detectedLanguage === 'en' || detectedLanguage === 'eng') {
     return text;
   }
@@ -27,33 +27,43 @@ async function translateToEnglish(text, detectedLanguage) {
 
   console.log(`[Transliteration] Converting ${detectedLanguage} → Roman script`);
 
-  const { data } = await axios.post(
-    GROQ_CHAT_URL,
-    {
-      model: CHAT_MODEL,
-      max_tokens: 2000,
-      messages: [
-        {
-          role: 'system',
-          content: `You are a transliteration expert. Convert the following ${detectedLanguage} text into Roman (English) script — keep the SAME words and pronunciation, just write them in English letters.
-Do NOT translate the meaning. Do NOT change the words.
-Example: "अभी मैं थोड़ा बिजी हूं" → "abi mein thoda busy hu"
-Example: "ನಾನು ಸ್ವಲ್ಪ ಬ್ಯುಸಿ ಇದ್ದೀನಿ" → "naanu svalpa busy iddini"
-If the text already has English/Roman words, keep them exactly as-is.
-Return ONLY the transliterated text, nothing else.`,
-        },
-        { role: 'user', content: text },
-      ],
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        'Content-Type': 'application/json',
+  try {
+    const { data } = await axios.post(
+      GROQ_CHAT_URL,
+      {
+        model: CHAT_MODEL,
+        max_tokens: 2000,
+        messages: [
+          {
+            role: 'system',
+            content:
+              `You are a transliteration expert. Convert the following ${detectedLanguage} text into Roman (English) script — keep the SAME words and pronunciation, just write them in English letters.\n` +
+              `Do NOT translate the meaning. Do NOT change the words.\n` +
+              `Example: "अभी मैं थोड़ा बिजी हूं" → "abi mein thoda busy hu"\n` +
+              `Example: "ನಾನು ಸ್ವಲ್ಪ ಬ್ಯುಸಿ ಇದ್ದೀನಿ" → "naanu svalpa busy iddini"\n` +
+              `If the text already has English/Roman words, keep them exactly as-is.\n` +
+              `Return ONLY the transliterated text, nothing else.`,
+          },
+          { role: 'user', content: text },
+        ],
       },
-    }
-  );
+      {
+        headers: {
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
 
-  return (data.choices?.[0]?.message?.content || text).trim();
+    return (data.choices?.[0]?.message?.content || text).trim();
+  } catch (err) {
+    const detail = err.response?.data
+      ? JSON.stringify(err.response.data)
+      : err.message;
+    console.error(`[Transliteration] Chat API failed (${err.response?.status ?? 'network'}): ${detail}`);
+    console.warn('[Transliteration] Falling back to original transcript text.');
+    return text; // don't crash — return the raw transcript
+  }
 }
 
 // ── Core Groq Whisper large-v3 call ──────────────────────────────────────────
@@ -80,18 +90,25 @@ async function runGroqWhisper(audioInput) {
   form.append('file', fileBuffer, { filename: fileName });
   form.append('model', WHISPER_MODEL);
   form.append('response_format', 'verbose_json');
-  // timestamp_granularities requires response_format=verbose_json
-  form.append('timestamp_granularities[]', 'segment');
-  // No language param → auto-detect (handles Hindi/Kannada/Telugu/Tamil/English)
+  // No language param → auto-detect (Hindi/Kannada/Telugu/Tamil/English)
 
-  const { data } = await axios.post(GROQ_STT_URL, form, {
-    headers: {
-      Authorization: `Bearer ${GROQ_API_KEY}`,
-      ...form.getHeaders(),
-    },
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-  });
+  let data;
+  try {
+    const resp = await axios.post(GROQ_STT_URL, form, {
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        ...form.getHeaders(),
+      },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+    data = resp.data;
+  } catch (err) {
+    const detail = err.response?.data
+      ? JSON.stringify(err.response.data)
+      : err.message;
+    throw new Error(`Groq STT request failed (${err.response?.status ?? 'network'}): ${detail}`);
+  }
 
   if (!data || !data.text) {
     throw new Error('Groq Whisper returned an empty transcription.');
@@ -104,16 +121,11 @@ async function runGroqWhisper(audioInput) {
   console.log(`[Groq] Detected language: ${detectedLanguage}`);
   console.log(`[Groq] Original transcript (first 100 chars): ${originalText.slice(0, 100)}`);
 
-  // ── Build readable dialogue from segments ─────────────────────────────────
-  // Whisper (via Groq) does not provide speaker diarization natively.
-  // We format as timestamped segments so context is preserved.
+  // ── Format as timestamped segments ───────────────────────────────────────
   let dialogueText = '';
   if (segments.length > 0) {
     dialogueText = segments
-      .map(seg => {
-        const start = formatTime(seg.start);
-        return `[${start}] ${seg.text.trim()}`;
-      })
+      .map(seg => `[${formatTime(seg.start)}] ${seg.text.trim()}`)
       .join('\n');
   }
 
