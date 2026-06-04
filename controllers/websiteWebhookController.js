@@ -4,6 +4,7 @@ const Lead               = require("../models/Leads");
 const User               = require("../models/Users");
 const { notifyTelegram } = require("../utils/telegramNotifier");
 const { normalizePhone } = require("../utils/normalizePhone");
+const { autoSendTemplates } = require("../services/autoTemplateService");
 
 async function getNextAssignedUser(config) {
   const users = await User.find({
@@ -40,14 +41,20 @@ const receiveWebsiteWebhook = async (req, res) => {
 
     const cleanMobile = normalizePhone(mobile) || (mobile || "").replace(/\D/g, "");
 
-    // Permanent dedup using normalizedPhone index (replaces old 10-min window)
+    // ── Phone-based dedup — checks BOTH primaryPhone and secondaryPhone ───────
     if (cleanMobile) {
-      const normPhone  = normalizePhone(cleanMobile);
-      const duplicate  = normPhone
-        ? await Lead.findOne({ company: config.company, normalizedPhone: normPhone }, { _id: 1, name: 1 }).lean()
+      const normPhone = normalizePhone(cleanMobile);
+      const duplicate = normPhone
+        ? await Lead.findOne({
+            company: config.company,
+            $or: [
+              { normalizedPhone:          normPhone },
+              { normalizedSecondaryPhone: normPhone },
+            ],
+          }, { _id: 1, name: 1 }).lean()
         : null;
       if (duplicate) {
-        console.log(`⏭ Duplicate submission — mobile "${cleanMobile}" normalizes to "${normPhone}", exists as "${duplicate.name}"`);
+        console.log(`⏭ Duplicate — mobile "${cleanMobile}" normalizes to "${normPhone}", exists as "${duplicate.name}"`);
         return;
       }
     }
@@ -57,16 +64,17 @@ const receiveWebsiteWebhook = async (req, res) => {
     let newLead;
     try {
       newLead = await Lead.create({
-        name:     (name || "Unknown").trim(),
-        mobile:   cleanMobile,
-        email:    (email || "").trim(),
-        source:   "Website",
-        campaign: config.sourceName,
-        status:   config.defaultStatus,
-        date:     new Date(),
-        remark:   message ? `${config.defaultRemark} — ${message}` : config.defaultRemark,
-        user:     assignedUserId,
-        company:  config.company,
+        name:         (name || "Unknown").trim(),
+        mobile:       cleanMobile,
+        primaryPhone: cleanMobile,
+        email:        (email || "").trim(),
+        source:       "Website",
+        campaign:     config.sourceName,
+        status:       config.defaultStatus,
+        date:         new Date(),
+        remark:       message ? `${config.defaultRemark} — ${message}` : config.defaultRemark,
+        user:         assignedUserId,
+        company:      config.company,
       });
     } catch (createErr) {
       if (createErr.code === 11000) {
@@ -78,11 +86,9 @@ const receiveWebsiteWebhook = async (req, res) => {
 
     console.log(`✅ WEBSITE LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | source: "${config.sourceName}" | id: ${newLead._id}`);
 
-    // ── Notify via Telegram ─────────────────────────────────────────────────
     notifyTelegram(newLead, config.sourceName).catch(e => console.error("Telegram error:", e.message));
+    autoSendTemplates(newLead, config.company);
 
-
-    // ── Emit real-time socket event ─────────────────────────────────────────
     try {
       const io = global._io;
       if (io) {
