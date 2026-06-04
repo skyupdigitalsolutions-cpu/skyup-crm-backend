@@ -55,19 +55,14 @@ const sendViaMSG91 = async ({ mobile, name, templateId, senderId, authKey }) => 
   // MSG91 v5/flow payload for DLT template "Skyup_greetings":
   //   "Hi ##alphanumeric##, thank you for contacting SKYUP Digital Solutions LLP!..."
   //
-  // The template has ONE variable slot — ##alphanumeric## — which is the lead's name.
-  // VAR1 must be ONLY the name, not the full message text.
-  // Passing the full message as VAR1 causes DLT mismatch → SMS delivered to MSG91
-  // but silently dropped before reaching the recipient's phone.
+  // IMPORTANT: mobiles, VAR1, and sender go at the TOP LEVEL — NOT inside a recipients array.
+  // Ref: https://control.msg91.com/api/v5/flow/
   const payload = {
     template_id: templateId,
+    sender:      senderId || "695382",  // DLT Sender ID for Skyup_greetings
     short_url:   "0",
-    recipients: [
-      {
-        mobiles: phone,
-        VAR1:    name || "there",   // fills ##alphanumeric## slot in the DLT template
-      },
-    ],
+    mobiles:     phone,                 // top-level, not inside recipients[]
+    VAR1:        name || "there",       // fills ##alphanumeric## slot in the DLT template
   };
 
   let data;
