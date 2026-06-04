@@ -87,7 +87,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
 
     try {
       const resp = await axios.post(
-        "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+        "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
         requestPayload,
         { headers: { authkey: authKey, "Content-Type": "application/json" } }
       );
@@ -253,7 +253,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
     sms: [{
       message: body,
       to:      [phone],
-      ...(templateId ? { template_id: templateId } : {}),
+      ...(templateId ? { dlt_template_id: templateId } : {}),
     }],
   };
 
@@ -261,7 +261,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
 
   try {
     const { data } = await axios.post(
-      "https://api.msg91.com/api/v5/textsms/send",
+      "https://control.msg91.com/api/v5/textsms/send",
       payload,
       { headers: { authkey: authKey, "Content-Type": "application/json", Accept: "application/json" } }
     );

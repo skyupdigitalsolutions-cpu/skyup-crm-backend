@@ -66,7 +66,7 @@ const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) 
   let data;
   try {
     const response = await axios.post(
-      "https://api.msg91.com/api/v5/textsms/send",
+      "https://control.msg91.com/api/v5/textsms/send",
       payload,
       {
         headers: {
