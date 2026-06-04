@@ -31,11 +31,12 @@ const smsConfigSchema = new mongoose.Schema(
 
     // ── Skyup_greetings approved DLT template ──────────────────────────────
     // Sender ID registered with MSG91: 695382
-    // DLT Template ID: 1007503933418344595
-    // These are stored per-company so they can be overridden if needed.
+    // DLT Template ID (TRAI):   1007503933418344595  ← NOT used in API calls
+    // MSG91 Flow ID (API field): 6a1ffe028c6272147b00b233  ← THIS is what goes in flow_id
+    // The /api/v5/flow/ endpoint uses flow_id = the MSG91 Template/Flow ID, NOT the DLT ID.
     greetingsTemplateId: {
       type:    String,
-      default: "1007503933418344595",
+      default: "6a1ffe028c6272147b00b233",   // ✅ MSG91 Flow ID (not the DLT number)
       trim:    true,
     },
 
