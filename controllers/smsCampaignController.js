@@ -13,8 +13,10 @@ const SmsConfig = require("../models/SmsConfig");
 async function getCompanySmsCredentials(companyId) {
   const config = await SmsConfig.findOne({ company: companyId });
   return {
-    authKey:  config?.msg91AuthKey  || "",
-    senderId: config?.msg91SenderId || "SKYCRM",
+    authKey:             config?.msg91AuthKey          || "",
+    senderId:            config?.msg91SenderId         || "SKYCRM",
+    greetingsTemplateId: config?.greetingsTemplateId   || "1007503933418344595",
+    greetingsSenderId:   config?.greetingsSenderId     || "695382",
   };
 }
 
@@ -28,7 +30,7 @@ async function getCompanySmsCredentials(companyId) {
 // The template_id must be a DLT-approved SMS template ID from your MSG91
 // dashboard (SMS → Templates). Free-text messages are no longer supported
 // by this endpoint — every SMS must use a registered template.
-const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) => {
+const sendViaMSG91 = async ({ mobile, name, templateId, senderId, authKey }) => {
   if (!authKey) {
     throw new Error(
       "MSG91 Auth Key not configured. Go to SMS Settings (gear icon) and save your Auth Key."
@@ -50,15 +52,20 @@ const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) 
   if (phone.startsWith("00"))   phone = phone.slice(2);
   if (phone.length === 10)      phone = "91" + phone;
 
-  // MSG91 v5/flow payload — template variables map to {{VAR1}}, {{VAR2}} etc.
-  // in your approved DLT template. The `message` value is passed as VAR1.
+  // MSG91 v5/flow payload for DLT template "Skyup_greetings":
+  //   "Hi ##alphanumeric##, thank you for contacting SKYUP Digital Solutions LLP!..."
+  //
+  // The template has ONE variable slot — ##alphanumeric## — which is the lead's name.
+  // VAR1 must be ONLY the name, not the full message text.
+  // Passing the full message as VAR1 causes DLT mismatch → SMS delivered to MSG91
+  // but silently dropped before reaching the recipient's phone.
   const payload = {
     template_id: templateId,
     short_url:   "0",
     recipients: [
       {
         mobiles: phone,
-        VAR1:    message,           // maps to {{VAR1}} in your MSG91 template
+        VAR1:    name || "there",   // fills ##alphanumeric## slot in the DLT template
       },
     ],
   };
@@ -156,7 +163,7 @@ async function runSmsInBackground({
         try {
           const requestId = await sendViaMSG91({
             mobile:     lead.mobile,
-            message:    body,
+            name:       lead.name || "there",   // VAR1 = name fills ##alphanumeric## slot
             templateId,
             senderId,
             authKey,
@@ -267,23 +274,25 @@ const sendSingleSms = async (req, res) => {
       });
     }
 
-    const body = message
-      .replace(/{{name}}/g,   name   || "")
-      .replace(/{{mobile}}/g, mobile || "");
+    // Use templateId from request body, fallback to company's saved greetingsTemplateId
+    const resolvedTemplateId = templateId || creds.greetingsTemplateId;
 
     const requestId = await sendViaMSG91({
       mobile,
-      message: body,
-      templateId,
-      senderId: senderId || creds.senderId,
+      name:       name || "there",   // VAR1 = name fills ##alphanumeric## in DLT template
+      templateId: resolvedTemplateId,
+      senderId:   senderId || creds.senderId,
       authKey,
     });
+
+    // Log the actual template message text for records
+    const logMessage = `Hi ${name || "there"}, thank you for contacting SKYUP Digital Solutions LLP! Our Services:SEO Services, Social Media & GBP Management, Google & Meta Ads, Website Design & Development, AI Automation & Machine Learning, Chatbot & WhatsApp Automation. One of our team members will connect with you shortly. Phone: +91 88678 67775 Website: SKYUP Digital Solutions LLP`;
 
     await saveLog({
       to:             mobile,
       recipientName:  name || "",
-      message:        body,
-      templateId,
+      message:        logMessage,
+      templateId:     resolvedTemplateId,
       senderId:       senderId || creds.senderId,
       campaignId:     null,
       status:         "sent",

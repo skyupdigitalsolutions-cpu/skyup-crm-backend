@@ -213,7 +213,6 @@ async function sendAutoEmail({ companyId, lead, emailSettings }) {
 // ─── 3. SMS (MSG91) ──────────────────────────────────────────────────────────
 async function sendAutoSms({ companyId, lead, smsSettings }) {
   const {
-    message    = "Hi {{name}}, thanks for your interest! Our team will contact you soon.",
     templateId = "",
     senderId   = "",
   } = smsSettings;
@@ -221,10 +220,14 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
   console.log(`[autoTemplate] SMS → lead.mobile="${lead.mobile}" companyId=${companyId}`);
 
   const smsConfig = await SmsConfig.findOne({ company: companyId }).lean();
-  const authKey   = smsConfig?.msg91AuthKey  || "";
-  const defaultSenderId = senderId || smsConfig?.msg91SenderId || "SKYCRM";
+  const authKey   = smsConfig?.msg91AuthKey || "";
 
-  console.log(`[autoTemplate] SMS MSG91: authKey=${authKey ? "SET" : "MISSING"}, senderId="${defaultSenderId}"`);
+  // Use templateId from autoTemplate settings, fallback to company's saved greetingsTemplateId
+  const resolvedTemplateId = templateId || smsConfig?.greetingsTemplateId || "1007503933418344595";
+  // Use senderId from settings, fallback to greetingsSenderId (695382) for Skyup_greetings template
+  const resolvedSenderId   = senderId || smsConfig?.greetingsSenderId || smsConfig?.msg91SenderId || "695382";
+
+  console.log(`[autoTemplate] SMS MSG91: authKey=${authKey ? "SET" : "MISSING"}, templateId="${resolvedTemplateId}", senderId="${resolvedSenderId}"`);
 
   if (!authKey) {
     console.warn(`[autoTemplate] ❌ SMS skipped — MSG91 authKey not configured for company ${companyId}`);
@@ -241,28 +244,24 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
     return;
   }
 
-  const body = message
-    .replace(/{{name}}/g,     lead.name     || "")
-    .replace(/{{mobile}}/g,   lead.mobile   || "")
-    .replace(/{{campaign}}/g, lead.campaign || "");
+  // DLT template "Skyup_greetings" has ONE variable: ##alphanumeric## = lead name.
+  // VAR1 must be ONLY the name — NOT the full message text.
+  // Passing full message as VAR1 causes DLT mismatch and silent delivery failure.
+  const leadName = (lead.name || "there").trim();
 
-  if (!templateId) {
-    console.warn(`[autoTemplate] ❌ SMS skipped — templateId is required for MSG91 v5/flow endpoint. Set it in SMS Settings.`);
-    return;
-  }
-
-  // MSG91 v5/flow payload — textsms/send was deprecated and returns 404.
-  // Use /api/v5/flow with template_id + recipients array.
   const payload = {
-    template_id: templateId,
+    template_id: resolvedTemplateId,
     short_url:   "0",
     recipients: [{
       mobiles: phone,
-      VAR1:    body,    // maps to {{VAR1}} in your DLT-approved MSG91 template
+      VAR1:    leadName,   // fills ##alphanumeric## slot in "Skyup_greetings" template
     }],
   };
 
-  console.log(`[autoTemplate] 📤 SMS → ${phone} templateId="${templateId}"`);
+  console.log(`[autoTemplate] 📤 SMS → ${phone} VAR1="${leadName}" templateId="${resolvedTemplateId}"`);
+
+  // Log message text for records (actual SMS body is stored in MSG91 template)
+  const logMessage = `Hi ${leadName}, thank you for contacting SKYUP Digital Solutions LLP! Our Services: SEO Services, Social Media & GBP Management, Google & Meta Ads, Website Design & Development, AI Automation & Machine Learning, Chatbot & WhatsApp Automation. One of our team members will connect with you shortly. Phone: +91 88678 67775 Website: SKYUP Digital Solutions LLP`;
 
   try {
     const { data } = await axios.post(
@@ -278,9 +277,9 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
     await SmsLog.create({
       to:             phone,
       recipientName:  lead.name || "",
-      message:        body,
-      templateId:     templateId || null,
-      senderId:       defaultSenderId,
+      message:        logMessage,
+      templateId:     resolvedTemplateId,
+      senderId:       resolvedSenderId,
       campaignId:     "auto-template",
       status:         "sent",
       msg91RequestId: String(data?.message || data?.requestId || ""),
@@ -292,7 +291,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
     await SmsLog.create({
       to:            phone,
       recipientName: lead.name || "",
-      message:       body,
+      message:       logMessage,
       campaignId:    "auto-template",
       status:        "failed",
       errorMessage:  errMsg,
