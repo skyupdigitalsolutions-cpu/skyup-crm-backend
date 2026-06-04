@@ -249,14 +249,14 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
   // Passing full message as VAR1 causes DLT mismatch and silent delivery failure.
   const leadName = (lead.name || "there").trim();
 
-  // MSG91 v5/flow payload — mobiles, VAR1, sender go at TOP LEVEL (not in recipients[]).
-  // Ref: https://control.msg91.com/api/v5/flow/
+  // MSG91 v5/flow payload — field name is 'flow_id' NOT 'template_id'
+  // MSG91 docs: "Copy the template ID and use it as Flow_ID"
   const payload = {
-    template_id: resolvedTemplateId,
-    sender:      resolvedSenderId,   // DLT Sender ID (695382 for Skyup_greetings)
-    short_url:   "0",
-    mobiles:     phone,              // top-level field
-    VAR1:        leadName,           // fills ##alphanumeric## slot in "Skyup_greetings" template
+    flow_id:   resolvedTemplateId,   // ✅ correct field name
+    sender:    resolvedSenderId,     // DLT Sender ID (695382 for Skyup_greetings)
+    short_url: "0",
+    mobiles:   phone,
+    VAR1:      leadName,             // fills ##alphanumeric## slot in "Skyup_greetings" template
   };
 
   console.log(`[autoTemplate] 📤 SMS → ${phone} VAR1="${leadName}" templateId="${resolvedTemplateId}"`);

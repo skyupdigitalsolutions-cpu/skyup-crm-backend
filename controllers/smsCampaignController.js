@@ -55,14 +55,15 @@ const sendViaMSG91 = async ({ mobile, name, templateId, senderId, authKey }) => 
   // MSG91 v5/flow payload for DLT template "Skyup_greetings":
   //   "Hi ##alphanumeric##, thank you for contacting SKYUP Digital Solutions LLP!..."
   //
-  // IMPORTANT: mobiles, VAR1, and sender go at the TOP LEVEL — NOT inside a recipients array.
+  // IMPORTANT: field name is 'flow_id' NOT 'template_id' for the /api/v5/flow/ endpoint.
+  // MSG91 docs: "Copy the template ID and use it as Flow_ID"
   // Ref: https://control.msg91.com/api/v5/flow/
   const payload = {
-    template_id: templateId,
-    sender:      senderId || "695382",  // DLT Sender ID for Skyup_greetings
-    short_url:   "0",
-    mobiles:     phone,                 // top-level, not inside recipients[]
-    VAR1:        name || "there",       // fills ##alphanumeric## slot in the DLT template
+    flow_id:   templateId,            // ✅ correct field name (not template_id)
+    sender:    senderId || "695382",  // DLT Sender ID for Skyup_greetings
+    short_url: "0",
+    mobiles:   phone,
+    VAR1:      name || "there",       // fills ##alphanumeric## slot in the DLT template
   };
 
   let data;
