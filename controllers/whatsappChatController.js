@@ -7,18 +7,21 @@ const WhatsAppConversation = require("../models/WhatsAppConversation");
 const crypto = require("crypto");
 const WhatsAppMessage = require("../models/WhatsAppMessage");
 const Lead = require("../models/Leads");
-const {
-  normalizePhone: _sharedNormalizePhone,
-} = require("../utils/normalizePhone");
+const { normalizePhone: _sharedNormalizePhone } = require("../utils/normalizePhone");
 
-// Local E.164 normaliser for WA API calls (always returns full digits, no +)
+// ─────────────────────────────────────────────────────────────────────────────
+// normalizePhone — WA-safe wrapper around the shared normaliser.
+// The shared normaliser returns a 10-digit string or null.
+// WA API calls require a full E.164 number (12 digits for India: 91 + 10).
+// This wrapper appends the country prefix so WA delivery works correctly.
+// ─────────────────────────────────────────────────────────────────────────────
 function normalizePhone(raw) {
   if (!raw) return "";
-  let digits = String(raw).replace(/\D/g, "");
-  if (digits.startsWith("0091")) digits = digits.slice(4);
-  if (digits.startsWith("0") && digits.length === 11) digits = digits.slice(1);
-  if (digits.length === 10) digits = "91" + digits;
-  return digits;
+  const ten = _sharedNormalizePhone(raw);
+  if (ten) return "91" + ten;         // shared util returns 10-digit → prepend 91
+  // Fallback: strip non-digits and return as-is for non-Indian numbers
+  const digits = String(raw).replace(/\D/g, "");
+  return digits.startsWith("91") ? digits : digits;
 }
 
 function safeWaPhone(stored) {

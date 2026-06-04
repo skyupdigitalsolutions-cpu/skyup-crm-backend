@@ -161,21 +161,48 @@ const getDistinctCampaigns = async (req, res) => {
 // ── User creates a lead manually ──────────────────────────────────────────────
 const createLead = async (req, res) => {
   try {
-    const companyId = getCompanyId(req);
+    const companyId    = getCompanyId(req);
+    const primaryMobile  = req.body.mobile || req.body.primaryPhone || "";
+    const secondaryMobile = req.body.secondaryPhone || null;
+    const normPrimary    = normalizePhone(primaryMobile);
+    const normSecondary  = secondaryMobile ? normalizePhone(secondaryMobile) : null;
+
+    if (!normPrimary) {
+      return res.status(400).json({ message: "A valid primary phone number is required." });
+    }
+    if (normSecondary) {
+      if (normSecondary === normPrimary) {
+        return res.status(400).json({ message: "Secondary phone cannot be the same as primary." });
+      }
+      const conflict = await findLeadByPhone(companyId, normSecondary);
+      if (conflict) {
+        return res.status(409).json({
+          message: `Secondary number already belongs to lead "${conflict.name}"`,
+          duplicate: true, lead: conflict,
+        });
+      }
+    }
+    const conflict = await findLeadByPhone(companyId, normPrimary);
+    if (conflict) {
+      return res.status(409).json({
+        message: `Primary number already belongs to lead "${conflict.name}"`,
+        duplicate: true, lead: conflict,
+      });
+    }
+
     const lead = await Lead.create({
       ...req.body,
-      primaryPhone: req.body.primaryPhone || req.body.mobile,
-      secondaryPhone: req.body.secondaryPhone || null,
-      user: req.body.user || req.user._id,
+      mobile:        primaryMobile,
+      primaryPhone:  primaryMobile,
+      secondaryPhone: normSecondary ? secondaryMobile : null,
+      user:    req.body.user || req.user._id,
       company: companyId,
     });
 
     notifyTelegram(lead, "Manual").catch((e) =>
       console.error("Telegram error:", e.message),
     );
-
     autoSendTemplates(lead, companyId);
-
     res.status(201).json(lead);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -333,24 +360,51 @@ const adminCreateLeadsBulk = async (req, res) => {
       errors = [];
     for (let i = 0; i < items.length; i++) {
       const row = items[i];
-      try {
-        const assignedUser =
-          row.user || (fallbackUser ? fallbackUser._id : null);
+     try {
+        const assignedUser = row.user || (fallbackUser ? fallbackUser._id : null);
         if (!assignedUser) {
           errors.push({ index: i, message: "No user found." });
           continue;
         }
+
+        const primaryMobile   = row.mobile || row.primaryPhone || "";
+        const secondaryMobile = row.secondaryPhone || null;
+        const normPrimary     = normalizePhone(primaryMobile);
+        const normSecondary   = secondaryMobile ? normalizePhone(secondaryMobile) : null;
+
+        if (!normPrimary) {
+          errors.push({ index: i, row: row.name || i, message: "Missing or invalid primary phone number." });
+          continue;
+        }
+        if (normSecondary && normSecondary === normPrimary) {
+          errors.push({ index: i, row: row.name || i, message: "Secondary phone cannot be the same as primary." });
+          continue;
+        }
+        const primaryConflict = await findLeadByPhone(companyId, normPrimary);
+        if (primaryConflict) {
+          errors.push({ index: i, row: row.name || i, message: `Primary number already belongs to lead "${primaryConflict.name}"` });
+          continue;
+        }
+        if (normSecondary) {
+          const secConflict = await findLeadByPhone(companyId, normSecondary);
+          if (secConflict) {
+            errors.push({ index: i, row: row.name || i, message: `Secondary number already belongs to lead "${secConflict.name}"` });
+            continue;
+          }
+        }
+
         const lead = await Lead.create({
-          name: row.name,
-          mobile: row.mobile,
-          primaryPhone: row.primaryPhone || row.mobile,
-          source: row.source || "Web Form",
-          campaign: row.campaign || null,
-          status: row.status || "New",
-          date: row.date || new Date(),
-          remark: row.remark || "Manually added",
-          user: assignedUser,
-          company: companyId,
+          name:          row.name,
+          mobile:        primaryMobile,
+          primaryPhone:  primaryMobile,
+          secondaryPhone: normSecondary ? secondaryMobile : null,
+          source:        row.source   || "Web Form",
+          campaign:      row.campaign || null,
+          status:        row.status   || "New",
+          date:          row.date     || new Date(),
+          remark:        row.remark   || "Manually added",
+          user:          assignedUser,
+          company:       companyId,
           assignedAdmin: req.admin?._id || req.superAdmin?._id || null,
         });
 
@@ -695,22 +749,54 @@ const deleteLead = async (req, res) => {
 const updateLead = async (req, res) => {
   try {
     const { id } = req.params;
-    const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
+    const companyId = getCompanyId(req);
+    const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
+    // Strip fields that must never be changed via this endpoint
     const {
-      company,
-      user,
-      normalizedPhone,
-      leadgenId,
-      previousAgents,
-      reassignCount,
-      ...safeBody
+      company, user, normalizedPhone, normalizedSecondaryPhone,
+      leadgenId, previousAgents, reassignCount, additionalNumbers,
+      mergedFrom, ...safeBody
     } = req.body;
 
-    const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, {
-      new: true,
-    });
+    // If caller is changing primary phone, validate uniqueness
+    const newPrimary = safeBody.mobile || safeBody.primaryPhone;
+    if (newPrimary) {
+      const normNew = normalizePhone(newPrimary);
+      if (normNew) {
+        const conflict = await findLeadByPhone(companyId, normNew, id);
+        if (conflict) {
+          return res.status(409).json({
+            message: `Primary number already belongs to lead "${conflict.name}"`,
+            duplicate: true, lead: conflict,
+          });
+        }
+        // Keep mobile + primaryPhone in sync
+        safeBody.mobile       = newPrimary;
+        safeBody.primaryPhone = newPrimary;
+      }
+    }
+
+    // If caller is changing secondary phone, validate
+    if (safeBody.secondaryPhone !== undefined) {
+      const normSec = safeBody.secondaryPhone ? normalizePhone(safeBody.secondaryPhone) : null;
+      const normPri = normalizePhone(newPrimary || lead.mobile || "");
+      if (normSec) {
+        if (normSec === normPri) {
+          return res.status(400).json({ message: "Secondary phone cannot be the same as primary." });
+        }
+        const conflict = await findLeadByPhone(companyId, normSec, id);
+        if (conflict) {
+          return res.status(409).json({
+            message: `Secondary number already belongs to lead "${conflict.name}"`,
+            duplicate: true, lead: conflict,
+          });
+        }
+      }
+    }
+
+    const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, { new: true });
     return res.status(200).json(updatedLead);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -727,13 +813,54 @@ const adminUpdateLead = async (req, res) => {
 
     const previousUserId = lead.user ? String(lead.user) : null;
 
-    const { company, user, leadgenId, reassignReason, ...safeBody } = req.body;
+    const {
+      company, leadgenId, reassignReason,
+      normalizedPhone, normalizedSecondaryPhone,
+      additionalNumbers, mergedFrom,
+      ...safeBody
+    } = req.body;
+    const incomingUser = req.body.user;
+
+    // Validate primary phone change
+    const newPrimary = safeBody.mobile || safeBody.primaryPhone;
+    if (newPrimary) {
+      const normNew = normalizePhone(newPrimary);
+      if (normNew) {
+        const conflict = await findLeadByPhone(companyId, normNew, id);
+        if (conflict) {
+          return res.status(409).json({
+            message: `Primary number already belongs to lead "${conflict.name}"`,
+            duplicate: true, lead: conflict,
+          });
+        }
+        safeBody.mobile       = newPrimary;
+        safeBody.primaryPhone = newPrimary;
+      }
+    }
+
+    // Validate secondary phone change
+    if (safeBody.secondaryPhone !== undefined) {
+      const normSec = safeBody.secondaryPhone ? normalizePhone(safeBody.secondaryPhone) : null;
+      const normPri = normalizePhone(newPrimary || lead.mobile || "");
+      if (normSec) {
+        if (normSec === normPri) {
+          return res.status(400).json({ message: "Secondary phone cannot be the same as primary." });
+        }
+        const conflict = await findLeadByPhone(companyId, normSec, id);
+        if (conflict) {
+          return res.status(409).json({
+            message: `Secondary number already belongs to lead "${conflict.name}"`,
+            duplicate: true, lead: conflict,
+          });
+        }
+      }
+    }
 
     const updatePayload = { ...safeBody };
     let newUserId = null;
-    if (user && String(user) !== previousUserId) {
-      updatePayload.user = user;
-      newUserId = String(user);
+    if (incomingUser && String(incomingUser) !== previousUserId) {
+       updatePayload.user = incomingUser;
+      newUserId = String(incomingUser);
       updatePayload.noActionAlert1hSentAt = null;
       updatePayload.noActionAlert2hSentAt = null;
     }
@@ -1288,9 +1415,9 @@ const checkDuplicate = async (req, res) => {
         .status(400)
         .json({ message: "mobile query param is required" });
 
-    const companyId =
-      req.user?.company || req.admin?.company?._id || req.admin?.company;
-    const normalized = mobile.replace(/\D/g, "").slice(-10);
+    const companyId  = req.user?.company || req.admin?.company?._id || req.admin?.company;
+    const normalized = normalizePhone(mobile);
+    if (!normalized) return res.status(200).json({ duplicate: false });
 
     const existing = await Lead.findOne({
       company: companyId,
@@ -1418,7 +1545,7 @@ const addSecondaryPhone = async (req, res) => {
     });
     if (!lead) return res.status(404).json({ message: "Lead not found" });
 
-    const normPrimary = normalizePhone(lead.mobile || "");
+    const normPrimary   = normalizePhone(lead.primaryPhone || lead.mobile || "");
     const normSecondary = normalizePhone(secondaryPhone);
 
     if (!normSecondary) {

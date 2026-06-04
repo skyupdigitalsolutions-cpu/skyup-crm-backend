@@ -98,6 +98,14 @@ router.delete("/admin/:id/secondary-phone", protectAdmin, removeSecondaryPhone);
 router.put("/:id/swap-phones", protect, swapPhones);
 router.put("/admin/:id/swap-phones", protectAdmin, swapPhones);
 
+// ── Additional (secondary) phone number management ────────────────────────────
+router.put("/:id/secondary-phone",          protect,      addSecondaryPhone);
+router.put("/admin/:id/secondary-phone",    protectAdmin, addSecondaryPhone);
+router.delete("/:id/secondary-phone",       protect,      removeSecondaryPhone);
+router.delete("/admin/:id/secondary-phone", protectAdmin, removeSecondaryPhone);
+router.put("/:id/swap-phones",              protect,      swapPhones);
+router.put("/admin/:id/swap-phones",        protectAdmin, swapPhones);
+
 // ── DELETE ────────────────────────────────────────────────────────────────────
 router.delete("/admin/:id", protectAdmin, adminDeleteLead);
 router.delete("/superadmin/:id", protectSuperAdmin, adminDeleteLead);

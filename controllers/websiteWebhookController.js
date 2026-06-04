@@ -39,20 +39,24 @@ const receiveWebsiteWebhook = async (req, res) => {
     if (!config) return console.error(`❌ No WebsiteConfig found for secret: "${webhook_secret}"`);
     if (!config.isActive) return console.warn(`⚠️  WebsiteConfig "${config.sourceName}" is PAUSED`);
 
-    const cleanMobile = normalizePhone(mobile) || (mobile || "").replace(/\D/g, "");
+    // normalizePhone is the single canonical normaliser — do not fall back to
+    // raw strip, which would bypass country-code handling and allow ghost dupes.
+    const cleanMobile = normalizePhone(mobile);
+    if (!cleanMobile) {
+      console.warn(`⚠️  Webhook: unparseable mobile "${mobile}" — lead skipped`);
+      return;
+    }
 
     // ── Phone-based dedup — checks BOTH primaryPhone and secondaryPhone ───────
     if (cleanMobile) {
-      const normPhone = normalizePhone(cleanMobile);
-      const duplicate = normPhone
-        ? await Lead.findOne({
+      const normPhone = cleanMobile; // already normalized above
+      const duplicate = await Lead.findOne({
             company: config.company,
             $or: [
               { normalizedPhone:          normPhone },
               { normalizedSecondaryPhone: normPhone },
             ],
-          }, { _id: 1, name: 1 }).lean()
-        : null;
+          }, { _id: 1, name: 1 }).lean();
       if (duplicate) {
         console.log(`⏭ Duplicate — mobile "${cleanMobile}" normalizes to "${normPhone}", exists as "${duplicate.name}"`);
         return;
@@ -64,10 +68,13 @@ const receiveWebsiteWebhook = async (req, res) => {
     let newLead;
     try {
       newLead = await Lead.create({
-        name:         (name || "Unknown").trim(),
-        mobile:       cleanMobile,
-        primaryPhone: cleanMobile,
-        email:        (email || "").trim(),
+        name:            (name || "Unknown").trim(),
+        mobile:          cleanMobile,
+        primaryPhone:    cleanMobile,
+        normalizedPhone: cleanMobile, // redundant but guards against hook timing issues
+        secondaryPhone:  null,
+        normalizedSecondaryPhone: null,
+        email:           (email || "").trim(),
         source:       "Website",
         campaign:     config.sourceName,
         status:       config.defaultStatus,

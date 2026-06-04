@@ -157,17 +157,17 @@ const leadSchema = mongoose.Schema(
     phoneRevealCount: { type: Number, default: 0 },
 
     // ── Additional / alternate phone numbers linked to this lead ─────────────
-    additionalNumbers: {
-      type: [
-        {
-          number:  { type: String, required: true, trim: true },
-          label:   { type: String, default: "" },   // e.g. "WhatsApp", "Office"
-          addedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-          addedAt: { type: Date, default: Date.now },
-        },
-      ],
-      default: [],
-    },
+    // additionalNumbers: {
+    //   type: [
+    //     {
+    //       number:  { type: String, required: true, trim: true },
+    //       label:   { type: String, default: "" },   // e.g. "WhatsApp", "Office"
+    //       addedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    //       addedAt: { type: Date, default: Date.now },
+    //     },
+    //   ],
+    //   default: [],
+    // },
 
     // ── No-action alert tracking (prevents duplicate alerts) ─────────────────
     // Stores timestamps of when 1-hr and 2-hr no-action alerts were sent.
@@ -183,10 +183,10 @@ const leadSchema = mongoose.Schema(
       default: null,
     },
     // mergedFrom: array on the SURVIVING lead — lists all duplicates absorbed
-    mergedFrom: {
-      type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Lead" }],
-      default: [],
-    },
+    // mergedFrom: {
+    //   type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Lead" }],
+    //   default: [],
+    // },
 
     // ── Close Lead (wrong entry) ──────────────────────────────────────────────
     isClosed: {
@@ -244,49 +244,92 @@ leadSchema.index(
     name: 'company_normalizedPhone_unique',
   }
 );
-leadSchema.index({ normalizedPhone: 1 }, { sparse: true });
-
-// ── Sparse index on normalizedSecondaryPhone ──────────────────────────────────
+// ── PHONE DEDUP: Partial unique index on normalizedSecondaryPhone ─────────────
+// Prevents two leads in the same company from owning the same secondary number.
+leadSchema.index(
+  { company: 1, normalizedSecondaryPhone: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      normalizedSecondaryPhone: { $type: 'string', $exists: true },
+    },
+    name: 'company_normalizedSecondaryPhone_unique',
+  }
+);
 leadSchema.index({ normalizedSecondaryPhone: 1 }, { sparse: true });
-leadSchema.index({ company: 1, normalizedSecondaryPhone: 1 }, { sparse: true });
+
+
 
 // ── Pre-validate hook: compute normalizedPhone automatically ─────────────────
+// ── Pre-validate hook: normalize phones + enforce schema-level rules ──────────
 leadSchema.pre('validate', async function () {
+  // ── Primary phone ──────────────────────────────────────────────────────────
   if (this.mobile) {
     const n = normalizePhone(this.mobile);
     this.normalizedPhone = n || null;
-    // If primaryPhone not yet set, mirror from mobile
+    // Keep primaryPhone in sync with mobile (backward compat)
     if (!this.primaryPhone) this.primaryPhone = this.mobile;
   }
+  // If primaryPhone was set directly (without mobile), sync mobile too
+  if (this.primaryPhone && !this.mobile) {
+    this.mobile = this.primaryPhone;
+    this.normalizedPhone = normalizePhone(this.primaryPhone) || null;
+  }
+
+  // ── Secondary phone ────────────────────────────────────────────────────────
   if (this.secondaryPhone) {
     const ns = normalizePhone(this.secondaryPhone);
     this.normalizedSecondaryPhone = ns || null;
+
+    // Schema-level guard: secondary cannot equal primary
+    if (ns && ns === this.normalizedPhone) {
+      throw new Error('Secondary phone cannot be the same as primary phone.');
+    }
+  } else {
+    // Explicitly nullify so the unique partial index ignores empty values
+    this.normalizedSecondaryPhone = null;
   }
 });
 
 // ── Pre-findOneAndUpdate / updateOne / updateMany hooks ───────────────────────
+// ── Pre-findOneAndUpdate / updateOne / updateMany hooks ───────────────────────
 async function syncNormalizedPhoneOnUpdate() {
   try {
     const update = this.getUpdate();
-    const mobile =
-      (update && update.$set && update.$set.mobile) ||
-      (update && update.mobile);
+    if (!update) return;
+    if (!update.$set) update.$set = {};
+
+    // ── Primary phone sync ─────────────────────────────────────────────────
+    const mobile      = update.$set.mobile      || update.mobile;
+    const primaryPhone = update.$set.primaryPhone || update.primaryPhone;
+
     if (mobile) {
-      const n = normalizePhone(mobile);
-      if (!update.$set) update.$set = {};
-      update.$set.normalizedPhone = n || null;
-      // Keep primaryPhone in sync with mobile if not explicitly set
+      update.$set.normalizedPhone  = normalizePhone(mobile) || null;
+      // Sync primaryPhone to match mobile for backward compat
       if (!update.$set.primaryPhone) update.$set.primaryPhone = mobile;
-      this.setUpdate(update);
+    } else if (primaryPhone) {
+      // primaryPhone changed directly — sync mobile too
+      update.$set.normalizedPhone = normalizePhone(primaryPhone) || null;
+      if (!update.$set.mobile) update.$set.mobile = primaryPhone;
     }
-    const secondary =
-      (update && update.$set && update.$set.secondaryPhone) ||
-      (update && update.secondaryPhone);
+
+    // ── Secondary phone sync ───────────────────────────────────────────────
+    const secondary = update.$set.secondaryPhone !== undefined
+      ? update.$set.secondaryPhone
+      : update.secondaryPhone;
+
     if (secondary !== undefined) {
-      if (!update.$set) update.$set = {};
-      update.$set.normalizedSecondaryPhone = secondary ? (normalizePhone(secondary) || null) : null;
-      this.setUpdate(update);
+      update.$set.normalizedSecondaryPhone = secondary
+        ? (normalizePhone(secondary) || null)
+        : null;
     }
+
+    // ── If secondaryPhone is being explicitly removed, clear normalized too ─
+    if (update.$set.secondaryPhone === null || update.$set.secondaryPhone === '') {
+      update.$set.normalizedSecondaryPhone = null;
+    }
+
+    this.setUpdate(update);
   } catch (err) {
     console.error("syncNormalizedPhoneOnUpdate error:", err);
   }
