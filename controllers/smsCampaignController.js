@@ -68,7 +68,7 @@ const sendViaMSG91 = async ({ mobile, name, templateId, senderId, authKey }) => 
   let data;
   try {
     const response = await axios.post(
-      "https://control.msg91.com/api/v5/flow",   // ✅ correct current endpoint
+      "https://control.msg91.com/api/v5/flow/",   // ✅ correct current endpoint (trailing slash required)
       payload,
       {
         headers: {

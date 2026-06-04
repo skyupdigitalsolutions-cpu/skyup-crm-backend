@@ -266,7 +266,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
 
   try {
     const { data } = await axios.post(
-      "https://control.msg91.com/api/v5/flow",   // ✅ correct current endpoint
+      "https://control.msg91.com/api/v5/flow/",   // ✅ correct current endpoint (trailing slash required)
       payload,
       { headers: { authkey: authKey, "Content-Type": "application/json", accept: "application/json" } }
     );
