@@ -246,24 +246,29 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
     .replace(/{{mobile}}/g,   lead.mobile   || "")
     .replace(/{{campaign}}/g, lead.campaign || "");
 
+  if (!templateId) {
+    console.warn(`[autoTemplate] ❌ SMS skipped — templateId is required for MSG91 v5/flow endpoint. Set it in SMS Settings.`);
+    return;
+  }
+
+  // MSG91 v5/flow payload — textsms/send was deprecated and returns 404.
+  // Use /api/v5/flow with template_id + recipients array.
   const payload = {
-    sender:  defaultSenderId,
-    route:   "4",
-    country: "91",
-    sms: [{
-      message: body,
-      to:      [phone],
-      ...(templateId ? { dlt_template_id: templateId } : {}),
+    template_id: templateId,
+    short_url:   "0",
+    recipients: [{
+      mobiles: phone,
+      VAR1:    body,    // maps to {{VAR1}} in your DLT-approved MSG91 template
     }],
   };
 
-  console.log(`[autoTemplate] 📤 SMS → ${phone} message="${body}"`);
+  console.log(`[autoTemplate] 📤 SMS → ${phone} templateId="${templateId}"`);
 
   try {
     const { data } = await axios.post(
-      "https://control.msg91.com/api/v5/textsms/send",
+      "https://control.msg91.com/api/v5/flow",   // ✅ correct current endpoint
       payload,
-      { headers: { authkey: authKey, "Content-Type": "application/json", Accept: "application/json" } }
+      { headers: { authkey: authKey, "Content-Type": "application/json", accept: "application/json" } }
     );
 
     if (data?.type === "error") throw new Error(data?.message || "MSG91 SMS error");

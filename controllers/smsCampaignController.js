@@ -18,20 +18,16 @@ async function getCompanySmsCredentials(companyId) {
   };
 }
 
-// ── MSG91 SMS sender (correct Send SMS API) ───────────────────────────────────
-// Endpoint: POST https://api.msg91.com/api/v5/flow/
-// is for WhatsApp — SMS uses https://control.msg91.com/api/v5/otp  is for OTP.
-// The correct bulk SMS endpoint is:
-//   POST https://api.msg91.com/api/sendhttp.php  (legacy)
-//   POST https://control.msg91.com/api/v5/textsms/send (new)
+// ── MSG91 SMS sender ──────────────────────────────────────────────────────────
+// Uses the current MSG91 v5/flow endpoint (textsms/send was deprecated → 404).
+// Docs: https://docs.msg91.com/reference/send-sms
 //
-// MSG91's current recommended SMS API (non-OTP, DLT-compliant):
-//   POST https://api.msg91.com/api/v5/flow/
-//   BUT only for flows. For plain text SMS use the send API below.
+// Endpoint: POST https://control.msg91.com/api/v5/flow
+// Payload : { template_id, short_url, recipients: [{ mobiles, VAR1, ... }] }
 //
-// We use the correct v5 SMS send endpoint:
-//   POST https://control.msg91.com/api/v5/textsms/send
-// with JSON body.
+// The template_id must be a DLT-approved SMS template ID from your MSG91
+// dashboard (SMS → Templates). Free-text messages are no longer supported
+// by this endpoint — every SMS must use a registered template.
 const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) => {
   if (!authKey) {
     throw new Error(
@@ -39,26 +35,30 @@ const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) 
     );
   }
 
+  if (!templateId) {
+    throw new Error(
+      "MSG91 template_id is required. Go to SMS Settings and enter your DLT-approved MSG91 Template ID."
+    );
+  }
+
   // Normalize: strip all non-digits
   // - 10-digit bare number → prepend India country code 91
   // - 11–13 digit number   → already has a country code, keep as-is
-  //   (e.g. 9807651234 = Nepal, 989123456789 = Iran — don't corrupt these)
   // - Do NOT slice — trimming drops valid leading country-code digits
   let phone = mobile.replace(/\D/g, "");
   if (phone.startsWith("0091")) phone = phone.slice(4);
   if (phone.startsWith("00"))   phone = phone.slice(2);
   if (phone.length === 10)      phone = "91" + phone;
 
-  // MSG91 v5 SMS API payload
+  // MSG91 v5/flow payload — template variables map to {{VAR1}}, {{VAR2}} etc.
+  // in your approved DLT template. The `message` value is passed as VAR1.
   const payload = {
-    sender:      senderId || "695382",   // DLT-registered Sender ID
-    route:       "4",                    // 4 = DLT transactional/service
-    country:     "91",
-    sms: [
+    template_id: templateId,
+    short_url:   "0",
+    recipients: [
       {
-        message:    message,
-        to:         [phone],
-        ...(templateId ? { dlt_template_id: templateId } : {}),
+        mobiles: phone,
+        VAR1:    message,           // maps to {{VAR1}} in your MSG91 template
       },
     ],
   };
@@ -66,13 +66,13 @@ const sendViaMSG91 = async ({ mobile, message, templateId, senderId, authKey }) 
   let data;
   try {
     const response = await axios.post(
-      "https://control.msg91.com/api/v5/textsms/send",
+      "https://control.msg91.com/api/v5/flow",   // ✅ correct current endpoint
       payload,
       {
         headers: {
           authkey:        authKey,
           "Content-Type": "application/json",
-          Accept:         "application/json",
+          accept:         "application/json",
         },
         timeout: 15000,
       }
