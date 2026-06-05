@@ -1,25 +1,173 @@
 // utils/transcribeAudio.js
 // ── Dual-engine transcription ─────────────────────────────────────────────────
-//   • Sarvam AI  → mixed / Indic audio  (hi, kn, ta, te, ml, mr, gu, bn, pa, or)
-//   • Groq Whisper large-v3 → purely English audio
+//   • Sarvam AI  → mixed / Indic audio  (auto-detects hi/kn/ta/te/ml/mr/gu/bn)
+//   • Groq Whisper large-v3 → purely English audio  (free tier)
 //
-// The caller passes  audioLang: 'english' | 'mixed'  (or omits it → 'mixed')
+// Sarvam limit: 30 s per request → audio is chunked with ffmpeg before upload.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const fs       = require('fs');
-const path     = require('path');
-const os       = require('os');
-const axios    = require('axios');
-const FormData = require('form-data');
+const fs             = require('fs');
+const path           = require('path');
+const os             = require('os');
+const { execSync }   = require('child_process');
+const axios          = require('axios');
+const FormData       = require('form-data');
 
-// ── API endpoints ─────────────────────────────────────────────────────────────
-const GROQ_STT_URL    = 'https://api.groq.com/openai/v1/audio/transcriptions';
-const GROQ_CHAT_URL   = 'https://api.groq.com/openai/v1/chat/completions';
-const SARVAM_STT_URL  = 'https://api.sarvam.ai/speech-to-text-translate';
+const GROQ_STT_URL   = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const SARVAM_STT_URL = 'https://api.sarvam.ai/speech-to-text-translate';
+const WHISPER_MODEL  = 'whisper-large-v3';
+const CHUNK_SECS     = 25; // stay under Sarvam's 30 s hard limit
 
-// ── Model constants ───────────────────────────────────────────────────────────
-const WHISPER_MODEL   = 'whisper-large-v3';
-const CHAT_MODEL      = 'llama-3.1-8b-instant';
+// ─────────────────────────────────────────────────────────────────────────────
+// Utilities
+// ─────────────────────────────────────────────────────────────────────────────
+
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+  const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+/** Download a URL to a tmp file, return the local path */
+async function downloadToTmp(url, suffix = '.mp3') {
+  const tmpPath = path.join(os.tmpdir(), `stt_${Date.now()}${suffix}`);
+  const response = await axios.get(url, { responseType: 'arraybuffer' });
+  fs.writeFileSync(tmpPath, Buffer.from(response.data));
+  return tmpPath;
+}
+
+/**
+ * Use ffmpeg to probe audio duration in seconds.
+ * Returns 0 if ffprobe fails (we'll treat it as a single chunk then).
+ */
+function getAudioDuration(filePath) {
+  try {
+    const out = execSync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
+      { stdio: ['pipe', 'pipe', 'pipe'] }
+    ).toString().trim();
+    return parseFloat(out) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Split audio into ≤CHUNK_SECS-second WAV chunks using ffmpeg.
+ * Returns array of tmp file paths — caller must delete them.
+ */
+function splitAudio(filePath, chunkSecs = CHUNK_SECS) {
+  const duration = getAudioDuration(filePath);
+  const chunks   = [];
+
+  if (duration <= chunkSecs) {
+    // No split needed — convert to wav for Sarvam compatibility
+    const out = path.join(os.tmpdir(), `chunk_${Date.now()}_0.wav`);
+    execSync(`ffmpeg -y -i "${filePath}" -ar 16000 -ac 1 "${out}"`, { stdio: 'pipe' });
+    chunks.push(out);
+    return chunks;
+  }
+
+  const numChunks = Math.ceil(duration / chunkSecs);
+  console.log(`[Sarvam] Audio is ${duration.toFixed(1)}s → splitting into ${numChunks} chunks of ${chunkSecs}s`);
+
+  for (let i = 0; i < numChunks; i++) {
+    const start = i * chunkSecs;
+    const out   = path.join(os.tmpdir(), `chunk_${Date.now()}_${i}.wav`);
+    execSync(
+      `ffmpeg -y -i "${filePath}" -ss ${start} -t ${chunkSecs} -ar 16000 -ac 1 "${out}"`,
+      { stdio: 'pipe' }
+    );
+    chunks.push(out);
+  }
+  return chunks;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SARVAM ENGINE  (mixed / Indic, chunked)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Send a single ≤30 s chunk to Sarvam, return its transcript string */
+async function sarvamChunk(chunkPath, chunkIndex) {
+  const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
+
+  const form = new FormData();
+  form.append('file', fs.createReadStream(chunkPath), {
+    filename: path.basename(chunkPath),
+    contentType: 'audio/wav',
+  });
+  form.append('with_timestamps', 'true');
+  form.append('with_diarization', 'false');
+
+  try {
+    const resp = await axios.post(SARVAM_STT_URL, form, {
+      headers: {
+        'api-subscription-key': SARVAM_API_KEY,
+        ...form.getHeaders(),
+      },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+    const data = resp.data;
+    if (!data?.transcript) return '';
+
+    const lang = data.language_code || 'unknown';
+    console.log(`[Sarvam] Chunk ${chunkIndex}: lang=${lang}, chars=${data.transcript.length}`);
+
+    // Use timestamped segments if available
+    if (Array.isArray(data.timestamps) && data.timestamps.length > 0) {
+      const offsetSecs = chunkIndex * CHUNK_SECS;
+      return data.timestamps
+        .map(seg => `[${formatTime((seg.start || 0) + offsetSecs)}] ${(seg.transcript || '').trim()}`)
+        .filter(l => l)
+        .join('\n');
+    }
+    return data.transcript.trim();
+  } catch (err) {
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    throw new Error(`Sarvam STT chunk ${chunkIndex} failed (${err.response?.status ?? 'network'}): ${detail}`);
+  }
+}
+
+async function runSarvam(audioInput) {
+  const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
+  if (!SARVAM_API_KEY) throw new Error('SARVAM_API_KEY is not set in your environment variables.');
+
+  // Resolve to a local file path
+  let localPath;
+  let needsCleanup = false;
+
+  if (typeof audioInput === 'string' && audioInput.startsWith('http')) {
+    const ext = path.extname(new URL(audioInput).pathname) || '.mp3';
+    localPath    = await downloadToTmp(audioInput, ext);
+    needsCleanup = true;
+  } else {
+    localPath = audioInput;
+  }
+
+  // Split into ≤25 s chunks
+  let chunks = [];
+  try {
+    chunks = splitAudio(localPath, CHUNK_SECS);
+  } finally {
+    if (needsCleanup) fs.unlink(localPath, () => {});
+  }
+
+  // Transcribe all chunks (sequentially to avoid rate-limit bursts)
+  const parts = [];
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      const part = await sarvamChunk(chunks[i], i);
+      if (part) parts.push(part);
+    }
+  } finally {
+    chunks.forEach(c => fs.unlink(c, () => {}));
+  }
+
+  const transcript = parts.join('\n');
+  console.log(`[Sarvam] Final transcript (first 150 chars): ${transcript.slice(0, 150)}`);
+  return { text: transcript };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GROQ ENGINE  (pure English)
@@ -27,9 +175,7 @@ const CHAT_MODEL      = 'llama-3.1-8b-instant';
 
 async function runGroqWhisper(audioInput) {
   const GROQ_API_KEY = process.env.GROQ_API_KEY;
-  if (!GROQ_API_KEY) {
-    throw new Error('GROQ_API_KEY is not set in your environment variables.');
-  }
+  if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY is not set in your environment variables.');
 
   let fileBuffer, fileName;
 
@@ -46,15 +192,12 @@ async function runGroqWhisper(audioInput) {
   form.append('file', fileBuffer, { filename: fileName });
   form.append('model', WHISPER_MODEL);
   form.append('response_format', 'verbose_json');
-  form.append('language', 'en'); // force English for speed + accuracy
+  form.append('language', 'en');
 
   let data;
   try {
     const resp = await axios.post(GROQ_STT_URL, form, {
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        ...form.getHeaders(),
-      },
+      headers: { Authorization: `Bearer ${GROQ_API_KEY}`, ...form.getHeaders() },
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
     });
@@ -67,124 +210,32 @@ async function runGroqWhisper(audioInput) {
   if (!data?.text) throw new Error('Groq Whisper returned an empty transcription.');
 
   const segments = data.segments || [];
-  let transcript = '';
+  const transcript = segments.length > 0
+    ? segments.map(seg => `[${formatTime(seg.start)}] ${seg.text.trim()}`).join('\n')
+    : data.text.trim();
 
-  if (segments.length > 0) {
-    transcript = segments
-      .map(seg => `[${formatTime(seg.start)}] ${seg.text.trim()}`)
-      .join('\n');
-  } else {
-    transcript = data.text.trim();
-  }
-
-  console.log(`[Groq] English transcript (first 100 chars): ${transcript.slice(0, 100)}`);
+  console.log(`[Groq] Transcript (first 100 chars): ${transcript.slice(0, 100)}`);
   return { text: transcript };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SARVAM AI ENGINE  (mixed / Indic)
-// ─────────────────────────────────────────────────────────────────────────────
-// Uses  /speech-to-text-translate  endpoint which:
-//   • Auto-detects Indian languages (hi, kn, ta, te, ml, mr, gu, bn, pa, or)
-//   • Returns transcript already translated to English
-//   • Handles code-switched (Hinglish / Kanglish etc.) audio natively
-//
-// Sarvam accepts: wav, mp3, ogg, flac, aac, opus — max 25 MB / 5 min per chunk.
+// ROUTER
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runSarvam(audioInput) {
-  const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
-  if (!SARVAM_API_KEY) {
-    throw new Error('SARVAM_API_KEY is not set in your environment variables.');
-  }
-
-  let fileBuffer, fileName;
-
-  if (typeof audioInput === 'string' && audioInput.startsWith('http')) {
-    const response = await axios.get(audioInput, { responseType: 'arraybuffer' });
-    fileBuffer = Buffer.from(response.data);
-    // Preserve original extension; default to mp3
-    const urlPath = new URL(audioInput).pathname;
-    fileName = path.basename(urlPath) || 'audio.mp3';
-  } else {
-    fileBuffer = fs.readFileSync(audioInput);
-    fileName   = path.basename(audioInput);
-  }
-
-  const form = new FormData();
-  form.append('file', fileBuffer, { filename: fileName });
-  // with_timestamps=true gives segment-level timestamps in the response
-  form.append('with_timestamps', 'true');
-  // with_diarization — set to true if you want speaker labels (optional)
-  form.append('with_diarization', 'false');
-
-  let data;
-  try {
-    const resp = await axios.post(SARVAM_STT_URL, form, {
-      headers: {
-        'api-subscription-key': SARVAM_API_KEY,
-        ...form.getHeaders(),
-      },
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity,
-    });
-    data = resp.data;
-  } catch (err) {
-    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    throw new Error(`Sarvam STT failed (${err.response?.status ?? 'network'}): ${detail}`);
-  }
-
-  // Sarvam response shape:
-  // { transcript: string, language_code: string, timestamps?: [...] }
-  if (!data?.transcript) {
-    throw new Error('Sarvam AI returned an empty transcription.');
-  }
-
-  const detectedLang = data.language_code || 'unknown';
-  console.log(`[Sarvam] Detected language: ${detectedLang}`);
-
-  // Build timestamped transcript if timestamps are available
-  let transcript = '';
-  if (Array.isArray(data.timestamps) && data.timestamps.length > 0) {
-    transcript = data.timestamps
-      .map(seg => `[${formatTime(seg.start)}] ${seg.transcript?.trim() || ''}`)
-      .filter(line => line)
-      .join('\n');
-  }
-  // Fall back to flat transcript
-  if (!transcript) {
-    transcript = data.transcript.trim();
-  }
-
-  console.log(`[Sarvam] Transcript (first 100 chars): ${transcript.slice(0, 100)}`);
-  return { text: transcript };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ROUTER — picks engine based on audioLang hint
-// ─────────────────────────────────────────────────────────────────────────────
-//
-//   audioLang = 'english'  → Groq Whisper large-v3  (fast, free tier)
-//   audioLang = 'mixed'    → Sarvam AI               (Indic + code-switched)
-//   audioLang = undefined  → defaults to 'mixed'     (safe default for India)
-//
 async function transcribeAudio(audioInput, audioLang = 'mixed') {
   const lang = (audioLang || 'mixed').toLowerCase();
-
   if (lang === 'english') {
-    console.log('[Transcription] Engine: Groq Whisper large-v3 (English)');
+    console.log('[Transcription] Engine → Groq Whisper large-v3 (English)');
     return runGroqWhisper(audioInput);
   }
-
-  console.log('[Transcription] Engine: Sarvam AI (mixed/Indic)');
+  console.log('[Transcription] Engine → Sarvam AI (mixed/Indic, auto-chunked)');
   return runSarvam(audioInput);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC API  (kept backward-compatible with existing controller calls)
+// PUBLIC API  (backward-compatible)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Twilio recording — audioLang passed via options (default: 'mixed')
 async function transcribeTwilioRecording(recordingSid, options = {}) {
   const audioLang = options.audioLang || 'mixed';
   const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Recordings/${recordingSid}.mp3`;
@@ -192,12 +243,8 @@ async function transcribeTwilioRecording(recordingSid, options = {}) {
 
   const response = await axios.get(twilioUrl, {
     responseType: 'arraybuffer',
-    auth: {
-      username: process.env.TWILIO_ACCOUNT_SID,
-      password: process.env.TWILIO_AUTH_TOKEN,
-    },
+    auth: { username: process.env.TWILIO_ACCOUNT_SID, password: process.env.TWILIO_AUTH_TOKEN },
   });
-
   fs.writeFileSync(tmpPath, response.data);
 
   try {
@@ -208,7 +255,6 @@ async function transcribeTwilioRecording(recordingSid, options = {}) {
   }
 }
 
-// Mobile recording — audioLang passed via options (default: 'mixed')
 async function transcribeMobileRecording(relativeUrl, options = {}) {
   const audioLang = options.audioLang || 'mixed';
 
@@ -230,15 +276,6 @@ async function transcribeMobileRecording(relativeUrl, options = {}) {
 
   const { text } = await transcribeAudio(filePath, audioLang);
   return { transcript: text };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-function formatTime(seconds) {
-  const m = Math.floor(seconds / 60).toString().padStart(2, '0');
-  const s = Math.floor(seconds % 60).toString().padStart(2, '0');
-  return `${m}:${s}`;
 }
 
 module.exports = { transcribeTwilioRecording, transcribeMobileRecording };
