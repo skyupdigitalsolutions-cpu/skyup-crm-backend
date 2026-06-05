@@ -102,6 +102,9 @@ async function sarvamChunk(chunkPath, chunkIndex) {
   form.append('with_timestamps', 'true');
   // language_code: 'unknown' → auto-detect (hi-IN / kn-IN / ta-IN etc.)
   form.append('language_code', 'unknown');
+  // script: 'roman' → output in Roman/Latin letters (Hinglish)
+  // e.g. "kya kar raha hai" not "क्या कर रहा है"
+  form.append('script', 'roman');
 
   try {
     const resp = await axios.post(SARVAM_STT_URL, form, {
