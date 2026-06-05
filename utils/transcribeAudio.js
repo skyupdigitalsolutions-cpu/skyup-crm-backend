@@ -1,81 +1,183 @@
 // utils/transcribeAudio.js
-// ── Groq Whisper large-v3 for transcription + Groq LLM for transliteration ───
+// ── Dual-engine transcription ─────────────────────────────────────────────────
+//   • Sarvam AI  → mixed / Indic audio  (auto-detects hi/kn/ta/te/ml/mr/gu/bn)
+//   • Groq Whisper large-v3 → purely English audio  (free tier)
+//
+// Sarvam limit: 30 s per request → audio is chunked with ffmpeg before upload.
+// ─────────────────────────────────────────────────────────────────────────────
 
-const fs       = require('fs');
-const path     = require('path');
-const os       = require('os');
-const axios    = require('axios');
-const FormData = require('form-data');
+const fs             = require('fs');
+const path           = require('path');
+const os             = require('os');
+const { execSync }   = require('child_process');
+const axios          = require('axios');
+const FormData       = require('form-data');
 
-const GROQ_STT_URL  = 'https://api.groq.com/openai/v1/audio/transcriptions';
-const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const WHISPER_MODEL = 'whisper-large-v3';
-const CHAT_MODEL    = 'llama-3.1-8b-instant'; // current supported Groq chat model
+const GROQ_STT_URL   = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const SARVAM_STT_URL = 'https://api.sarvam.ai/speech-to-text-translate';
+const WHISPER_MODEL  = 'whisper-large-v3';
+const CHUNK_SECS     = 25; // stay under Sarvam's 30 s hard limit
 
-// ── Transliterate non-English text to Roman script using Groq LLM ─────────────
-async function translateToEnglish(text, detectedLanguage) {
-  // If already English, skip
-  if (detectedLanguage === 'en' || detectedLanguage === 'eng') {
-    return text;
-  }
+// ─────────────────────────────────────────────────────────────────────────────
+// Utilities
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const GROQ_API_KEY = process.env.GROQ_API_KEY;
-  if (!GROQ_API_KEY) {
-    console.warn('[Transliteration] GROQ_API_KEY not set — returning original text.');
-    return text;
-  }
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+  const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
 
-  console.log(`[Transliteration] Converting ${detectedLanguage} → Roman script`);
+/** Download a URL to a tmp file, return the local path */
+async function downloadToTmp(url, suffix = '.mp3') {
+  const tmpPath = path.join(os.tmpdir(), `stt_${Date.now()}${suffix}`);
+  const response = await axios.get(url, { responseType: 'arraybuffer' });
+  fs.writeFileSync(tmpPath, Buffer.from(response.data));
+  return tmpPath;
+}
 
+/**
+ * Use ffmpeg to probe audio duration in seconds.
+ * Returns 0 if ffprobe fails (we'll treat it as a single chunk then).
+ */
+function getAudioDuration(filePath) {
   try {
-    const { data } = await axios.post(
-      GROQ_CHAT_URL,
-      {
-        model: CHAT_MODEL,
-        max_tokens: 2000,
-        messages: [
-          {
-            role: 'system',
-            content:
-              `You are a transliteration expert. Convert the following ${detectedLanguage} text into Roman (English) script — keep the SAME words and pronunciation, just write them in English letters.\n` +
-              `Do NOT translate the meaning. Do NOT change the words.\n` +
-              `Example: "अभी मैं थोड़ा बिजी हूं" → "abi mein thoda busy hu"\n` +
-              `Example: "ನಾನು ಸ್ವಲ್ಪ ಬ್ಯುಸಿ ಇದ್ದೀನಿ" → "naanu svalpa busy iddini"\n` +
-              `If the text already has English/Roman words, keep them exactly as-is.\n` +
-              `Return ONLY the transliterated text, nothing else.`,
-          },
-          { role: 'user', content: text },
-        ],
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    return (data.choices?.[0]?.message?.content || text).trim();
-  } catch (err) {
-    const detail = err.response?.data
-      ? JSON.stringify(err.response.data)
-      : err.message;
-    console.error(`[Transliteration] Chat API failed (${err.response?.status ?? 'network'}): ${detail}`);
-    console.warn('[Transliteration] Falling back to original transcript text.');
-    return text; // don't crash — return the raw transcript
+    const out = execSync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
+      { stdio: ['pipe', 'pipe', 'pipe'] }
+    ).toString().trim();
+    return parseFloat(out) || 0;
+  } catch {
+    return 0;
   }
 }
 
-// ── Core Groq Whisper large-v3 call ──────────────────────────────────────────
+/**
+ * Split audio into ≤CHUNK_SECS-second WAV chunks using ffmpeg.
+ * Returns array of tmp file paths — caller must delete them.
+ */
+function splitAudio(filePath, chunkSecs = CHUNK_SECS) {
+  const duration = getAudioDuration(filePath);
+  const chunks   = [];
+
+  if (duration <= chunkSecs) {
+    // No split needed — convert to wav for Sarvam compatibility
+    const out = path.join(os.tmpdir(), `chunk_${Date.now()}_0.wav`);
+    execSync(`ffmpeg -y -i "${filePath}" -ar 16000 -ac 1 "${out}"`, { stdio: 'pipe' });
+    chunks.push(out);
+    return chunks;
+  }
+
+  const numChunks = Math.ceil(duration / chunkSecs);
+  console.log(`[Sarvam] Audio is ${duration.toFixed(1)}s → splitting into ${numChunks} chunks of ${chunkSecs}s`);
+
+  for (let i = 0; i < numChunks; i++) {
+    const start = i * chunkSecs;
+    const out   = path.join(os.tmpdir(), `chunk_${Date.now()}_${i}.wav`);
+    execSync(
+      `ffmpeg -y -i "${filePath}" -ss ${start} -t ${chunkSecs} -ar 16000 -ac 1 "${out}"`,
+      { stdio: 'pipe' }
+    );
+    chunks.push(out);
+  }
+  return chunks;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SARVAM ENGINE  (mixed / Indic, chunked)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Send a single ≤30 s chunk to Sarvam, return its transcript string */
+async function sarvamChunk(chunkPath, chunkIndex) {
+  const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
+
+  const form = new FormData();
+  form.append('file', fs.createReadStream(chunkPath), {
+    filename: path.basename(chunkPath),
+    contentType: 'audio/wav',
+  });
+  form.append('with_timestamps', 'true');
+  form.append('with_diarization', 'false');
+
+  try {
+    const resp = await axios.post(SARVAM_STT_URL, form, {
+      headers: {
+        'api-subscription-key': SARVAM_API_KEY,
+        ...form.getHeaders(),
+      },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+    const data = resp.data;
+    if (!data?.transcript) return '';
+
+    const lang = data.language_code || 'unknown';
+    console.log(`[Sarvam] Chunk ${chunkIndex}: lang=${lang}, chars=${data.transcript.length}`);
+
+    // Use timestamped segments if available
+    if (Array.isArray(data.timestamps) && data.timestamps.length > 0) {
+      const offsetSecs = chunkIndex * CHUNK_SECS;
+      return data.timestamps
+        .map(seg => `[${formatTime((seg.start || 0) + offsetSecs)}] ${(seg.transcript || '').trim()}`)
+        .filter(l => l)
+        .join('\n');
+    }
+    return data.transcript.trim();
+  } catch (err) {
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    throw new Error(`Sarvam STT chunk ${chunkIndex} failed (${err.response?.status ?? 'network'}): ${detail}`);
+  }
+}
+
+async function runSarvam(audioInput) {
+  const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
+  if (!SARVAM_API_KEY) throw new Error('SARVAM_API_KEY is not set in your environment variables.');
+
+  // Resolve to a local file path
+  let localPath;
+  let needsCleanup = false;
+
+  if (typeof audioInput === 'string' && audioInput.startsWith('http')) {
+    const ext = path.extname(new URL(audioInput).pathname) || '.mp3';
+    localPath    = await downloadToTmp(audioInput, ext);
+    needsCleanup = true;
+  } else {
+    localPath = audioInput;
+  }
+
+  // Split into ≤25 s chunks
+  let chunks = [];
+  try {
+    chunks = splitAudio(localPath, CHUNK_SECS);
+  } finally {
+    if (needsCleanup) fs.unlink(localPath, () => {});
+  }
+
+  // Transcribe all chunks (sequentially to avoid rate-limit bursts)
+  const parts = [];
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      const part = await sarvamChunk(chunks[i], i);
+      if (part) parts.push(part);
+    }
+  } finally {
+    chunks.forEach(c => fs.unlink(c, () => {}));
+  }
+
+  const transcript = parts.join('\n');
+  console.log(`[Sarvam] Final transcript (first 150 chars): ${transcript.slice(0, 150)}`);
+  return { text: transcript };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GROQ ENGINE  (pure English)
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function runGroqWhisper(audioInput) {
   const GROQ_API_KEY = process.env.GROQ_API_KEY;
-  if (!GROQ_API_KEY) {
-    throw new Error('GROQ_API_KEY is not set. Add it to your environment variables.');
-  }
-  console.log('[Groq] Using key ending in:', GROQ_API_KEY.slice(-6));
+  if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY is not set in your environment variables.');
 
-  let fileBuffer;
-  let fileName;
+  let fileBuffer, fileName;
 
   if (typeof audioInput === 'string' && audioInput.startsWith('http')) {
     const response = await axios.get(audioInput, { responseType: 'arraybuffer' });
@@ -90,88 +192,74 @@ async function runGroqWhisper(audioInput) {
   form.append('file', fileBuffer, { filename: fileName });
   form.append('model', WHISPER_MODEL);
   form.append('response_format', 'verbose_json');
-  // No language param → auto-detect (Hindi/Kannada/Telugu/Tamil/English)
+  form.append('language', 'en');
 
   let data;
   try {
     const resp = await axios.post(GROQ_STT_URL, form, {
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        ...form.getHeaders(),
-      },
+      headers: { Authorization: `Bearer ${GROQ_API_KEY}`, ...form.getHeaders() },
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
     });
     data = resp.data;
   } catch (err) {
-    const detail = err.response?.data
-      ? JSON.stringify(err.response.data)
-      : err.message;
-    throw new Error(`Groq STT request failed (${err.response?.status ?? 'network'}): ${detail}`);
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    throw new Error(`Groq STT failed (${err.response?.status ?? 'network'}): ${detail}`);
   }
 
-  if (!data || !data.text) {
-    throw new Error('Groq Whisper returned an empty transcription.');
-  }
+  if (!data?.text) throw new Error('Groq Whisper returned an empty transcription.');
 
-  const originalText     = data.text.trim();
-  const detectedLanguage = data.language || 'unknown';
-  const segments         = data.segments || [];
+  const segments = data.segments || [];
+  const transcript = segments.length > 0
+    ? segments.map(seg => `[${formatTime(seg.start)}] ${seg.text.trim()}`).join('\n')
+    : data.text.trim();
 
-  console.log(`[Groq] Detected language: ${detectedLanguage}`);
-  console.log(`[Groq] Original transcript (first 100 chars): ${originalText.slice(0, 100)}`);
-
-  // ── Format as timestamped segments ───────────────────────────────────────
-  let dialogueText = '';
-  if (segments.length > 0) {
-    dialogueText = segments
-      .map(seg => `[${formatTime(seg.start)}] ${seg.text.trim()}`)
-      .join('\n');
-  }
-
-  // ── Transliterate to Roman script if needed ───────────────────────────────
-  const textToTransliterate = dialogueText || originalText;
-  const englishText = await translateToEnglish(textToTransliterate, detectedLanguage);
-
-  console.log(`[Transliteration] Roman transcript (first 100 chars): ${englishText.slice(0, 100)}`);
-
-  return { text: englishText };
+  console.log(`[Groq] Transcript (first 100 chars): ${transcript.slice(0, 100)}`);
+  return { text: transcript };
 }
 
-// Format seconds → MM:SS
-function formatTime(seconds) {
-  const m = Math.floor(seconds / 60).toString().padStart(2, '0');
-  const s = Math.floor(seconds % 60).toString().padStart(2, '0');
-  return `${m}:${s}`;
+// ─────────────────────────────────────────────────────────────────────────────
+// ROUTER
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function transcribeAudio(audioInput, audioLang = 'mixed') {
+  const lang = (audioLang || 'mixed').toLowerCase();
+  if (lang === 'english') {
+    console.log('[Transcription] Engine → Groq Whisper large-v3 (English)');
+    return runGroqWhisper(audioInput);
+  }
+  console.log('[Transcription] Engine → Sarvam AI (mixed/Indic, auto-chunked)');
+  return runSarvam(audioInput);
 }
 
-// ── Transcribe a Twilio recording ─────────────────────────────────────────────
-async function transcribeTwilioRecording(recordingSid) {
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC API  (backward-compatible)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function transcribeTwilioRecording(recordingSid, options = {}) {
+  const audioLang = options.audioLang || 'mixed';
   const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Recordings/${recordingSid}.mp3`;
   const tmpPath   = path.join(os.tmpdir(), `twilio_${recordingSid}.mp3`);
 
   const response = await axios.get(twilioUrl, {
     responseType: 'arraybuffer',
-    auth: {
-      username: process.env.TWILIO_ACCOUNT_SID,
-      password: process.env.TWILIO_AUTH_TOKEN,
-    },
+    auth: { username: process.env.TWILIO_ACCOUNT_SID, password: process.env.TWILIO_AUTH_TOKEN },
   });
-
   fs.writeFileSync(tmpPath, response.data);
 
   try {
-    const { text } = await runGroqWhisper(tmpPath);
+    const { text } = await transcribeAudio(tmpPath, audioLang);
     return { transcript: text };
   } finally {
     fs.unlink(tmpPath, () => {});
   }
 }
 
-// ── Transcribe a mobile recording ─────────────────────────────────────────────
-async function transcribeMobileRecording(relativeUrl) {
+async function transcribeMobileRecording(relativeUrl, options = {}) {
+  const audioLang = options.audioLang || 'mixed';
+
   if (relativeUrl && relativeUrl.startsWith('http')) {
-    const { text } = await runGroqWhisper(relativeUrl);
+    const { text } = await transcribeAudio(relativeUrl, audioLang);
     return { transcript: text };
   }
 
@@ -180,17 +268,13 @@ async function transcribeMobileRecording(relativeUrl) {
   const candidate2 = path.join(__dirname, '..', clean);
 
   let filePath;
-  if (fs.existsSync(candidate1)) {
-    filePath = candidate1;
-  } else if (fs.existsSync(candidate2)) {
-    filePath = candidate2;
-  } else {
-    throw new Error(
-      `Recording file not found.\n  Tried: ${candidate1}\n  Tried: ${candidate2}\n  URL stored: ${relativeUrl}`
-    );
-  }
+  if (fs.existsSync(candidate1))      filePath = candidate1;
+  else if (fs.existsSync(candidate2)) filePath = candidate2;
+  else throw new Error(
+    `Recording file not found.\n  Tried: ${candidate1}\n  Tried: ${candidate2}\n  URL stored: ${relativeUrl}`
+  );
 
-  const { text } = await runGroqWhisper(filePath);
+  const { text } = await transcribeAudio(filePath, audioLang);
   return { transcript: text };
 }
 
