@@ -15,9 +15,11 @@ const os           = require('os');
 const axios        = require('axios');
 const FormData     = require('form-data');
 
-const GROQ_STT_URL      = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const GROQ_STT_URL       = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const GROQ_CHAT_URL      = 'https://api.groq.com/openai/v1/chat/completions';
 const ELEVENLABS_STT_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
-const WHISPER_MODEL     = 'whisper-large-v3';
+const WHISPER_MODEL      = 'whisper-large-v3';
+const ROMANIZE_MODEL     = 'llama-3.1-8b-instant'; // fast + free on Groq
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Utilities
@@ -34,6 +36,72 @@ async function downloadToTmp(url, suffix = '.mp3') {
   const response = await axios.get(url, { responseType: 'arraybuffer' });
   fs.writeFileSync(tmpPath, Buffer.from(response.data));
   return tmpPath;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROMANIZE  (convert native script → Roman/Latin phonetic via Groq LLM)
+// ─────────────────────────────────────────────────────────────────────────────
+// Converts any Devanagari/native script words to their Roman phonetic form.
+// English words and structure ([00:00] Employee:) are preserved as-is.
+// "ऐसा कुछ भी नहीं है"  →  "aisa kuch bhi nahi hai"
+// "नहीं"                 →  "nahi"
+// Uses llama-3.1-8b-instant on Groq (fast, free tier).
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function romanizeTranscript(transcript) {
+  const GROQ_API_KEY = process.env.GROQ_API_KEY;
+  if (!GROQ_API_KEY) {
+    console.warn('[Romanize] GROQ_API_KEY not set — skipping romanization');
+    return transcript;
+  }
+
+  // Quick check: if no non-ASCII characters exist, nothing to romanize
+  if (!/[^-]/.test(transcript)) {
+    console.log('[Romanize] No native script detected — skipping');
+    return transcript;
+  }
+
+  const systemPrompt = `You are a phonetic transliteration engine.
+Your ONLY job: convert any Devanagari, Kannada, Tamil, Telugu, Malayalam, Bengali, or other Indic script words into their Roman/Latin phonetic spelling.
+
+STRICT RULES:
+1. Keep ALL English words exactly as they are.
+2. Keep ALL timestamps exactly as they are, e.g. [00:09] → [00:09]
+3. Keep ALL speaker labels exactly as they are, e.g. "Employee:" → "Employee:"
+4. Transliterate Indic script words phonetically — do NOT translate their meaning.
+   Example: "नहीं" → "nahi"  (NOT "no")
+   Example: "ऐसा कुछ भी नहीं है" → "aisa kuch bhi nahi hai"  (NOT "there is nothing like that")
+   Example: "हाँ सर" → "haan sir"  (NOT "yes sir")
+5. Output ONLY the converted transcript. No explanations, no preamble.`;
+
+  try {
+    const resp = await axios.post(GROQ_CHAT_URL, {
+      model: ROMANIZE_MODEL,
+      max_tokens: 4096,
+      temperature: 0,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: transcript },
+      ],
+    }, {
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const romanized = resp.data?.choices?.[0]?.message?.content?.trim();
+    if (!romanized) {
+      console.warn('[Romanize] Empty response from Groq — returning original');
+      return transcript;
+    }
+    console.log('[Romanize] Done. Sample:', romanized.slice(0, 150));
+    return romanized;
+  } catch (err) {
+    console.error('[Romanize] Groq LLM error — returning original transcript:', err.message);
+    return transcript; // never block the transcription if romanization fails
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -104,9 +172,29 @@ async function runElevenLabs(audioInput) {
   console.log(`[ElevenLabs] Total words: ${data.words.length}`);
 
   // ── Build dialog from word-level speaker turns ──────────────────────────────
-  // Group consecutive words by speaker_id into lines
-  // speaker_id: "agent" → Employee, "customer" → Client, anything else → Speaker N
-  const LABEL_MAP = { agent: 'Employee', customer: 'Client' };
+  // ElevenLabs returns speaker_id as:
+  //   "agent" / "customer"  → when detect_speaker_roles succeeds (best case)
+  //   "speaker_0" / "speaker_1" → when role detection is uncertain (fallback)
+  //
+  // Strategy:
+  //   1. If we see "agent"/"customer" labels → use them directly
+  //   2. Otherwise → map by first-appearance order: first speaker = Employee, second = Client
+
+  // Fixed role labels (ElevenLabs detect_speaker_roles output)
+  const ROLE_MAP = { agent: 'Employee', customer: 'Client' };
+
+  // Dynamic fallback map built on first-appearance order
+  const dynamicMap   = {};   // e.g. { speaker_0: 'Employee', speaker_1: 'Client' }
+  const ROLE_ORDER   = ['Employee', 'Client', 'Speaker 3', 'Speaker 4'];
+
+  function resolveLabel(spk) {
+    if (ROLE_MAP[spk]) return ROLE_MAP[spk];           // agent/customer → direct
+    if (dynamicMap[spk]) return dynamicMap[spk];       // already assigned
+    const role = ROLE_ORDER[Object.keys(dynamicMap).length] || `Speaker ${spk}`;
+    dynamicMap[spk] = role;
+    console.log(`[ElevenLabs] Speaker mapping: ${spk} → ${role}`);
+    return role;
+  }
 
   const lines    = [];
   let curSpeaker = null;
@@ -122,8 +210,7 @@ async function runElevenLabs(audioInput) {
     if (spk !== curSpeaker) {
       // Flush previous turn
       if (curWords.length > 0) {
-        const label = LABEL_MAP[curSpeaker] || `Speaker ${curSpeaker}`;
-        lines.push(`[${formatTime(curStart)}] ${label}: ${curWords.join(' ').trim()}`);
+        lines.push(`[${formatTime(curStart)}] ${resolveLabel(curSpeaker)}: ${curWords.join(' ').trim()}`);
       }
       curSpeaker = spk;
       curWords   = [word.text];
@@ -135,12 +222,14 @@ async function runElevenLabs(audioInput) {
 
   // Flush last turn
   if (curWords.length > 0) {
-    const label = LABEL_MAP[curSpeaker] || `Speaker ${curSpeaker}`;
-    lines.push(`[${formatTime(curStart)}] ${label}: ${curWords.join(' ').trim()}`);
+    lines.push(`[${formatTime(curStart)}] ${resolveLabel(curSpeaker)}: ${curWords.join(' ').trim()}`);
   }
 
-  const transcript = lines.join('\n');
-  console.log(`[ElevenLabs] Transcript (first 200 chars): ${transcript.slice(0, 200)}`);
+  const rawTranscript = lines.join('\n');
+  console.log(`[ElevenLabs] Raw transcript (first 200 chars): ${rawTranscript.slice(0, 200)}`);
+
+  // Romanize any native-script (Devanagari etc.) words → Roman phonetic
+  const transcript = await romanizeTranscript(rawTranscript);
   return { text: transcript };
 }
 
