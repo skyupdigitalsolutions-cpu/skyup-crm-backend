@@ -63,7 +63,8 @@ const { startLeadAlertsJob }         = require('./jobs/leadAlertsJob');
 const { startUsageResetJob }         = require('./jobs/usageResetJob');
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
-const smsCampaignRoute = require('./routes/smsCampaign');
+const smsCampaignRoute         = require('./routes/smsCampaign');
+const smsCampaignEmployeeRoute = require('./routes/smsCampaignEmployee');
 const smsHistoryRoute  = require('./routes/smsHistory');
 
 // ── Saanvi Voicebot Proxy ─────────────────────────────────────────────────────
@@ -217,7 +218,8 @@ app.use('/api/website-config',      websiteConfigRoute);
 app.use('/api/chat',                chatRoutes);
 app.use('/api/email-campaign',      emailCampaignRoute);
 app.use('/api/email',               emailHistoryRoute);
-app.use('/api/sms-campaign',        smsCampaignRoute);
+app.use('/api/sms-campaign',          smsCampaignRoute);
+app.use('/api/sms-campaign/employee', smsCampaignEmployeeRoute);
 app.use('/api/sms',                 smsHistoryRoute);
 app.use('/api/sms-config',          require('./routes/smsConfig'));
 app.use('/api/privacy',             privacyRoute);

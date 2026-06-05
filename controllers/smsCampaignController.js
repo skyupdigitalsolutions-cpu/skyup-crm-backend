@@ -443,6 +443,242 @@ const previewSmsCampaign = async (req, res) => {
   }
 };
 
+// (exports moved to bottom)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EMPLOYEE-FACING SMS ROUTES (use `protect` middleware, not `protectAdmin`)
+// These mirror the admin routes but are scoped to the employee's assigned leads.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Helper: get companyId from employee req ───────────────────────────────────
+function getEmployeeCompanyId(req) {
+  return req.user?.company?._id || req.user?.company || req.user?.companyId;
+}
+
+// ── GET /api/sms-campaign/employee/preview?campaign=XYZ ──────────────────────
+// Returns count of the employee's assigned leads in that campaign with a mobile.
+const employeePreviewSmsCampaign = async (req, res) => {
+  try {
+    const { campaign } = req.query;
+    if (!campaign) return res.status(400).json({ message: "campaign is required" });
+
+    const companyId = getEmployeeCompanyId(req);
+    const userId    = req.user._id;
+
+    const filter = {
+      company:  companyId,
+      user:     userId,
+      mobile:   { $exists: true, $ne: "" },
+    };
+    if (campaign !== "__all__") filter.campaign = campaign;
+
+    const count = await Lead.countDocuments(filter);
+    res.json({ success: true, count });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to preview campaign" });
+  }
+};
+
+// ── GET /api/sms-campaign/employee/my-campaigns ───────────────────────────────
+// Distinct campaign names from the employee's assigned leads.
+const employeeGetMyCampaigns = async (req, res) => {
+  try {
+    const companyId = getEmployeeCompanyId(req);
+    const userId    = req.user._id;
+
+    const campaigns = await Lead.distinct("campaign", {
+      company:  companyId,
+      user:     userId,
+      campaign: { $nin: [null, ""] },
+      mobile:   { $exists: true, $ne: "" },
+    });
+
+    res.json({ success: true, data: campaigns.filter(Boolean).sort() });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch your campaigns" });
+  }
+};
+
+// ── POST /api/sms-campaign/employee/send ─────────────────────────────────────
+// Blast SMS to all the employee's assigned leads (optionally filtered by campaign).
+const employeeSendBulkSms = async (req, res) => {
+  try {
+    const { campaign, message, templateId, senderId } = req.body;
+    if (!message) return res.status(400).json({ message: "message is required" });
+
+    const companyId = getEmployeeCompanyId(req);
+    const userId    = req.user._id;
+    const creds     = await getCompanySmsCredentials(companyId);
+
+    if (!creds.authKey) {
+      return res.status(400).json({
+        message: "MSG91 Auth Key not configured. Ask your admin to set it up in SMS Settings.",
+      });
+    }
+
+    const filter = {
+      company: companyId,
+      user:    userId,
+      mobile:  { $exists: true, $ne: "" },
+    };
+    if (campaign && campaign !== "__all__") filter.campaign = campaign;
+
+    const leads = await Lead.find(filter)
+      .select("name mobile email campaign")
+      .lean();
+
+    if (leads.length === 0) {
+      return res.status(404).json({
+        message: campaign
+          ? `No leads with mobile numbers found in campaign "${campaign}"`
+          : "No assigned leads with mobile numbers found",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `SMS blast started for ${leads.length} leads`,
+      total:   leads.length,
+    });
+
+    runSmsInBackground({
+      leads,
+      message,
+      templateId: templateId || null,
+      senderId:   senderId   || creds.senderId,
+      companyId,
+      campaignId: campaign   || "employee-blast",
+      authKey:    creds.authKey,
+    });
+  } catch (err) {
+    console.error("employeeSendBulkSms error:", err);
+    res.status(500).json({ message: "Internal server error", error: err.message });
+  }
+};
+
+// ── POST /api/sms-campaign/employee/send-single ───────────────────────────────
+const employeeSendSingleSms = async (req, res) => {
+  try {
+    const { name, mobile, message, templateId, senderId } = req.body;
+    if (!mobile || !message) {
+      return res.status(400).json({ message: "mobile and message are required" });
+    }
+
+    const companyId = getEmployeeCompanyId(req);
+    const creds     = await getCompanySmsCredentials(companyId);
+
+    if (!creds.authKey) {
+      return res.status(400).json({
+        message: "MSG91 Auth Key not configured. Ask your admin to configure it.",
+      });
+    }
+
+    const resolvedTemplateId = templateId || creds.greetingsTemplateId;
+
+    const requestId = await sendViaMSG91({
+      mobile,
+      name:       name || "there",
+      templateId: resolvedTemplateId,
+      senderId:   senderId || creds.senderId,
+      authKey:    creds.authKey,
+    });
+
+    const logMessage = message
+      .replace(/{{name}}/g,     name     || "")
+      .replace(/{{mobile}}/g,   mobile   || "")
+      .replace(/{{campaign}}/g, "")
+      .replace(/{{email}}/g,    "");
+
+    await saveLog({
+      to:             mobile,
+      recipientName:  name || "",
+      message:        logMessage,
+      templateId:     resolvedTemplateId,
+      senderId:       senderId || creds.senderId,
+      campaignId:     null,
+      status:         "sent",
+      msg91RequestId: String(requestId),
+      companyId,
+    });
+
+    res.json({ success: true, message: "SMS sent", requestId });
+  } catch (err) {
+    await saveLog({
+      to:            req.body.mobile  || "",
+      recipientName: req.body.name    || "",
+      message:       req.body.message || "",
+      campaignId:    null,
+      status:        "failed",
+      errorMessage:  err.message,
+      companyId:     getEmployeeCompanyId(req),
+    });
+    res.status(500).json({ message: err.message, error: err.message });
+  }
+};
+
+// ── POST /api/sms-campaign/employee/send-csv ─────────────────────────────────
+const employeeSendCsvSms = async (req, res) => {
+  try {
+    const { recipients, message, templateId, senderId } = req.body;
+    if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
+      return res.status(400).json({ message: "recipients array is required" });
+    }
+    if (!message) return res.status(400).json({ message: "message is required" });
+
+    const companyId = getEmployeeCompanyId(req);
+    const creds     = await getCompanySmsCredentials(companyId);
+
+    if (!creds.authKey) {
+      return res.status(400).json({
+        message: "MSG91 Auth Key not configured. Ask your admin to configure it.",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `SMS blast started for ${recipients.length} CSV recipients`,
+      total:   recipients.length,
+    });
+
+    runSmsInBackground({
+      leads: recipients.map((r) => ({
+        name:   r.name   || "",
+        mobile: r.mobile,
+        email:  "",
+      })),
+      message,
+      templateId: templateId || null,
+      senderId:   senderId   || creds.senderId,
+      companyId,
+      campaignId: "employee-csv-blast",
+      authKey:    creds.authKey,
+    });
+  } catch (err) {
+    console.error("employeeSendCsvSms error:", err);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// ── GET /api/sms-config/employee ──────────────────────────────────────────────
+// Read-only view of SMS config (auth key masked) for the employee panel.
+const employeeGetSmsConfig = async (req, res) => {
+  try {
+    const companyId = getEmployeeCompanyId(req);
+    const config    = await SmsConfig.findOne({ company: companyId });
+    res.json({
+      success: true,
+      data: {
+        msg91SenderId:       config?.msg91SenderId         || "SKYCRM",
+        greetingsTemplateId: config?.greetingsTemplateId   || "1007503933418344595",
+        greetingsSenderId:   config?.greetingsSenderId     || "695382",
+        isConfigured:        !!(config?.msg91AuthKey),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch SMS config" });
+  }
+};
+
 module.exports = {
   sendBulkSms,
   sendSingleSms,
@@ -451,4 +687,11 @@ module.exports = {
   getSmsCampaigns,
   deleteSmsLog,
   previewSmsCampaign,
+  // employee exports
+  employeePreviewSmsCampaign,
+  employeeGetMyCampaigns,
+  employeeSendBulkSms,
+  employeeSendSingleSms,
+  employeeSendCsvSms,
+  employeeGetSmsConfig,
 };
