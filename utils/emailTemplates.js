@@ -501,4 +501,184 @@ const superAdminExpiryDigestEmail = ({
   };
 };
 
-module.exports = { companyWelcomeEmail, subscriptionExpiryEmail, superAdminExpiryDigestEmail };
+// ── 4. Plan Invoice / Activation Email ───────────────────────────────────────
+// Sent to SuperAdmin AND Developer after a plan is renewed or upgraded.
+// Works for both Razorpay-paid invoices and manual developer activations.
+//
+// @param {object} opts
+//   recipientName   {string}    — e.g. "Platform Admin" or "Dev Team"
+//   recipientRole   {string}    — "superadmin" | "developer"
+//   companyName     {string}    — the company whose plan changed
+//   companyEmail    {string}    — company's registered email
+//   planName        {string}    — "Starter" | "Growth" | "Enterprise"
+//   billing         {string}    — "monthly" | "yearly"
+//   newExpiry       {Date|string}
+//   actionType      {string}    — "renewal" | "upgrade" | "activation"
+//   invoiceId       {string|null}
+//   amount          {number|null}  — in INR (not paise)
+//   transactionId   {string|null}
+//   paymentDate     {Date|string|null}
+//   dashboardUrl    {string}
+const planInvoiceEmail = ({
+  recipientName  = "Admin",
+  recipientRole  = "superadmin",
+  companyName,
+  companyEmail   = "",
+  planName       = "Pro",
+  billing        = "monthly",
+  newExpiry,
+  actionType     = "renewal",
+  invoiceId      = null,
+  amount         = null,
+  transactionId  = null,
+  paymentDate    = null,
+  dashboardUrl   = process.env.FRONTEND_URL
+    ? `${process.env.FRONTEND_URL}/developer/subscriptions`
+    : "https://app.skyupcrm.com/developer/subscriptions",
+}) => {
+  const isPaid     = amount !== null && invoiceId !== null;
+  const actionWord = actionType === "renewal"  ? "Renewed"
+                   : actionType === "upgrade"  ? "Upgraded"
+                   :                             "Activated";
+  const actionIcon = actionType === "renewal"  ? "🔄"
+                   : actionType === "upgrade"  ? "🚀"
+                   :                             "✅";
+
+  const planLabel  = (planName || "").charAt(0).toUpperCase() + (planName || "").slice(1);
+  const planColor  = planName?.toLowerCase() === "enterprise" ? ORANGE
+                   : ["growth","pro"].includes(planName?.toLowerCase()) ? ACCENT
+                   : GREEN;
+
+  const billingLabel = billing === "yearly" ? "Annual" : "Monthly";
+  const expiryStr    = new Date(newExpiry).toLocaleDateString("en-IN", {
+    day: "numeric", month: "long", year: "numeric",
+  });
+  const paymentStr   = paymentDate
+    ? new Date(paymentDate).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })
+    : new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+  const amountStr    = amount != null ? `\u20B9${Number(amount).toLocaleString("en-IN")}` : "\u2014";
+
+  const roleBadgeColor = recipientRole === "developer" ? ORANGE : ACCENT;
+  const roleBadgeLabel = recipientRole === "developer" ? "Developer" : "Super Admin";
+
+  const detailRows = [
+    ["Company",        companyName],
+    ["Company Email",  companyEmail || "\u2014"],
+    ["Plan",           planLabel],
+    ["Billing Cycle",  billingLabel],
+    ["New Expiry",     expiryStr],
+    ...(isPaid ? [
+      ["Invoice ID",    invoiceId],
+      ["Amount Paid",   amountStr],
+      ["Transaction ID", transactionId || "\u2014"],
+      ["Payment Date",  paymentStr],
+    ] : [
+      ["Activated On",  paymentStr],
+      ["Activated By",  "Developer Panel"],
+    ]),
+  ].map(([label, value], i, arr) => {
+    const isLast = i === arr.length - 1;
+    return `
+    <tr>
+      <td style="padding:10px 0;${!isLast ? `border-bottom:1px solid ${BORDER};` : ""}width:42%;">
+        <span style="font-size:12px;color:${MUTED};">${label}</span>
+      </td>
+      <td style="padding:10px 0;${!isLast ? `border-bottom:1px solid ${BORDER};` : ""}">
+        <span style="font-size:13px;font-weight:600;color:${TEXT};">${value}</span>
+      </td>
+    </tr>`;
+  }).join("");
+
+  const body = `
+  <!-- Role badge banner -->
+  <tr>
+    <td style="padding:0;">
+      <div style="background:${roleBadgeColor}15;border-bottom:2px solid ${roleBadgeColor}40;padding:14px 40px;">
+        <p style="margin:0;font-size:11px;font-weight:700;color:${roleBadgeColor};
+                  letter-spacing:1.5px;text-transform:uppercase;">
+          \uD83D\uDEE1\uFE0F ${roleBadgeLabel} &nbsp;·&nbsp; Plan ${actionWord} Notification
+        </p>
+      </div>
+    </td>
+  </tr>
+  <!-- Hero -->
+  <tr>
+    <td style="padding:28px 40px 0;">
+      <p style="margin:0 0 6px;font-size:24px;font-weight:800;color:${TEXT};line-height:1.25;">
+        ${actionIcon} Plan ${actionWord}
+      </p>
+      <p style="margin:0 0 24px;font-size:13px;color:${MUTED};line-height:1.6;">
+        Hi <strong style="color:${TEXT};">${recipientName}</strong>,
+        the subscription for <strong style="color:${TEXT};">${companyName}</strong>
+        has been successfully <strong style="color:${GREEN};">${actionWord.toLowerCase()}</strong>
+        to the <strong style="color:${planColor};">${planLabel}</strong> plan.
+        ${isPaid
+          ? "The payment has been processed and the invoice details are below."
+          : "The subscription was activated manually via the Developer Panel."}
+      </p>
+    </td>
+  </tr>
+  <!-- Details card -->
+  <tr>
+    <td style="padding:0 40px 24px;">
+      <div style="background:${BG};border:1px solid ${BORDER};border-radius:14px;padding:24px 28px;">
+        <p style="margin:0 0 16px;font-size:11px;font-weight:700;letter-spacing:2px;
+                  text-transform:uppercase;color:${DIM};">${isPaid ? "Invoice Details" : "Activation Details"}</p>
+        <table cellpadding="0" cellspacing="0" width="100%">${detailRows}</table>
+      </div>
+    </td>
+  </tr>
+  ${isPaid ? `
+  <!-- Amount highlight -->
+  <tr>
+    <td style="padding:0 40px 24px;">
+      <div style="background:${GREEN}10;border:1px solid ${GREEN}30;border-radius:14px;padding:20px 28px;text-align:center;">
+        <p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:${GREEN}80;">Amount Paid</p>
+        <p style="margin:0;font-size:32px;font-weight:800;color:${GREEN};">${amountStr}</p>
+        <p style="margin:4px 0 0;font-size:11px;color:${MUTED};">${billingLabel} &nbsp;·&nbsp; ${planLabel} Plan</p>
+      </div>
+    </td>
+  </tr>` : ""}
+  <!-- CTA -->
+  <tr>
+    <td style="padding:0 40px 28px;text-align:center;">
+      <a href="${dashboardUrl}"
+         style="display:inline-block;background:${ACCENT};color:#fff;font-size:14px;
+                font-weight:700;text-decoration:none;padding:14px 36px;border-radius:10px;">
+        View Subscription Dashboard \u2192
+      </a>
+    </td>
+  </tr>`;
+
+  const subject = isPaid
+    ? `${actionIcon} Invoice: ${companyName} \u2014 ${planLabel} Plan ${actionWord} (${invoiceId})`
+    : `${actionIcon} Plan ${actionWord}: ${companyName} \u2192 ${planLabel}`;
+
+  const text = [
+    `SkyUp CRM \u2014 Plan ${actionWord} ${isPaid ? "Invoice" : "Notification"}`,
+    ``,
+    `Hi ${recipientName},`,
+    `The subscription for ${companyName} has been ${actionWord.toLowerCase()} to the ${planLabel} plan.`,
+    ``,
+    `Company:      ${companyName}`,
+    `Plan:         ${planLabel} (${billingLabel})`,
+    `New Expiry:   ${expiryStr}`,
+    ...(isPaid ? [
+      `Invoice ID:   ${invoiceId}`,
+      `Amount Paid:  ${amountStr}`,
+      `Transaction:  ${transactionId || "\u2014"}`,
+      `Date:         ${paymentStr}`,
+    ] : [`Activated On: ${paymentStr}`, `Source:       Developer Panel`]),
+    ``,
+    `Dashboard: ${dashboardUrl}`,
+  ].join("\n");
+
+  return { subject, html: shell(body), text };
+};
+
+module.exports = {
+  companyWelcomeEmail,
+  subscriptionExpiryEmail,
+  superAdminExpiryDigestEmail,
+  planInvoiceEmail,
+};

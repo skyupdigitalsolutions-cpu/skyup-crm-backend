@@ -1,7 +1,92 @@
-const Razorpay = require("razorpay");
-const crypto = require("crypto");
-const Company = require("../models/Company");
-const Payment = require("../models/Payment");
+const Razorpay   = require("razorpay");
+const crypto     = require("crypto");
+const Company    = require("../models/Company");
+const Payment    = require("../models/Payment");
+const SuperAdmin = require("../models/SuperAdmin");
+const Admin      = require("../models/Admin");
+const Developer  = require("../models/Developer");
+const { sendEmail }          = require("../utils/brevoMailer");
+const { planInvoiceEmail }   = require("../utils/emailTemplates");
+
+// ─── Helper: collect SuperAdmin + Developer emails and send invoice ───────────
+// Called after every successful payment (renewal or upgrade).
+const _sendPlanInvoiceEmails = async ({
+  companyName,
+  companyEmail,
+  planName,
+  billing,
+  newExpiry,
+  invoiceId,
+  amount,
+  transactionId,
+  paymentDate,
+}) => {
+  const seen      = new Set();
+  const dashboard = process.env.FRONTEND_URL
+    ? `${process.env.FRONTEND_URL}/developer/subscriptions`
+    : "https://app.skyupcrm.com/developer/subscriptions";
+
+  const buildPayload = (recipientName, recipientRole) =>
+    planInvoiceEmail({
+      recipientName,
+      recipientRole,
+      companyName,
+      companyEmail,
+      planName,
+      billing,
+      newExpiry,
+      actionType: "renewal",   // Razorpay = customer self-pay (renewal / upgrade)
+      invoiceId,
+      amount,
+      transactionId,
+      paymentDate,
+      dashboardUrl: dashboard,
+    });
+
+  // ── 1. Legacy global SuperAdmin docs ──────────────────────────────────────
+  try {
+    const legacyAdmins = await SuperAdmin.find({}).select("email name").lean();
+    for (const sa of legacyAdmins) {
+      const key = sa.email.trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const mail = buildPayload(sa.name || "Super Admin", "superadmin");
+      await sendEmail({ to: sa.email.trim(), toName: sa.name || "Super Admin", ...mail });
+    }
+  } catch (e) {
+    console.error("[Razorpay] Failed to email legacy SuperAdmins:", e.message);
+  }
+
+  // ── 2. Company-level super_admins from Admin model ────────────────────────
+  try {
+    const companyAdmins = await Admin.find({ role: "super_admin" })
+      .select("email name")
+      .lean();
+    for (const sa of companyAdmins) {
+      const key = sa.email.trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const mail = buildPayload(sa.name || "Super Admin", "superadmin");
+      await sendEmail({ to: sa.email.trim(), toName: sa.name || "Super Admin", ...mail });
+    }
+  } catch (e) {
+    console.error("[Razorpay] Failed to email company SuperAdmins:", e.message);
+  }
+
+  // ── 3. All registered developers ─────────────────────────────────────────
+  try {
+    const devs = await Developer.find({}).select("email name").lean();
+    for (const dev of devs) {
+      const key = dev.email.trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const mail = buildPayload(dev.name || "Developer", "developer");
+      await sendEmail({ to: dev.email.trim(), toName: dev.name || "Developer", ...mail });
+    }
+  } catch (e) {
+    console.error("[Razorpay] Failed to email Developers:", e.message);
+  }
+};
 
 // ─── Razorpay instance ────────────────────────────────────────────────────────
 const razorpay = new Razorpay({
@@ -160,12 +245,27 @@ const verifyPayment = async (req, res) => {
       newExpiry.setMonth(newExpiry.getMonth() + 1);
     }
 
-    await Company.findByIdAndUpdate(companyId, {
+    const updatedCompany = await Company.findByIdAndUpdate(companyId, {
       plan: planEnumMap[planId] || 'basic',
       subscriptionStatus: 'active',
       subscriptionExpiry: newExpiry,
       isActive: true,
-    });
+    }, { new: true }).select('name email').lean();
+
+    // ── Send invoice email to SuperAdmins + Developers (non-blocking) ────────
+    _sendPlanInvoiceEmails({
+      companyName:   updatedCompany?.name  || "Company",
+      companyEmail:  updatedCompany?.email || "",
+      planName:      plan.name,
+      billing,
+      newExpiry,
+      invoiceId:     payment.invoiceId,
+      amount:        amountPaid,
+      transactionId: razorpay_payment_id,
+      paymentDate:   now,
+    }).catch((err) =>
+      console.error("[Razorpay] Invoice email dispatch failed:", err.message)
+    );
 
     return res.status(200).json({
       success: true,

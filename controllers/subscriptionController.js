@@ -1,6 +1,87 @@
 // backend/controllers/subscriptionController.js
 const Company    = require('../models/Company');
 const PlanConfig = require('../models/PlanConfig');
+const SuperAdmin = require('../models/SuperAdmin');
+const Admin      = require('../models/Admin');
+const Developer  = require('../models/Developer');
+const { sendEmail }        = require('../utils/brevoMailer');
+const { planInvoiceEmail } = require('../utils/emailTemplates');
+
+// ─── Helper: send activation/renewal invoice to SuperAdmin + Developer ────────
+// Called after manual developer activation via activateSubscription().
+const _sendActivationInvoiceEmails = async ({
+  companyName,
+  companyEmail,
+  planName,
+  billing,
+  newExpiry,
+}) => {
+  const seen      = new Set();
+  const dashboard = process.env.FRONTEND_URL
+    ? `${process.env.FRONTEND_URL}/developer/subscriptions`
+    : "https://app.skyupcrm.com/developer/subscriptions";
+
+  const buildPayload = (recipientName, recipientRole) =>
+    planInvoiceEmail({
+      recipientName,
+      recipientRole,
+      companyName,
+      companyEmail,
+      planName,
+      billing,
+      newExpiry,
+      actionType:   "activation",  // developer manually activated
+      invoiceId:    null,           // no payment invoice for manual activations
+      amount:       null,
+      transactionId: null,
+      paymentDate:  new Date(),
+      dashboardUrl: dashboard,
+    });
+
+  // ── 1. Legacy global SuperAdmin docs ──────────────────────────────────────
+  try {
+    const legacyAdmins = await SuperAdmin.find({}).select("email name").lean();
+    for (const sa of legacyAdmins) {
+      const key = sa.email.trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const mail = buildPayload(sa.name || "Super Admin", "superadmin");
+      await sendEmail({ to: sa.email.trim(), toName: sa.name || "Super Admin", ...mail });
+    }
+  } catch (e) {
+    console.error("[activateSubscription] Failed to email legacy SuperAdmins:", e.message);
+  }
+
+  // ── 2. Company-level super_admins from Admin model ────────────────────────
+  try {
+    const companyAdmins = await Admin.find({ role: "super_admin" })
+      .select("email name")
+      .lean();
+    for (const sa of companyAdmins) {
+      const key = sa.email.trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const mail = buildPayload(sa.name || "Super Admin", "superadmin");
+      await sendEmail({ to: sa.email.trim(), toName: sa.name || "Super Admin", ...mail });
+    }
+  } catch (e) {
+    console.error("[activateSubscription] Failed to email company SuperAdmins:", e.message);
+  }
+
+  // ── 3. All registered developers ─────────────────────────────────────────
+  try {
+    const devs = await Developer.find({}).select("email name").lean();
+    for (const dev of devs) {
+      const key = dev.email.trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const mail = buildPayload(dev.name || "Developer", "developer");
+      await sendEmail({ to: dev.email.trim(), toName: dev.name || "Developer", ...mail });
+    }
+  } catch (e) {
+    console.error("[activateSubscription] Failed to email Developers:", e.message);
+  }
+};
 
 // ── Plan feature definitions — developer can override per-company via planFeatures ──
 const DEFAULT_PLAN_FEATURES = {
@@ -230,6 +311,18 @@ const activateSubscription = async (req, res) => {
     company.maxUsers = DEFAULT_PLAN_FEATURES[plan].maxUsers;
     company.maxLeads = DEFAULT_PLAN_FEATURES[plan].maxLeads;
     await company.save();
+
+    // ── Send activation notification to SuperAdmins + Developers (non-blocking)
+    const planDisplayName = DEFAULT_PLAN_FEATURES[plan]?.name || plan;
+    _sendActivationInvoiceEmails({
+      companyName:  company.name,
+      companyEmail: company.email || "",
+      planName:     planDisplayName,
+      billing,
+      newExpiry:    expiry,
+    }).catch((err) =>
+      console.error("[activateSubscription] Invoice email dispatch failed:", err.message)
+    );
 
     res.json({
       success: true,
