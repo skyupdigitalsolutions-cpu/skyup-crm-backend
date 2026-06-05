@@ -1,70 +1,57 @@
 // controllers/transcriptionController.js
 
-const Call = require("../models/Call");
-const MobileCallLog = require("../models/MobileCallLog");
+const Call          = require('../models/Call');
+const MobileCallLog = require('../models/MobileCallLog');
 const {
   transcribeTwilioRecording,
   transcribeMobileRecording,
-} = require("../utils/transcribeAudio");
-const { summarizeCallTranscript, combineLeadSummaries } = require("../utils/summarizeCall");
-const Lead = require("../models/Leads");
+} = require('../utils/transcribeAudio');
+const { summarizeCallTranscript, combineLeadSummaries } = require('../utils/summarizeCall');
+const Lead = require('../models/Leads');
 
-// ── Helper: run the full pipeline and return result ───────────────────────────
+// ── Helper: run full pipeline ─────────────────────────────────────────────────
 async function runPipeline(transcribeFn, contactName) {
   const { transcript } = await transcribeFn();
   const summary = await summarizeCallTranscript(transcript, contactName);
   return { transcript, summary };
 }
 
-// ── Helper: resolve caller identity from protectAny middleware ─────────────────
-// Returns { userId, isAdmin, company } regardless of token type
+// ── Helper: resolve caller from protectAny middleware ─────────────────────────
 function getCaller(req) {
   if (req.admin) {
-    return {
-      isAdmin: true,
-      company: req.admin.company?._id || req.admin.company,
-    };
+    return { isAdmin: true, company: req.admin.company?._id || req.admin.company };
   }
-  return {
-    isAdmin: false,
-    userId: req.user._id,
-    company: req.user.company,
-  };
+  return { isAdmin: false, userId: req.user._id, company: req.user.company };
 }
 
 // ── POST /api/transcription/twilio/:recordingSid ──────────────────────────────
+// Body: { audioLang?: 'english' | 'mixed', contactName?: string }
 const transcribeTwilioCall = async (req, res) => {
   const { recordingSid } = req.params;
+  // 'mixed' is the safe default for India — handles Hindi/Kannada/Hinglish etc.
+  const audioLang = req.body.audioLang || 'mixed';
+
   try {
-    await Call.findOneAndUpdate(
-      { recordingSid },
-      { transcribeStatus: "processing" },
-    );
+    await Call.findOneAndUpdate({ recordingSid }, { transcribeStatus: 'processing' });
     const call = await Call.findOne({ recordingSid });
-    const contactName =
-      req.body.contactName || call?.contactName || "the customer";
+    const contactName = req.body.contactName || call?.contactName || 'the customer';
+
     const { transcript, summary } = await runPipeline(
-      () => transcribeTwilioRecording(recordingSid),
+      () => transcribeTwilioRecording(recordingSid, { audioLang }),
       contactName,
     );
+
     const updated = await Call.findOneAndUpdate(
       { recordingSid },
-      { transcript, summary, transcribeStatus: "done" },
+      { transcript, summary, transcribeStatus: 'done' },
       { new: true },
     );
-    res.json({
-      message: "Transcription complete",
-      transcript,
-      summary,
-      call: updated,
-    });
+
+    res.json({ message: 'Transcription complete', transcript, summary, call: updated });
   } catch (err) {
-    console.error("[transcribeTwilioCall] error:", err.message);
-    await Call.findOneAndUpdate(
-      { recordingSid },
-      { transcribeStatus: "failed" },
-    ).catch(() => {});
-    res.status(500).json({ message: err.message || "Transcription failed" });
+    console.error('[transcribeTwilioCall] error:', err.message);
+    await Call.findOneAndUpdate({ recordingSid }, { transcribeStatus: 'failed' }).catch(() => {});
+    res.status(500).json({ message: err.message || 'Transcription failed' });
   }
 };
 
@@ -72,11 +59,11 @@ const transcribeTwilioCall = async (req, res) => {
 const getTwilioTranscription = async (req, res) => {
   try {
     const call = await Call.findOne({ recordingSid: req.params.recordingSid });
-    if (!call) return res.status(404).json({ message: "Recording not found" });
+    if (!call) return res.status(404).json({ message: 'Recording not found' });
     res.json({
-      transcribeStatus: call.transcribeStatus || "pending",
+      transcribeStatus: call.transcribeStatus || 'pending',
       transcript: call.transcript || null,
-      summary: call.summary || null,
+      summary:    call.summary    || null,
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -84,70 +71,55 @@ const getTwilioTranscription = async (req, res) => {
 };
 
 // ── POST /api/transcription/mobile/:callLogId/:recordingId ────────────────────
-// FIX: Accepts both user and admin tokens (protectAny).
-// Admin: can transcribe any recording in their company.
-// User: can only transcribe their own recordings.
+// Body: { audioLang?: 'english' | 'mixed' }
 const transcribeMobileCall = async (req, res) => {
   const { callLogId, recordingId } = req.params;
-  const caller = getCaller(req);
+  const caller    = getCaller(req);
+  const audioLang = req.body.audioLang || 'mixed';
 
   try {
-    // Build query — admin can access all company logs; user only their own
     const query = caller.isAdmin
       ? { _id: callLogId, company: caller.company }
       : { _id: callLogId, user: caller.userId };
 
     const log = await MobileCallLog.findOne(query);
-    if (!log) return res.status(404).json({ message: "Call log not found" });
+    if (!log) return res.status(404).json({ message: 'Call log not found' });
 
     const recording = log.recordings.id(recordingId);
-    if (!recording)
-      return res.status(404).json({ message: "Recording not found" });
+    if (!recording) return res.status(404).json({ message: 'Recording not found' });
 
-    recording.transcribeStatus = "processing";
+    recording.transcribeStatus = 'processing';
     await log.save({ validateBeforeSave: false });
 
-    const contactName = log.name || "the customer";
+    const contactName = log.name || 'the customer';
     const { transcript, summary } = await runPipeline(
-      () => transcribeMobileRecording(recording.url),
+      () => transcribeMobileRecording(recording.url, { audioLang }),
       contactName,
     );
 
-    recording.transcript = transcript;
-    recording.summary = summary;
-    recording.transcribeStatus = "done";
+    recording.transcript       = transcript;
+    recording.summary          = summary;
+    recording.transcribeStatus = 'done';
     await log.save({ validateBeforeSave: false });
 
-    res.json({
-      message: "Transcription complete",
-      transcript,
-      summary,
-      recordingId,
-    });
+    res.json({ message: 'Transcription complete', transcript, summary, recordingId });
   } catch (err) {
-    console.error("[transcribeMobileCall] error:", err.message);
+    console.error('[transcribeMobileCall] error:', err.message);
     try {
-      const caller2 = getCaller(req);
-      const q = caller2.isAdmin
-        ? { _id: callLogId, company: caller2.company }
-        : { _id: callLogId, user: caller2.userId };
+      const q = caller.isAdmin
+        ? { _id: callLogId, company: caller.company }
+        : { _id: callLogId, user: caller.userId };
       const log = await MobileCallLog.findOne(q);
       if (log) {
         const rec = log.recordings.id(recordingId);
-        if (rec) {
-          rec.transcribeStatus = "failed";
-          await log.save({ validateBeforeSave: false });
-        }
+        if (rec) { rec.transcribeStatus = 'failed'; await log.save({ validateBeforeSave: false }); }
       }
-    } catch {
-      /* ignore */
-    }
-    res.status(500).json({ message: err.message || "Transcription failed" });
+    } catch { /* ignore */ }
+    res.status(500).json({ message: err.message || 'Transcription failed' });
   }
 };
 
 // ── GET /api/transcription/mobile/:callLogId/:recordingId ─────────────────────
-// FIX: Accepts both user and admin tokens (protectAny).
 const getMobileTranscription = async (req, res) => {
   const caller = getCaller(req);
   try {
@@ -156,16 +128,15 @@ const getMobileTranscription = async (req, res) => {
       : { _id: req.params.callLogId, user: caller.userId };
 
     const log = await MobileCallLog.findOne(query);
-    if (!log) return res.status(404).json({ message: "Call log not found" });
+    if (!log) return res.status(404).json({ message: 'Call log not found' });
 
     const recording = log.recordings.id(req.params.recordingId);
-    if (!recording)
-      return res.status(404).json({ message: "Recording not found" });
+    if (!recording) return res.status(404).json({ message: 'Recording not found' });
 
     res.json({
-      transcribeStatus: recording.transcribeStatus || "pending",
+      transcribeStatus: recording.transcribeStatus || 'pending',
       transcript: recording.transcript || null,
-      summary: recording.summary || null,
+      summary:    recording.summary    || null,
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -173,37 +144,23 @@ const getMobileTranscription = async (req, res) => {
 };
 
 // ── GET /api/transcription/lead/:leadId/summary ───────────────────────────────
-// Fetches all call summaries for a lead and combines them into one master summary.
-// Accepts both admin and user tokens (protectAny).
 const getLeadCombinedSummary = async (req, res) => {
   const { leadId } = req.params;
   const caller = getCaller(req);
 
   try {
-    // Verify the lead belongs to this company
-    const lead = await Lead.findOne({
-      _id: leadId,
-      company: caller.company,
-    }).lean();
+    const lead = await Lead.findOne({ _id: leadId, company: caller.company }).lean();
     if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
-    // Gather all MobileCallLog records matched to this lead
-    const logs = await MobileCallLog.find({
-      matchedLead: leadId,
-      company: caller.company,
-    })
-      .sort({ timestamp: 1 }) // chronological order
+    const logs = await MobileCallLog.find({ matchedLead: leadId, company: caller.company })
+      .sort({ timestamp: 1 })
       .lean();
 
-    // Extract every recording that has a completed summary
     const summaries = [];
     for (const log of logs) {
       for (const rec of log.recordings || []) {
         if (rec.transcribeStatus === 'done' && rec.summary) {
-          summaries.push({
-            ...rec.summary,
-            calledAt: log.timestamp || log.createdAt,
-          });
+          summaries.push({ ...rec.summary, calledAt: log.timestamp || log.createdAt });
         }
       }
     }
@@ -211,8 +168,8 @@ const getLeadCombinedSummary = async (req, res) => {
     if (summaries.length === 0) {
       return res.json({
         leadId,
-        leadName:      lead.name,
-        totalCalls:    logs.length,
+        leadName:        lead.name,
+        totalCalls:      logs.length,
         summarizedCalls: 0,
         combinedSummary: null,
         message: 'No transcribed calls found for this lead. Transcribe some recordings first.',
@@ -220,7 +177,6 @@ const getLeadCombinedSummary = async (req, res) => {
     }
 
     const combinedSummary = await combineLeadSummaries(summaries, lead.name);
-
     res.json({
       leadId,
       leadName:        lead.name,
