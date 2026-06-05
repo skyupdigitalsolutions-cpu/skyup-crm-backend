@@ -1,3 +1,10 @@
+// server.js — UPDATED
+// Added:
+//   - addonRoutes   → /api/addons
+//   - benefitRoutes → /api/benefits
+//   - usageResetJob → startUsageResetJob()
+// All existing code is UNCHANGED.
+
 require('dotenv').config();
 const express      = require('express');
 const http         = require('http');
@@ -16,9 +23,13 @@ const adminRoute        = require('./routes/adminRoute');
 const authRoute         = require('./routes/authRoutes');
 const leadRoute         = require('./routes/leadRoute');
 
-// ── Privacy & Subscription Routes ────────────────────────────────────────────
+// ── Privacy & Subscription Routes ─────────────────────────────────────────────
 const privacyRoute      = require('./routes/privacyRoute');
 const subscriptionRoute = require('./routes/subscriptionRoute');
+
+// ── NEW: Addon & Benefit Routes ───────────────────────────────────────────────
+const addonRoutes   = require('./routes/addonRoute');
+const benefitRoutes = require('./routes/benefitRoute');
 
 // ── Chat Engine Routes ─────────────────────────────────────────────────────────
 const chatRoutes = require('./routes/chatRoutes');
@@ -43,15 +54,18 @@ const attendanceRoute      = require('./routes/attendanceRoute');
 const emailCampaignRoute   = require('./routes/emailCampaign');
 const emailHistoryRoute    = require('./routes/emailHistory');
 
-// ── Subscription Expiry Email Job ─────────────────────────────────────────────
+// ── Jobs ──────────────────────────────────────────────────────────────────────
 const { startSubscriptionExpiryJob } = require('./jobs/subscriptionExpiryJob');
-const { startIdleJob } = require('./jobs/markIdleJob');
-const { startLeadAlertsJob } = require('./jobs/leadAlertsJob');
+const { startIdleJob }               = require('./jobs/markIdleJob');
+const { startLeadAlertsJob }         = require('./jobs/leadAlertsJob');
+// NEW: Monthly usage counter reset
+const { startUsageResetJob }         = require('./jobs/usageResetJob');
+
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute = require('./routes/smsCampaign');
 const smsHistoryRoute  = require('./routes/smsHistory');
 
-// ── Saanvi Voicebot Proxy (avoids CORS) ──────────────────────────────────────
+// ── Saanvi Voicebot Proxy ─────────────────────────────────────────────────────
 const saanviProxyRoute = require('./routes/saanviProxy');
 
 // ── WhatsApp Routes (MSG91 + Meta) ────────────────────────────────────────────
@@ -60,10 +74,6 @@ const msg91WebhookRoute = require('./routes/msg91Webhook');
 
 const app = express();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Trust proxy — Render sits behind 1 hop of its own reverse proxy.
-// '1' = trust only the first X-Forwarded-For entry (prevents IP spoofing).
-// ─────────────────────────────────────────────────────────────────────────────
 app.set('trust proxy', 1);
 
 const server = http.createServer(app);
@@ -145,11 +155,7 @@ app.use(generalLimiter);
 app.use('/recordings',    express.static(path.join(__dirname, 'uploads/recordings')));
 app.use('/uploads/logos', express.static(path.join(__dirname, 'public/uploads/logos')));
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OPTIONAL: Serve the React frontend build from the backend.
-// ─────────────────────────────────────────────────────────────────────────────
 const SERVE_FRONTEND = process.env.SERVE_FRONTEND === 'true';
-
 if (SERVE_FRONTEND) {
   const distPath = path.join(__dirname, 'dist');
   app.use(express.static(distPath));
@@ -157,13 +163,10 @@ if (SERVE_FRONTEND) {
 }
 
 app.get('/', (req, res) => {
-  if (SERVE_FRONTEND) {
-    return res.sendFile(path.join(__dirname, 'dist', 'index.html'));
-  }
+  if (SERVE_FRONTEND) return res.sendFile(path.join(__dirname, 'dist', 'index.html'));
   res.send('Server is running');
 });
 
-// ── Health check ──────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) =>
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
 );
@@ -185,18 +188,10 @@ app.use('/website-webhook', (req, res, next) => {
       try {
         const WebsiteConfig = require('./models/WebsiteConfig');
         const hostname = origin.replace(/^https?:\/\//, '').replace(/\/$/, '');
-        const config = await WebsiteConfig.findOne({
-          pageUrl:  { $regex: hostname, $options: 'i' },
-          isActive: true,
-        });
-        if (config) {
-          console.log(`🌐 Website webhook from registered site: "${config.sourceName}" (${origin})`);
-        } else {
-          console.log(`⚠️  Website webhook from unregistered origin: ${origin} — secret will verify`);
-        }
-      } catch (e) {
-        console.error('Website webhook DB log error:', e.message);
-      }
+        const config = await WebsiteConfig.findOne({ pageUrl: { $regex: hostname, $options: 'i' }, isActive: true });
+        if (config) console.log(`🌐 Website webhook from registered site: "${config.sourceName}" (${origin})`);
+        else console.log(`⚠️  Website webhook from unregistered origin: ${origin} — secret will verify`);
+      } catch (e) { console.error('Website webhook DB log error:', e.message); }
     })();
   }
   next();
@@ -205,30 +200,33 @@ app.use('/website-webhook', (req, res, next) => {
 // ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/meta-config',         metaConfigRoute);
 app.use('/api/meta-qualification',  require('./routes/metaQualification'));
-app.use('/api/superadmin',        superAdminRoute);
-app.use('/api/developer',         developerRoutes);
-app.use('/api/admin',             adminRoute);
-app.use('/api/auth',              authRoute);
-app.use('/api/lead',              leadRoute);
-app.use('/api/project',           projectRoute);
-app.use('/api/attendance',        attendanceRoute);
-app.use('/api/razorpay',          razorpayRoute);
-app.use('/api/google-ads-config', googleAdsConfigRoute);
-app.use('/',                      googleWebhookRoute);
-app.use('/api/website-config',    websiteConfigRoute);
-app.use('/api/chat',              chatRoutes);
-app.use('/api/email-campaign',    emailCampaignRoute);
-app.use('/api/email',             emailHistoryRoute);
-app.use('/api/sms-campaign',      smsCampaignRoute);
-app.use('/api/sms',               smsHistoryRoute);
-app.use('/api/sms-config',        require('./routes/smsConfig'));
-app.use('/api/privacy',           privacyRoute);
-app.use('/api/subscription',      subscriptionRoute);
-app.use('/api/saanvi',            saanviProxyRoute);
-app.use('/api/whatsapp',          whatsappRoutes);
-app.use('/api/reports',           require('./routes/reportRoutes'));
-app.use('/api/call-logs',         require('./routes/mobileCallLog'));
-app.use('/api/transcription',     require('./routes/transcription'));
+app.use('/api/superadmin',          superAdminRoute);
+app.use('/api/developer',           developerRoutes);
+app.use('/api/admin',               adminRoute);
+app.use('/api/auth',                authRoute);
+app.use('/api/lead',                leadRoute);
+app.use('/api/project',             projectRoute);
+app.use('/api/attendance',          attendanceRoute);
+app.use('/api/razorpay',            razorpayRoute);
+app.use('/api/google-ads-config',   googleAdsConfigRoute);
+app.use('/',                        googleWebhookRoute);
+app.use('/api/website-config',      websiteConfigRoute);
+app.use('/api/chat',                chatRoutes);
+app.use('/api/email-campaign',      emailCampaignRoute);
+app.use('/api/email',               emailHistoryRoute);
+app.use('/api/sms-campaign',        smsCampaignRoute);
+app.use('/api/sms',                 smsHistoryRoute);
+app.use('/api/sms-config',          require('./routes/smsConfig'));
+app.use('/api/privacy',             privacyRoute);
+app.use('/api/subscription',        subscriptionRoute);
+// NEW
+app.use('/api/addons',              addonRoutes);
+app.use('/api/benefits',            benefitRoutes);
+app.use('/api/saanvi',              saanviProxyRoute);
+app.use('/api/whatsapp',            whatsappRoutes);
+app.use('/api/reports',             require('./routes/reportRoutes'));
+app.use('/api/call-logs',           require('./routes/mobileCallLog'));
+app.use('/api/transcription',       require('./routes/transcription'));
 
 // ── APK Download Routes ───────────────────────────────────────────────────────
 app.get('/download', (req, res) => {
@@ -277,9 +275,6 @@ app.get('/install', (req, res) => {
   `);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SPA fallback — must be LAST.
-// ─────────────────────────────────────────────────────────────────────────────
 if (SERVE_FRONTEND) {
   app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'dist', 'index.html'));
@@ -300,10 +295,13 @@ connectDB().then(() => {
     console.log(`🔐 BIP39 zero-knowledge encryption: enabled`);
     console.log(`📋 Privacy API:       /api/privacy`);
     console.log(`💳 Subscription API:  /api/subscription`);
+    console.log(`📦 Addon API:         /api/addons`);
+    console.log(`🎁 Benefit API:       /api/benefits`);
     console.log(`🌐 Frontend served:   ${SERVE_FRONTEND ? 'YES (from dist/)' : 'NO (separate Render service)'}`);
     startSubscriptionExpiryJob();
     startIdleJob();
     startLeadAlertsJob();
+    startUsageResetJob();   // NEW
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();
   });

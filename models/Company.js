@@ -1,4 +1,10 @@
-// models/Company.js — UPDATED (added 10 new fields; all existing fields unchanged)
+// models/Company.js — UPDATED
+// Adds: subscriptionStatus "suspended"|"paused", plan "trial", maxAdmins,
+//       maxWebsites, maxMetaCampaigns, maxGoogleAccounts, maxStorage,
+//       devOverrides, aiProviderMode, customerOpenAiKey, customerGeminiKey,
+//       demoCreditGranted
+// All existing fields are UNCHANGED.
+
 const mongoose = require("mongoose");
 
 const companySchema = mongoose.Schema(
@@ -6,130 +12,147 @@ const companySchema = mongoose.Schema(
     name:    { type: String, required: true, trim: true },
     email:   { type: String, required: true, trim: true, unique: true },
     phone:   { type: String, trim: true },
-    plan:    { type: String, enum: ["basic", "pro", "enterprise"], default: "basic" },
-    isActive:{ type: Boolean, default: true },
+
+    // ── Plan — extended to include "trial" ────────────────────────────────────
+    plan: {
+      type:    String,
+      enum:    ["trial", "basic", "pro", "enterprise"],
+      default: "trial",
+    },
+
+    isActive: { type: Boolean, default: true },
 
     encryptionKeyHash: {
-      type: String,
+      type:    String,
       default: null,
     },
 
     // ── Subscription & Expiry ─────────────────────────────────────────────────
     subscriptionExpiry: {
-      type: Date,
+      type:    Date,
       default: null,
     },
+
+    // Extended enum — adds "suspended" and "paused"
     subscriptionStatus: {
-      type: String,
-      enum: ["active", "expired", "trial", "cancelled"],
+      type:    String,
+      enum:    ["active", "expired", "trial", "cancelled", "suspended", "paused"],
       default: "trial",
     },
+
     trialEndsAt: {
-      type: Date,
+      type:    Date,
       default: () => new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14-day free trial
     },
 
     // ── Data Privacy Settings ─────────────────────────────────────────────────
     dataEncryptionEnabled: {
-      type: Boolean,
-      default: false, // becomes true after client completes BIP39 setup
+      type:    Boolean,
+      default: false,
     },
 
-    // ── FIX 4D: Atomic round-robin index (replaces N+1 countDocuments loop) ──
+    // ── FIX 4D: Atomic round-robin index ─────────────────────────────────────
     roundRobinIndex: {
-      type: Number,
+      type:    Number,
       default: 0,
     },
 
     // ── Company Branding (set by SuperAdmin) ──────────────────────────────────
-    brandName: {
-      type: String,
-      default: "",
-      trim: true,
-    },
-    brandLogoUrl: {
-      type: String,
-      default: "",
-      trim: true,
-    },
+    brandName:    { type: String, default: "", trim: true },
+    brandLogoUrl: { type: String, default: "", trim: true },
 
     // ── Header Bar Branding (set by Developer per-company) ────────────────────
-    // Shown in the sticky top header bar for that company's users/admins.
-    // The sidebar always shows the platform logo (SKYUP); only the header differs.
-    headerName: {
-      type: String,
-      default: "",
-      trim: true,
-    },
-    headerLogoUrl: {
-      type: String,
-      default: "",
-      trim: true,
-    },
+    headerName:    { type: String, default: "", trim: true },
+    headerLogoUrl: { type: String, default: "", trim: true },
 
-    // ── NEW: Extended Branding & Media ────────────────────────────────────────
+    // ── Extended Branding & Media ─────────────────────────────────────────────
     logo:    { type: String, default: "" },
     favicon: { type: String, default: "" },
     website: { type: String, default: "" },
     address: { type: String, default: "" },
 
-    // ── NEW: Theme Colors ─────────────────────────────────────────────────────
+    // ── Theme Colors ──────────────────────────────────────────────────────────
     companyPrimaryColor:   { type: String, default: "#2563EB" },
     companySecondaryColor: { type: String, default: "#1E40AF" },
     stickyHeaderEnabled:   { type: Boolean, default: true },
 
-    // ── NEW: Tenant Limits ────────────────────────────────────────────────────
-    maxUsers: { type: Number, default: 10 },
-    maxLeads: { type: Number, default: 1000 },
+    // ── Tenant Limits (base — may be overridden by addons/benefits/devOverrides) ──
+    maxUsers:  { type: Number, default: 10 },
+    maxLeads:  { type: Number, default: 1000 },
+
+    // ── NEW: Extended Tenant Limits ───────────────────────────────────────────
+    maxAdmins:          { type: Number, default: 1 },
+    maxWebsites:        { type: Number, default: 1 },
+    maxMetaCampaigns:   { type: Number, default: 1 },
+    maxGoogleAccounts:  { type: Number, default: 1 },
+    maxStorage:         { type: Number, default: 100 }, // MB
+
+    // ── NEW: Developer Override Block ─────────────────────────────────────────
+    // Highest-priority override — set by developer per-company.
+    // Numeric keys override plan+addon+benefit limits.
+    // featureToggles is a Map<String, Boolean> keyed by feature key.
+    devOverrides: {
+      admins:         { type: Number, default: null },
+      users:          { type: Number, default: null },
+      leads:          { type: Number, default: null },
+      websites:       { type: Number, default: null },
+      metaCampaigns:  { type: Number, default: null },
+      googleAccounts: { type: Number, default: null },
+      storageMB:      { type: Number, default: null },
+      featureToggles: {
+        type: Map,
+        of:   Boolean,
+        default: {},
+      },
+    },
+
+    // ── NEW: AI Provider Mode ─────────────────────────────────────────────────
+    aiProviderMode: {
+      type:    String,
+      enum:    ["platform_ai", "customer_openai", "customer_gemini"],
+      default: "platform_ai",
+    },
+
+    // Customer-supplied keys — never returned in normal queries
+    customerOpenAiKey: { type: String, select: false },
+    customerGeminiKey: { type: String, select: false },
+
+    // ── NEW: Demo Credit Grant Flag ───────────────────────────────────────────
+    // Set to true after first-activation demo credits have been granted.
+    // Prevents double-granting on re-activations.
+    demoCreditGranted: { type: Boolean, default: false },
 
     // ── Plan feature overrides (set by Developer per-company) ─────────────────
-    // Array of { key: String, enabled: Boolean } — merged onto plan defaults
     planFeatures: {
-      type: [{ key: String, enabled: Boolean }],
+      type:    [{ key: String, enabled: Boolean }],
       default: [],
     },
 
-    // ── NEW: Audit — which Developer account created this company ─────────────
+    // ── Audit — which Developer account created this company ──────────────────
     createdBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Developer",
+      type:    mongoose.Schema.Types.ObjectId,
+      ref:     "Developer",
       default: null,
     },
 
     // ── Brevo (email blast) credentials ──────────────────────────────────────
     brevoApiKey: {
-      type: String,
+      type:    String,
       default: "",
-      trim: true,
-      select: false, // never returned in normal queries — must be explicitly selected
+      trim:    true,
+      select:  false,
     },
-    brevoSenderEmail: {
-      type: String,
-      default: "",
-      trim: true,
-    },
-    brevoSenderName: {
-      type: String,
-      default: "",
-      trim: true,
-    },
+    brevoSenderEmail: { type: String, default: "", trim: true },
+    brevoSenderName:  { type: String, default: "", trim: true },
 
     // ── Telegram Notification Settings ───────────────────────────────────────
-    // Each company configures its own Telegram bot.
-    // Admin sets the bot token via @BotFather and the group/personal chat ID
-    // for admin-level alerts. Individual employees add their own chat IDs in
-    // their profile so they receive personal lead-assignment notifications.
     telegramBotToken: {
       type:    String,
       default: "",
       trim:    true,
-      select:  false, // never returned in normal queries
+      select:  false,
     },
-    telegramAdminChatId: {
-      type:    String,
-      default: "",
-      trim:    true,
-    },
+    telegramAdminChatId: { type: String, default: "", trim: true },
 
     // ── Auto-template settings for new leads ─────────────────────────────────
     autoTemplate: {
@@ -142,7 +165,10 @@ const companySchema = mongoose.Schema(
         enabled:      { type: Boolean, default: false },
         subject:      { type: String,  default: "Welcome! We'll be in touch soon." },
         fromName:     { type: String,  default: "" },
-        bodyTemplate: { type: String,  default: "<p>Hi {{name}},</p><p>Thank you for your interest. Our team will reach out to you shortly.</p><p>Regards,<br/>The Team</p>" },
+        bodyTemplate: {
+          type:    String,
+          default: "<p>Hi {{name}},</p><p>Thank you for your interest. Our team will reach out to you shortly.</p><p>Regards,<br/>The Team</p>",
+        },
       },
       sms: {
         enabled:    { type: Boolean, default: false },

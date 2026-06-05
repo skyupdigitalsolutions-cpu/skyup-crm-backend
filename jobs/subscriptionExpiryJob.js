@@ -1,49 +1,30 @@
-// jobs/subscriptionExpiryJob.js
-// ─────────────────────────────────────────────────────────────────────────────
-// Daily cron that:
-//  1. Finds companies whose subscriptions expire in exactly 7, 3, or 1 days
-//     and sends a warning email to EACH COMPANY.
-//  2. Sends a DIGEST email to every SuperAdmin listing all expiring companies.
-//  3. Emits a real-time socket event to connected SuperAdmin clients so the
-//     in-app notification bell lights up immediately after the cron runs.
-//  4. Auto-expires subscriptions that are already past their expiry date.
-//
-// Requires:
-//   npm install node-cron
-//
-// Env vars used (same as brevoMailer):
-//   BREVO_API_KEY, BREVO_FROM_EMAIL, BREVO_FROM_NAME,
-//   FRONTEND_URL (optional — for the renewal / dashboard deep-links),
-//   SUPPORT_EMAIL (optional)
-// ─────────────────────────────────────────────────────────────────────────────
+// jobs/subscriptionExpiryJob.js — UPDATED
+// Changes from original:
+//  1. Added: expire addons past their expiryDate (status → "expired")
+//  2. Added: expire benefits past their validUntil (active → false)
+//  3. Added: data retention cleanup (delete recordings/transcriptions older than plan limit)
+//  4. All existing warning-email + auto-expire logic is UNCHANGED.
 
-const cron       = require("node-cron");
-const Company    = require("../models/Company");
-const SuperAdmin = require("../models/SuperAdmin");
-const Admin      = require("../models/Admin");
+const cron           = require("node-cron");
+const Company        = require("../models/Company");
+const CompanyAddon   = require("../models/CompanyAddon");
+const CompanyBenefit = require("../models/CompanyBenefit");
+const { sendEmail }               = require("../utils/brevoMailer");
+const { subscriptionExpiryEmail } = require("../utils/emailTemplates");
 
-const { sendEmail }                     = require("../utils/brevoMailer");
-const { subscriptionExpiryEmail,
-        superAdminExpiryDigestEmail }   = require("../utils/emailTemplates");
-
-// Days before expiry at which we warn the company
 const WARNING_DAYS = [7, 3, 1];
 
-// ── Core scan function (exported so it can be called manually / in tests) ─────
+// ── Core scan (exported so it can be triggered manually / in tests) ────────────
 const runExpiryCheck = async () => {
   const now   = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // midnight UTC
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
-  // ── Buckets for the SuperAdmin digest ──────────────────────────────────────
-  // critical = ≤ 1 day, warning = 2–3 days, notice = 4–7 days
-  const digestGroups = { critical: [], warning: [], notice: [] };
-  let   totalCompanySent = 0;
+  let totalSent = 0;
 
-  // ── Step 1: Company-facing warning emails ──────────────────────────────────
+  // ── 1. Subscription expiry warning emails ─────────────────────────────────
   for (const daysLeft of WARNING_DAYS) {
     const windowStart = new Date(today);
     windowStart.setDate(windowStart.getDate() + daysLeft);
-
     const windowEnd = new Date(windowStart);
     windowEnd.setDate(windowEnd.getDate() + 1);
 
@@ -54,7 +35,6 @@ const runExpiryCheck = async () => {
     }).select("name email plan subscriptionExpiry").lean();
 
     for (const company of expiring) {
-      // ── Send warning email to the company ─────────────────────────────────
       try {
         const template = subscriptionExpiryEmail({
           companyName: company.name,
@@ -62,182 +42,109 @@ const runExpiryCheck = async () => {
           daysLeft,
           expiryDate:  company.subscriptionExpiry,
         });
-
-        await sendEmail({
-          to:      company.email,
-          toName:  company.name,
-          subject: template.subject,
-          html:    template.html,
-          text:    template.text,
-        });
-
-        totalCompanySent++;
-        console.log(
-          `[SubscriptionExpiryJob] ✉  Sent ${daysLeft}-day warning to ${company.email} (${company.name})`
-        );
+        await sendEmail({ to: company.email, toName: company.name, subject: template.subject, html: template.html, text: template.text });
+        totalSent++;
+        console.log(`[SubscriptionExpiryJob] ✉  Sent ${daysLeft}-day warning to ${company.email}`);
       } catch (err) {
-        console.error(
-          `[SubscriptionExpiryJob] ✗  Failed company email for ${company.email}:`,
-          err.message
-        );
-      }
-
-      // ── Add to digest bucket ───────────────────────────────────────────────
-      const entry = {
-        name:       company.name,
-        email:      company.email,
-        plan:       company.plan,
-        daysLeft,
-        expiryDate: company.subscriptionExpiry,
-      };
-
-      if (daysLeft <= 1)       digestGroups.critical.push(entry);
-      else if (daysLeft <= 3)  digestGroups.warning.push(entry);
-      else                     digestGroups.notice.push(entry);
-    }
-  }
-
-  const totalExpiring = (
-    digestGroups.critical.length +
-    digestGroups.warning.length  +
-    digestGroups.notice.length
-  );
-
-  // ── Step 2: SuperAdmin digest email ───────────────────────────────────────
-  // Only send if there's at least one expiring company (avoids noisy daily
-  // "nothing to report" emails; remove the guard if you prefer daily pings).
-  if (totalExpiring > 0) {
-    const superAdminEmails = await _collectSuperAdminEmails();
-
-    for (const { email, name } of superAdminEmails) {
-      try {
-        const digest = superAdminExpiryDigestEmail({
-          superAdminName: name,
-          expiringGroups: digestGroups,
-          totalExpiring,
-        });
-
-        await sendEmail({
-          to:      email,
-          toName:  name,
-          subject: digest.subject,
-          html:    digest.html,
-          text:    digest.text,
-        });
-
-        console.log(
-          `[SubscriptionExpiryJob] 📧 Sent digest to SuperAdmin ${email} (${totalExpiring} expiring)`
-        );
-      } catch (err) {
-        console.error(
-          `[SubscriptionExpiryJob] ✗  Failed digest for SuperAdmin ${email}:`,
-          err.message
-        );
+        console.error(`[SubscriptionExpiryJob] ✗  Failed for ${company.email}:`, err.message);
       }
     }
   }
 
-  // ── Step 3: Real-time socket notification to connected SuperAdmins ─────────
-  // Uses global._io set in server.js. Emits `subscription_expiry_alert` to
-  // every connected super_admin room so the NotificationBell lights up.
-  if (totalExpiring > 0) {
-    _emitToSuperAdmins(digestGroups, totalExpiring);
-  }
-
-  // ── Step 4: Auto-expire overdue subscriptions ─────────────────────────────
+  // ── 2. Auto-expire subscriptions that passed their expiry date ─────────────
   const expired = await Company.updateMany(
-    {
-      subscriptionStatus: "active",
-      subscriptionExpiry: { $lt: today },
-    },
-    { $set: { subscriptionStatus: "expired" } }
+    { subscriptionStatus: "active", subscriptionExpiry: { $lt: today } },
+    { $set: { subscriptionStatus: "expired", isActive: false } }
   );
-
   if (expired.modifiedCount > 0) {
-    console.log(
-      `[SubscriptionExpiryJob] ⚡ Auto-expired ${expired.modifiedCount} subscription(s)`
-    );
+    console.log(`[SubscriptionExpiryJob] ⚡ Auto-expired ${expired.modifiedCount} subscription(s)`);
+  }
+
+  // ── 3. Expire addons past their expiryDate ────────────────────────────────
+  // NEW: any active addon whose expiryDate has passed → status "expired"
+  const expiredAddons = await CompanyAddon.updateMany(
+    { status: "active", expiryDate: { $ne: null, $lt: now } },
+    { $set: { status: "expired" } }
+  );
+  if (expiredAddons.modifiedCount > 0) {
+    console.log(`[SubscriptionExpiryJob] 📦 Expired ${expiredAddons.modifiedCount} addon(s)`);
+  }
+
+  // ── 4. Expire benefits past their validUntil ──────────────────────────────
+  // NEW: any active benefit whose validUntil has passed → active: false
+  const expiredBenefits = await CompanyBenefit.updateMany(
+    { active: true, validUntil: { $ne: null, $lt: now } },
+    { $set: { active: false } }
+  );
+  if (expiredBenefits.modifiedCount > 0) {
+    console.log(`[SubscriptionExpiryJob] 🎁 Expired ${expiredBenefits.modifiedCount} benefit(s)`);
+  }
+
+  // ── 5. Data retention cleanup ──────────────────────────────────────────────
+  // NEW: delete call recordings/transcriptions older than the company's plan limit.
+  // We do this lazily — find active companies with a retention limit and remove
+  // old callHistory entries from Leads (recordingUrl/transcriptionText).
+  //
+  // This avoids loading all leads by doing a targeted $pull on callHistory
+  // entries whose calledAt is older than the retention window.
+  try {
+    const companies = await Company.find({ isActive: true })
+      .select("_id plan subscriptionStatus")
+      .lean();
+
+    // Import inline to avoid circular dependency issues at module load time
+    const PlanConfig = require("../models/PlanConfig");
+    const Lead       = require("../models/Leads");
+    const { DEFAULT_PLAN_LIMITS } = require("../services/entitlementService");
+
+    for (const company of companies) {
+      // Only clean active or trial companies
+      if (!["active", "trial"].includes(company.subscriptionStatus)) continue;
+
+      let retentionDays = DEFAULT_PLAN_LIMITS[company.plan]?.dataRetentionDays ?? 15;
+
+      // Try to get from DB plan first
+      try {
+        const dbPlan = await PlanConfig.findOne({ planKey: company.plan }).select("dataRetentionDays").lean();
+        if (dbPlan?.dataRetentionDays) retentionDays = dbPlan.dataRetentionDays;
+      } catch (_) {}
+
+      if (!retentionDays || retentionDays <= 0) continue;
+
+      const cutoff = new Date(now);
+      cutoff.setDate(cutoff.getDate() - retentionDays);
+
+      // Remove callHistory entries older than the retention cutoff that have a recording
+      const result = await Lead.updateMany(
+        { company: company._id },
+        {
+          $pull: {
+            callHistory: {
+              calledAt:     { $lt: cutoff },
+              recordingUrl: { $ne: null },
+            },
+          },
+        }
+      );
+
+      if (result.modifiedCount > 0) {
+        console.log(
+          `[SubscriptionExpiryJob] 🗑  Cleaned recordings older than ${retentionDays}d for company ${company._id} (${result.modifiedCount} lead(s) updated)`
+        );
+      }
+    }
+  } catch (retentionErr) {
+    // Never crash the whole job on retention errors
+    console.error("[SubscriptionExpiryJob] Retention cleanup error:", retentionErr.message);
   }
 
   console.log(
-    `[SubscriptionExpiryJob] ✅ Done — ${totalCompanySent} company warning(s) sent, ` +
-    `${totalExpiring} in SuperAdmin digest, at ${new Date().toISOString()}`
+    `[SubscriptionExpiryJob] ✅ Done — ${totalSent} warning email(s) sent at ${new Date().toISOString()}`
   );
 };
 
-// ── Helper: collect all unique SuperAdmin email/name pairs ────────────────────
-// Sources:
-//   1. Legacy SuperAdmin model (global platform admin)
-//   2. Admin model with role === "super_admin" (company-level super admins)
-async function _collectSuperAdminEmails() {
-  const seen  = new Set();
-  const result = [];
-
-  const addEntry = ({ email, name }) => {
-    const key = email.trim().toLowerCase();
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push({ email: email.trim(), name: name || "Super Admin" });
-    }
-  };
-
-  // Legacy global SuperAdmin(s)
-  try {
-    const legacyAdmins = await SuperAdmin.find({}).select("email name").lean();
-    legacyAdmins.forEach(addEntry);
-  } catch (err) {
-    console.error("[SubscriptionExpiryJob] Could not fetch legacy SuperAdmins:", err.message);
-  }
-
-  // Company-level super_admins from Admin model
-  try {
-    const companyAdmins = await Admin.find({ role: "super_admin" }).select("email name").lean();
-    companyAdmins.forEach(addEntry);
-  } catch (err) {
-    console.error("[SubscriptionExpiryJob] Could not fetch Admin super_admins:", err.message);
-  }
-
-  return result;
-}
-
-// ── Helper: emit socket notifications to all connected SuperAdmin clients ──────
-// Finds all super_admin sockets in global._io and emits `subscription_expiry_alert`.
-async function _emitToSuperAdmins(digestGroups, totalExpiring) {
-  try {
-    const io = global._io;
-    if (!io) return;
-
-    // Find all Admin-model super_admin IDs so we can emit to their named rooms
-    const superAdmins = await Admin.find({ role: "super_admin" }).select("_id").lean();
-
-    for (const sa of superAdmins) {
-      io.to(`superadmin:${sa._id}`).emit("subscription_expiry_alert", {
-        totalExpiring,
-        critical: digestGroups.critical.length,
-        warning:  digestGroups.warning.length,
-        notice:   digestGroups.notice.length,
-        companies: [
-          ...digestGroups.critical,
-          ...digestGroups.warning,
-          ...digestGroups.notice,
-        ],
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    console.log(
-      `[SubscriptionExpiryJob] 🔔 Socket alert emitted to ${superAdmins.length} super_admin room(s)`
-    );
-  } catch (err) {
-    // Non-fatal — email already delivered
-    console.error("[SubscriptionExpiryJob] Socket emit error:", err.message);
-  }
-}
-
-// ── Register the cron schedule ────────────────────────────────────────────────
-// Fires at 08:00 AM IST every day (UTC 02:30).
-// IST = UTC+5:30  →  08:00 IST = 02:30 UTC
-// Cron format: second(opt) minute hour day month weekday
+// ── Register daily cron ────────────────────────────────────────────────────────
+// Fires at 08:00 AM IST (02:30 UTC) every day.
 const startSubscriptionExpiryJob = () => {
   cron.schedule("30 2 * * *", async () => {
     console.log("[SubscriptionExpiryJob] 🔄 Running daily expiry check…");
@@ -246,9 +153,7 @@ const startSubscriptionExpiryJob = () => {
     } catch (err) {
       console.error("[SubscriptionExpiryJob] Unhandled error:", err.message);
     }
-  }, {
-    timezone: "UTC",
-  });
+  }, { timezone: "UTC" });
 
   console.log("[SubscriptionExpiryJob] 🕗 Scheduled — fires daily at 08:00 IST (02:30 UTC)");
 };

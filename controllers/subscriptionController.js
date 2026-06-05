@@ -1,171 +1,177 @@
-// backend/controllers/subscriptionController.js
-const Company    = require('../models/Company');
-const PlanConfig = require('../models/PlanConfig');
-const SuperAdmin = require('../models/SuperAdmin');
-const Admin      = require('../models/Admin');
-const Developer  = require('../models/Developer');
-const { sendEmail }        = require('../utils/brevoMailer');
-const { planInvoiceEmail } = require('../utils/emailTemplates');
+// controllers/subscriptionController.js — UPDATED
+// Changes from original:
+//  1. All hardcoded plan checks replaced by getCompanyEntitlements()
+//  2. getMySubscriptionStatus now returns full entitlements object
+//  3. Added devOverride endpoint logic
+//  4. activateSubscription extended: "suspended"/"paused" status + demo credits
+//  5. Added getCompanyFullDetails()
+//  6. DEFAULT_PLAN_FEATURES extended with "trial" plan + all new limit fields
+//  7. Added GET /my/entitlements route handler
 
-// ─── Helper: send activation/renewal invoice to SuperAdmin + Developer ────────
-// Called after manual developer activation via activateSubscription().
-const _sendActivationInvoiceEmails = async ({
-  companyName,
-  companyEmail,
-  planName,
-  billing,
-  newExpiry,
-}) => {
-  const seen      = new Set();
-  const dashboard = process.env.FRONTEND_URL
-    ? `${process.env.FRONTEND_URL}/developer/subscriptions`
-    : "https://app.skyupcrm.com/developer/subscriptions";
+const Company    = require("../models/Company");
+const PlanConfig = require("../models/PlanConfig");
+const CompanyAddon    = require("../models/CompanyAddon");
+const CompanyBenefit  = require("../models/CompanyBenefit");
+const CompanyUsage    = require("../models/CompanyUsage");
+const EntitlementAuditLog = require("../models/EntitlementAuditLog");
+const {
+  getCompanyEntitlements,
+  getRemainingUsage,
+  logAudit,
+} = require("../services/entitlementService");
 
-  const buildPayload = (recipientName, recipientRole) =>
-    planInvoiceEmail({
-      recipientName,
-      recipientRole,
-      companyName,
-      companyEmail,
-      planName,
-      billing,
-      newExpiry,
-      actionType:   "activation",  // developer manually activated
-      invoiceId:    null,           // no payment invoice for manual activations
-      amount:       null,
-      transactionId: null,
-      paymentDate:  new Date(),
-      dashboardUrl: dashboard,
-    });
-
-  // ── 1. Legacy global SuperAdmin docs ──────────────────────────────────────
-  try {
-    const legacyAdmins = await SuperAdmin.find({}).select("email name").lean();
-    for (const sa of legacyAdmins) {
-      const key = sa.email.trim().toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const mail = buildPayload(sa.name || "Super Admin", "superadmin");
-      await sendEmail({ to: sa.email.trim(), toName: sa.name || "Super Admin", ...mail });
-    }
-  } catch (e) {
-    console.error("[activateSubscription] Failed to email legacy SuperAdmins:", e.message);
-  }
-
-  // ── 2. Company-level super_admins from Admin model ────────────────────────
-  try {
-    const companyAdmins = await Admin.find({ role: "super_admin" })
-      .select("email name")
-      .lean();
-    for (const sa of companyAdmins) {
-      const key = sa.email.trim().toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const mail = buildPayload(sa.name || "Super Admin", "superadmin");
-      await sendEmail({ to: sa.email.trim(), toName: sa.name || "Super Admin", ...mail });
-    }
-  } catch (e) {
-    console.error("[activateSubscription] Failed to email company SuperAdmins:", e.message);
-  }
-
-  // ── 3. All registered developers ─────────────────────────────────────────
-  try {
-    const devs = await Developer.find({}).select("email name").lean();
-    for (const dev of devs) {
-      const key = dev.email.trim().toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const mail = buildPayload(dev.name || "Developer", "developer");
-      await sendEmail({ to: dev.email.trim(), toName: dev.name || "Developer", ...mail });
-    }
-  } catch (e) {
-    console.error("[activateSubscription] Failed to email Developers:", e.message);
-  }
-};
-
-// ── Plan feature definitions — developer can override per-company via planFeatures ──
+// ── Plan feature definitions — single source of truth for fallback ─────────────
+// Extended with "trial" plan and all new limit fields from spec.
+// Controllers should call getCompanyEntitlements() rather than referencing
+// this directly — it is kept here only for activation defaults and backward compat.
 const DEFAULT_PLAN_FEATURES = {
-  basic: {
-    name: 'Basic',
-    price: { monthly: 999, yearly: 9990 },
-    color: '#6B7280',
-    maxUsers: 5,
-    maxLeads: 1000,
+  trial: {
+    name:    "Trial",
+    price:   { monthly: 0, yearly: 0 },
+    color:   "#9CA3AF",
+    maxAdmins: 1,
+    maxUsers:  3,
+    maxLeads:  100,
+    maxWebsites: 1,
+    maxMetaCampaigns: 0,
+    maxGoogleAccounts: 0,
+    maxStorageMB: 50,
+    transcriptionsPerMonth: 0,
+    summariesPerMonth: 0,
+    voiceBotPerMonth: 0,
+    recordingEnabled: false,
+    dataRetentionDays: 7,
     features: [
-      { key: 'leads',          label: 'Lead Management',      enabled: true  },
-      { key: 'contacts',       label: 'Contacts',             enabled: true  },
-      { key: 'basic-reports',  label: 'Basic Reports',        enabled: true  },
-      { key: 'attendance',     label: 'Attendance',           enabled: true  },
-      { key: 'daily-report',   label: 'Daily Report (Email)', enabled: true  },
-      { key: 'sms-blast',      label: 'SMS Blast',            enabled: false },
-      { key: 'whatsapp-blast', label: 'WhatsApp Blast',       enabled: false },
-      { key: 'email-blast',    label: 'Email Blast',          enabled: false },
-      { key: 'campaigns',      label: 'Campaigns',            enabled: false },
-      { key: 'google-ads',     label: 'Google Ads',           enabled: false },
-      { key: 'meta-ads',       label: 'Facebook / Meta Ads',  enabled: false },
-      { key: 'call-recording', label: 'Call Recordings',      enabled: false },
-      { key: 'api-access',     label: 'API / Webhooks',       enabled: false },
-      { key: 'custom-reports', label: 'Custom Reports',       enabled: false },
-      { key: 'white-label',    label: 'White Label',          enabled: false },
+      { key: "leads",          label: "Lead Management",      enabled: true  },
+      { key: "contacts",       label: "Contacts",             enabled: true  },
+      { key: "basic-reports",  label: "Basic Reports",        enabled: true  },
+      { key: "attendance",     label: "Attendance",           enabled: false },
+      { key: "daily-report",   label: "Daily Report (Email)", enabled: false },
+      { key: "sms-blast",      label: "SMS Blast",            enabled: false },
+      { key: "whatsapp-blast", label: "WhatsApp Blast",       enabled: false },
+      { key: "email-blast",    label: "Email Blast",          enabled: false },
+      { key: "campaigns",      label: "Campaigns",            enabled: false },
+      { key: "google-ads",     label: "Google Ads",           enabled: false },
+      { key: "meta-ads",       label: "Facebook / Meta Ads",  enabled: false },
+      { key: "call-recording", label: "Call Recordings",      enabled: false },
+      { key: "api-access",     label: "API / Webhooks",       enabled: false },
+      { key: "custom-reports", label: "Custom Reports",       enabled: false },
+      { key: "white-label",    label: "White Label",          enabled: false },
+    ],
+  },
+  basic: {
+    name:    "Basic",
+    price:   { monthly: 999, yearly: 9990 },
+    color:   "#6B7280",
+    maxAdmins: 1,
+    maxUsers:  5,
+    maxLeads:  1000,
+    maxWebsites: 1,
+    maxMetaCampaigns: 1,
+    maxGoogleAccounts: 1,
+    maxStorageMB: 100,
+    transcriptionsPerMonth: 0,
+    summariesPerMonth: 0,
+    voiceBotPerMonth: 0,
+    recordingEnabled: false,
+    dataRetentionDays: 15,
+    features: [
+      { key: "leads",          label: "Lead Management",      enabled: true  },
+      { key: "contacts",       label: "Contacts",             enabled: true  },
+      { key: "basic-reports",  label: "Basic Reports",        enabled: true  },
+      { key: "attendance",     label: "Attendance",           enabled: true  },
+      { key: "daily-report",   label: "Daily Report (Email)", enabled: true  },
+      { key: "sms-blast",      label: "SMS Blast",            enabled: false },
+      { key: "whatsapp-blast", label: "WhatsApp Blast",       enabled: false },
+      { key: "email-blast",    label: "Email Blast",          enabled: false },
+      { key: "campaigns",      label: "Campaigns",            enabled: false },
+      { key: "google-ads",     label: "Google Ads",           enabled: false },
+      { key: "meta-ads",       label: "Facebook / Meta Ads",  enabled: false },
+      { key: "call-recording", label: "Call Recordings",      enabled: false },
+      { key: "api-access",     label: "API / Webhooks",       enabled: false },
+      { key: "custom-reports", label: "Custom Reports",       enabled: false },
+      { key: "white-label",    label: "White Label",          enabled: false },
     ],
   },
   pro: {
-    name: 'Pro',
-    price: { monthly: 2999, yearly: 29990 },
-    color: '#2563EB',
-    maxUsers: 20,
-    maxLeads: 10000,
+    name:    "Pro",
+    price:   { monthly: 2999, yearly: 29990 },
+    color:   "#2563EB",
+    maxAdmins: 3,
+    maxUsers:  20,
+    maxLeads:  10000,
+    maxWebsites: 3,
+    maxMetaCampaigns: 5,
+    maxGoogleAccounts: 3,
+    maxStorageMB: 5120,
+    transcriptionsPerMonth: 200,
+    summariesPerMonth: 200,
+    voiceBotPerMonth: 100,
+    recordingEnabled: true,
+    dataRetentionDays: 60,
     features: [
-      { key: 'leads',          label: 'Lead Management',      enabled: true  },
-      { key: 'contacts',       label: 'Contacts',             enabled: true  },
-      { key: 'basic-reports',  label: 'Basic Reports',        enabled: true  },
-      { key: 'attendance',     label: 'Attendance',           enabled: true  },
-      { key: 'daily-report',   label: 'Daily Report (Email)', enabled: true  },
-      { key: 'sms-blast',      label: 'SMS Blast',            enabled: true  },
-      { key: 'whatsapp-blast', label: 'WhatsApp Blast',       enabled: true  },
-      { key: 'email-blast',    label: 'Email Blast',          enabled: true  },
-      { key: 'campaigns',      label: 'Campaigns',            enabled: true  },
-      { key: 'google-ads',     label: 'Google Ads',           enabled: true  },
-      { key: 'meta-ads',       label: 'Facebook / Meta Ads',  enabled: true  },
-      { key: 'call-recording', label: 'Call Recordings',      enabled: true  },
-      { key: 'api-access',     label: 'API / Webhooks',       enabled: true  },
-      { key: 'custom-reports', label: 'Custom Reports',       enabled: false },
-      { key: 'white-label',    label: 'White Label',          enabled: false },
+      { key: "leads",          label: "Lead Management",      enabled: true  },
+      { key: "contacts",       label: "Contacts",             enabled: true  },
+      { key: "basic-reports",  label: "Basic Reports",        enabled: true  },
+      { key: "attendance",     label: "Attendance",           enabled: true  },
+      { key: "daily-report",   label: "Daily Report (Email)", enabled: true  },
+      { key: "sms-blast",      label: "SMS Blast",            enabled: true  },
+      { key: "whatsapp-blast", label: "WhatsApp Blast",       enabled: true  },
+      { key: "email-blast",    label: "Email Blast",          enabled: true  },
+      { key: "campaigns",      label: "Campaigns",            enabled: true  },
+      { key: "google-ads",     label: "Google Ads",           enabled: true  },
+      { key: "meta-ads",       label: "Facebook / Meta Ads",  enabled: true  },
+      { key: "call-recording", label: "Call Recordings",      enabled: true  },
+      { key: "api-access",     label: "API / Webhooks",       enabled: true  },
+      { key: "custom-reports", label: "Custom Reports",       enabled: false },
+      { key: "white-label",    label: "White Label",          enabled: false },
     ],
   },
   enterprise: {
-    name: 'Enterprise',
-    price: { monthly: 9999, yearly: 99990 },
-    color: '#7C3AED',
-    maxUsers: 999,
-    maxLeads: 999999,
+    name:    "Enterprise",
+    price:   { monthly: 9999, yearly: 99990 },
+    color:   "#7C3AED",
+    maxAdmins: 10,
+    maxUsers:  999,
+    maxLeads:  999999,
+    maxWebsites: 999,
+    maxMetaCampaigns: 999,
+    maxGoogleAccounts: 999,
+    maxStorageMB: 51200,
+    transcriptionsPerMonth: 2000,
+    summariesPerMonth: 2000,
+    voiceBotPerMonth: 1000,
+    recordingEnabled: true,
+    dataRetentionDays: 365,
     features: [
-      { key: 'leads',          label: 'Lead Management',      enabled: true },
-      { key: 'contacts',       label: 'Contacts',             enabled: true },
-      { key: 'basic-reports',  label: 'Basic Reports',        enabled: true },
-      { key: 'attendance',     label: 'Attendance',           enabled: true },
-      { key: 'daily-report',   label: 'Daily Report (Email)', enabled: true },
-      { key: 'sms-blast',      label: 'SMS Blast',            enabled: true },
-      { key: 'whatsapp-blast', label: 'WhatsApp Blast',       enabled: true },
-      { key: 'email-blast',    label: 'Email Blast',          enabled: true },
-      { key: 'campaigns',      label: 'Campaigns',            enabled: true },
-      { key: 'google-ads',     label: 'Google Ads',           enabled: true },
-      { key: 'meta-ads',       label: 'Facebook / Meta Ads',  enabled: true },
-      { key: 'call-recording', label: 'Call Recordings',      enabled: true },
-      { key: 'api-access',     label: 'API / Webhooks',       enabled: true },
-      { key: 'custom-reports', label: 'Custom Reports',       enabled: true },
-      { key: 'white-label',    label: 'White Label',          enabled: true },
+      { key: "leads",          label: "Lead Management",      enabled: true },
+      { key: "contacts",       label: "Contacts",             enabled: true },
+      { key: "basic-reports",  label: "Basic Reports",        enabled: true },
+      { key: "attendance",     label: "Attendance",           enabled: true },
+      { key: "daily-report",   label: "Daily Report (Email)", enabled: true },
+      { key: "sms-blast",      label: "SMS Blast",            enabled: true },
+      { key: "whatsapp-blast", label: "WhatsApp Blast",       enabled: true },
+      { key: "email-blast",    label: "Email Blast",          enabled: true },
+      { key: "campaigns",      label: "Campaigns",            enabled: true },
+      { key: "google-ads",     label: "Google Ads",           enabled: true },
+      { key: "meta-ads",       label: "Facebook / Meta Ads",  enabled: true },
+      { key: "call-recording", label: "Call Recordings",      enabled: true },
+      { key: "api-access",     label: "API / Webhooks",       enabled: true },
+      { key: "custom-reports", label: "Custom Reports",       enabled: true },
+      { key: "white-label",    label: "White Label",          enabled: true },
     ],
   },
 };
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 // Calendar-accurate days remaining (UTC midnight comparison)
 function calcDaysRemaining(company) {
   const now    = new Date();
   let expiry   = null;
-  if (company.subscriptionStatus === 'active' && company.subscriptionExpiry)
+  if (["active","suspended","paused"].includes(company.subscriptionStatus) && company.subscriptionExpiry)
     expiry = new Date(company.subscriptionExpiry);
-  else if (company.subscriptionStatus === 'trial' && company.trialEndsAt)
+  else if (company.subscriptionStatus === "trial" && company.trialEndsAt)
     expiry = new Date(company.trialEndsAt);
   if (!expiry) return 0;
   const nowMid    = Date.UTC(now.getUTCFullYear(),    now.getUTCMonth(),    now.getUTCDate());
@@ -174,11 +180,10 @@ function calcDaysRemaining(company) {
   return diff > 0 ? diff : 0;
 }
 
-// Merge developer-saved planFeatures overrides onto defaults
+// Merge developer-saved planFeatures overrides onto plan defaults
 function resolvePlanFeatures(planKey, savedOverrides) {
   const base = JSON.parse(JSON.stringify(DEFAULT_PLAN_FEATURES[planKey] || DEFAULT_PLAN_FEATURES.basic));
   if (!savedOverrides || !Array.isArray(savedOverrides)) return base;
-  // Apply developer overrides by key
   for (const override of savedOverrides) {
     const feat = base.features.find(f => f.key === override.key);
     if (feat) feat.enabled = !!override.enabled;
@@ -186,33 +191,43 @@ function resolvePlanFeatures(planKey, savedOverrides) {
   return base;
 }
 
-// ── GET /api/subscription/plans ───────────────────────────────────────────────
-// Returns plan definitions — optionally enriched with per-plan developer overrides
-// stored on a "master config" (we store them on a sentinel Company doc or env, but
-// simplest: store in a separate PlanConfig collection). For now we return defaults +
-// any overrides stored in process-level cache set by the developer.
+// Resolve actor for audit log
+function getActor(req) {
+  if (req.developer) return { actorId: req.developer._id, actorRole: "developer" };
+  if (req.superAdmin) return { actorId: req.superAdmin._id, actorRole: "super_admin" };
+  return { actorId: null, actorRole: "system" };
+}
+
+// ── GET /api/subscription/plans ──────────────────────────────────────────────
 const getPlans = async (req, res) => {
   try {
     const dbPlans = await PlanConfig.find({ isActive: true }).sort({ sortOrder: 1, createdAt: 1 });
     if (dbPlans.length > 0) {
-      // Convert array to keyed object so existing clients work unchanged
       const plansMap = {};
       for (const p of dbPlans) {
         plansMap[p.planKey] = {
-          name:     p.name,
-          price:    p.price,
-          color:    p.color,
-          maxUsers: p.maxUsers,
-          maxLeads: p.maxLeads,
-          features: p.features,
+          name:                  p.name,
+          price:                 p.price,
+          color:                 p.color,
+          maxAdmins:             p.maxAdmins,
+          maxUsers:              p.maxUsers,
+          maxLeads:              p.maxLeads,
+          maxWebsites:           p.maxWebsites,
+          maxMetaCampaigns:      p.maxMetaCampaigns,
+          maxGoogleAccounts:     p.maxGoogleAccounts,
+          maxStorageMB:          p.maxStorageMB,
+          transcriptionsPerMonth: p.transcriptionsPerMonth,
+          summariesPerMonth:     p.summariesPerMonth,
+          voiceBotPerMonth:      p.voiceBotPerMonth,
+          recordingEnabled:      p.recordingEnabled,
+          dataRetentionDays:     p.dataRetentionDays,
+          features:              p.features,
         };
       }
       return res.json({ success: true, plans: plansMap });
     }
-    // Fallback: no DB plans yet — return hardcoded defaults
     res.json({ success: true, plans: DEFAULT_PLAN_FEATURES });
   } catch (err) {
-    // Graceful degradation
     res.json({ success: true, plans: DEFAULT_PLAN_FEATURES });
   }
 };
@@ -220,18 +235,18 @@ const getPlans = async (req, res) => {
 // ── GET /api/subscription/all ─────────────────────────────────────────────────
 const getAllSubscriptions = async (req, res) => {
   try {
-    const page   = Math.max(1, parseInt(req.query.page  || '1',  10));
-    const limit  = Math.min(100, parseInt(req.query.limit || '50', 10));
+    const page   = Math.max(1, parseInt(req.query.page  || "1",  10));
+    const limit  = Math.min(100, parseInt(req.query.limit || "50", 10));
     const skip   = (page - 1) * limit;
     const status = req.query.status || null;
     const search = req.query.search?.trim() || null;
 
     const filter = {};
-    if (status && status !== 'all') filter.subscriptionStatus = status;
+    if (status && status !== "all") filter.subscriptionStatus = status;
     if (search) {
       filter.$or = [
-        { name:  { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
+        { name:  { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
       ];
     }
 
@@ -239,7 +254,7 @@ const getAllSubscriptions = async (req, res) => {
       { $match: filter },
       {
         $facet: {
-          total:        [{ $count: 'count' }],
+          total:        [{ $count: "count" }],
           companies: [
             { $sort: { createdAt: -1 } },
             { $skip: skip },
@@ -249,10 +264,11 @@ const getAllSubscriptions = async (req, res) => {
                 name: 1, email: 1, plan: 1, isActive: 1,
                 subscriptionStatus: 1, subscriptionExpiry: 1,
                 trialEndsAt: 1, planFeatures: 1, createdAt: 1,
+                maxAdmins: 1, maxUsers: 1, maxLeads: 1,
               },
             },
           ],
-          statusCounts: [{ $group: { _id: '$subscriptionStatus', count: { $sum: 1 } } }],
+          statusCounts: [{ $group: { _id: "$subscriptionStatus", count: { $sum: 1 } } }],
         },
       },
     ]);
@@ -276,85 +292,150 @@ const getAllSubscriptions = async (req, res) => {
       summary: statusSummary,
     });
   } catch (err) {
-    console.error('[getAllSubscriptions]', err.message);
+    console.error("[getAllSubscriptions]", err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
 // ── POST /api/subscription/activate/:companyId ────────────────────────────────
+// Extended: supports "suspended"/"paused" status + grants demo credits on first activation
 const activateSubscription = async (req, res) => {
   try {
     const { companyId } = req.params;
-    const { plan, billing = 'monthly', durationMonths } = req.body;
+    const { plan, billing = "monthly", durationMonths, status: targetStatus } = req.body;
+    const { actorId, actorRole } = getActor(req);
 
-    if (!DEFAULT_PLAN_FEATURES[plan]) {
-      return res.status(400).json({ success: false, message: `Invalid plan. Choose: ${Object.keys(DEFAULT_PLAN_FEATURES).join(', ')}` });
+    const validPlans = Object.keys(DEFAULT_PLAN_FEATURES);
+    if (plan && !validPlans.includes(plan)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid plan. Choose: ${validPlans.join(", ")}`,
+      });
     }
 
     const company = await Company.findById(companyId);
-    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+    if (!company) return res.status(404).json({ success: false, message: "Company not found" });
 
-    const months = Math.max(1, parseInt(durationMonths || (billing === 'yearly' ? 12 : 1), 10));
-    // Calendar-accurate: extend from existing expiry if it is still in the future,
-    // so early renewals do not lose remaining days.
-    const now = new Date();
+    const oldPlan   = company.plan;
+    const oldStatus = company.subscriptionStatus;
+
+    const months = Math.max(1, parseInt(durationMonths || (billing === "yearly" ? 12 : 1), 10));
+    const now    = new Date();
     const currentExpiry = company.subscriptionExpiry ? new Date(company.subscriptionExpiry) : null;
-    const baseDate = (currentExpiry && currentExpiry > now) ? currentExpiry : now;
-    const expiry = new Date(baseDate);
+    const baseDate = currentExpiry && currentExpiry > now ? currentExpiry : now;
+    const expiry   = new Date(baseDate);
     expiry.setMonth(expiry.getMonth() + months);
 
-    company.plan               = plan;
-    company.subscriptionStatus = 'active';
+    const finalPlan   = plan || company.plan;
+    const planDef     = DEFAULT_PLAN_FEATURES[finalPlan] || DEFAULT_PLAN_FEATURES.basic;
+    const finalStatus = ["active","suspended","paused"].includes(targetStatus)
+      ? targetStatus
+      : "active";
+
+    company.plan               = finalPlan;
+    company.subscriptionStatus = finalStatus;
     company.subscriptionExpiry = expiry;
-    company.isActive           = true;
-    // Apply plan limits
-    company.maxUsers = DEFAULT_PLAN_FEATURES[plan].maxUsers;
-    company.maxLeads = DEFAULT_PLAN_FEATURES[plan].maxLeads;
+    company.isActive           = finalStatus === "active";
+    company.maxAdmins          = planDef.maxAdmins;
+    company.maxUsers           = planDef.maxUsers;
+    company.maxLeads           = planDef.maxLeads;
+    company.maxWebsites        = planDef.maxWebsites;
+    company.maxMetaCampaigns   = planDef.maxMetaCampaigns;
+    company.maxGoogleAccounts  = planDef.maxGoogleAccounts;
+    company.maxStorage         = planDef.maxStorageMB;
+
+    // Grant demo credits on very first activation
+    const shouldGrantDemo = !company.demoCreditGranted && finalStatus === "active";
+    if (shouldGrantDemo) {
+      company.demoCreditGranted = true;
+    }
+
     await company.save();
 
-    // ── Send activation notification to SuperAdmins + Developers (non-blocking)
-    const planDisplayName = DEFAULT_PLAN_FEATURES[plan]?.name || plan;
-    _sendActivationInvoiceEmails({
-      companyName:  company.name,
-      companyEmail: company.email || "",
-      planName:     planDisplayName,
-      billing,
-      newExpiry:    expiry,
-    }).catch((err) =>
-      console.error("[activateSubscription] Invoice email dispatch failed:", err.message)
-    );
+    // Create demo credit addons (non-blocking)
+    if (shouldGrantDemo) {
+      setImmediate(async () => {
+        try {
+          await CompanyAddon.create([
+            {
+              companyId,
+              addonType:     "transcriptions_100",
+              quantity:      1,
+              startDate:     now,
+              expiryDate:    null,
+              status:        "active",
+              paymentStatus: "free",
+              notes:         "Demo credits — granted on first activation",
+            },
+            {
+              companyId,
+              addonType:     "summaries_100",
+              quantity:      1,
+              startDate:     now,
+              expiryDate:    null,
+              status:        "active",
+              paymentStatus: "free",
+              notes:         "Demo credits — granted on first activation",
+            },
+          ]);
+          console.log(`[activateSubscription] 🎁 Demo credits granted to ${companyId}`);
+        } catch (e) {
+          console.error("[activateSubscription] Demo credit grant failed:", e.message);
+        }
+      });
+    }
+
+    await logAudit({
+      companyId,
+      actorId,
+      actorRole,
+      action:   "plan_changed",
+      field:    "plan",
+      oldValue: { plan: oldPlan, status: oldStatus },
+      newValue: { plan: finalPlan, status: finalStatus, expiresAt: expiry },
+      reason:   `Activated ${finalPlan} for ${months} month(s)`,
+    });
 
     res.json({
       success: true,
-      message:      `Subscription activated for ${company.name}`,
-      plan,
-      expiresAt:    expiry,
+      message:       `Subscription activated for ${company.name}`,
+      plan:          finalPlan,
+      status:        finalStatus,
+      expiresAt:     expiry,
       daysRemaining: calcDaysRemaining(company),
+      demoCreditGranted: shouldGrantDemo,
     });
   } catch (err) {
-    console.error('[activateSubscription]', err.message);
+    console.error("[activateSubscription]", err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
 // ── PUT /api/subscription/features/:companyId ─────────────────────────────────
-// Developer sets which features are enabled for a specific company
 const updatePlanFeatures = async (req, res) => {
   try {
     const { companyId } = req.params;
-    const { features }  = req.body; // array of { key, enabled }
+    const { features }  = req.body;
+    const { actorId, actorRole } = getActor(req);
 
     if (!Array.isArray(features)) {
-      return res.status(400).json({ success: false, message: 'features must be an array' });
+      return res.status(400).json({ success: false, message: "features must be an array" });
     }
 
     const company = await Company.findByIdAndUpdate(
       companyId,
       { planFeatures: features },
       { new: true }
-    ).select('name plan planFeatures');
+    ).select("name plan planFeatures");
 
-    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+    if (!company) return res.status(404).json({ success: false, message: "Company not found" });
+
+    await logAudit({
+      companyId, actorId, actorRole,
+      action:   "plan_features_updated",
+      newValue: features,
+      reason:   "Plan feature overrides updated",
+    });
 
     res.json({
       success:          true,
@@ -362,20 +443,34 @@ const updatePlanFeatures = async (req, res) => {
       resolvedFeatures: resolvePlanFeatures(company.plan, company.planFeatures),
     });
   } catch (err) {
-    console.error('[updatePlanFeatures]', err.message);
+    console.error("[updatePlanFeatures]", err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ── POST /api/subscription/cancel/:companyId ──────────────────────────────────
+// ── POST /api/subscription/cancel/:companyId ─────────────────────────────────
 const cancelSubscription = async (req, res) => {
   try {
+    const { companyId } = req.params;
+    const { reason }    = req.body;
+    const { actorId, actorRole } = getActor(req);
+
     const company = await Company.findByIdAndUpdate(
-      req.params.companyId,
-      { subscriptionStatus: 'cancelled', isActive: false },
+      companyId,
+      { subscriptionStatus: "cancelled", isActive: false },
       { new: true }
-    ).select('name subscriptionStatus');
-    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+    ).select("name subscriptionStatus");
+
+    if (!company) return res.status(404).json({ success: false, message: "Company not found" });
+
+    await logAudit({
+      companyId, actorId, actorRole,
+      action:   "subscription_status_changed",
+      field:    "subscriptionStatus",
+      newValue: "cancelled",
+      reason:   reason || "Subscription cancelled",
+    });
+
     res.json({ success: true, message: `Subscription cancelled for ${company.name}` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -387,22 +482,34 @@ const extendTrial = async (req, res) => {
   try {
     const { companyId } = req.params;
     const days = Math.max(1, parseInt(req.body.days || 7, 10));
+    const { actorId, actorRole } = getActor(req);
+
     const company = await Company.findById(companyId);
-    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+    if (!company) return res.status(404).json({ success: false, message: "Company not found" });
 
     const base   = company.trialEndsAt && new Date(company.trialEndsAt) > new Date()
       ? new Date(company.trialEndsAt) : new Date();
     const newEnd = new Date(base);
     newEnd.setDate(newEnd.getDate() + days);
 
+    const oldEnd = company.trialEndsAt;
     company.trialEndsAt        = newEnd;
-    company.subscriptionStatus = 'trial';
+    company.subscriptionStatus = "trial";
     company.isActive           = true;
     await company.save();
 
+    await logAudit({
+      companyId, actorId, actorRole,
+      action:   "trial_extended",
+      field:    "trialEndsAt",
+      oldValue: oldEnd,
+      newValue: newEnd,
+      reason:   `Trial extended by ${days} day(s)`,
+    });
+
     res.json({
       success: true,
-      message:      `Trial extended by ${days} days for ${company.name}`,
+      message:       `Trial extended by ${days} days for ${company.name}`,
       newTrialEnd:   newEnd,
       daysRemaining: calcDaysRemaining(company),
     });
@@ -411,38 +518,67 @@ const extendTrial = async (req, res) => {
   }
 };
 
-// ── GET /api/subscription/status — for admin/super_admin panel ────────────────
-// Returns current subscription status + features for the calling company
+// ── GET /api/subscription/status — for admin panel (backward compat) ──────────
+// Now returns full entitlements object from entitlementService
 const getMySubscriptionStatus = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id ?? req.admin?.company;
     const company   = await Company.findById(companyId)
-      .select('name plan subscriptionStatus subscriptionExpiry trialEndsAt isActive planFeatures');
-    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+      .select("name plan subscriptionStatus subscriptionExpiry trialEndsAt isActive planFeatures");
+    if (!company) return res.status(404).json({ success: false, message: "Company not found" });
+
+    // Auto-suspend check
+    const now = new Date();
+    if (company.subscriptionStatus === "active" && company.subscriptionExpiry && now > company.subscriptionExpiry) {
+      await Company.findByIdAndUpdate(companyId, { subscriptionStatus: "expired", isActive: false });
+      company.subscriptionStatus = "expired";
+    }
+    if (company.subscriptionStatus === "trial" && company.trialEndsAt && now > company.trialEndsAt) {
+      await Company.findByIdAndUpdate(companyId, { subscriptionStatus: "expired", isActive: false });
+      company.subscriptionStatus = "expired";
+    }
+
+    // Get full entitlements from service
+    let entitlements = null;
+    try {
+      entitlements = await getCompanyEntitlements(companyId);
+    } catch (_) {
+      // Fallback: return resolved features only
+    }
 
     const daysRemaining = calcDaysRemaining(company);
-    // Auto-suspend: if expiry passed, mark expired + deactivate
-    const now = new Date();
-    let status = company.subscriptionStatus;
-    if (status === 'active' && company.subscriptionExpiry && now > company.subscriptionExpiry) {
-      await Company.findByIdAndUpdate(companyId, { subscriptionStatus: 'expired', isActive: false });
-      status = 'expired';
-    }
-    if (status === 'trial' && company.trialEndsAt && now > company.trialEndsAt) {
-      await Company.findByIdAndUpdate(companyId, { subscriptionStatus: 'expired', isActive: false });
-      status = 'expired';
-    }
 
     res.json({
       success: true,
       plan:             company.plan,
-      status,
+      status:           company.subscriptionStatus,
       daysRemaining,
       expiresAt:        company.subscriptionExpiry || company.trialEndsAt,
-      expiringSoon:     daysRemaining <= 5 && daysRemaining > 0 && ['active','trial'].includes(status),
-      suspended:        status === 'expired' || status === 'cancelled',
+      expiringSoon:     daysRemaining <= 5 && daysRemaining > 0 && ["active","trial"].includes(company.subscriptionStatus),
+      suspended:        ["expired","cancelled","suspended","paused"].includes(company.subscriptionStatus),
+      readOnly:         !["active","trial"].includes(company.subscriptionStatus),
+      // Full entitlements (new — replaces resolvedFeatures)
+      entitlements,
+      // Legacy — keep for backward compat with older frontend
       resolvedFeatures: resolvePlanFeatures(company.plan, company.planFeatures),
     });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── GET /api/subscription/my/entitlements — full entitlements for calling company ──
+const getMyEntitlements = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id ?? req.admin?.company;
+    if (!companyId) return res.status(400).json({ success: false, message: "Company not found in token" });
+
+    const [entitlements, remaining] = await Promise.all([
+      getCompanyEntitlements(companyId),
+      getRemainingUsage(companyId),
+    ]);
+
+    res.json({ success: true, entitlements, remaining });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -452,8 +588,13 @@ const getMySubscriptionStatus = async (req, res) => {
 const getCompanySubscription = async (req, res) => {
   try {
     const company = await Company.findById(req.params.companyId)
-      .select('name plan subscriptionStatus subscriptionExpiry trialEndsAt isActive planFeatures');
-    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+      .select("name plan subscriptionStatus subscriptionExpiry trialEndsAt isActive planFeatures");
+    if (!company) return res.status(404).json({ success: false, message: "Company not found" });
+
+    let entitlements = null;
+    try {
+      entitlements = await getCompanyEntitlements(req.params.companyId);
+    } catch (_) {}
 
     res.json({
       success: true,
@@ -461,9 +602,104 @@ const getCompanySubscription = async (req, res) => {
         ...company.toObject(),
         daysRemaining:    calcDaysRemaining(company),
         resolvedFeatures: resolvePlanFeatures(company.plan, company.planFeatures),
+        entitlements,
       },
     });
   } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── PUT /api/subscription/override/:companyId ─────────────────────────────────
+// NEW: Store devOverrides on company (resource limits + feature toggles)
+const applyDevOverride = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const { actorId, actorRole } = getActor(req);
+
+    const {
+      admins, users, leads, websites,
+      metaCampaigns, googleAccounts, storageMB,
+      featureToggles,
+      reason = "",
+    } = req.body;
+
+    const company = await Company.findById(companyId);
+    if (!company) return res.status(404).json({ success: false, message: "Company not found" });
+
+    const oldOverrides = company.devOverrides?.toObject?.() || company.devOverrides || {};
+
+    // Build update — only set fields that were explicitly provided
+    const newOverrides = { ...oldOverrides };
+    if (admins         != null) newOverrides.admins         = parseInt(admins, 10);
+    if (users          != null) newOverrides.users          = parseInt(users, 10);
+    if (leads          != null) newOverrides.leads          = parseInt(leads, 10);
+    if (websites       != null) newOverrides.websites       = parseInt(websites, 10);
+    if (metaCampaigns  != null) newOverrides.metaCampaigns  = parseInt(metaCampaigns, 10);
+    if (googleAccounts != null) newOverrides.googleAccounts = parseInt(googleAccounts, 10);
+    if (storageMB      != null) newOverrides.storageMB      = parseInt(storageMB, 10);
+    if (featureToggles && typeof featureToggles === "object") {
+      newOverrides.featureToggles = featureToggles;
+    }
+
+    company.devOverrides = newOverrides;
+    await company.save();
+
+    await logAudit({
+      companyId, actorId, actorRole,
+      action:   "dev_override_applied",
+      field:    "devOverrides",
+      oldValue: oldOverrides,
+      newValue: newOverrides,
+      reason:   reason || "Dev override applied",
+    });
+
+    // Return refreshed entitlements after override
+    const entitlements = await getCompanyEntitlements(companyId);
+    res.json({ success: true, devOverrides: newOverrides, entitlements });
+  } catch (err) {
+    console.error("[applyDevOverride]", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── GET /api/subscription/full/:companyId — for Developer Panel ───────────────
+// Returns subscription + usage + addons + benefits + audit log summary
+const getCompanyFullDetails = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+
+    const now   = new Date();
+    const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+    const [company, entitlements, addons, benefits, usage, auditLogs] = await Promise.all([
+      Company.findById(companyId)
+        .select("-brevoApiKey -encryptionKeyHash -customerOpenAiKey -customerGeminiKey")
+        .lean(),
+      getCompanyEntitlements(companyId),
+      CompanyAddon.find({ companyId }).sort({ createdAt: -1 }).lean(),
+      CompanyBenefit.find({ companyId }).sort({ createdAt: -1 }).lean(),
+      CompanyUsage.findOne({ companyId, month }).lean(),
+      EntitlementAuditLog.find({ companyId })
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .lean(),
+    ]);
+
+    if (!company) return res.status(404).json({ success: false, message: "Company not found" });
+
+    res.json({
+      success: true,
+      company,
+      entitlements,
+      addons,
+      benefits,
+      usage: usage || { month, recordingsUsed: 0, transcriptionsUsed: 0, summariesUsed: 0, voiceBotUsed: 0 },
+      auditLogs,
+      daysRemaining: calcDaysRemaining(company),
+    });
+  } catch (err) {
+    console.error("[getCompanyFullDetails]", err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -477,6 +713,10 @@ module.exports = {
   getCompanySubscription,
   updatePlanFeatures,
   getMySubscriptionStatus,
+  getMyEntitlements,
+  applyDevOverride,
+  getCompanyFullDetails,
+  // Keep these exports for other controllers that import them
   DEFAULT_PLAN_FEATURES,
   resolvePlanFeatures,
   calcDaysRemaining,

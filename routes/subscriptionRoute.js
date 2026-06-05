@@ -1,16 +1,17 @@
-// backend/routes/subscriptionRoute.js
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX: Added developer auth support alongside superadmin so the developer
-// dashboard Subscriptions page can call these endpoints with a developer token.
-// ─────────────────────────────────────────────────────────────────────────────
+// routes/subscriptionRoute.js — UPDATED
+// Added:
+//   GET  /my/entitlements          → getMyEntitlements  (full entitlements for calling company)
+//   PUT  /override/:companyId      → applyDevOverride   (dev override via subscription route)
+//   GET  /full/:companyId          → getCompanyFullDetails
+// All existing routes are UNCHANGED.
 
-const express = require('express');
+const express = require("express");
 const router  = express.Router();
-const jwt     = require('jsonwebtoken');
+const jwt     = require("jsonwebtoken");
 
-const Admin      = require('../models/Admin');
-const SuperAdmin = require('../models/SuperAdmin');
-const Developer  = require('../models/Developer');
+const Admin      = require("../models/Admin");
+const SuperAdmin = require("../models/SuperAdmin");
+const Developer  = require("../models/Developer");
 
 const {
   getPlans,
@@ -21,67 +22,68 @@ const {
   getCompanySubscription,
   updatePlanFeatures,
   getMySubscriptionStatus,
-} = require('../controllers/subscriptionController');
+  getMyEntitlements,
+  applyDevOverride,
+  getCompanyFullDetails,
+} = require("../controllers/subscriptionController");
 
-const { protectAdmin } = require('../middlewares/adminAuthMiddleware');
+const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 
 // ── Middleware: allow either super_admin OR developer ─────────────────────────
-// FIX: previous version chained protectSuperAdmin → protectDeveloper, but
-// protectSuperAdmin never calls next(err) on failure (it sends res.json directly),
-// so the developer fallback was never reached. We now decode the JWT once and
-// route to the correct collection based on the role claim.
 const protectPrivileged = async (req, res, next) => {
-  if (!req.headers.authorization?.startsWith('Bearer')) {
-    return res.status(401).json({ success: false, message: 'No token provided' });
+  if (!req.headers.authorization?.startsWith("Bearer")) {
+    return res.status(401).json({ success: false, message: "No token provided" });
   }
   try {
-    const token   = req.headers.authorization.split(' ')[1];
+    const token   = req.headers.authorization.split(" ")[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const role    = decoded.role === 'superadmin' ? 'super_admin' : decoded.role;
+    const role    = decoded.role === "superadmin" ? "super_admin" : decoded.role;
 
-    if (role === 'developer') {
-      const dev = await Developer.findById(decoded.id).select('-password');
-      if (!dev) return res.status(401).json({ success: false, message: 'Developer not found' });
+    if (role === "developer") {
+      const dev = await Developer.findById(decoded.id).select("-password");
+      if (!dev) return res.status(401).json({ success: false, message: "Developer not found" });
       req.developer = dev;
       return next();
     }
 
-    if (role === 'super_admin') {
-      // Try Admin model first (new multi-tenant super_admin), then legacy SuperAdmin
-      const adminDoc = await Admin.findById(decoded.id).select('-password');
-      if (adminDoc && adminDoc.role === 'super_admin') {
+    if (role === "super_admin") {
+      const adminDoc = await Admin.findById(decoded.id).select("-password");
+      if (adminDoc && adminDoc.role === "super_admin") {
         req.superAdmin = adminDoc;
         return next();
       }
-      const legacy = await SuperAdmin.findById(decoded.id).select('-password');
-      if (legacy) {
-        req.superAdmin = legacy;
-        return next();
-      }
-      return res.status(401).json({ success: false, message: 'Not authorized as super_admin' });
+      const legacy = await SuperAdmin.findById(decoded.id).select("-password");
+      if (legacy) { req.superAdmin = legacy; return next(); }
+      return res.status(401).json({ success: false, message: "Not authorized as super_admin" });
     }
 
     return res.status(403).json({
       success: false,
-      message: 'Access denied. Requires super_admin or developer role.',
+      message: "Access denied. Requires super_admin or developer role.",
     });
   } catch (err) {
-    return res.status(401).json({ success: false, message: 'Not authorized, invalid token' });
+    return res.status(401).json({ success: false, message: "Not authorized, invalid token" });
   }
 };
 
 // ── Public ────────────────────────────────────────────────────────────────────
-router.get('/plans', getPlans);
+router.get("/plans", getPlans);
 
-// ── Admin/SuperAdmin: get own subscription status + features ─────────────────
-router.get('/my/status', protectAdmin, getMySubscriptionStatus);
+// ── Admin / super_admin — own subscription ────────────────────────────────────
+// Backward-compat: returns combined status + entitlements + resolvedFeatures
+router.get("/my/status",       protectAdmin, getMySubscriptionStatus);
 
-// ── Privileged (superadmin or developer) ─────────────────────────────────────
-router.get('/all',                          protectPrivileged, getAllSubscriptions);
-router.get('/:companyId',                   protectPrivileged, getCompanySubscription);
-router.post('/activate/:companyId',         protectPrivileged, activateSubscription);
-router.post('/cancel/:companyId',           protectPrivileged, cancelSubscription);
-router.post('/extend-trial/:companyId',     protectPrivileged, extendTrial);
-router.put('/features/:companyId',          protectPrivileged, updatePlanFeatures);
+// NEW: Full entitlements object for the calling company (used by usePlanFeatures hook)
+router.get("/my/entitlements", protectAdmin, getMyEntitlements);
+
+// ── Privileged (super_admin or developer) ─────────────────────────────────────
+router.get("/all",                       protectPrivileged, getAllSubscriptions);
+router.get("/full/:companyId",           protectPrivileged, getCompanyFullDetails);
+router.get("/:companyId",                protectPrivileged, getCompanySubscription);
+router.post("/activate/:companyId",      protectPrivileged, activateSubscription);
+router.post("/cancel/:companyId",        protectPrivileged, cancelSubscription);
+router.post("/extend-trial/:companyId",  protectPrivileged, extendTrial);
+router.put("/features/:companyId",       protectPrivileged, updatePlanFeatures);
+router.put("/override/:companyId",       protectPrivileged, applyDevOverride);
 
 module.exports = router;
