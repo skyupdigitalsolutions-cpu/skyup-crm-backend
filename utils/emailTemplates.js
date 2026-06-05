@@ -2,7 +2,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // HTML email templates used by:
 //   • developerController.js  → companyWelcomeEmail()  (on company creation)
-//   • jobs/subscriptionExpiryJob.js → subscriptionExpiryEmail() (cron warnings)
+//   • jobs/subscriptionExpiryJob.js → subscriptionExpiryEmail() (cron warnings to company)
+//   • jobs/subscriptionExpiryJob.js → superAdminExpiryDigestEmail() (digest to SuperAdmin)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── Shared design tokens ──────────────────────────────────────────────────────
@@ -301,4 +302,203 @@ const subscriptionExpiryEmail = ({
   };
 };
 
-module.exports = { companyWelcomeEmail, subscriptionExpiryEmail };
+// ── 3. SuperAdmin Expiry Digest Email ─────────────────────────────────────────
+// Sent to the SuperAdmin once daily listing ALL companies whose subscriptions
+// are expiring soon (1, 3, or 7 days) or have just expired.
+//
+// @param {object} opts
+//   superAdminName  {string}         — e.g. "Platform Admin"
+//   expiringGroups  {object}         — { critical: [], warning: [], notice: [] }
+//     Each entry: { name, plan, email, daysLeft, expiryDate }
+//   totalExpiring   {number}         — total count across all groups
+//   dashboardUrl    {string}         — link to superadmin subscription dashboard
+const superAdminExpiryDigestEmail = ({
+  superAdminName = "Super Admin",
+  expiringGroups = { critical: [], warning: [], notice: [] },
+  totalExpiring  = 0,
+  dashboardUrl   = process.env.FRONTEND_URL
+    ? `${process.env.FRONTEND_URL}/developer/subscriptions`
+    : "https://app.skyupcrm.com/developer/subscriptions",
+}) => {
+  const runDate = new Date().toLocaleDateString("en-IN", {
+    day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+
+  // ── Helper: render a single company row ──────────────────────────────────
+  const companyRow = ({ name, plan, email, daysLeft, expiryDate }) => {
+    const urgencyColor = daysLeft <= 1 ? RED : daysLeft <= 3 ? ORANGE : ACCENT;
+    const planLabel    = (plan || "basic").charAt(0).toUpperCase() + (plan || "basic").slice(1);
+    const expiryStr    = new Date(expiryDate).toLocaleDateString("en-IN", {
+      day: "numeric", month: "short", year: "numeric",
+    });
+    const dayLabel = daysLeft <= 0
+      ? "Expired"
+      : daysLeft === 1 ? "1 day left" : `${daysLeft} days left`;
+
+    return `
+    <table cellpadding="0" cellspacing="0" width="100%"
+           style="margin-bottom:8px;background:${BG};border:1px solid ${BORDER};
+                  border-radius:10px;overflow:hidden;">
+      <tr>
+        <td style="padding:12px 16px;">
+          <table cellpadding="0" cellspacing="0" width="100%">
+            <tr>
+              <td>
+                <p style="margin:0;font-size:13px;font-weight:700;color:${TEXT};">${name}</p>
+                <p style="margin:2px 0 0;font-size:11px;color:${MUTED};">${email}</p>
+              </td>
+              <td style="text-align:right;white-space:nowrap;padding-left:12px;">
+                <span style="display:inline-block;background:${urgencyColor}20;color:${urgencyColor};
+                             font-size:10px;font-weight:700;letter-spacing:0.8px;
+                             text-transform:uppercase;padding:3px 8px;border-radius:5px;">
+                  ${dayLabel}
+                </span>
+                <br/>
+                <span style="font-size:10px;color:${DIM};margin-top:2px;display:inline-block;">
+                  ${planLabel} · ${expiryStr}
+                </span>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>`;
+  };
+
+  // ── Helper: render a section (Critical / Warning / Notice) ───────────────
+  const section = (label, color, emoji, companies) => {
+    if (!companies || companies.length === 0) return "";
+    return `
+    <tr>
+      <td style="padding:0 40px 20px;">
+        <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:1.5px;
+                  text-transform:uppercase;color:${color};">
+          ${emoji} ${label} (${companies.length})
+        </p>
+        ${companies.map(companyRow).join("")}
+      </td>
+    </tr>`;
+  };
+
+  const hasCritical = expiringGroups.critical?.length > 0;
+  const hasWarning  = expiringGroups.warning?.length  > 0;
+  const hasNotice   = expiringGroups.notice?.length   > 0;
+
+  const summaryBg    = hasCritical ? `${RED}10`    : hasWarning ? `${ORANGE}10` : `${ACCENT}10`;
+  const summaryBorder= hasCritical ? `${RED}30`    : hasWarning ? `${ORANGE}30` : `${ACCENT}30`;
+  const summaryColor = hasCritical ? RED            : hasWarning ? ORANGE        : ACCENT;
+  const summaryIcon  = hasCritical ? "🚨"           : hasWarning ? "⚠️"           : "📋";
+
+  const body = `
+  <!-- ── Admin banner ── -->
+  <tr>
+    <td style="padding:0;">
+      <div style="background:${ORANGE}15;border-bottom:2px solid ${ORANGE}40;padding:14px 40px;">
+        <p style="margin:0;font-size:11px;font-weight:700;color:${ORANGE};
+                  letter-spacing:1.5px;text-transform:uppercase;">
+          🛡️ Super Admin · Daily Subscription Report
+        </p>
+      </div>
+    </td>
+  </tr>
+
+  <!-- ── Hero ── -->
+  <tr>
+    <td style="padding:28px 40px 0;">
+      <p style="margin:0 0 6px;font-size:24px;font-weight:800;color:${TEXT};line-height:1.25;">
+        Subscription Expiry Digest
+      </p>
+      <p style="margin:0 0 20px;font-size:13px;color:${MUTED};line-height:1.6;">
+        Hi <strong style="color:${TEXT};">${superAdminName}</strong>,
+        here's your daily summary of companies with subscriptions expiring soon.
+        Run at <strong style="color:${TEXT};">${runDate}</strong>.
+      </p>
+    </td>
+  </tr>
+
+  <!-- ── Summary card ── -->
+  <tr>
+    <td style="padding:0 40px 24px;">
+      <div style="background:${summaryBg};border:1px solid ${summaryBorder};
+                  border-radius:14px;padding:20px 24px;">
+        <table cellpadding="0" cellspacing="0" width="100%">
+          <tr>
+            <td>
+              <p style="margin:0;font-size:28px;font-weight:800;color:${summaryColor};
+                        line-height:1;">${summaryIcon} ${totalExpiring}</p>
+              <p style="margin:4px 0 0;font-size:12px;color:${MUTED};">
+                compan${totalExpiring === 1 ? "y" : "ies"} require${totalExpiring === 1 ? "s" : ""} attention
+              </p>
+            </td>
+            <td style="text-align:right;vertical-align:top;">
+              <table cellpadding="0" cellspacing="0">
+                ${hasCritical ? `<tr><td style="padding:2px 0;"><span style="font-size:11px;color:${RED};">🔴 ${expiringGroups.critical.length} critical (≤1 day)</span></td></tr>` : ""}
+                ${hasWarning  ? `<tr><td style="padding:2px 0;"><span style="font-size:11px;color:${ORANGE};">🟡 ${expiringGroups.warning.length} warning (2–3 days)</span></td></tr>` : ""}
+                ${hasNotice   ? `<tr><td style="padding:2px 0;"><span style="font-size:11px;color:${ACCENT};">🔵 ${expiringGroups.notice.length} upcoming (4–7 days)</span></td></tr>` : ""}
+              </table>
+            </td>
+          </tr>
+        </table>
+      </div>
+    </td>
+  </tr>
+
+  ${section("Critical — Expires Today or Tomorrow", RED,    "🔴", expiringGroups.critical)}
+  ${section("Warning — Expires in 2–3 Days",        ORANGE, "🟡", expiringGroups.warning)}
+  ${section("Upcoming — Expires in 4–7 Days",       ACCENT, "🔵", expiringGroups.notice)}
+
+  <!-- ── CTA ── -->
+  <tr>
+    <td style="padding:0 40px 28px;text-align:center;">
+      <a href="${dashboardUrl}"
+         style="display:inline-block;background:${ACCENT};color:#fff;font-size:14px;
+                font-weight:700;text-decoration:none;padding:14px 36px;border-radius:10px;
+                letter-spacing:0.3px;">
+        Open Subscription Dashboard →
+      </a>
+    </td>
+  </tr>
+
+  <!-- ── Footer note ── -->
+  <tr>
+    <td style="padding:0 40px 28px;">
+      <div style="background:${ACCENT}0D;border:1px solid ${ACCENT}25;border-radius:10px;padding:14px 16px;">
+        <p style="margin:0;font-size:12px;color:${MUTED};line-height:1.6;">
+          This digest is sent automatically every day at 08:00 AM IST.
+          Individual reminder emails have already been sent to each affected company.
+        </p>
+      </div>
+    </td>
+  </tr>`;
+
+  // Plain-text fallback
+  const lines = [`SkyUp CRM — SuperAdmin Subscription Expiry Digest`, ``, `Hi ${superAdminName},`, `Run at: ${runDate}`, ``, `${totalExpiring} company/companies require attention.`, ``];
+  if (hasCritical) {
+    lines.push("🔴 CRITICAL (≤1 day):");
+    expiringGroups.critical.forEach(c => lines.push(`  • ${c.name} (${c.plan}) — expires ${new Date(c.expiryDate).toLocaleDateString("en-IN")}`));
+    lines.push("");
+  }
+  if (hasWarning) {
+    lines.push("🟡 WARNING (2–3 days):");
+    expiringGroups.warning.forEach(c => lines.push(`  • ${c.name} (${c.plan}) — expires ${new Date(c.expiryDate).toLocaleDateString("en-IN")}`));
+    lines.push("");
+  }
+  if (hasNotice) {
+    lines.push("🔵 UPCOMING (4–7 days):");
+    expiringGroups.notice.forEach(c => lines.push(`  • ${c.name} (${c.plan}) — expires ${new Date(c.expiryDate).toLocaleDateString("en-IN")}`));
+    lines.push("");
+  }
+  lines.push(`Manage subscriptions: ${dashboardUrl}`);
+
+  return {
+    subject: totalExpiring === 0
+      ? `✅ No Expiring Subscriptions Today — SkyUp CRM`
+      : hasCritical
+        ? `🚨 ${expiringGroups.critical.length} Subscription(s) Expiring TODAY — SkyUp CRM`
+        : `⚠️ ${totalExpiring} Subscription(s) Expiring Soon — SkyUp CRM`,
+    html: shell(body),
+    text: lines.join("\n"),
+  };
+};
+
+module.exports = { companyWelcomeEmail, subscriptionExpiryEmail, superAdminExpiryDigestEmail };

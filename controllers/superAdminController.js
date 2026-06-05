@@ -523,6 +523,47 @@ const getAllAdminsWithStats = async (req, res) => {
   }
 };
 
+// ── GET /api/superadmin/expiring-subscriptions ────────────────────────────────
+// Returns companies whose active subscriptions expire within the next 30 days,
+// sorted by expiry date (soonest first).  Used by the frontend NotificationBell
+// to surface in-app alerts for the SuperAdmin without waiting for the cron email.
+//
+// Query params (all optional):
+//   days  {number}  — look-ahead window in days (default: 30, max: 90)
+const getExpiringSubscriptions = async (req, res) => {
+  try {
+    const days = Math.min(parseInt(req.query.days, 10) || 30, 90);
+
+    const now   = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // midnight
+    const limit = new Date(today);
+    limit.setDate(limit.getDate() + days);
+
+    const companies = await Company.find({
+      subscriptionStatus: "active",
+      subscriptionExpiry: { $gte: today, $lte: limit },
+      isActive: true,
+    })
+      .select("name email plan subscriptionExpiry subscriptionStatus")
+      .sort({ subscriptionExpiry: 1 })
+      .lean();
+
+    // Annotate each record with daysLeft so the frontend can colour-code easily
+    const annotated = companies.map((c) => {
+      const ms       = new Date(c.subscriptionExpiry).getTime() - today.getTime();
+      const daysLeft = Math.ceil(ms / (1000 * 60 * 60 * 24));
+      return { ...c, daysLeft };
+    });
+
+    res.status(200).json({
+      total:     annotated.length,
+      companies: annotated,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   registerSuperAdmin,
   loginSuperAdmin,
@@ -537,4 +578,5 @@ module.exports = {
   getDashboardStats,
   getAdminDetails,
   getAllAdminsWithStats,
+  getExpiringSubscriptions,
 };

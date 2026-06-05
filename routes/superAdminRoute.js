@@ -15,6 +15,7 @@ const {
   getDashboardStats,
   getAdminDetails,
   getAllAdminsWithStats,
+  getExpiringSubscriptions,
 } = require("../controllers/superAdminController");
 const { protectUnified, authorizeRoles } = require("../middlewares/authMiddleware");
 const { protectSuperAdmin } = require("../middlewares/superAdminMiddleware");
@@ -49,5 +50,11 @@ router.post("/companies",       protectSuperAdmin, createCompany);
 router.get("/companies/:id",    protectSuperAdmin, getCompany);
 router.put("/companies/:id",    protectSuperAdmin, toggleCompany);
 router.delete("/companies/:id", protectSuperAdmin, deleteCompany);
+
+// ── Subscription expiry monitoring ───────────────────────────────────────────
+// Returns companies expiring within the next N days (default 30).
+// Used by the frontend NotificationBell for in-app expiry alerts.
+router.get("/expiring-subscriptions",
+  protectSuperAdmin, getExpiringSubscriptions);
 
 module.exports = router;
