@@ -1,6 +1,9 @@
 // utils/transcribeAudio.js
 // ── Dual-engine transcription ─────────────────────────────────────────────────
 //   • Sarvam AI  → mixed / Indic audio  (auto-detects hi/kn/ta/te/ml/mr/gu/bn)
+//     Uses /speech-to-text (NOT /speech-to-text-translate) so Hindi stays as
+//     Hinglish romanisation, e.g. "mein apka kya help kar sakta hu" not
+//     "how can I help you"
 //   • Groq Whisper large-v3 → purely English audio  (free tier)
 //
 // Sarvam limit: 30 s per request → audio is chunked with ffmpeg before upload.
@@ -14,7 +17,7 @@ const axios          = require('axios');
 const FormData       = require('form-data');
 
 const GROQ_STT_URL   = 'https://api.groq.com/openai/v1/audio/transcriptions';
-const SARVAM_STT_URL = 'https://api.sarvam.ai/speech-to-text-translate';
+const SARVAM_STT_URL = 'https://api.sarvam.ai/speech-to-text';   // ← transcribe only, no translation
 const WHISPER_MODEL  = 'whisper-large-v3';
 const CHUNK_SECS     = 25; // stay under Sarvam's 30 s hard limit
 
@@ -28,7 +31,6 @@ function formatTime(seconds) {
   return `${m}:${s}`;
 }
 
-/** Download a URL to a tmp file, return the local path */
 async function downloadToTmp(url, suffix = '.mp3') {
   const tmpPath = path.join(os.tmpdir(), `stt_${Date.now()}${suffix}`);
   const response = await axios.get(url, { responseType: 'arraybuffer' });
@@ -36,10 +38,6 @@ async function downloadToTmp(url, suffix = '.mp3') {
   return tmpPath;
 }
 
-/**
- * Use ffmpeg to probe audio duration in seconds.
- * Returns 0 if ffprobe fails (we'll treat it as a single chunk then).
- */
 function getAudioDuration(filePath) {
   try {
     const out = execSync(
@@ -52,16 +50,11 @@ function getAudioDuration(filePath) {
   }
 }
 
-/**
- * Split audio into ≤CHUNK_SECS-second WAV chunks using ffmpeg.
- * Returns array of tmp file paths — caller must delete them.
- */
 function splitAudio(filePath, chunkSecs = CHUNK_SECS) {
   const duration = getAudioDuration(filePath);
   const chunks   = [];
 
   if (duration <= chunkSecs) {
-    // No split needed — convert to wav for Sarvam compatibility
     const out = path.join(os.tmpdir(), `chunk_${Date.now()}_0.wav`);
     execSync(`ffmpeg -y -i "${filePath}" -ar 16000 -ac 1 "${out}"`, { stdio: 'pipe' });
     chunks.push(out);
@@ -69,7 +62,7 @@ function splitAudio(filePath, chunkSecs = CHUNK_SECS) {
   }
 
   const numChunks = Math.ceil(duration / chunkSecs);
-  console.log(`[Sarvam] Audio is ${duration.toFixed(1)}s → splitting into ${numChunks} chunks of ${chunkSecs}s`);
+  console.log(`[Sarvam] Audio ${duration.toFixed(1)}s → ${numChunks} chunks of ${chunkSecs}s`);
 
   for (let i = 0; i < numChunks; i++) {
     const start = i * chunkSecs;
@@ -84,10 +77,18 @@ function splitAudio(filePath, chunkSecs = CHUNK_SECS) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SARVAM ENGINE  (mixed / Indic, chunked)
+// SARVAM ENGINE  (mixed / Indic, transcribe-only)
+// ─────────────────────────────────────────────────────────────────────────────
+// /speech-to-text response shape:
+// {
+//   transcript: string,          // romanised or native-script text
+//   language_code: string,       // e.g. "hi-IN", "kn-IN"
+//   time_stamps?: [              // present when with_timestamps=true
+//     { start: number, end: number, word: string }
+//   ]
+// }
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Send a single ≤30 s chunk to Sarvam, return its transcript string */
 async function sarvamChunk(chunkPath, chunkIndex) {
   const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
 
@@ -96,8 +97,11 @@ async function sarvamChunk(chunkPath, chunkIndex) {
     filename: path.basename(chunkPath),
     contentType: 'audio/wav',
   });
+  // model: saarika:v2 is Sarvam's latest multilingual STT model
+  form.append('model', 'saarika:v2');
   form.append('with_timestamps', 'true');
-  form.append('with_diarization', 'false');
+  // language_code: 'unknown' → auto-detect (hi-IN / kn-IN / ta-IN etc.)
+  form.append('language_code', 'unknown');
 
   try {
     const resp = await axios.post(SARVAM_STT_URL, form, {
@@ -108,21 +112,42 @@ async function sarvamChunk(chunkPath, chunkIndex) {
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
     });
+
     const data = resp.data;
     if (!data?.transcript) return '';
 
     const lang = data.language_code || 'unknown';
     console.log(`[Sarvam] Chunk ${chunkIndex}: lang=${lang}, chars=${data.transcript.length}`);
+    console.log(`[Sarvam] Chunk ${chunkIndex} sample: ${data.transcript.slice(0, 80)}`);
 
-    // Use timestamped segments if available
-    if (Array.isArray(data.timestamps) && data.timestamps.length > 0) {
-      const offsetSecs = chunkIndex * CHUNK_SECS;
-      return data.timestamps
-        .map(seg => `[${formatTime((seg.start || 0) + offsetSecs)}] ${(seg.transcript || '').trim()}`)
-        .filter(l => l)
-        .join('\n');
+    // Build timestamped lines using word-level timestamps if present
+    // time_stamps is an array of { start, end, word }
+    const offsetSecs = chunkIndex * CHUNK_SECS;
+
+    if (Array.isArray(data.time_stamps) && data.time_stamps.length > 0) {
+      // Group words into sentence-like segments (split on long pauses > 1 s)
+      const lines   = [];
+      let lineWords = [];
+      let lineStart = data.time_stamps[0].start;
+
+      for (let i = 0; i < data.time_stamps.length; i++) {
+        const curr = data.time_stamps[i];
+        const next = data.time_stamps[i + 1];
+        lineWords.push(curr.word);
+        // Start a new line on a gap > 1.2 s or at the very end
+        const gap = next ? next.start - curr.end : Infinity;
+        if (gap > 1.2 || !next) {
+          lines.push(`[${formatTime(lineStart + offsetSecs)}] ${lineWords.join(' ').trim()}`);
+          lineWords = [];
+          if (next) lineStart = next.start;
+        }
+      }
+      return lines.join('\n');
     }
-    return data.transcript.trim();
+
+    // Fallback: flat transcript with chunk offset marker
+    return `[${formatTime(offsetSecs)}] ${data.transcript.trim()}`;
+
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
     throw new Error(`Sarvam STT chunk ${chunkIndex} failed (${err.response?.status ?? 'network'}): ${detail}`);
@@ -133,19 +158,17 @@ async function runSarvam(audioInput) {
   const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
   if (!SARVAM_API_KEY) throw new Error('SARVAM_API_KEY is not set in your environment variables.');
 
-  // Resolve to a local file path
   let localPath;
   let needsCleanup = false;
 
   if (typeof audioInput === 'string' && audioInput.startsWith('http')) {
-    const ext = path.extname(new URL(audioInput).pathname) || '.mp3';
+    const ext    = path.extname(new URL(audioInput).pathname) || '.mp3';
     localPath    = await downloadToTmp(audioInput, ext);
     needsCleanup = true;
   } else {
     localPath = audioInput;
   }
 
-  // Split into ≤25 s chunks
   let chunks = [];
   try {
     chunks = splitAudio(localPath, CHUNK_SECS);
@@ -153,7 +176,6 @@ async function runSarvam(audioInput) {
     if (needsCleanup) fs.unlink(localPath, () => {});
   }
 
-  // Transcribe all chunks (sequentially to avoid rate-limit bursts)
   const parts = [];
   try {
     for (let i = 0; i < chunks.length; i++) {
@@ -209,7 +231,7 @@ async function runGroqWhisper(audioInput) {
 
   if (!data?.text) throw new Error('Groq Whisper returned an empty transcription.');
 
-  const segments = data.segments || [];
+  const segments   = data.segments || [];
   const transcript = segments.length > 0
     ? segments.map(seg => `[${formatTime(seg.start)}] ${seg.text.trim()}`).join('\n')
     : data.text.trim();
@@ -228,7 +250,7 @@ async function transcribeAudio(audioInput, audioLang = 'mixed') {
     console.log('[Transcription] Engine → Groq Whisper large-v3 (English)');
     return runGroqWhisper(audioInput);
   }
-  console.log('[Transcription] Engine → Sarvam AI (mixed/Indic, auto-chunked)');
+  console.log('[Transcription] Engine → Sarvam AI /speech-to-text (Hinglish/mixed, no translation)');
   return runSarvam(audioInput);
 }
 
