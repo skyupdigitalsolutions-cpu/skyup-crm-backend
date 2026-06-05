@@ -98,7 +98,7 @@ async function sarvamChunk(chunkPath, chunkIndex) {
     contentType: 'audio/wav',
   });
   // model: saarika:v2 is Sarvam's latest multilingual STT model
-  form.append('model', 'saarika:v2');
+  form.append('model', 'saarika:v2.5');
   form.append('with_timestamps', 'true');
   // language_code: 'unknown' → auto-detect (hi-IN / kn-IN / ta-IN etc.)
   form.append('language_code', 'unknown');
