@@ -1,14 +1,7 @@
 // controllers/superAdminController.js — UPDATED
 // Added: getCompanyEntitlementDetails — visible to super_admin role.
-// All existing functions are UNCHANGED — they are re-exported at the bottom.
-
-// ── Load existing controller to re-export everything unchanged ────────────────
-// We extend, not replace, so we import the compiled exports from the original
-// file. The new function is appended and exported alongside the originals.
-//
-// NOTE: When you replace the original file with this one, remove the dynamic
-// require below and keep all original functions inline (as they already are).
-// This pattern is used here only so the diff is minimal and clear.
+// Added: getExpiringSubscriptions — returns companies with subscriptions expiring within N days.
+// All existing functions are UNCHANGED.
 
 const bcrypt       = require("bcryptjs");
 const SuperAdmin   = require("../models/SuperAdmin");
@@ -19,7 +12,7 @@ const Lead         = require("../models/Leads");
 const generateToken         = require("../utils/generateToken");
 const { sendSuperAdminOtp } = require("../utils/brevoMailer");
 
-// New imports for entitlement details
+// Imports for entitlement details
 const CompanyAddon        = require("../models/CompanyAddon");
 const CompanyBenefit      = require("../models/CompanyBenefit");
 const CompanyUsage        = require("../models/CompanyUsage");
@@ -37,7 +30,7 @@ function generateOtp() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ALL ORIGINAL FUNCTIONS — unchanged from the existing file
+// ALL ORIGINAL FUNCTIONS — unchanged
 // ─────────────────────────────────────────────────────────────────────────────
 
 const registerSuperAdmin = async (req, res) => {
@@ -315,9 +308,8 @@ const getAllAdminsWithStats = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NEW: getCompanyEntitlementDetails
+// getCompanyEntitlementDetails
 // GET /api/superadmin/companies/:id/entitlements
-// Same as developer detail page but visible to super_admin role.
 // ─────────────────────────────────────────────────────────────────────────────
 const getCompanyEntitlementDetails = async (req, res) => {
   try {
@@ -354,6 +346,37 @@ const getCompanyEntitlementDetails = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// getExpiringSubscriptions
+// GET /api/superadmin/expiring-subscriptions?days=30
+// Returns companies whose subscriptionEnd falls within the next N days (max 90).
+// Used by NotificationProvider on mount to populate the bell icon alerts.
+// ─────────────────────────────────────────────────────────────────────────────
+const getExpiringSubscriptions = async (req, res) => {
+  try {
+    const days   = Math.min(parseInt(req.query.days) || 30, 90);
+    const now    = new Date();
+    const cutoff = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    const companies = await Company.find({
+      subscriptionEnd: { $gte: now, $lte: cutoff },
+    })
+      .select("name email plan subscriptionEnd isActive")
+      .sort({ subscriptionEnd: 1 })
+      .lean();
+
+    const results = companies.map(c => ({
+      ...c,
+      daysRemaining: calcDaysRemaining(c),
+    }));
+
+    res.json({ success: true, count: results.length, companies: results });
+  } catch (err) {
+    console.error("[getExpiringSubscriptions]", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   registerSuperAdmin,
   loginSuperAdmin,
@@ -368,5 +391,6 @@ module.exports = {
   getDashboardStats,
   getAdminDetails,
   getAllAdminsWithStats,
-  getCompanyEntitlementDetails,   // NEW
+  getCompanyEntitlementDetails,
+  getExpiringSubscriptions,     // NEW
 };

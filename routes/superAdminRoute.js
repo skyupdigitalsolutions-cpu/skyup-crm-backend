@@ -1,4 +1,5 @@
 // routes/superAdminRoute.js — UPDATED
+// Added: GET /expiring-subscriptions → superAdminController.getExpiringSubscriptions
 // Added: GET /companies/:id/entitlements → superAdminController.getCompanyEntitlementDetails
 // All existing routes are UNCHANGED.
 
@@ -19,7 +20,8 @@ const {
   getDashboardStats,
   getAdminDetails,
   getAllAdminsWithStats,
-  getCompanyEntitlementDetails,   // NEW
+  getCompanyEntitlementDetails,
+  getExpiringSubscriptions,
 } = require("../controllers/superAdminController");
 
 const { protectUnified, authorizeRoles } = require("../middlewares/authMiddleware");
@@ -40,18 +42,22 @@ router.get("/dashboard",
 // ── Admin management ──────────────────────────────────────────────────────────
 router.post("/admins",
   protectUnified, authorizeRoles("super_admin"), companyIsolation, createAdmin);
-
 router.get("/admins",
   protectUnified, authorizeRoles("super_admin"), companyIsolation, getAllAdminsWithStats);
-
 router.get("/admins/:adminId",
   protectUnified, authorizeRoles("super_admin"), companyIsolation, getAdminDetails);
 
-// ── NEW: Entitlement details for a company (visible to super_admin) ───────────
+// ── Expiring subscriptions — pre-populates NotificationProvider bell ──────────
+// Called on mount by super_admin role to show upcoming expiry alerts.
+// Query param: ?days=N (default 30, max 90)
+router.get("/expiring-subscriptions",
+  protectSuperAdmin, getExpiringSubscriptions);
+
+// ── Entitlement details for a company ────────────────────────────────────────
 router.get("/companies/:id/entitlements",
   protectSuperAdmin, getCompanyEntitlementDetails);
 
-// ── Legacy company management ─────────────────────────────────────────────────
+// ── Company management ────────────────────────────────────────────────────────
 router.get("/companies",        protectSuperAdmin, getCompanies);
 router.post("/companies",       protectSuperAdmin, createCompany);
 router.get("/companies/:id",    protectSuperAdmin, getCompany);
