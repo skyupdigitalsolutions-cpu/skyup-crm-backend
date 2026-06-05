@@ -1,8 +1,7 @@
-// utils/brevoMailer.js  ← NEW FILE
-// Required env vars:
-//   BREVO_API_KEY     — your Brevo API key (starts with "xkeysib-...")
-//   BREVO_FROM_EMAIL  — verified sender address
-//   BREVO_FROM_NAME   — sender display name
+// utils/brevoMailer.js
+// FIX: sendSuperAdminOtp now accepts EITHER a plain object { toEmail, toName, otp }
+// OR the legacy positional signature (toEmail, toName, otp) so both call sites work.
+// All email template HTML/text is UNCHANGED.
 
 const axios = require("axios");
 
@@ -32,7 +31,22 @@ const sendEmail = async ({ to, toName, subject, html, text }) => {
   );
 };
 
-const sendSuperAdminOtp = async (toEmail, toName, otp) => {
+// FIX: supports both call styles:
+//   sendSuperAdminOtp({ toEmail, toName, otp })   ← new object style (superAdminController)
+//   sendSuperAdminOtp(toEmail, toName, otp)        ← legacy positional style
+const sendSuperAdminOtp = async (toEmailOrObj, toNameArg, otpArg) => {
+  let toEmail, toName, otp;
+
+  if (toEmailOrObj && typeof toEmailOrObj === "object") {
+    // Object style: { toEmail, toName, otp }
+    ({ toEmail, toName, otp } = toEmailOrObj);
+  } else {
+    // Positional style
+    toEmail = toEmailOrObj;
+    toName  = toNameArg;
+    otp     = otpArg;
+  }
+
   const html = `
 <!DOCTYPE html>
 <html lang="en">

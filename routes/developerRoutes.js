@@ -1,6 +1,5 @@
 // routes/developerRoutes.js — UPDATED
-// Added: company details, dev override, AI credits, status change, audit log,
-//        grant-addon, grant-benefit routes for the Developer Panel.
+// Added: GET /plans/config and POST /plans/config for PlanCustomization.jsx
 // All existing routes are UNCHANGED.
 
 const express = require("express");
@@ -17,7 +16,7 @@ const {
   toggleCompanyStatus,
   getSubscriptions,
   updateSubscription,
-  // New Phase 3
+  // Phase 3
   getCompanyDetails,
   applyDevOverride,
   addAiCredits,
@@ -33,6 +32,8 @@ const {
   updatePlan,
   deletePlan,
   getPlan,
+  getPlansConfig,   // NEW
+  savePlansConfig,  // NEW
 } = require("../controllers/planController");
 
 // ── Public ────────────────────────────────────────────────────────────────────
@@ -51,37 +52,29 @@ router.post("/companies/:id/super-admin", createCompanySuperAdmin);
 router.put("/companies/:id",              updateCompany);
 router.put("/companies/:id/toggle",       toggleCompanyStatus);
 
-// ── NEW: Company detail actions (Phase 3) ─────────────────────────────────────
-// Full details page (subscription + usage + addons + benefits + audit log)
-router.get("/companies/:id/details",       getCompanyDetails);
-
-// Developer resource/feature overrides
-router.put("/companies/:id/override",      applyDevOverride);
-
-// Add AI credits (transcription / summary packs)
-router.post("/companies/:id/ai-credits",   addAiCredits);
-
-// Pause / Resume / Suspend subscription status
-router.put("/companies/:id/status",        changeSubscriptionStatus);
-
-// Paginated audit log for a company
-router.get("/companies/:id/audit",         getAuditLogs);
-
-// Grant free addon directly from developer panel
-router.post("/companies/:id/grant-addon",  grantFreeAddon);
-
-// Grant benefit directly from developer panel
+// ── Company detail actions (Phase 3) ─────────────────────────────────────────
+router.get("/companies/:id/details",        getCompanyDetails);
+router.put("/companies/:id/override",       applyDevOverride);
+router.post("/companies/:id/ai-credits",    addAiCredits);
+router.put("/companies/:id/status",         changeSubscriptionStatus);
+router.get("/companies/:id/audit",          getAuditLogs);
+router.post("/companies/:id/grant-addon",   grantFreeAddon);
 router.post("/companies/:id/grant-benefit", grantBenefit);
 
-// ── Subscriptions (list + update) ─────────────────────────────────────────────
-router.get("/subscriptions",              getSubscriptions);
-router.put("/subscriptions/:companyId",   updateSubscription);
+// ── Subscriptions ─────────────────────────────────────────────────────────────
+router.get("/subscriptions",            getSubscriptions);
+router.put("/subscriptions/:companyId", updateSubscription);
 
 // ── Plan CRUD ─────────────────────────────────────────────────────────────────
-router.get("/plans",        getPlans);
-router.post("/plans",       createPlan);
-router.get("/plans/:id",    getPlan);
-router.put("/plans/:id",    updatePlan);
-router.delete("/plans/:id", deletePlan);
+// IMPORTANT: /plans/config must be registered BEFORE /plans/:id so Express
+// does not treat "config" as an :id param and route it to getPlan / updatePlan.
+router.get("/plans/config",  getPlansConfig);   // NEW — used by PlanCustomization.jsx
+router.post("/plans/config", savePlansConfig);  // NEW — used by PlanCustomization.jsx
+
+router.get("/plans",         getPlans);
+router.post("/plans",        createPlan);
+router.get("/plans/:id",     getPlan);
+router.put("/plans/:id",     updatePlan);
+router.delete("/plans/:id",  deletePlan);
 
 module.exports = router;

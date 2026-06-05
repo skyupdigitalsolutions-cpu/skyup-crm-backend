@@ -1,9 +1,10 @@
 // server.js — UPDATED
+// Fix: /uploads/logos static path corrected (public/uploads/logos → uploads/logos)
 // Added:
 //   - addonRoutes   → /api/addons
 //   - benefitRoutes → /api/benefits
 //   - usageResetJob → startUsageResetJob()
-// All existing code is UNCHANGED.
+// All existing code is UNCHANGED except the static path fix.
 
 require('dotenv').config();
 const express      = require('express');
@@ -153,7 +154,9 @@ app.use(generalLimiter);
 
 // ── Static file serving ───────────────────────────────────────────────────────
 app.use('/recordings',    express.static(path.join(__dirname, 'uploads/recordings')));
-app.use('/uploads/logos', express.static(path.join(__dirname, 'public/uploads/logos')));
+// FIX: was path.join(__dirname, 'public/uploads/logos') — that folder doesn't exist.
+// Local uploads land in uploads/logos/; Cloudinary URLs are absolute and don't hit this.
+app.use('/uploads/logos', express.static(path.join(__dirname, 'uploads/logos')));
 
 const SERVE_FRONTEND = process.env.SERVE_FRONTEND === 'true';
 if (SERVE_FRONTEND) {

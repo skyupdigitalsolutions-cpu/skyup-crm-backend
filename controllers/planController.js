@@ -2,6 +2,11 @@
 // Developer-only CRUD for plan configurations.
 // Plans created here are read by subscriptionController.getPlans
 // and drive the upgrade page and feature-gate system.
+//
+// ADDED: getPlansConfig / savePlansConfig
+//   GET  /api/developer/plans/config  — returns flat { basic, pro, enterprise } shape
+//   POST /api/developer/plans/config  — accepts the same flat shape and upserts each plan
+//   These endpoints are consumed by PlanCustomization.jsx on the developer frontend.
 
 const PlanConfig = require('../models/PlanConfig');
 const { DEFAULT_PLAN_FEATURES } = require('./subscriptionController');
@@ -62,7 +67,7 @@ const createPlan = async (req, res) => {
       name:        name.trim(),
       description: description?.trim() || '',
       color:       color || '#6B7280',
-      price:       {
+      price: {
         monthly: Number(price?.monthly ?? 0),
         yearly:  Number(price?.yearly  ?? 0),
       },
@@ -138,4 +143,114 @@ const getPlan = async (req, res) => {
   }
 };
 
-module.exports = { getPlans, createPlan, updatePlan, deletePlan, getPlan };
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: getPlansConfig
+// GET /api/developer/plans/config
+// Returns plans as a flat object keyed by planKey:
+//   { basic: { name, monthlyPrice, yearlyPrice, maxUsers, maxLeads, maxAdmins, features }, ... }
+// This is the shape PlanCustomization.jsx expects.
+// ─────────────────────────────────────────────────────────────────────────────
+const getPlansConfig = async (req, res) => {
+  try {
+    await seedDefaultsIfEmpty();
+    const dbPlans = await PlanConfig.find({ isActive: true }).sort({ sortOrder: 1, createdAt: 1 });
+
+    const config = {};
+    for (const p of dbPlans) {
+      config[p.planKey] = {
+        name:         p.name,
+        monthlyPrice: p.price?.monthly ?? 0,
+        yearlyPrice:  p.price?.yearly  ?? 0,
+        maxUsers:     p.maxUsers,
+        maxAdmins:    p.maxAdmins,
+        maxLeads:     p.maxLeads,
+        // features is stored as [{ key, label, enabled }] in DB;
+        // PlanCustomization expects a plain string[] of enabled keys.
+        features: Array.isArray(p.features)
+          ? p.features.filter(f => f.enabled).map(f => f.key)
+          : [],
+      };
+    }
+
+    res.json(config);
+  } catch (err) {
+    console.error('[getPlansConfig]', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: savePlansConfig
+// POST /api/developer/plans/config
+// Accepts the flat config object from PlanCustomization.jsx and upserts each
+// plan into PlanConfig. Creates the plan if it doesn't exist.
+// Body: { basic: { name, monthlyPrice, yearlyPrice, maxUsers, maxLeads, maxAdmins, features }, ... }
+// ─────────────────────────────────────────────────────────────────────────────
+const savePlansConfig = async (req, res) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ success: false, message: 'Body must be a plan config object.' });
+    }
+
+    const results = [];
+
+    for (const [planKey, cfg] of Object.entries(body)) {
+      if (!cfg || typeof cfg !== 'object') continue;
+
+      const slug = planKey.trim().toLowerCase();
+
+      // Build the features array in the DB format [{ key, label, enabled }]
+      // We pull existing feature definitions from the DB (or defaults) and
+      // overlay the enabled/disabled state from the incoming string[] of enabled keys.
+      const enabledSet = new Set(Array.isArray(cfg.features) ? cfg.features : []);
+
+      // Get all known feature keys from defaults so we preserve labels
+      const defaults = DEFAULT_PLAN_FEATURES[slug] || DEFAULT_PLAN_FEATURES.basic;
+      const allFeatureKeys = defaults.features || [];
+
+      const featuresDoc = allFeatureKeys.map(f => ({
+        key:     f.key,
+        label:   f.label,
+        enabled: enabledSet.has(f.key),
+      }));
+
+      const update = {
+        name:      cfg.name     || slug,
+        isActive:  true,
+        price: {
+          monthly: Number(cfg.monthlyPrice ?? 0),
+          yearly:  Number(cfg.yearlyPrice  ?? 0),
+        },
+        maxUsers:  Number(cfg.maxUsers  ?? 5),
+        maxAdmins: Number(cfg.maxAdmins ?? 1),
+        maxLeads:  Number(cfg.maxLeads  ?? 1000),
+        features:  featuresDoc,
+      };
+
+      const plan = await PlanConfig.findOneAndUpdate(
+        { planKey: slug },
+        { $set: update },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+
+      results.push(plan);
+    }
+
+    // Signal clients to refresh their cached entitlements
+    res.json({ success: true, saved: results.length });
+  } catch (err) {
+    console.error('[savePlansConfig]', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = {
+  getPlans,
+  createPlan,
+  updatePlan,
+  deletePlan,
+  getPlan,
+  getPlansConfig,   // NEW
+  savePlansConfig,  // NEW
+};
