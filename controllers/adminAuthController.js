@@ -14,15 +14,20 @@ const registerAdmin = async (req, res) => {
     if (!company) return res.status(404).json({ message: "Company not found" });
     if (!company.isActive) return res.status(403).json({ message: "Company is not active" });
 
-const adminExists = await Admin.findOne({ email });
+    const adminExists = await Admin.findOne({ email });
     if (adminExists) return res.status(400).json({ message: "Admin already exists" });
 
     // ── Per-company superadmin ───────────────────────────────────────────────
     // FIRST admin of a company becomes that company's superadmin (full control
     // inside their own company). Every later admin is a normal "admin".
     // This does NOT touch the global platform SuperAdmin (models/SuperAdmin.js).
+    //
+    // FIX: was "superadmin" (no underscore) which is NOT in the Admin model enum
+    // ["super_admin", "admin"]. Mongoose silently rejected it and stored undefined,
+    // causing Admin.findOne({ role: 'super_admin' }) to never find the super admin,
+    // breaking reassignment notifications and follow-up alert room targeting.
     const existingCount = await Admin.countDocuments({ company: companyId });
-    const role = existingCount === 0 ? "superadmin" : "admin";
+    const role = existingCount === 0 ? "super_admin" : "admin";
 
     const admin = await Admin.create({ name, email, password, company: companyId, role });
 
@@ -31,9 +36,9 @@ const adminExists = await Admin.findOne({ email });
       name:    admin.name,
       email:   admin.email,
       company: admin.company,
-      plan:    company.plan,        // FIX: include plan so frontend doesn't need extra fetch
-      role:    admin.role,          // CHANGED: real role (superadmin | admin), was hardcoded
-      token:   generateToken(admin._id, "admin"), // JWT role stays "admin" on purpose
+      plan:    company.plan,
+      role:    admin.role,
+      token:   generateToken(admin._id, "admin"),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -54,14 +59,14 @@ const loginAdmin = async (req, res) => {
       return res.status(403).json({ message: "Your company is deactivated" });
     }
 
-res.status(200).json({
+    res.status(200).json({
       _id:     admin._id,
       name:    admin.name,
       email:   admin.email,
       company: admin.company._id,
-      plan:    admin.company.plan,  // FIX: include plan in login response
-      role:    admin.role,          // CHANGED: was hardcoded "admin"; now superadmin | admin
-      token:   generateToken(admin._id, "admin"), // JWT role stays "admin" so protectAdmin passes
+      plan:    admin.company.plan,
+      role:    admin.role,          // "super_admin" | "admin"
+      token:   generateToken(admin._id, "admin"),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -69,8 +74,6 @@ res.status(200).json({
 };
 
 // ── Logout Admin ───────────────────────────────────────────────────────────────
-// Blacklists the current JWT so it cannot be reused even before its expiry.
-// Frontend should also clear the token from localStorage / cookies.
 const logoutAdmin = async (req, res) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];

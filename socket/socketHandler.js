@@ -30,26 +30,30 @@ const Admin    = require('../models/Admin');
 const User     = require('../models/Users');
 const Lead     = require('../models/Leads');
 
-// ── Push pending follow-up alerts to a freshly connected admin/superadmin ─────
-// Called on every admin_join / super_admin_join so the bell is pre-populated
-// without waiting for the 9 AM cron tick.
+// ── Push pending follow-up alerts to a freshly connected admin ───────────────
+// Called on admin_join so the bell is pre-populated without waiting for the
+// 9 AM cron tick.
+//
+// SCOPING: admin only receives alerts for leads where assignedAdmin === adminId.
+// super_admin does NOT receive on-connect follow-up alerts — they are not the
+// target audience for per-lead action reminders.
 async function pushPendingFollowUps(socket, adminId, company, role) {
+  // super_admin: no on-connect follow-up alerts — skip entirely
+  if (role === 'super_admin') return;
+
   try {
     const now        = new Date();
     const todayEnd   = new Date(now); todayEnd.setHours(23, 59, 59, 999);
     const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
 
+    // Always scope to this admin's assigned leads only
     const query = {
-      isClosed: { $ne: true },
-      status:   { $ne: 'Converted' },
+      isClosed:      { $ne: true },
+      status:        { $ne: 'Converted' },
       company,
+      assignedAdmin: adminId,
       scheduledCalls: { $elemMatch: { done: false, scheduledAt: { $lte: todayEnd } } },
     };
-
-    // Regular admin only sees leads they are responsible for
-    if (role === 'admin') {
-      query.assignedAdmin = adminId;
-    }
 
     const leads = await Lead.find(query)
       .select('_id name scheduledCalls')
@@ -311,8 +315,8 @@ const initSocket = (io) => {
 
       broadcastOnlineMap(io, company);
 
-      // Push any pending follow-up alerts immediately so the bell is pre-populated
-      pushPendingFollowUps(socket, adminId, company, 'super_admin');
+      // super_admin does not receive on-connect follow-up alerts.
+      // Their notifications come from lead_reassigned_notify only.
     });
 
     // ════════════════════════════════════════════════════════════════════════
