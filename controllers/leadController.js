@@ -1746,8 +1746,19 @@ const mergeLead = async (req, res) => {
     }
 
     const normPrimary = normalizePhone(lead.primaryPhone || lead.mobile || "");
+
+    // Special case: incoming number IS already this lead's primary phone.
+    // Nothing to add as secondary — just log the merge and return the lead.
     if (normSecondary === normPrimary) {
-      return res.status(400).json({ message: "Secondary phone cannot be the same as primary." });
+      const mergeNote = sourceName
+        ? `Merged with duplicate lead "${sourceName}" (${sourceMobile || secondaryPhone}). Number already exists as primary — data merged.`
+        : `Merged duplicate entry for ${secondaryPhone} — number already exists as primary.`;
+      const merged = await Lead.findByIdAndUpdate(
+        id,
+        { $push: { activityTimeline: { action: "leads_merged", performedBy: actorId, role: actorRole, timestamp: new Date(), note: mergeNote } } },
+        { new: true },
+      ).populate("user", "name email").populate("previousAgents", "name email");
+      return res.status(200).json({ success: true, lead: merged, dataOnlyMerge: true });
     }
 
     // Check the number isn't already claimed by yet another lead
