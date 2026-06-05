@@ -31,6 +31,7 @@ const {
   addSecondaryPhone,
   removeSecondaryPhone,
   swapPhones,
+  mergeLead,
 } = require("../controllers/leadController");
 
 const { protect } = require("../middlewares/authMiddleware");
@@ -98,13 +99,10 @@ router.delete("/admin/:id/secondary-phone", protectAdmin, removeSecondaryPhone);
 router.put("/:id/swap-phones", protect, swapPhones);
 router.put("/admin/:id/swap-phones", protectAdmin, swapPhones);
 
-// ── Additional (secondary) phone number management ────────────────────────────
-router.put("/:id/secondary-phone",          protect,      addSecondaryPhone);
-router.put("/admin/:id/secondary-phone",    protectAdmin, addSecondaryPhone);
-router.delete("/:id/secondary-phone",       protect,      removeSecondaryPhone);
-router.delete("/admin/:id/secondary-phone", protectAdmin, removeSecondaryPhone);
-router.put("/:id/swap-phones",              protect,      swapPhones);
-router.put("/admin/:id/swap-phones",        protectAdmin, swapPhones);
+// ── Merge duplicate leads (add incoming number as secondary of target lead) ───
+router.post("/admin/:id/merge", protectAdmin, mergeLead);
+router.post("/superadmin/:id/merge", protectSuperAdmin, mergeLead);
+router.post("/:id/merge", protect, mergeLead);
 
 // ── DELETE ────────────────────────────────────────────────────────────────────
 router.delete("/admin/:id", protectAdmin, adminDeleteLead);

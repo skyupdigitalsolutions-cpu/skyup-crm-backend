@@ -1569,10 +1569,11 @@ const addSecondaryPhone = async (req, res) => {
           { normalizedPhone: normSecondary },
           { normalizedSecondaryPhone: normSecondary },
         ],
-      });
+      }).select("name mobile primaryPhone secondaryPhone status createdAt").lean();
       if (conflict) {
         return res.status(409).json({
           message: `This number already belongs to lead "${conflict.name}".`,
+          existingLead: conflict,   // ← required by frontend merge flow
         });
       }
     }
@@ -1698,6 +1699,107 @@ const swapPhones = async (req, res) => {
   }
 };
 
+// ── POST /lead/admin/:id/merge  (or /superadmin/:id/merge) ────────────────────
+// Merge a duplicate lead into an existing lead.
+//
+// Body: { secondaryPhone, sourceName, sourceMobile }
+//
+// What this does:
+//   1. Adds `secondaryPhone` to the TARGET lead (the one whose :id is in the URL).
+//   2. Logs a timeline entry on the target lead.
+//   3. Returns the updated target lead.
+//
+// The "source" lead (the one being discarded) should be handled by the caller.
+// In the AddLeadModal flow the source lead was never saved, so nothing to delete.
+// In the PhoneActionsPanel flow the source lead already exists — the caller must
+// decide whether to archive / close it (currently left to the admin).
+const mergeLead = async (req, res) => {
+  try {
+    const { id } = req.params;                       // target lead id
+    const { secondaryPhone, sourceName, sourceMobile } = req.body;
+
+    if (!secondaryPhone || !String(secondaryPhone).trim()) {
+      return res.status(400).json({ message: "secondaryPhone is required for merge." });
+    }
+
+    const companyId  = getCompanyId(req);
+    const actorId    = req.user?._id || req.admin?._id || null;
+    const actorRole  = req.admin ? "admin" : (req.superAdmin ? "superadmin" : "user");
+
+    // Load the target lead
+    const lead = await Lead.findOne({
+      _id: id,
+      ...(companyId ? { company: companyId } : {}),
+    });
+    if (!lead) return res.status(404).json({ message: "Target lead not found." });
+
+    // Already has a secondary number → cannot add another
+    if (lead.secondaryPhone) {
+      return res.status(409).json({
+        message: `"${lead.name}" already has a secondary number. Remove it first before merging.`,
+      });
+    }
+
+    const normSecondary = normalizePhone(secondaryPhone);
+    if (!normSecondary) {
+      return res.status(400).json({ message: "Invalid phone number format." });
+    }
+
+    const normPrimary = normalizePhone(lead.primaryPhone || lead.mobile || "");
+    if (normSecondary === normPrimary) {
+      return res.status(400).json({ message: "Secondary phone cannot be the same as primary." });
+    }
+
+    // Check the number isn't already claimed by yet another lead
+    if (companyId) {
+      const conflict = await Lead.findOne({
+        company: companyId,
+        _id: { $ne: id },
+        $or: [
+          { normalizedPhone: normSecondary },
+          { normalizedSecondaryPhone: normSecondary },
+        ],
+      }).select("name").lean();
+      if (conflict) {
+        return res.status(409).json({
+          message: `This number already belongs to lead "${conflict.name}".`,
+        });
+      }
+    }
+
+    const now  = new Date();
+    const note = sourceName
+      ? `Merged with duplicate lead "${sourceName}" (${sourceMobile || secondaryPhone}). Number added as secondary.`
+      : `Merged duplicate number ${secondaryPhone} as secondary.`;
+
+    const updated = await Lead.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          secondaryPhone,
+          normalizedSecondaryPhone: normSecondary,
+        },
+        $push: {
+          activityTimeline: {
+            action:      "leads_merged",
+            performedBy: actorId,
+            role:        actorRole,
+            timestamp:   now,
+            note,
+          },
+        },
+      },
+      { new: true },
+    )
+      .populate("user", "name email")
+      .populate("previousAgents", "name email");
+
+    return res.status(200).json({ success: true, lead: updated });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getLead,
   getLeads,
@@ -1727,4 +1829,5 @@ module.exports = {
   addSecondaryPhone,
   removeSecondaryPhone,
   swapPhones,
+  mergeLead,
 };
