@@ -679,6 +679,35 @@ const employeeGetSmsConfig = async (req, res) => {
   }
 };
 
+// ── GET /api/sms-campaign/employee/thread?mobile=XXXXX ────────────────────────
+// Returns all SMS logs sent to a specific mobile number, scoped to employee's company.
+// Used by the SMS Direct Messaging tab to show a conversation-style thread.
+const employeeGetSmsThread = async (req, res) => {
+  try {
+    const { mobile } = req.query;
+    if (!mobile) return res.status(400).json({ message: "mobile is required" });
+
+    const companyId = getEmployeeCompanyId(req);
+
+    // Normalize: keep last 10 digits for matching
+    const digits = String(mobile).replace(/\D/g, "");
+    const last10 = digits.slice(-10);
+
+    // Match both 10-digit and 12-digit formats (e.g. 9876543210 or 919876543210)
+    const logs = await SmsLog.find({
+      company: companyId,
+      to: { $regex: last10 + "$" },
+    })
+      .sort({ sentAt: 1 })
+      .limit(100)
+      .lean();
+
+    res.json({ success: true, data: logs });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch SMS thread" });
+  }
+};
+
 module.exports = {
   sendBulkSms,
   sendSingleSms,
@@ -694,4 +723,5 @@ module.exports = {
   employeeSendSingleSms,
   employeeSendCsvSms,
   employeeGetSmsConfig,
+  employeeGetSmsThread,
 };

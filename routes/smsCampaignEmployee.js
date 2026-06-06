@@ -12,6 +12,7 @@ const {
   employeeSendSingleSms,
   employeeSendCsvSms,
   employeeGetSmsConfig,
+  employeeGetSmsThread,
 } = require("../controllers/smsCampaignController");
 
 const { protect } = require("../middlewares/authMiddleware");
@@ -33,5 +34,8 @@ router.post("/send-single", protect, employeeSendSingleSms);
 
 // POST /api/sms-campaign/employee/send-csv      → CSV list
 router.post("/send-csv",    protect, employeeSendCsvSms);
+
+// GET  /api/sms-campaign/employee/thread?mobile=XXX  → SMS history for a specific mobile
+router.get("/thread",       protect, employeeGetSmsThread);
 
 module.exports = router;
