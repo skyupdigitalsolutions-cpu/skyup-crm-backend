@@ -126,12 +126,20 @@ const getLead = async (req, res) => {
 const getLeadsByCampaign = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    const { campaign } = req.query;
+    const { campaign, adSetName } = req.query;
     if (!campaign)
       return res
         .status(400)
         .json({ message: "campaign query param is required" });
-    const leads = await Lead.find({ company: companyId, campaign })
+
+    // Build filter — when adSetName is provided, scope leads to that specific
+    // ad set so the Campaigns page drill-down shows only the correct subset.
+    const filter = { company: companyId, campaign };
+    if (adSetName && adSetName.trim() !== "") {
+      filter.adSetName = adSetName.trim();
+    }
+
+    const leads = await Lead.find(filter)
       .populate("user", "name email")
       .populate("previousAgents", "name email");
     res.status(200).json(leads);
@@ -1426,11 +1434,12 @@ const checkDuplicate = async (req, res) => {
         { normalizedSecondaryPhone: normalized },
       ],
     })
-      .select("name mobile primaryPhone secondaryPhone status user")
+      .select("name mobile primaryPhone secondaryPhone status user createdAt")
       .populate("user", "name");
 
     if (existing) {
-      return res.status(200).json({ duplicate: true, lead: existing });
+      // Return both `lead` (legacy) and `existingLead` (required by merge flow)
+      return res.status(200).json({ duplicate: true, lead: existing, existingLead: existing });
     }
     return res.status(200).json({ duplicate: false });
   } catch (error) {
@@ -1755,12 +1764,7 @@ const mergeLead = async (req, res) => {
         : `Merged duplicate entry for ${secondaryPhone} — number already exists as primary.`;
       const merged = await Lead.findByIdAndUpdate(
         id,
-        {
-          $push: {
-            activityTimeline: { action: "leads_merged", performedBy: actorId, role: actorRole, timestamp: new Date(), note: mergeNote },
-            ...(sourceName ? { mergedNames: sourceName.trim() } : {}),
-          },
-        },
+        { $push: { activityTimeline: { action: "leads_merged", performedBy: actorId, role: actorRole, timestamp: new Date(), note: mergeNote } } },
         { new: true },
       ).populate("user", "name email").populate("previousAgents", "name email");
       return res.status(200).json({ success: true, lead: merged, dataOnlyMerge: true });
@@ -1803,7 +1807,6 @@ const mergeLead = async (req, res) => {
             timestamp:   now,
             note,
           },
-          ...(sourceName ? { mergedNames: sourceName.trim() } : {}),
         },
       },
       { new: true },
