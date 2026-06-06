@@ -1740,21 +1740,18 @@ const swapPhones = async (req, res) => {
 // ── POST /lead/admin/:id/merge  (or /superadmin/:id/merge) ────────────────────
 // Merge a duplicate lead into an existing lead.
 //
-// Body: { secondaryPhone, sourceName, sourceMobile }
+// Body: { secondaryPhone, sourceName, sourceMobile, sourceLeadId? }
 //
 // What this does:
 //   1. Adds `secondaryPhone` to the TARGET lead (the one whose :id is in the URL).
 //   2. Logs a timeline entry on the target lead.
-//   3. Returns the updated target lead.
-//
-// The "source" lead (the one being discarded) should be handled by the caller.
-// In the AddLeadModal flow the source lead was never saved, so nothing to delete.
-// In the PhoneActionsPanel flow the source lead already exists — the caller must
-// decide whether to archive / close it (currently left to the admin).
+//   3. If `sourceLeadId` is provided, marks that lead as mergedInto the target
+//      so it stops appearing as an active lead after page refresh.
+//   4. Returns the updated target lead.
 const mergeLead = async (req, res) => {
   try {
     const { id } = req.params;                       // target lead id
-    const { secondaryPhone, sourceName, sourceMobile } = req.body;
+    const { secondaryPhone, sourceName, sourceMobile, sourceLeadId } = req.body;
 
     if (!secondaryPhone || !String(secondaryPhone).trim()) {
       return res.status(400).json({ message: "secondaryPhone is required for merge." });
@@ -1785,6 +1782,34 @@ const mergeLead = async (req, res) => {
 
     const normPrimary = normalizePhone(lead.primaryPhone || lead.mobile || "");
 
+    // ── Helper: mark source lead as merged (if sourceLeadId provided) ─────────
+    const markSourceAsMerged = async (targetId) => {
+      if (!sourceLeadId) return;
+      try {
+        await Lead.findOneAndUpdate(
+          {
+            _id: sourceLeadId,
+            ...(companyId ? { company: companyId } : {}),
+          },
+          {
+            $set: { mergedInto: targetId },
+            $push: {
+              activityTimeline: {
+                action:      "leads_merged",
+                performedBy: actorId,
+                role:        actorRole,
+                timestamp:   new Date(),
+                note:        `This lead was merged into lead "${lead.name}" (${lead.primaryPhone || lead.mobile}).`,
+              },
+            },
+          }
+        );
+      } catch (e) {
+        // Non-fatal: log but don't fail the whole merge
+        console.error("[mergeLead] Failed to mark source lead as mergedInto:", e.message);
+      }
+    };
+
     // Special case: incoming number IS already this lead's primary phone.
     // Nothing to add as secondary — just log the merge and return the lead.
     if (normSecondary === normPrimary) {
@@ -1799,6 +1824,7 @@ const mergeLead = async (req, res) => {
         },
         { new: true },
       ).populate("user", "name email").populate("previousAgents", "name email");
+      await markSourceAsMerged(id);
       return res.status(200).json({ success: true, lead: merged, dataOnlyMerge: true });
     }
 
@@ -1848,6 +1874,7 @@ const mergeLead = async (req, res) => {
       .populate("user", "name email")
       .populate("previousAgents", "name email");
 
+    await markSourceAsMerged(id);
     return res.status(200).json({ success: true, lead: updated });
   } catch (err) {
     res.status(500).json({ message: err.message });

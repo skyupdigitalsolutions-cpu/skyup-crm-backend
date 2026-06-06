@@ -106,14 +106,17 @@ router.patch("/admin/:id/close-wrong-entry", protectAdmin, closeLeadWrongEntry);
 // Add/replace additional number
 router.put("/:id/secondary-phone", protect, addSecondaryPhone);
 router.put("/admin/:id/secondary-phone", protectAdmin, addSecondaryPhone);
+router.put("/superadmin/:id/secondary-phone", protectSuperAdmin, addSecondaryPhone);
 
 // Remove additional number
 router.delete("/:id/secondary-phone", protect, removeSecondaryPhone);
 router.delete("/admin/:id/secondary-phone", protectAdmin, removeSecondaryPhone);
+router.delete("/superadmin/:id/secondary-phone", protectSuperAdmin, removeSecondaryPhone);
 
 // Swap primary ↔ additional number
 router.put("/:id/swap-phones", protect, swapPhones);
 router.put("/admin/:id/swap-phones", protectAdmin, swapPhones);
+router.put("/superadmin/:id/swap-phones", protectSuperAdmin, swapPhones);
 
 // ── Merge duplicate leads (add incoming number as secondary of target lead) ───
 router.post("/admin/:id/merge", protectAdmin, mergeLead);
