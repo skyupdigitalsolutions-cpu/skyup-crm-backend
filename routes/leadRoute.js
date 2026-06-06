@@ -27,6 +27,7 @@ const {
   adminGetAllLeads,
   checkDuplicate,
   logPhoneReveal,
+  logEmailReveal,
   getFollowUpAlerts,
   addSecondaryPhone,
   removeSecondaryPhone,
@@ -74,6 +75,10 @@ router.patch("/:id/cold-reassign", protect, markColdReassign);
 // ── Phone reveal tracking ────────────────────────────────────────────────────
 router.post("/:id/reveal-phone", protect, logPhoneReveal);
 router.post("/admin/:id/reveal-phone", protectAdmin, logPhoneReveal);
+
+// ── Email reveal tracking ────────────────────────────────────────────────────
+router.post("/:id/reveal-email", protect, logEmailReveal);
+router.post("/admin/:id/reveal-email", protectAdmin, logEmailReveal);
 
 router.patch("/:id/temperature", protectAdmin, patchLeadTemperature);
 router.patch("/:id", protect, patchLead);

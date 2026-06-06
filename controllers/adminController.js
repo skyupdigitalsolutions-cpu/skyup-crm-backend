@@ -266,6 +266,7 @@ const getDashboardStats = async (req, res) => {
       warmLeads,
       coldLeads,
       revealAggregate,
+      emailRevealAggregate,
     ] = await Promise.all([
       Lead.countDocuments({ company: companyId }),
       Lead.countDocuments({ company: companyId, temperature: "Hot" }),
@@ -280,9 +281,19 @@ const getDashboardStats = async (req, res) => {
           },
         },
       ]),
+      Lead.aggregate([
+        { $match: { company: companyId } },
+        { $group: {
+            _id: null,
+            totalReveals:  { $sum: "$emailRevealCount" },
+            leadsRevealed: { $sum: { $cond: [{ $gt: ["$emailRevealCount", 0] }, 1, 0] } },
+          },
+        },
+      ]),
     ]);
 
-    const revealStats = revealAggregate[0] || { totalReveals: 0, leadsRevealed: 0 };
+    const revealStats      = revealAggregate[0]      || { totalReveals: 0, leadsRevealed: 0 };
+    const emailRevealStats = emailRevealAggregate[0]  || { totalReveals: 0, leadsRevealed: 0 };
 
     const topRevealed = await Lead.find({ company: companyId, phoneRevealCount: { $gt: 0 } })
       .sort({ phoneRevealCount: -1 })
@@ -339,6 +350,10 @@ const getDashboardStats = async (req, res) => {
           count:  l.phoneRevealCount,
         })),
         byAdmin,
+      },
+      emailReveal: {
+        totalReveals:  emailRevealStats.totalReveals,
+        leadsRevealed: emailRevealStats.leadsRevealed,
       },
     });
   } catch (error) {

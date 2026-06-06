@@ -1475,6 +1475,35 @@ const logPhoneReveal = async (req, res) => {
   }
 };
 
+// ── Log Email Reveal ──────────────────────────────────────────────────────────
+const logEmailReveal = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const actorId   = req.user?._id   || req.admin?._id;
+    const actorName = req.user?.name  || req.admin?.name || "";
+    const companyId =
+      req.user?.company || req.admin?.company?._id || req.admin?.company;
+
+    const lead = await Lead.findOne({ _id: id, company: companyId });
+    if (!lead) return res.status(404).json({ message: "Lead Not Found" });
+
+    await Lead.findByIdAndUpdate(id, {
+      $inc: { emailRevealCount: 1 },
+      $push: {
+        emailRevealLog: {
+          userId:    actorId,
+          userName:  actorName,
+          revealedAt: new Date(),
+        },
+      },
+    });
+
+    return res.status(200).json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const getFollowUpAlerts = async (req, res) => {
   try {
     const company =
@@ -1845,6 +1874,7 @@ module.exports = {
   adminGetAllLeads,
   checkDuplicate,
   logPhoneReveal,
+  logEmailReveal,
   getFollowUpAlerts,
   addSecondaryPhone,
   removeSecondaryPhone,

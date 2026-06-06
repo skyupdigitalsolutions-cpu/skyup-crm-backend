@@ -156,6 +156,17 @@ const leadSchema = mongoose.Schema(
     },
     phoneRevealCount: { type: Number, default: 0 },
 
+    // ── Email reveal tracking (mirrors phone reveal) ───────────────────────────
+    emailRevealLog: {
+      type: [{
+        userId:     { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        userName:   { type: String, default: "" },
+        revealedAt: { type: Date, default: Date.now },
+      }],
+      default: [],
+    },
+    emailRevealCount: { type: Number, default: 0 },
+
     // ── Additional / alternate phone numbers linked to this lead ─────────────
     // additionalNumbers: {
     //   type: [
@@ -187,11 +198,6 @@ const leadSchema = mongoose.Schema(
     //   type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Lead" }],
     //   default: [],
     // },
-    // mergedNames: names of leads absorbed into this one (for search).
-    mergedNames: {
-      type:    [String],
-      default: [],
-    },
 
     // ── Close Lead (wrong entry) ──────────────────────────────────────────────
     isClosed: {
