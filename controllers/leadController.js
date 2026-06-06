@@ -1426,12 +1426,11 @@ const checkDuplicate = async (req, res) => {
         { normalizedSecondaryPhone: normalized },
       ],
     })
-      .select("name mobile primaryPhone secondaryPhone status user createdAt")
+      .select("name mobile primaryPhone secondaryPhone status user")
       .populate("user", "name");
 
     if (existing) {
-      // Return both `lead` (legacy) and `existingLead` (required by merge flow)
-      return res.status(200).json({ duplicate: true, lead: existing, existingLead: existing });
+      return res.status(200).json({ duplicate: true, lead: existing });
     }
     return res.status(200).json({ duplicate: false });
   } catch (error) {
@@ -1756,7 +1755,12 @@ const mergeLead = async (req, res) => {
         : `Merged duplicate entry for ${secondaryPhone} — number already exists as primary.`;
       const merged = await Lead.findByIdAndUpdate(
         id,
-        { $push: { activityTimeline: { action: "leads_merged", performedBy: actorId, role: actorRole, timestamp: new Date(), note: mergeNote } } },
+        {
+          $push: {
+            activityTimeline: { action: "leads_merged", performedBy: actorId, role: actorRole, timestamp: new Date(), note: mergeNote },
+            ...(sourceName ? { mergedNames: sourceName.trim() } : {}),
+          },
+        },
         { new: true },
       ).populate("user", "name email").populate("previousAgents", "name email");
       return res.status(200).json({ success: true, lead: merged, dataOnlyMerge: true });
@@ -1799,6 +1803,7 @@ const mergeLead = async (req, res) => {
             timestamp:   now,
             note,
           },
+          ...(sourceName ? { mergedNames: sourceName.trim() } : {}),
         },
       },
       { new: true },

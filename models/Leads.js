@@ -187,6 +187,11 @@ const leadSchema = mongoose.Schema(
     //   type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Lead" }],
     //   default: [],
     // },
+    // mergedNames: names of leads absorbed into this one (for search).
+    mergedNames: {
+      type:    [String],
+      default: [],
+    },
 
     // ── Close Lead (wrong entry) ──────────────────────────────────────────────
     isClosed: {
