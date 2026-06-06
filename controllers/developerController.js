@@ -308,6 +308,13 @@ const getCompanyDetails = async (req, res) => {
 
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
 
+    // Normalize devOverrides.featureToggles (a Mongoose Map) → plain object.
+    // JSON.stringify(new Map()) === "{}", so without this the frontend would
+    // never see the company's explicit per-feature overrides.
+    if (company.devOverrides && company.devOverrides.featureToggles instanceof Map) {
+      company.devOverrides.featureToggles = Object.fromEntries(company.devOverrides.featureToggles);
+    }
+
     res.json({
       success: true,
       company,
@@ -330,12 +337,7 @@ const getCompanyDetails = async (req, res) => {
 const applyDevOverride = async (req, res) => {
   try {
     const companyId = req.params.id;
-    const {
-      admins, users, leads, websites,
-      metaCampaigns, googleAccounts, storageMB,
-      featureToggles,
-      reason = "",
-    } = req.body;
+    const { featureToggles, reason = "" } = req.body;
 
     const company = await Company.findById(companyId);
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
@@ -343,13 +345,33 @@ const applyDevOverride = async (req, res) => {
     const oldOverrides = company.devOverrides?.toObject?.() || company.devOverrides || {};
     const newOverrides = { ...oldOverrides };
 
-    if (admins         != null) newOverrides.admins         = parseInt(admins, 10);
-    if (users          != null) newOverrides.users          = parseInt(users, 10);
-    if (leads          != null) newOverrides.leads          = parseInt(leads, 10);
-    if (websites       != null) newOverrides.websites       = parseInt(websites, 10);
-    if (metaCampaigns  != null) newOverrides.metaCampaigns  = parseInt(metaCampaigns, 10);
-    if (googleAccounts != null) newOverrides.googleAccounts = parseInt(googleAccounts, 10);
-    if (storageMB      != null) newOverrides.storageMB      = parseInt(storageMB, 10);
+    // Numeric / limit overrides. For each field:
+    //   • key ABSENT from body     → leave unchanged
+    //   • key present & a number   → set as ABSOLUTE override (this company only)
+    //   • key present & "" or null → clear it (revert to plan + addon value)
+    const NUMERIC_FIELDS = [
+      "admins", "users", "leads", "websites",
+      "metaCampaigns", "googleAccounts", "storageMB",
+      "transcriptionsLimit", "summariesLimit", "voiceBotLimit",
+    ];
+    for (const field of NUMERIC_FIELDS) {
+      if (!(field in req.body)) continue;
+      const raw = req.body[field];
+      if (raw === null || raw === "") {
+        newOverrides[field] = null;
+      } else {
+        const n = parseInt(raw, 10);
+        newOverrides[field] = Number.isFinite(n) ? n : null;
+      }
+    }
+
+    // recordingEnabled tri-state: true / false / null (inherit)
+    if ("recordingEnabled" in req.body) {
+      const r = req.body.recordingEnabled;
+      newOverrides.recordingEnabled = (r === null || r === "") ? null : !!r;
+    }
+
+    // featureToggles replaced wholesale when provided (object keyed by camelCase feature key)
     if (featureToggles && typeof featureToggles === "object") {
       newOverrides.featureToggles = featureToggles;
     }

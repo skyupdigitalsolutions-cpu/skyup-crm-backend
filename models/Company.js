@@ -99,6 +99,15 @@ const companySchema = mongoose.Schema(
       metaCampaigns:  { type: Number, default: null },
       googleAccounts: { type: Number, default: null },
       storageMB:      { type: Number, default: null },
+
+      // NEW: per-company AI / feature LIMIT overrides (null = inherit from plan+addons).
+      // These let the developer set an ABSOLUTE monthly cap for a single company,
+      // independent of the plan, without touching any other company.
+      transcriptionsLimit: { type: Number,  default: null },
+      summariesLimit:      { type: Number,  default: null },
+      voiceBotLimit:       { type: Number,  default: null },
+      recordingEnabled:    { type: Boolean, default: null },
+
       featureToggles: {
         type: Map,
         of:   Boolean,

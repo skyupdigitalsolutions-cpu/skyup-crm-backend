@@ -76,6 +76,15 @@ const PLAN_FEATURE_KEY_MAP = {
   "api-access":     "apiAccess",
   "custom-reports": "customReports",
   "white-label":    "whiteLabel",
+  // Extended features — so plan-level toggles map to the same entitlement keys
+  // used by addons / benefits / devOverrides (otherwise these silently no-op).
+  "call-transcription":  "callTranscription",
+  "ai-summary":          "aiSummary",
+  "voice-bot":           "voiceBot",
+  "whatsapp-automation": "whatsappAutomation",
+  "webhook-access":      "webhookAccess",
+  "custom-domain":       "customDomain",
+  "custom-branding":     "customBranding",
 };
 
 // DEFAULT_PLAN_LIMITS — fallback when PlanConfig record is missing from DB.
@@ -294,6 +303,13 @@ async function getCompanyEntitlements(companyId) {
   if (overrides.metaCampaigns  != null) ent.metaCampaigns  = overrides.metaCampaigns;
   if (overrides.googleAccounts != null) ent.googleAccounts = overrides.googleAccounts;
   if (overrides.storageMB      != null) ent.storageMB      = overrides.storageMB;
+
+  // NEW: per-company AI / feature LIMIT overrides (highest priority, always win).
+  // null = inherit the plan+addon value; a number = absolute cap for this company.
+  if (overrides.transcriptionsLimit != null) ent.transcriptionsLimit = overrides.transcriptionsLimit;
+  if (overrides.summariesLimit      != null) ent.summariesLimit      = overrides.summariesLimit;
+  if (overrides.voiceBotLimit       != null) ent.voiceBotLimit       = overrides.voiceBotLimit;
+  if (overrides.recordingEnabled    != null) ent.recordingEnabled    = !!overrides.recordingEnabled;
 
   // Feature toggles from devOverrides (Map<String, Boolean>)
   if (overrides.featureToggles) {

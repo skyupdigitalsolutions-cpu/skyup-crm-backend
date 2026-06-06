@@ -11,6 +11,35 @@
 const PlanConfig = require('../models/PlanConfig');
 const { DEFAULT_PLAN_FEATURES } = require('./subscriptionController');
 
+// Full feature catalogue (key + label) used when persisting plan feature flags.
+// MUST stay in sync with ALL_FEATURES in PlanCustomization.jsx and the
+// PLAN_FEATURE_KEY_MAP in entitlementService.js. Listing every feature here
+// ensures none are silently dropped on save (the old code only knew 15).
+const FEATURE_CATALOG = [
+  { key: 'leads',               label: 'Lead Management'     },
+  { key: 'contacts',            label: 'Contacts'            },
+  { key: 'basic-reports',       label: 'Basic Reports'       },
+  { key: 'attendance',          label: 'Attendance'          },
+  { key: 'daily-report',        label: 'Daily Report'        },
+  { key: 'sms-blast',           label: 'SMS Blast'           },
+  { key: 'whatsapp-blast',      label: 'WhatsApp Blast'      },
+  { key: 'email-blast',         label: 'Email Blast'         },
+  { key: 'campaigns',           label: 'Campaigns'           },
+  { key: 'google-ads',          label: 'Google Ads'          },
+  { key: 'meta-ads',            label: 'Meta Ads'            },
+  { key: 'call-recording',      label: 'Call Recording'      },
+  { key: 'call-transcription',  label: 'Call Transcription'  },
+  { key: 'ai-summary',          label: 'AI Summary'          },
+  { key: 'voice-bot',           label: 'Voice Bot'           },
+  { key: 'whatsapp-automation', label: 'WhatsApp Automation' },
+  { key: 'api-access',          label: 'API Access'          },
+  { key: 'webhook-access',      label: 'Webhook Access'      },
+  { key: 'custom-reports',      label: 'Custom Reports'      },
+  { key: 'white-label',         label: 'White Label'         },
+  { key: 'custom-domain',       label: 'Custom Domain'       },
+  { key: 'custom-branding',     label: 'Custom Branding'     },
+];
+
 // ── Seed helper — called lazily on first GET /plans so the DB always
 //    has the three default plans even on a fresh install. ─────────────────────
 async function seedDefaultsIfEmpty() {
@@ -164,6 +193,22 @@ const getPlansConfig = async (req, res) => {
         maxUsers:     p.maxUsers,
         maxAdmins:    p.maxAdmins,
         maxLeads:     p.maxLeads,
+
+        // Extended resource limits
+        maxWebsites:       p.maxWebsites,
+        maxMetaCampaigns:  p.maxMetaCampaigns,
+        maxGoogleAccounts: p.maxGoogleAccounts,
+        maxStorageMB:      p.maxStorageMB,
+
+        // AI / transcription monthly quotas (0 = feature not available on the plan)
+        transcriptionsPerMonth: p.transcriptionsPerMonth,
+        summariesPerMonth:      p.summariesPerMonth,
+        voiceBotPerMonth:       p.voiceBotPerMonth,
+
+        // Flags
+        recordingEnabled:  p.recordingEnabled,
+        dataRetentionDays: p.dataRetentionDays,
+
         // features is stored as [{ key, label, enabled }] in DB;
         // PlanCustomization expects a plain string[] of enabled keys.
         features: Array.isArray(p.features)
@@ -205,11 +250,8 @@ const savePlansConfig = async (req, res) => {
       // overlay the enabled/disabled state from the incoming string[] of enabled keys.
       const enabledSet = new Set(Array.isArray(cfg.features) ? cfg.features : []);
 
-      // Get all known feature keys from defaults so we preserve labels
-      const defaults = DEFAULT_PLAN_FEATURES[slug] || DEFAULT_PLAN_FEATURES.basic;
-      const allFeatureKeys = defaults.features || [];
-
-      const featuresDoc = allFeatureKeys.map(f => ({
+      // Use the FULL catalogue (22 features) so none are dropped on save.
+      const featuresDoc = FEATURE_CATALOG.map(f => ({
         key:     f.key,
         label:   f.label,
         enabled: enabledSet.has(f.key),
@@ -227,6 +269,24 @@ const savePlansConfig = async (req, res) => {
         maxLeads:  Number(cfg.maxLeads  ?? 1000),
         features:  featuresDoc,
       };
+
+      // NEW: extended limits / AI quotas / flags.
+      // Only overwrite a field when the client actually sent it, so an older
+      // or partial payload can never clobber an existing value with a default.
+      const EXT_NUMERIC = [
+        "maxWebsites", "maxMetaCampaigns", "maxGoogleAccounts", "maxStorageMB",
+        "transcriptionsPerMonth", "summariesPerMonth", "voiceBotPerMonth",
+        "dataRetentionDays",
+      ];
+      for (const key of EXT_NUMERIC) {
+        if (cfg[key] !== undefined && cfg[key] !== null && cfg[key] !== "") {
+          const n = Number(cfg[key]);
+          if (Number.isFinite(n)) update[key] = n;
+        }
+      }
+      if (cfg.recordingEnabled !== undefined) {
+        update.recordingEnabled = !!cfg.recordingEnabled;
+      }
 
       const plan = await PlanConfig.findOneAndUpdate(
         { planKey: slug },
