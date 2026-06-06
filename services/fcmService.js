@@ -28,13 +28,13 @@
 //      problem clearly in the logs before any HTTP traffic starts.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const User = require('../models/Users');
+const User  = require('../models/Users');
 const Admin = require('../models/Admin');
 
 // ── Lazy Firebase init ────────────────────────────────────────────────────────
 let _messaging  = null;
 let _initFailed = false;
-let _initError  = null;   // FIX BUG 3: store the reason so per-send logs are useful
+let _initError  = null;   // store the reason so per-send logs are useful
 
 function getMessaging() {
   if (_messaging)  return _messaging;
@@ -51,8 +51,6 @@ function getMessaging() {
         try {
           parsed = JSON.parse(serviceAccountJson);
         } catch (parseErr) {
-          // FIX BUG 3: JSON parse failure used to produce a cryptic error later.
-          // Now we surface a clear message pointing to the env var.
           _initError  = `FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON: ${parseErr.message}`;
           _initFailed = true;
           console.error('[FCM] ❌', _initError);
@@ -71,9 +69,6 @@ function getMessaging() {
         console.log('[FCM] ✅ Firebase Admin initialized from GOOGLE_APPLICATION_CREDENTIALS');
 
       } else {
-        // FIX BUG 3: Previously this was a warn() that was easy to miss and
-        // then every send silently returned without explanation.
-        // Now: store the reason so each send() call can log it explicitly.
         _initError = (
           'Neither FIREBASE_SERVICE_ACCOUNT_JSON nor GOOGLE_APPLICATION_CREDENTIALS is set.\n' +
           '  → Push notifications are DISABLED.\n' +
@@ -96,7 +91,7 @@ function getMessaging() {
   }
 }
 
-// ── FIX BUG 3: Health check — call this from server.js after connectDB() ─────
+// ── Health check — call this from server.js after connectDB() ─────────────────
 // Prints a clear startup message so the problem is visible in Render logs
 // without having to wait for the first notification attempt.
 //
@@ -128,9 +123,6 @@ async function clearStaleToken(userId) {
 async function sendNewLeadNotification(userId, lead) {
   const messaging = getMessaging();
   if (!messaging) {
-    // FIX BUG 3: Log the reason so it's visible in per-request logs,
-    // not just once at startup. Keeps the original silent-return behaviour
-    // (server doesn't crash) but makes the problem undeniable in logs.
     if (_initFailed) {
       console.warn('[FCM] sendNewLeadNotification skipped — FCM not initialised:', _initError);
     }
@@ -230,8 +222,8 @@ async function sendReassignedLeadNotification(userId, lead) {
         type:       'reassigned_lead',
         leadId:     String(lead._id),
         leadName:   leadName,
-        leadMobile: lead.mobile  || '',
-        leadSource: lead.source  || '',
+        leadMobile: lead.mobile   || '',
+        leadSource: lead.source   || '',
         campaign:   lead.campaign || '',
         status:     lead.status   || '',
       },
@@ -361,7 +353,7 @@ async function notifySuperAdminReassignment(companyId, { lead, fromAdminName, to
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  sendNoActionAlert(recipientId, recipientModel, leads)
+//  sendNoActionAlert(recipient, leads, threshold)
 //
 //  Notifies an admin or superadmin that certain leads were assigned but have
 //  had zero agent interaction (empty callHistory) for more than 24 hours.
@@ -399,9 +391,9 @@ async function sendNoActionAlert(recipient, leads, threshold = 'daily') {
       token: recipient.fcmToken,
       notification: { title, body },
       data: {
-        type:  'no_action_alert',
+        type:    'no_action_alert',
         threshold,
-        count: String(count),
+        count:   String(count),
         leadIds: leads.map(l => String(l._id)).join(','),
       },
       android: {
@@ -425,7 +417,7 @@ async function sendNoActionAlert(recipient, leads, threshold = 'daily') {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  sendFollowUpAlert(recipient, leads)
+//  sendFollowUpAlert(recipient, leads, type)
 //
 //  Notifies an admin or superadmin that certain leads have overdue or
 //  today-due scheduled follow-up calls that haven't been marked done.
@@ -487,11 +479,95 @@ async function sendFollowUpAlert(recipient, leads, type = 'due') {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  sendEscalationAlert(superAdmin, adminBreakdown, totalCount)           BUG 1 FIX
+//
+//  Called by leadAlertsJob when leads have had zero agent action for 3+ hours.
+//  Unlike sendNoActionAlert (which targets one admin's own leads), this sends
+//  a cross-admin summary to the super_admin so they can see which admin's queue
+//  is stalled.
+//
+//  superAdmin      — Admin document with _id, name, fcmToken
+//  adminBreakdown  — Array of { adminName, count, leads[] }
+//  totalCount      — Sum of all counts across the breakdown
+// ─────────────────────────────────────────────────────────────────────────────
+async function sendEscalationAlert(superAdmin, adminBreakdown, totalCount) {
+  try {
+    const title = `🚨 ${totalCount} Lead${totalCount > 1 ? 's' : ''} — No Action (3h Escalation)`;
+    const body  = adminBreakdown
+      .map(a => `${a.adminName}: ${a.count} lead${a.count > 1 ? 's' : ''} unactioned`)
+      .join(' | ');
+
+    // ── Socket ────────────────────────────────────────────────────────────────
+    const _io = global._io;
+    if (_io && superAdmin._id) {
+      _io.to(`superadmin:${superAdmin._id}`).emit('no_action_alert', {
+        count:     totalCount,
+        threshold: '3h',
+        leads:     adminBreakdown.flatMap(a =>
+          a.leads.map(l => ({
+            leadId:     String(l._id),
+            leadName:   l.name,
+            assignedTo: a.adminName,
+          }))
+        ),
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // ── FCM ───────────────────────────────────────────────────────────────────
+    const messaging = getMessaging();
+    if (!messaging || !superAdmin.fcmToken) return;
+
+    await messaging.send({
+      token: superAdmin.fcmToken,
+      notification: { title, body },
+      data: {
+        type:  'escalation_alert',
+        count: String(totalCount),
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          channelId:             'new_lead_channel_v2',
+          priority:              'max',
+          defaultSound:          true,
+          defaultVibrateTimings: true,
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            alert: { title, body },
+            sound: 'default',
+            badge: totalCount,
+            'content-available': 1,
+          },
+        },
+        headers: { 'apns-priority': '10' },
+      },
+    });
+
+    console.log(`[FCM] ✅ Escalation alert sent to super_admin "${superAdmin.name}" — ${totalCount} lead(s)`);
+  } catch (err) {
+    if (
+      err.code === 'messaging/registration-token-not-registered' ||
+      err.code === 'messaging/invalid-registration-token'
+    ) {
+      await Admin.findByIdAndUpdate(superAdmin._id, { $set: { fcmToken: null } }).catch(() => {});
+      console.warn(`[FCM] Cleared stale FCM token for super_admin "${superAdmin.name}"`);
+    } else {
+      console.error('[FCM] sendEscalationAlert error:', err.message);
+    }
+  }
+}
+
 module.exports = {
   sendNewLeadNotification,
   sendReassignedLeadNotification,
   notifySuperAdminReassignment,
   sendNoActionAlert,
   sendFollowUpAlert,
+  sendEscalationAlert,   // BUG 1 FIX — was missing, crashed leadAlertsJob every tick
   checkFCMHealth,
 };

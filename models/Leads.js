@@ -186,6 +186,12 @@ const leadSchema = mongoose.Schema(
     noActionAlert1hSentAt: { type: Date, default: null },
     noActionAlert2hSentAt: { type: Date, default: null },
 
+    // ── No-action 3h escalation guard (super_admin dedup) ────────────────────
+    // BUG 2 FIX — without this field the 3h escalation guard in leadAlertsJob
+    // never sticks: the query finds the same leads every 15-min tick and the
+    // super_admin gets spammed once Bug 1 (sendEscalationAlert) is fixed.
+    noActionAlertSuperAdminSentAt: { type: Date, default: null },
+
     // ── Lead merge tracking ───────────────────────────────────────────────────
     // mergedInto: set on the DUPLICATE lead — points to the surviving lead
     mergedInto: {
@@ -312,7 +318,6 @@ leadSchema.pre('validate', async function () {
 });
 
 // ── Pre-findOneAndUpdate / updateOne / updateMany hooks ───────────────────────
-// ── Pre-findOneAndUpdate / updateOne / updateMany hooks ───────────────────────
 async function syncNormalizedPhoneOnUpdate() {
   try {
     const update = this.getUpdate();
@@ -320,8 +325,8 @@ async function syncNormalizedPhoneOnUpdate() {
     if (!update.$set) update.$set = {};
 
     // ── Primary phone sync ─────────────────────────────────────────────────
-    const mobile      = update.$set.mobile      || update.mobile;
-    const primaryPhone = update.$set.primaryPhone || update.primaryPhone;
+    const mobile       = update.$set.mobile       || update.mobile;
+    const primaryPhone = update.$set.primaryPhone  || update.primaryPhone;
 
     if (mobile) {
       update.$set.normalizedPhone  = normalizePhone(mobile) || null;
