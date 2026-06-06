@@ -28,7 +28,9 @@ const dailyReport = async (req, res) => {
 
     if (!company) return res.status(400).json({ message: 'Company not resolved from token' });
 
-    const report = await getDailyReport({ company, date, userId, campaign, status });
+    const report = await getDailyReport({ company, date, userId, campaign, status,
+      excludeClosed: !isAdmin,  // employees must not see closed leads
+    });
 
     // Mask phone numbers for non-superadmin admins
     if (isAdmin && req.admin?.role !== 'superadmin') {

@@ -225,14 +225,23 @@ const getCompanyLeads = async (req, res) => {
     const skip  = (page - 1) * limit;
 
     const companyId = req.admin.company._id;
+
+    // Admins and superadmins see all leads including closed ones.
+    // Non-admin roles (employees) must NOT see closed leads.
+    const isAdminRole = ["admin", "super_admin"].includes(req.admin.role);
+    const filter = { company: companyId };
+    if (!isAdminRole) {
+      filter.isClosed = { $ne: true };
+    }
+
     const [leads, total] = await Promise.all([
-      Lead.find({ company: companyId })
+      Lead.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .populate("user", "name email")
         .lean(),
-      Lead.countDocuments({ company: companyId }),
+      Lead.countDocuments(filter),
     ]);
 
     res.status(200).json({ leads, total, page, pages: Math.ceil(total / limit) });

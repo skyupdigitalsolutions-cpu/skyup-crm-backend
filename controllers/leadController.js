@@ -1793,7 +1793,10 @@ const mergeLead = async (req, res) => {
         : `Merged duplicate entry for ${secondaryPhone} — number already exists as primary.`;
       const merged = await Lead.findByIdAndUpdate(
         id,
-        { $push: { activityTimeline: { action: "leads_merged", performedBy: actorId, role: actorRole, timestamp: new Date(), note: mergeNote } } },
+        {
+          ...(sourceName ? { $set: { mergedSourceName: sourceName } } : {}),
+          $push: { activityTimeline: { action: "leads_merged", performedBy: actorId, role: actorRole, timestamp: new Date(), note: mergeNote } },
+        },
         { new: true },
       ).populate("user", "name email").populate("previousAgents", "name email");
       return res.status(200).json({ success: true, lead: merged, dataOnlyMerge: true });
@@ -1827,6 +1830,8 @@ const mergeLead = async (req, res) => {
         $set: {
           secondaryPhone,
           normalizedSecondaryPhone: normSecondary,
+          // Store the merged lead's name so it is searchable on the surviving lead
+          ...(sourceName ? { mergedSourceName: sourceName } : {}),
         },
         $push: {
           activityTimeline: {

@@ -48,7 +48,7 @@ function getISTDayBounds(dateInput) {
  * @param {string}          [options.campaign]    - filter by campaign name
  * @param {string}          [options.status]      - filter by lead status
  */
-async function getDailyReport({ company, date, userId, campaign, status } = {}) {
+async function getDailyReport({ company, date, userId, campaign, status, excludeClosed = false } = {}) {
   if (!company) throw new Error('company is required');
 
   const { dayStart, dayEnd } = getISTDayBounds(date);
@@ -58,9 +58,11 @@ async function getDailyReport({ company, date, userId, campaign, status } = {}) 
     company: new mongoose.Types.ObjectId(company),
     date:    { $gte: dayStart, $lte: dayEnd },
   };
-  if (userId)   baseMatch.user     = new mongoose.Types.ObjectId(userId);
-  if (campaign) baseMatch.campaign = campaign;
-  if (status)   baseMatch.status   = status;
+  if (userId)        baseMatch.user     = new mongoose.Types.ObjectId(userId);
+  if (campaign)      baseMatch.campaign = campaign;
+  if (status)        baseMatch.status   = status;
+  // Employees must not see closed leads — admins see everything
+  if (excludeClosed) baseMatch.isClosed = { $ne: true };
 
   // ── Previous day for trend calculation ───────────────────────────────────
   const prevDate  = new Date(dayStart.getTime() - 24 * 60 * 60 * 1000);

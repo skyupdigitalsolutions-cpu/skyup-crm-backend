@@ -199,6 +199,15 @@ const leadSchema = mongoose.Schema(
     //   default: [],
     // },
 
+    // mergedSourceName: stores the name of the lead that was merged into this one.
+    // E.g. when "Shashi" merges into "Divzz", Divzz.mergedSourceName = "Shashi".
+    // This makes the surviving lead searchable by the absorbed lead's name.
+    mergedSourceName: {
+      type:    String,
+      default: "",
+      trim:    true,
+    },
+
     // ── Close Lead (wrong entry) ──────────────────────────────────────────────
     isClosed: {
       type:    Boolean,
