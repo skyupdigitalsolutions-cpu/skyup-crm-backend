@@ -38,6 +38,17 @@ const {
 const { protect } = require("../middlewares/authMiddleware");
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 const { protectSuperAdmin } = require("../middlewares/superAdminMiddleware");
+const { checkLimit } = require("../middlewares/entitlementMiddleware");
+const Lead = require("../models/Leads");
+
+// Shared lead count function — counts all leads for the company
+const countCompanyLeads = async (req) => {
+  const companyId =
+    req.admin?.company?._id || req.admin?.company ||
+    req.user?.company?._id  || req.user?.company  || null;
+  if (!companyId) return 0;
+  return Lead.countDocuments({ company: companyId });
+};
 
 // ── Duplicate-check endpoints (must come BEFORE /:id wildcard) ───────────────
 router.get("/check-duplicate", protect, checkDuplicate);
@@ -58,15 +69,15 @@ router.get("/", protect, getLeads);
 router.get("/:id", protect, getLead);
 
 // ── POST ──────────────────────────────────────────────────────────────────────
-router.post("/admin/create", protectAdmin, adminCreateLead);
-router.post("/admin/bulk-create", protectAdmin, adminCreateLeadsBulk);
-router.post("/admin/import-csv", protectAdmin, adminImportCSV);
+router.post("/admin/create",      protectAdmin,      checkLimit("leads", countCompanyLeads), adminCreateLead);
+router.post("/admin/bulk-create", protectAdmin,      checkLimit("leads", countCompanyLeads), adminCreateLeadsBulk);
+router.post("/admin/import-csv",  protectAdmin,      checkLimit("leads", countCompanyLeads), adminImportCSV);
 router.patch("/admin/bulk-update-emails", protectAdmin, bulkUpdateEmails);
 router.patch("/admin/update-email/:id", protectAdmin, updateLeadEmail);
-router.post("/superadmin/create", protectSuperAdmin, adminCreateLead);
-router.post("/superadmin/bulk-create", protectSuperAdmin, adminCreateLeadsBulk);
-router.post("/import-csv", protect, userImportCSV);
-router.post("/", protect, createLead);
+router.post("/superadmin/create",      protectSuperAdmin, checkLimit("leads", countCompanyLeads), adminCreateLead);
+router.post("/superadmin/bulk-create", protectSuperAdmin, checkLimit("leads", countCompanyLeads), adminCreateLeadsBulk);
+router.post("/import-csv", protect, checkLimit("leads", countCompanyLeads), userImportCSV);
+router.post("/",           protect, checkLimit("leads", countCompanyLeads), createLead);
 
 // ── PATCH ─────────────────────────────────────────────────────────────────────
 router.patch("/:id/not-interested", protect, markNotInterested);

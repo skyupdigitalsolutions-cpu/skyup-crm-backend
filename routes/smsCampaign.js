@@ -18,16 +18,18 @@ const {
   requireCompanySuperAdmin,
 } = require("../middlewares/adminAuthMiddleware");
 
+const { requireFeature } = require("../middlewares/entitlementMiddleware");
+
 // GET  /api/sms-campaign/preview?campaign=XYZ  — any admin can preview
 router.get("/preview", protectAdmin, previewSmsCampaign);
 
-// POST /api/sms-campaign/send          → CRM campaign leads (super_admin only)
-router.post("/send", protectAdmin, requireCompanySuperAdmin, sendBulkSms);
+// POST /api/sms-campaign/send          → CRM campaign leads (super_admin only, smsBlast feature required)
+router.post("/send", protectAdmin, requireCompanySuperAdmin, requireFeature("smsBlast"), sendBulkSms);
 
-// POST /api/sms-campaign/send-single   → one number (any admin)
-router.post("/send-single", protectAdmin, sendSingleSms);
+// POST /api/sms-campaign/send-single   → one number (any admin, smsBlast feature required)
+router.post("/send-single", protectAdmin, requireFeature("smsBlast"), sendSingleSms);
 
-// POST /api/sms-campaign/send-csv      → CSV list (super_admin only)
-router.post("/send-csv", protectAdmin, requireCompanySuperAdmin, sendCsvSms);
+// POST /api/sms-campaign/send-csv      → CSV list (super_admin only, smsBlast feature required)
+router.post("/send-csv", protectAdmin, requireCompanySuperAdmin, requireFeature("smsBlast"), sendCsvSms);
 
 module.exports = router;

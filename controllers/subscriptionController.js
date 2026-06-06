@@ -627,7 +627,15 @@ const applyDevOverride = async (req, res) => {
     const company = await Company.findById(companyId);
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
 
-    const oldOverrides = company.devOverrides?.toObject?.() || company.devOverrides || {};
+    // Serialize the current devOverrides to a plain JS object.
+    // Explicitly convert featureToggles Map to plain object before spreading.
+    const rawOverrides = company.devOverrides?.toObject?.() || company.devOverrides || {};
+    const oldOverrides = {
+      ...rawOverrides,
+      featureToggles: rawOverrides.featureToggles instanceof Map
+        ? Object.fromEntries(rawOverrides.featureToggles)
+        : (rawOverrides.featureToggles || {}),
+    };
 
     // Build update — only set fields that were explicitly provided
     const newOverrides = { ...oldOverrides };

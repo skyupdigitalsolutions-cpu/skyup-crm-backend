@@ -342,7 +342,17 @@ const applyDevOverride = async (req, res) => {
     const company = await Company.findById(companyId);
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
 
-    const oldOverrides = company.devOverrides?.toObject?.() || company.devOverrides || {};
+    // Serialize the current devOverrides to a plain JS object.
+    // toObject() converts the Mongoose subdoc but may leave the featureToggles
+    // field as a Map instance when using Mongoose 9.x with Map type fields.
+    // We explicitly convert it to a plain object to ensure safe spreading.
+    const rawOverrides = company.devOverrides?.toObject?.() || company.devOverrides || {};
+    const oldOverrides = {
+      ...rawOverrides,
+      featureToggles: rawOverrides.featureToggles instanceof Map
+        ? Object.fromEntries(rawOverrides.featureToggles)
+        : (rawOverrides.featureToggles || {}),
+    };
     const newOverrides = { ...oldOverrides };
 
     // Numeric / limit overrides. For each field:

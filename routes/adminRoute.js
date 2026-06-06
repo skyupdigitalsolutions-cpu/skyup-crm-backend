@@ -37,6 +37,9 @@ const {
 const { protectAdmin, requireCompanySuperAdmin } = require("../middlewares/adminAuthMiddleware");
 const { protectAny } = require("../middlewares/authMiddleware");
 const { authLimiter }  = require("../middlewares/rateLimiter");
+const { checkLimit }   = require("../middlewares/entitlementMiddleware");
+const User             = require("../models/Users");
+const Admin            = require("../models/Admin");
 
 // ── Auth (public) ─────────────────────────────────────────────────────────────
 router.post("/register", authLimiter, registerAdmin);
@@ -72,10 +75,27 @@ router.delete("/company/msg91-config", protectAdmin, requireCompanySuperAdmin, d
 
 // ── Admin CRUD (protected) ────────────────────────────────────────────────────
 router.get("/",  protectAdmin, getAdmins);
-router.post("/", protectAdmin, requireCompanySuperAdmin, createAdmin);
+router.post(
+  "/",
+  protectAdmin,
+  requireCompanySuperAdmin,
+  checkLimit("admins", async (req) => {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    return Admin.countDocuments({ company: companyId, role: "admin" });
+  }),
+  createAdmin
+);
 
 // User create/delete — must be before /:id to avoid conflict
-router.post("/user",       protectAdmin, createCompanyUser);
+router.post(
+  "/user",
+  protectAdmin,
+  checkLimit("users", async (req) => {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    return User.countDocuments({ company: companyId });
+  }),
+  createCompanyUser
+);
 router.delete("/user/:id", protectAdmin, deleteCompanyUser);
 
 router.get("/:id",    protectAdmin, getAdmin);

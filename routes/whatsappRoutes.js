@@ -23,6 +23,7 @@ const {
 
 const { protect, protectAny }            = require("../middlewares/authMiddleware");
 const { protectAdmin: adminProtect }     = require("../middlewares/adminAuthMiddleware");
+const { requireFeature }                 = require("../middlewares/entitlementMiddleware");
 
 // ─── Webhook (public — NO auth, Meta/MSG91 calls these directly) ─────────────
 router.get("/",  verifyWebhook);   // GET  /wa-webhook
@@ -56,16 +57,16 @@ router.post("/start-conversation", protectAny, startConversation);
 // ─── Admin deletes a zombie/failed conversation ───────────────────────────────
 router.delete("/conversations/:id", adminProtect, deleteConversation);
 
-// ─── Bulk send: all leads (or campaign-filtered leads) ───────────────────────
-router.post("/bulk-send",     adminProtect, bulkSendToLeads);
+// ─── Bulk send: all leads (or campaign-filtered leads) — whatsappBlast feature required ──
+router.post("/bulk-send",     adminProtect, requireFeature("whatsappBlast"), bulkSendToLeads);
 
-// ─── Bulk send: arbitrary recipients from CSV ────────────────────────────────
-router.post("/bulk-send-csv", adminProtect, bulkSendCSV);
+// ─── Bulk send: arbitrary recipients from CSV — whatsappBlast feature required ──
+router.post("/bulk-send-csv", adminProtect, requireFeature("whatsappBlast"), bulkSendCSV);
 
 // ─── Get all leads for WhatsApp panel (Leads tab) ────────────────────────────
 router.get("/leads", protectAny, getLeadsForWhatsApp);
 
-// ─── Employee WhatsApp blast — only their own assigned leads ─────────────────
-router.post("/employee-bulk-send", protect, employeeBulkSend);
+// ─── Employee WhatsApp blast — only their own assigned leads — whatsappBlast feature required ──
+router.post("/employee-bulk-send", protect, requireFeature("whatsappBlast"), employeeBulkSend);
 
 module.exports = router;
