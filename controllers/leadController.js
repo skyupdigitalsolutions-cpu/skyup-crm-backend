@@ -1426,11 +1426,12 @@ const checkDuplicate = async (req, res) => {
         { normalizedSecondaryPhone: normalized },
       ],
     })
-      .select("name mobile primaryPhone secondaryPhone status user")
+      .select("name mobile primaryPhone secondaryPhone status user createdAt")
       .populate("user", "name");
 
     if (existing) {
-      return res.status(200).json({ duplicate: true, lead: existing });
+      // Return both `lead` (legacy) and `existingLead` (required by merge flow)
+      return res.status(200).json({ duplicate: true, lead: existing, existingLead: existing });
     }
     return res.status(200).json({ duplicate: false });
   } catch (error) {
