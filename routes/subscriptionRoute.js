@@ -28,6 +28,7 @@ const {
 } = require("../controllers/subscriptionController");
 
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
+const { protectAny } = require("../middlewares/authMiddleware");
 
 // ── Middleware: allow either super_admin OR developer ─────────────────────────
 const protectPrivileged = async (req, res, next) => {
@@ -73,8 +74,10 @@ router.get("/plans", getPlans);
 // Backward-compat: returns combined status + entitlements + resolvedFeatures
 router.get("/my/status",       protectAdmin, getMySubscriptionStatus);
 
-// NEW: Full entitlements object for the calling company (used by usePlanFeatures hook)
-router.get("/my/entitlements", protectAdmin, getMyEntitlements);
+// NEW: Full entitlements object for the calling company (used by usePlanFeatures hook).
+// protectAny → serves admins, company super-admins AND employees (so employee
+// screens like the WhatsApp blast tab can gate themselves client-side).
+router.get("/my/entitlements", protectAny, getMyEntitlements);
 
 // ── Privileged (super_admin or developer) ─────────────────────────────────────
 router.get("/all",                       protectPrivileged, getAllSubscriptions);
