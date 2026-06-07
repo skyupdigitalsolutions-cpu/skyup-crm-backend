@@ -304,14 +304,25 @@ const getDashboardStats = async (req, res) => {
     const revealStats      = revealAggregate[0]      || { totalReveals: 0, leadsRevealed: 0 };
     const emailRevealStats = emailRevealAggregate[0]  || { totalReveals: 0, leadsRevealed: 0 };
 
+    // ── Phone reveal: top leads + per-admin breakdown ────────────────────────
     const topRevealed = await Lead.find({ company: companyId, phoneRevealCount: { $gt: 0 } })
       .sort({ phoneRevealCount: -1 })
       .limit(5)
       .select("name mobile phoneRevealCount")
       .lean();
 
+    // ── Email reveal: top leads + per-admin breakdown ─────────────────────
+    const topEmailRevealed = await Lead.find({ company: companyId, emailRevealCount: { $gt: 0 } })
+      .sort({ emailRevealCount: -1 })
+      .limit(5)
+      .select("name email emailRevealCount")
+      .lean();
+
     let byAdmin = [];
+    let byAdminEmail = [];
+
     if (req.admin?.role === "super_admin") {
+      // ── Phone reveal by admin ──────────────────────────────────────────
       const leadsWithReveals = await Lead.find({
         company: companyId,
         "phoneRevealLog.0": { $exists: true },
@@ -345,6 +356,43 @@ const getDashboardStats = async (req, res) => {
         leadsRevealed: a.leadsRevealed.size,
         leads:         Object.values(a.leads),
       }));
+
+      // ── Email reveal by admin ──────────────────────────────────────────
+      const leadsWithEmailReveals = await Lead.find({
+        company: companyId,
+        "emailRevealLog.0": { $exists: true },
+      }).select("name email emailRevealLog emailRevealCount").lean();
+
+      const emailUserMap = {};
+      leadsWithEmailReveals.forEach((lead) => {
+        (lead.emailRevealLog || []).forEach((entry) => {
+          const uid = entry.userId?.toString() || "unknown";
+          if (!emailUserMap[uid]) {
+            emailUserMap[uid] = {
+              adminName:    entry.userName || "Unknown User",
+              adminEmail:   entry.userEmail || "",
+              totalReveals: 0,
+              leadsRevealed: new Set(),
+              leads: {},
+            };
+          }
+          emailUserMap[uid].totalReveals += 1;
+          emailUserMap[uid].leadsRevealed.add(lead._id.toString());
+          const lid = lead._id.toString();
+          if (!emailUserMap[uid].leads[lid]) {
+            emailUserMap[uid].leads[lid] = { name: lead.name, email: lead.email, count: 0 };
+          }
+          emailUserMap[uid].leads[lid].count += 1;
+        });
+      });
+
+      byAdminEmail = Object.values(emailUserMap).map((a) => ({
+        adminName:     a.adminName,
+        adminEmail:    a.adminEmail,
+        totalReveals:  a.totalReveals,
+        leadsRevealed: a.leadsRevealed.size,
+        leads:         Object.values(a.leads),
+      }));
     }
 
     res.status(200).json({
@@ -363,6 +411,12 @@ const getDashboardStats = async (req, res) => {
       emailReveal: {
         totalReveals:  emailRevealStats.totalReveals,
         leadsRevealed: emailRevealStats.leadsRevealed,
+        topRevealed:   topEmailRevealed.map(l => ({
+          name:  l.name,
+          email: l.email,
+          count: l.emailRevealCount,
+        })),
+        byAdmin: byAdminEmail,
       },
     });
   } catch (error) {
