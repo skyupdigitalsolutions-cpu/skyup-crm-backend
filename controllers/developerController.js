@@ -621,13 +621,29 @@ const grantBenefit = async (req, res) => {
 
 // ── GET /api/developer/companies/:id/payments ─────────────────────────────────
 // Returns all payment invoices for a specific company (developer-only)
+// Also returns company customer details so the frontend can render/download PDFs
 const getCompanyPayments = async (req, res) => {
   try {
     const { id: companyId } = req.params;
 
-    const payments = await Payment.find({ company: companyId })
-      .sort({ createdAt: -1 })
-      .lean();
+    // Fetch company + super-admin for billing details
+    const [company, payments] = await Promise.all([
+      Company.findById(companyId).select("name email phone address gstin").lean(),
+      Payment.find({ company: companyId }).sort({ createdAt: -1 }).lean(),
+    ]);
+
+    if (!company) {
+      return res.status(404).json({ success: false, message: "Company not found." });
+    }
+
+    // Build customer object for InvoiceReceipt
+    const customer = {
+      name:    company.name  || "",
+      email:   company.email || "",
+      address: company.address || "",
+      gstin:   company.gstin   || "",
+      phone:   company.phone   || "",
+    };
 
     const invoices = payments.map((p) => ({
       id:            p.invoiceId,
@@ -643,9 +659,11 @@ const getCompanyPayments = async (req, res) => {
       billingCycle:  p.billing,
       transactionId: p.razorpayPaymentId,
       orderId:       p.razorpayOrderId,
+      // Customer billing snapshot — used by InvoiceReceipt for PDF generation
+      customer,
     }));
 
-    return res.status(200).json({ success: true, invoices });
+    return res.status(200).json({ success: true, invoices, customer });
   } catch (err) {
     console.error("[getCompanyPayments]", err.message);
     res.status(500).json({ success: false, message: err.message });
