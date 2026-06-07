@@ -20,14 +20,6 @@ const getCompanyId = (req) =>
   req.user?.company ||
   null;
 
-// Telegram notifier — optional, safe no-op if not present
-let notifyTelegram = async () => {};
-try {
-  notifyTelegram = require("../utils/telegramNotifier").notifyTelegram;
-} catch (e) {
-  console.warn("telegramNotifier not available:", e.message);
-}
-
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
 const { autoSendTemplates } = require("../services/autoTemplateService");
 
@@ -207,9 +199,6 @@ const createLead = async (req, res) => {
       company: companyId,
     });
 
-    notifyTelegram(lead, "Manual").catch((e) =>
-      console.error("Telegram error:", e.message),
-    );
     autoSendTemplates(lead, companyId);
     res.status(201).json(lead);
   } catch (error) {
@@ -328,9 +317,6 @@ const adminCreateLead = async (req, res) => {
       }
     }
 
-    notifyTelegram(lead, req.body.source || "Manual").catch((e) =>
-      console.error("Telegram error:", e.message),
-    );
 
     autoSendTemplates(populated, companyId);
 
@@ -1404,7 +1390,7 @@ const adminGetAllLeads = async (req, res) => {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId)
       return res.status(400).json({ message: "Company not found in token." });
-    const leads = await Lead.find({ company: companyId })
+    const leads = await Lead.find({ company: companyId, mergedInto: null })
       .sort({ createdAt: -1 })
       .populate("user", "name email")
       .populate("previousAgents", "name email");
