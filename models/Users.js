@@ -27,11 +27,6 @@ const userSchema = mongoose.Schema(
     osVersion:   { type: String, default: null },
     fcmToken:    { type: String, default: null },
 
-    // ── Telegram personal chat ID ─────────────────────────────────────────────
-    // Employee's personal Telegram chat ID so they receive a direct notification
-    // whenever a new lead is assigned to them.
-    // How to get it: message @userinfobot on Telegram — it replies with your chat ID.
-    telegramChatId: { type: String, default: null, trim: true },
 
     // ✅ FIX: added ipAddress field — was missing so it was silently dropped
     ipAddress:   { type: String, default: null },
