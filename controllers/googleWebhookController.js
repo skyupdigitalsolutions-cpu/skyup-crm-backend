@@ -1,7 +1,6 @@
 // controllers/googleWebhookController.js
 const GoogleAdsConfig    = require("../models/GoogleAdsConfig");
 const Lead               = require("../models/Leads");
-const { notifyTelegram } = require("../utils/telegramNotifier");
 const { normalizePhone } = require("../utils/normalizePhone");
 const { autoSendTemplates } = require("./leadController");
 const {
@@ -159,11 +158,7 @@ const receiveGoogleWebhook = async (req, res) => {
     console.log(
       `\n✅ GOOGLE LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | id: ${newLead._id}`
     );
-
-    // ── Notify via Telegram ──────────────────────────────────────────────────
-    notifyTelegram(newLead, config.campaignName).catch((e) =>
-      console.error("Telegram error:", e.message)
-    );
+;
 
     // ── Auto-send WhatsApp / Email / SMS template if enabled ─────────────────
     autoSendTemplates(newLead, newLead.company);
