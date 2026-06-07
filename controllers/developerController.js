@@ -27,6 +27,7 @@ const {
   logAudit,
 } = require("../services/entitlementService");
 const { calcDaysRemaining } = require("./subscriptionController");
+const Payment = require("../models/Payment");
 
 // ── Cloudinary config ─────────────────────────────────────────────────────────
 cloudinary.config({
@@ -617,6 +618,40 @@ const grantBenefit = async (req, res) => {
   }
 };
 
+
+// ── GET /api/developer/companies/:id/payments ─────────────────────────────────
+// Returns all payment invoices for a specific company (developer-only)
+const getCompanyPayments = async (req, res) => {
+  try {
+    const { id: companyId } = req.params;
+
+    const payments = await Payment.find({ company: companyId })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const invoices = payments.map((p) => ({
+      id:            p.invoiceId,
+      invoiceId:     p.invoiceId,
+      date:          new Date(p.createdAt).toLocaleDateString("en-IN", {
+                       day: "2-digit", month: "short", year: "numeric",
+                     }),
+      rawDate:       p.createdAt,
+      amount:        `₹${p.amount.toLocaleString("en-IN")}`,
+      baseAmount:    p.amount,
+      status:        p.status === "paid" ? "Paid" : p.status === "failed" ? "Failed" : "Pending",
+      planName:      p.planName,
+      billingCycle:  p.billing,
+      transactionId: p.razorpayPaymentId,
+      orderId:       p.razorpayOrderId,
+    }));
+
+    return res.status(200).json({ success: true, invoices });
+  } catch (err) {
+    console.error("[getCompanyPayments]", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   // Existing
   developerLogin,
@@ -636,4 +671,5 @@ module.exports = {
   getAuditLogs,
   grantFreeAddon,
   grantBenefit,
+  getCompanyPayments,
 };
