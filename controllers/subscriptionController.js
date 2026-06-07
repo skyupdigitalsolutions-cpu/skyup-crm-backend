@@ -570,7 +570,12 @@ const getMySubscriptionStatus = async (req, res) => {
 // ── GET /api/subscription/my/entitlements — full entitlements for calling company ──
 const getMyEntitlements = async (req, res) => {
   try {
-    const companyId = req.admin?.company?._id ?? req.admin?.company;
+    const companyId =
+      req.admin?.company?._id ??
+      req.admin?.company ??
+      req.user?.companyId ??
+      req.user?.company ??
+      null;
     if (!companyId) return res.status(400).json({ success: false, message: "Company not found in token" });
 
     const [entitlements, remaining] = await Promise.all([
