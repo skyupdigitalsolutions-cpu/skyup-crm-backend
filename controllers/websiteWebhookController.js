@@ -2,7 +2,6 @@
 const WebsiteConfig      = require("../models/WebsiteConfig");
 const Lead               = require("../models/Leads");
 const User               = require("../models/Users");
-const { notifyTelegram } = require("../utils/telegramNotifier");
 const { normalizePhone } = require("../utils/normalizePhone");
 const { autoSendTemplates } = require("../services/autoTemplateService");
 
@@ -93,7 +92,6 @@ const receiveWebsiteWebhook = async (req, res) => {
 
     console.log(`✅ WEBSITE LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | source: "${config.sourceName}" | id: ${newLead._id}`);
 
-    notifyTelegram(newLead, config.sourceName).catch(e => console.error("Telegram error:", e.message));
     autoSendTemplates(newLead, config.company);
 
     try {
