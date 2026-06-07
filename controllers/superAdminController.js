@@ -319,7 +319,7 @@ const getCompanyEntitlementDetails = async (req, res) => {
 
     const [company, entitlements, addons, benefits, usage, remaining] = await Promise.all([
       Company.findById(companyId)
-        .select("-brevoApiKey -encryptionKeyHash -customerOpenAiKey -customerGeminiKey -telegramBotToken")
+        .select("-brevoApiKey -encryptionKeyHash -customerOpenAiKey -customerGeminiKey")
         .lean(),
       getCompanyEntitlements(companyId),
       CompanyAddon.find({ companyId }).sort({ createdAt: -1 }).lean(),
