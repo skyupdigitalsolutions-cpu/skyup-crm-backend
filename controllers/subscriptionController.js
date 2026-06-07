@@ -619,7 +619,8 @@ const getCompanySubscription = async (req, res) => {
 // NEW: Store devOverrides on company (resource limits + feature toggles)
 const applyDevOverride = async (req, res) => {
   try {
-    const { companyId } = req.params;
+    // Developer route uses :id; subscription route uses :companyId — support both
+    const companyId = req.params.id || req.params.companyId;
     const { actorId, actorRole } = getActor(req);
 
     const {
@@ -642,15 +643,15 @@ const applyDevOverride = async (req, res) => {
         : (rawOverrides.featureToggles || {}),
     };
 
-    // Build update — only set fields that were explicitly provided
+    // Build update — null clears the override (inherit from plan); undefined means not sent
     const newOverrides = { ...oldOverrides };
-    if (admins         != null) newOverrides.admins         = parseInt(admins, 10);
-    if (users          != null) newOverrides.users          = parseInt(users, 10);
-    if (leads          != null) newOverrides.leads          = parseInt(leads, 10);
-    if (websites       != null) newOverrides.websites       = parseInt(websites, 10);
-    if (metaCampaigns  != null) newOverrides.metaCampaigns  = parseInt(metaCampaigns, 10);
-    if (googleAccounts != null) newOverrides.googleAccounts = parseInt(googleAccounts, 10);
-    if (storageMB      != null) newOverrides.storageMB      = parseInt(storageMB, 10);
+    if (admins         !== undefined) newOverrides.admins         = admins         != null ? (Number(admins)         || 0) : null;
+    if (users          !== undefined) newOverrides.users          = users          != null ? (Number(users)          || 0) : null;
+    if (leads          !== undefined) newOverrides.leads          = leads          != null ? (Number(leads)          || 0) : null;
+    if (websites       !== undefined) newOverrides.websites       = websites       != null ? (Number(websites)       || 0) : null;
+    if (metaCampaigns  !== undefined) newOverrides.metaCampaigns  = metaCampaigns  != null ? (Number(metaCampaigns)  || 0) : null;
+    if (googleAccounts !== undefined) newOverrides.googleAccounts = googleAccounts != null ? (Number(googleAccounts) || 0) : null;
+    if (storageMB      !== undefined) newOverrides.storageMB      = storageMB      != null ? (Number(storageMB)      || 0) : null;
     if (featureToggles && typeof featureToggles === "object") {
       newOverrides.featureToggles = featureToggles;
     }
