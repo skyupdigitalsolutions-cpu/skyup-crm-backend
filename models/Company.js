@@ -154,14 +154,6 @@ const companySchema = mongoose.Schema(
     brevoSenderEmail: { type: String, default: "", trim: true },
     brevoSenderName:  { type: String, default: "", trim: true },
 
-    // ── Telegram Notification Settings ───────────────────────────────────────
-    telegramBotToken: {
-      type:    String,
-      default: "",
-      trim:    true,
-      select:  false,
-    },
-    telegramAdminChatId: { type: String, default: "", trim: true },
 
     // ── Auto-template settings for new leads ─────────────────────────────────
     autoTemplate: {
