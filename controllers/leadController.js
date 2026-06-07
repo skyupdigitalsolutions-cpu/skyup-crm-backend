@@ -1750,89 +1750,67 @@ const swapPhones = async (req, res) => {
 //   4. Returns the updated target lead.
 const mergeLead = async (req, res) => {
   try {
-    const { id } = req.params;                       // target lead id
+    const { id } = req.params;                       // SURVIVOR: the lead we keep (its number stays primary)
     const { secondaryPhone, sourceName, sourceMobile, sourceLeadId } = req.body;
+    // secondaryPhone = the number to attach to the survivor (the absorbed lead's primary)
+    // sourceLeadId   = the duplicate lead to fold in + hide (optional)
 
     if (!secondaryPhone || !String(secondaryPhone).trim()) {
       return res.status(400).json({ message: "secondaryPhone is required for merge." });
     }
 
-    const companyId  = getCompanyId(req);
-    const actorId    = req.user?._id || req.admin?._id || null;
-    const actorRole  = req.admin ? "admin" : (req.superAdmin ? "superadmin" : "user");
+    const companyId = getCompanyId(req);
+    const actorId   = req.user?._id || req.admin?._id || req.superAdmin?._id || null;
+    const actorRole = req.admin ? "admin" : (req.superAdmin ? "superadmin" : "user");
 
-    // Load the target lead
-    const lead = await Lead.findOne({
+    // ── Load the SURVIVING lead (the one we keep) ────────────────────────────
+    const survivor = await Lead.findOne({
       _id: id,
       ...(companyId ? { company: companyId } : {}),
     });
-    if (!lead) return res.status(404).json({ message: "Target lead not found." });
-
-    // Already has a secondary number → cannot add another
-    if (lead.secondaryPhone) {
-      return res.status(409).json({
-        message: `"${lead.name}" already has a secondary number. Remove it first before merging.`,
-      });
-    }
+    if (!survivor) return res.status(404).json({ message: "Target lead not found." });
 
     const normSecondary = normalizePhone(secondaryPhone);
     if (!normSecondary) {
       return res.status(400).json({ message: "Invalid phone number format." });
     }
+    const normPrimary  = normalizePhone(survivor.primaryPhone || survivor.mobile || "");
+    const normExisting = survivor.secondaryPhone ? normalizePhone(survivor.secondaryPhone) : null;
+    // "Adding a number" only when it differs from the survivor's own primary.
+    const addingNewNumber = normSecondary !== normPrimary;
 
-    const normPrimary = normalizePhone(lead.primaryPhone || lead.mobile || "");
-
-    // ── Helper: mark source lead as merged (if sourceLeadId provided) ─────────
-    const markSourceAsMerged = async (targetId) => {
-      if (!sourceLeadId) return;
-      try {
-        await Lead.findOneAndUpdate(
-          {
-            _id: sourceLeadId,
-            ...(companyId ? { company: companyId } : {}),
-          },
-          {
-            $set: { mergedInto: targetId },
-            $push: {
-              activityTimeline: {
-                action:      "leads_merged",
-                performedBy: actorId,
-                role:        actorRole,
-                timestamp:   new Date(),
-                note:        `This lead was merged into lead "${lead.name}" (${lead.primaryPhone || lead.mobile}).`,
-              },
-            },
-          }
-        );
-      } catch (e) {
-        // Non-fatal: log but don't fail the whole merge
-        console.error("[mergeLead] Failed to mark source lead as mergedInto:", e.message);
-      }
-    };
-
-    // Special case: incoming number IS already this lead's primary phone.
-    // Nothing to add as secondary — just log the merge and return the lead.
-    if (normSecondary === normPrimary) {
-      const mergeNote = sourceName
-        ? `Merged with duplicate lead "${sourceName}" (${sourceMobile || secondaryPhone}). Number already exists as primary — data merged.`
-        : `Merged duplicate entry for ${secondaryPhone} — number already exists as primary.`;
-      const merged = await Lead.findByIdAndUpdate(
-        id,
-        {
-          ...(sourceName ? { $set: { mergedSourceName: sourceName } } : {}),
-          $push: { activityTimeline: { action: "leads_merged", performedBy: actorId, role: actorRole, timestamp: new Date(), note: mergeNote } },
-        },
-        { new: true },
-      ).populate("user", "name email").populate("previousAgents", "name email");
-      await markSourceAsMerged(id);
-      return res.status(200).json({ success: true, lead: merged, dataOnlyMerge: true });
+    // ── Load the lead being absorbed (optional) ──────────────────────────────
+    let source = null;
+    if (sourceLeadId) {
+      source = await Lead.findOne({
+        _id: sourceLeadId,
+        ...(companyId ? { company: companyId } : {}),
+      });
     }
 
-    // Check the number isn't already claimed by yet another lead
-    if (companyId) {
+    // A lead holds at most TWO numbers. Reject merges that would need a third.
+    if (addingNewNumber && normExisting && normExisting !== normSecondary) {
+      return res.status(409).json({
+        message: `"${survivor.name}" already has two numbers. Remove one before merging.`,
+      });
+    }
+    if (source && source.secondaryPhone) {
+      const normSrcSec = normalizePhone(source.secondaryPhone);
+      if (normSrcSec && normSrcSec !== normPrimary && normSrcSec !== normSecondary) {
+        return res.status(409).json({
+          message: `"${source.name}" has two numbers, so it can't be merged into a single lead. Remove one of its numbers first.`,
+        });
+      }
+    }
+
+    // ── Conflict check: the number must not belong to a THIRD lead ───────────
+    // Exclude BOTH the survivor (id) and the absorbed source (sourceLeadId):
+    // the source legitimately owns this number — folding it in is the point.
+    if (companyId && addingNewNumber) {
+      const excludeIds = [id, ...(sourceLeadId ? [sourceLeadId] : [])];
       const conflict = await Lead.findOne({
         company: companyId,
-        _id: { $ne: id },
+        _id: { $nin: excludeIds },
         $or: [
           { normalizedPhone: normSecondary },
           { normalizedSecondaryPhone: normSecondary },
@@ -1845,19 +1823,85 @@ const mergeLead = async (req, res) => {
       }
     }
 
-    const now  = new Date();
-    const note = sourceName
-      ? `Merged with duplicate lead "${sourceName}" (${sourceMobile || secondaryPhone}). Number added as secondary.`
-      : `Merged duplicate number ${secondaryPhone} as secondary.`;
+    const now        = new Date();
+    const mergedName = sourceName || source?.name || "";
 
-    const updated = await Lead.findByIdAndUpdate(
-      id,
-      {
+    // ── Build the survivor update ────────────────────────────────────────────
+    // Collect every $push into ONE object — multiple $push keys silently
+    // overwrite each other in a single update document.
+    const setOps  = {};
+    const pushOps = {};
+
+    if (addingNewNumber) {
+      setOps.secondaryPhone           = secondaryPhone;
+      setOps.normalizedSecondaryPhone = normSecondary;
+    }
+    if (mergedName) setOps.mergedSourceName = mergedName;
+
+    // Fold the absorbed lead's embedded history into the survivor (strip the
+    // sub-document _ids so the survivor mints fresh ones).
+    const stripId = (arr) => (arr || []).map((d) => {
+      const o = typeof d.toObject === "function" ? d.toObject() : { ...d };
+      delete o._id;
+      return o;
+    });
+    const timelineExtra = [];
+    if (source) {
+      const ch = stripId(source.callHistory);
+      const sc = stripId(source.scheduledCalls);
+      if (ch.length) pushOps.callHistory    = { $each: ch };
+      if (sc.length) pushOps.scheduledCalls = { $each: sc };
+      timelineExtra.push(...stripId(source.activityTimeline));
+    }
+
+    const mergeNote = mergedName
+      ? `Merged with duplicate lead "${mergedName}" (${sourceMobile || secondaryPhone}). ${addingNewNumber ? "Number added as secondary; " : ""}call logs, WhatsApp and history consolidated.`
+      : (addingNewNumber
+          ? `Merged duplicate number ${secondaryPhone} as secondary.`
+          : `Merged duplicate entry for ${secondaryPhone}.`);
+
+    pushOps.activityTimeline = {
+      $each: [
+        ...timelineExtra,
+        { action: "leads_merged", performedBy: actorId, role: actorRole, timestamp: now, note: mergeNote },
+      ],
+    };
+
+    const update = {};
+    if (Object.keys(setOps).length)  update.$set  = setOps;
+    if (Object.keys(pushOps).length) update.$push = pushOps;
+
+    const updated = await Lead.findByIdAndUpdate(id, update, { new: true })
+      .populate("user", "name email")
+      .populate("previousAgents", "name email");
+
+    // ── Re-point the absorbed lead's external records + hide it ──────────────
+    if (source) {
+      const MobileCallLog        = require("../models/MobileCallLog");
+      const WhatsAppConversation = require("../models/WhatsAppConversation");
+
+      // Call logs + recordings are fetched strictly by matchedLead, so they
+      // must be moved to the survivor or they vanish from its view. Their
+      // number is now the survivor's secondary.
+      await MobileCallLog.updateMany(
+        { matchedLead: source._id, ...(companyId ? { company: companyId } : {}) },
+        { $set: { matchedLead: survivor._id, matchedNumberType: addingNewNumber ? "Secondary" : "Primary" } },
+      ).catch((e) => console.error("[mergeLead] MobileCallLog re-point failed:", e.message));
+
+      // WhatsApp threads → survivor (the by-lead fetch also searches by phone
+      // variants, but re-pointing keeps the data consistent).
+      await WhatsAppConversation.updateMany(
+        { lead: source._id, ...(companyId ? { company: companyId } : {}) },
+        { $set: { lead: survivor._id } },
+      ).catch((e) => console.error("[mergeLead] WhatsAppConversation re-point failed:", e.message));
+
+      // Hide the source AND free its number from the dedup index so future
+      // calls/WhatsApp resolve to the survivor (whose secondary now owns it).
+      await Lead.findByIdAndUpdate(source._id, {
         $set: {
-          secondaryPhone,
-          normalizedSecondaryPhone: normSecondary,
-          // Store the merged lead's name so it is searchable on the surviving lead
-          ...(sourceName ? { mergedSourceName: sourceName } : {}),
+          mergedInto:               survivor._id,
+          normalizedPhone:          null,
+          normalizedSecondaryPhone: null,
         },
         $push: {
           activityTimeline: {
@@ -1865,17 +1909,18 @@ const mergeLead = async (req, res) => {
             performedBy: actorId,
             role:        actorRole,
             timestamp:   now,
-            note,
+            note:        `This lead was merged into "${survivor.name}" (${survivor.primaryPhone || survivor.mobile}). Its number is now a secondary on that lead.`,
           },
         },
-      },
-      { new: true },
-    )
-      .populate("user", "name email")
-      .populate("previousAgents", "name email");
+      }).catch((e) => console.error("[mergeLead] hide source failed:", e.message));
+    }
 
-    await markSourceAsMerged(id);
-    return res.status(200).json({ success: true, lead: updated });
+    return res.status(200).json({
+      success:       true,
+      lead:          updated,
+      absorbedLeadId: source ? String(source._id) : null,
+      dataOnlyMerge: !addingNewNumber,
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
