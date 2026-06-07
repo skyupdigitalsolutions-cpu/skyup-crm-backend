@@ -30,10 +30,6 @@ const adminSchema = mongoose.Schema(
     // push notifications to admin and super_admin devices.
     fcmToken:   { type: String, default: null },
 
-    // ── Telegram personal chat ID ─────────────────────────────────────────────
-    // Admin's personal Telegram chat ID for direct lead notifications.
-    // How to get it: message @userinfobot on Telegram — it replies with your chat ID.
-    telegramChatId: { type: String, default: null, trim: true },
   },
   { timestamps: true }
 );
