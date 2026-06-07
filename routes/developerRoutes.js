@@ -24,6 +24,7 @@ const {
   getAuditLogs,
   grantFreeAddon,
   grantBenefit,
+  getCompanyPayments,
 } = require("../controllers/developerController");
 
 const {
@@ -60,6 +61,7 @@ router.put("/companies/:id/status",         changeSubscriptionStatus);
 router.get("/companies/:id/audit",          getAuditLogs);
 router.post("/companies/:id/grant-addon",   grantFreeAddon);
 router.post("/companies/:id/grant-benefit", grantBenefit);
+router.get("/companies/:id/payments",       getCompanyPayments);
 
 // ── Subscriptions ─────────────────────────────────────────────────────────────
 router.get("/subscriptions",            getSubscriptions);
