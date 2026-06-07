@@ -1,12 +1,27 @@
 const express = require("express");
 const router  = express.Router();
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware"); // ✅ correct name
+const { checkLimit, requireFeature } = require("../middlewares/entitlementMiddleware");
+const GoogleAdsConfig = require("../models/GoogleAdsConfig");
 const {
   getConfigs, createConfig, toggleConfig, deleteConfig,
 } = require("../controllers/googleAdsConfigController");
 
+// Count existing Google Ads configs for the caller's company.
+const countCompanyGoogleConfigs = async (req) => {
+  const companyId = req.admin?.company?._id || req.admin?.company || null;
+  if (!companyId) return 0;
+  return GoogleAdsConfig.countDocuments({ company: companyId });
+};
+
 router.get("/",             protectAdmin, getConfigs);
-router.post("/",            protectAdmin, createConfig);
+router.post(
+  "/",
+  protectAdmin,
+  requireFeature("googleAds"),                              // feature gate: Google Ads must be enabled
+  checkLimit("googleAccounts", countCompanyGoogleConfigs),  // limit gate: max Google accounts
+  createConfig,
+);
 router.patch("/:id/toggle", protectAdmin, toggleConfig);
 router.delete("/:id",       protectAdmin, deleteConfig);
 
