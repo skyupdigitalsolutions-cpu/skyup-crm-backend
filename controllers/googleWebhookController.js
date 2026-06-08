@@ -8,6 +8,7 @@ const {
   getNextAssignedUserGoogle,
   mapGoogleLeadToSchema,
 } = require("../utils/googleAdsHelper");
+const { notifyCampaignLead } = require("../services/telegramService");
 
 /**
  * POST /google-webhook
@@ -162,6 +163,10 @@ const receiveGoogleWebhook = async (req, res) => {
 
     // ── Auto-send WhatsApp / Email / SMS template if enabled ─────────────────
     autoSendTemplates(newLead, newLead.company);
+    // Campaign-only Telegram notification
+    notifyCampaignLead(newLead, newLead.company).catch(e =>
+      console.error("[Telegram] Google Ads lead notify error:", e.message)
+    );
 
   } catch (err) {
     console.error("❌ GOOGLE WEBHOOK PROCESSING ERROR:", err.message);

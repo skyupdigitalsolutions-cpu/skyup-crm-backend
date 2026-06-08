@@ -233,8 +233,9 @@ const getCompanyLeads = async (req, res) => {
 
     // Admins and superadmins see all leads including closed ones.
     // Non-admin roles (employees) must NOT see closed leads.
+    // mergedInto: null ensures absorbed duplicate leads are always hidden.
     const isAdminRole = ["admin", "super_admin"].includes(req.admin.role);
-    const filter = { company: companyId };
+    const filter = { company: companyId, mergedInto: null };
     if (!isAdminRole) {
       filter.isClosed = { $ne: true };
     }
@@ -704,6 +705,67 @@ const deleteMsg91Config = async (req, res) => {
 };
 
 // ── Single clean export block ─────────────────────────────────────────────────
+// ── GET /admin/company/telegram ───────────────────────────────────────────────
+const getTelegramConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    // Explicitly select telegramBotToken (it has select:false on the schema)
+    const company = await Company.findById(companyId)
+      .select('telegramEnabled telegramChatId telegramBotToken')
+      .lean();
+    if (!company) return res.status(404).json({ message: 'Company not found' });
+    res.json({
+      telegramEnabled:  company.telegramEnabled  || false,
+      telegramChatId:   company.telegramChatId   || '',
+      // Only indicate whether a token is set — never return the actual token
+      hasToken: !!(company.telegramBotToken),
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── PUT /admin/company/telegram ───────────────────────────────────────────────
+const saveTelegramConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { telegramBotToken, telegramChatId, telegramEnabled } = req.body;
+
+    const update = {};
+    if (telegramChatId   !== undefined) update.telegramChatId   = (telegramChatId || '').trim();
+    if (telegramEnabled  !== undefined) update.telegramEnabled   = Boolean(telegramEnabled);
+    // Only update token when explicitly provided (non-empty string)
+    if (telegramBotToken && String(telegramBotToken).trim()) {
+      update.telegramBotToken = String(telegramBotToken).trim();
+    }
+
+    await Company.findByIdAndUpdate(companyId, { $set: update });
+    res.json({ message: 'Telegram settings saved.' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── POST /admin/company/telegram/test ─────────────────────────────────────────
+const testTelegramConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const company   = await Company.findById(companyId)
+      .select('name telegramBotToken telegramChatId')
+      .lean();
+
+    if (!company) return res.status(404).json({ message: 'Company not found' });
+    if (!company.telegramBotToken) return res.status(400).json({ message: 'Bot token not configured.' });
+    if (!company.telegramChatId)   return res.status(400).json({ message: 'Chat ID not configured.' });
+
+    const { sendTestNotification } = require('../services/telegramService');
+    await sendTestNotification(company.telegramBotToken, company.telegramChatId, company.name);
+    res.json({ message: 'Test message sent! Check your Telegram group.' });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Failed to send test — check token and chat ID.' });
+  }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -727,4 +789,7 @@ module.exports = {
   getMsg91Config,
   saveMsg91Config,
   deleteMsg91Config,
+  getTelegramConfig,
+  saveTelegramConfig,
+  testTelegramConfig,
 };

@@ -22,6 +22,7 @@ const getCompanyId = (req) =>
 
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
 const { autoSendTemplates } = require("../services/autoTemplateService");
+const { notifyCampaignLead } = require("../services/telegramService");
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
 async function getNextUser(companyId, excludeIds = []) {
@@ -95,6 +96,7 @@ const getLeads = async (req, res) => {
     const leads = await Lead.find({
       company: getCompanyId(req),
       $or: [{ user: req.user._id }, { user: null }],
+      mergedInto: null,
     })
       .populate("user", "name email")
       .populate("previousAgents", "name email");
@@ -319,6 +321,10 @@ const adminCreateLead = async (req, res) => {
 
 
     autoSendTemplates(populated, companyId);
+    // Telegram — campaign filter inside notifyCampaignLead; manual leads are silently skipped
+    notifyCampaignLead(lead, companyId).catch(e =>
+      console.error("[Telegram] adminCreateLead notify error:", e.message)
+    );
 
     if (assignedUser) {
       sendNewLeadNotification(assignedUser, lead).catch((e) =>
@@ -402,9 +408,6 @@ const adminCreateLeadsBulk = async (req, res) => {
           assignedAdmin: req.admin?._id || req.superAdmin?._id || null,
         });
 
-        notifyTelegram(lead, row.source || "Bulk Import").catch((e) =>
-          console.error("Telegram error:", e.message),
-        );
 
         results.push(
           await Lead.findById(lead._id)
@@ -561,9 +564,6 @@ const adminImportCSV = async (req, res) => {
           .populate("user", "name email")
           .populate("previousAgents", "name email");
 
-        notifyTelegram(adminDoc, row.source || "CSV Import").catch((e) =>
-          console.error("Telegram error:", e.message),
-        );
         autoSendTemplates(savedLead, companyId);
         results.push(savedLead);
       } catch (err) {
@@ -704,9 +704,6 @@ const userImportCSV = async (req, res) => {
           .populate("user", "name email")
           .populate("previousAgents", "name email");
 
-        notifyTelegram(userDoc, row.source || "CSV Import").catch((e) =>
-          console.error("Telegram error:", e.message),
-        );
         autoSendTemplates(savedLead, companyId);
         results.push(savedLead);
       } catch (err) {
@@ -938,7 +935,7 @@ const getMyLeads = async (req, res) => {
     );
     const skip = (page - 1) * limit;
 
-    const query = { company: getCompanyId(req), user: req.user._id };
+    const query = { company: getCompanyId(req), user: req.user._id, mergedInto: null };
 
     const [leads, total] = await Promise.all([
       Lead.find(query)

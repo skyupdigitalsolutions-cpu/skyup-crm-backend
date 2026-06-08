@@ -11,6 +11,7 @@ const {
   mapToLeadSchema,
   getNextAssignedUser,
 } = require("../utils/metaHelper");
+const { notifyCampaignLead } = require("../services/telegramService");
 
 // GET - Meta webhook verification handshake
 const verifyWebhook = async (req, res) => {
@@ -221,6 +222,10 @@ const receiveWebhook = async (req, res) => {
 ;
 
         autoSendTemplates(newLead, newLead.company);
+        // Campaign-only Telegram notification (filters by source internally)
+        notifyCampaignLead(newLead, newLead.company).catch(e =>
+          console.error("[Telegram] Meta lead notify error:", e.message)
+        );
       }
     }
   } catch (err) {

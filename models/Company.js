@@ -155,7 +155,13 @@ const companySchema = mongoose.Schema(
     brevoSenderName:  { type: String, default: "", trim: true },
 
 
-    // ── Auto-template settings for new leads ─────────────────────────────────
+    // ── Telegram Notification Settings ────────────────────────────────────────
+    // Campaign-only: only Meta / Google Ads / Website leads trigger notifications.
+    telegramBotToken: { type: String, default: null, trim: true, select: false },
+    telegramChatId:   { type: String, default: null, trim: true },
+    telegramEnabled:  { type: Boolean, default: false },
+
+        // ── Auto-template settings for new leads ─────────────────────────────────
     autoTemplate: {
       whatsapp: {
         enabled:      { type: Boolean, default: false },

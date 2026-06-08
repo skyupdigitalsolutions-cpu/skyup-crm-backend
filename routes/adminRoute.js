@@ -28,6 +28,9 @@ const {
   getMsg91Config,
   saveMsg91Config,
   deleteMsg91Config,
+  getTelegramConfig,
+  saveTelegramConfig,
+  testTelegramConfig,
 } = adminController;
 const {
   registerAdmin,
@@ -69,6 +72,11 @@ router.delete("/company/brevo-config", protectAdmin, requireCompanySuperAdmin, d
 router.get("/company/msg91-config",    protectAdmin, getMsg91Config);
 router.put("/company/msg91-config",    protectAdmin, requireCompanySuperAdmin, saveMsg91Config);
 router.delete("/company/msg91-config", protectAdmin, requireCompanySuperAdmin, deleteMsg91Config);
+
+// ── Telegram notification config (campaign leads only) ────────────────────────
+router.get("/company/telegram",       protectAdmin, getTelegramConfig);
+router.put("/company/telegram",       protectAdmin, requireCompanySuperAdmin, saveTelegramConfig);
+router.post("/company/telegram/test", protectAdmin, testTelegramConfig);
 
 // ── Legacy brevo-status (kept for backward compat) ───────────────────────────
 // router.get("/company/brevo-status",  protectAdmin, getBrevoStatus);
