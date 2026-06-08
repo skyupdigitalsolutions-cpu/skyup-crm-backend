@@ -85,6 +85,11 @@ const PLAN_FEATURE_KEY_MAP = {
   "webhook-access":      "webhookAccess",
   "custom-domain":       "customDomain",
   "custom-branding":     "customBranding",
+  // NEW: Operations features
+  "projects":            "projects",
+  "tasks":               "tasks",
+  "payroll":             "payroll",
+  "website-tracking":    "websiteTracking",
 };
 
 // DEFAULT_PLAN_LIMITS — fallback when PlanConfig record is missing from DB.
@@ -104,6 +109,7 @@ const DEFAULT_PLAN_LIMITS = {
       callTranscription: false, aiSummary: false, voiceBot: false,
       whatsappAutomation: false, webhookAccess: false,
       customDomain: false, customBranding: false,
+      projects: false, tasks: false, payroll: false, websiteTracking: false,
     },
   },
   basic: {
@@ -120,6 +126,7 @@ const DEFAULT_PLAN_LIMITS = {
       callTranscription: false, aiSummary: false, voiceBot: false,
       whatsappAutomation: false, webhookAccess: false,
       customDomain: false, customBranding: false,
+      projects: false, tasks: false, payroll: false, websiteTracking: false,
     },
   },
   pro: {
@@ -136,6 +143,7 @@ const DEFAULT_PLAN_LIMITS = {
       callTranscription: true, aiSummary: true, voiceBot: false,
       whatsappAutomation: true, webhookAccess: true,
       customDomain: false, customBranding: false,
+      projects: true, tasks: true, payroll: false, websiteTracking: true,
     },
   },
   enterprise: {
@@ -152,6 +160,7 @@ const DEFAULT_PLAN_LIMITS = {
       callTranscription: true, aiSummary: true, voiceBot: true,
       whatsappAutomation: true, webhookAccess: true,
       customDomain: true, customBranding: true,
+      projects: true, tasks: true, payroll: true, websiteTracking: true,
     },
   },
 };

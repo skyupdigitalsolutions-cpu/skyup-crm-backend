@@ -38,6 +38,11 @@ const FEATURE_CATALOG = [
   { key: 'white-label',         label: 'White Label'         },
   { key: 'custom-domain',       label: 'Custom Domain'       },
   { key: 'custom-branding',     label: 'Custom Branding'     },
+  // NEW: Operations features
+  { key: 'projects',            label: 'Projects'            },
+  { key: 'tasks',               label: 'Tasks'               },
+  { key: 'payroll',             label: 'Payroll'             },
+  { key: 'website-tracking',    label: 'Website Tracking'    },
 ];
 
 // ── Seed helper — called lazily on first GET /plans so the DB always

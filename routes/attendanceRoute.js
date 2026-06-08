@@ -1,3 +1,7 @@
+// routes/attendanceRoute.js — UPDATED
+// Added requireFeature("attendance") gate to all admin and user attendance routes.
+// Ensures companies without attendance in their plan cannot access any attendance APIs.
+
 const express = require("express");
 const router  = express.Router();
 
@@ -10,24 +14,25 @@ const {
 
 const { protect }      = require("../middlewares/authMiddleware");
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
+const { requireFeature } = require("../middlewares/entitlementMiddleware");
 
-// ── User routes ───────────────────────────────────────────────────────────────
-router.post("/clock-in",    protect, clockIn);
-router.post("/clock-out",   protect, clockOut);
-router.post("/break/start", protect, startBreak);
-router.post("/break/end",   protect, endBreak);
-router.post("/ping",        protect, pingActivity);
-router.get("/my-today",     protect, getMyToday);
+// ── User routes — all require attendance feature ──────────────────────────────
+router.post("/clock-in",    protect, requireFeature("attendance"), clockIn);
+router.post("/clock-out",   protect, requireFeature("attendance"), clockOut);
+router.post("/break/start", protect, requireFeature("attendance"), startBreak);
+router.post("/break/end",   protect, requireFeature("attendance"), endBreak);
+router.post("/ping",        protect, requireFeature("attendance"), pingActivity);
+router.get("/my-today",     protect, requireFeature("attendance"), getMyToday);
 
 // ── Admin routes — Live dashboard ─────────────────────────────────────────────
-router.get("/company",      protectAdmin, getCompanyAttendance);
-router.post("/mark-idle",   protectAdmin, markIdleUsers);
+router.get("/company",      protectAdmin, requireFeature("attendance"), getCompanyAttendance);
+router.post("/mark-idle",   protectAdmin, requireFeature("attendance"), markIdleUsers);
 
 // ── Admin routes — Attendance Management ─────────────────────────────────────
-router.get("/report",       protectAdmin, getAttendanceReport);   // date-range + filters
-router.get("/export",       protectAdmin, exportAttendance);      // export JSON for xlsx
-router.get("/users",        protectAdmin, getCompanyUsers);       // employee dropdown
-router.put("/:id",          protectAdmin, editAttendance);        // edit a record
-router.delete("/:id",       protectAdmin, deleteAttendance);      // delete a record
+router.get("/report",       protectAdmin, requireFeature("attendance"), getAttendanceReport);
+router.get("/export",       protectAdmin, requireFeature("attendance"), exportAttendance);
+router.get("/users",        protectAdmin, requireFeature("attendance"), getCompanyUsers);
+router.put("/:id",          protectAdmin, requireFeature("attendance"), editAttendance);
+router.delete("/:id",       protectAdmin, requireFeature("attendance"), deleteAttendance);
 
 module.exports = router;

@@ -1,7 +1,13 @@
+// routes/websiteConfig.js — UPDATED
+// Added requireFeature("websiteTracking") gate to all website config routes.
+// The existing checkLimit("websites") on POST is preserved.
+// GET (read) routes are also gated so companies without websiteTracking
+// cannot even list website integrations.
+
 const express = require("express");
 const router = express.Router();
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
-const { checkLimit } = require("../middlewares/entitlementMiddleware");
+const { checkLimit, requireFeature } = require("../middlewares/entitlementMiddleware");
 const WebsiteConfig = require("../models/WebsiteConfig");
 const {
   getConfigs,
@@ -18,15 +24,17 @@ const countCompanyWebsiteConfigs = async (req) => {
   return WebsiteConfig.countDocuments({ company: companyId });
 };
 
-router.get("/", protectAdmin, getConfigs);
+// All routes require websiteTracking feature
+router.get("/",    protectAdmin, requireFeature("websiteTracking"), getConfigs);
 router.post(
   "/",
   protectAdmin,
+  requireFeature("websiteTracking"),
   checkLimit("websites", countCompanyWebsiteConfigs), // limit gate: max website integrations
   createConfig,
 );
-router.put("/:id", protectAdmin, updateConfig);
-router.patch("/:id/toggle", protectAdmin, toggleConfig);
-router.delete("/:id", protectAdmin, deleteConfig);
+router.put("/:id",           protectAdmin, requireFeature("websiteTracking"), updateConfig);
+router.patch("/:id/toggle",  protectAdmin, requireFeature("websiteTracking"), toggleConfig);
+router.delete("/:id",        protectAdmin, requireFeature("websiteTracking"), deleteConfig);
 
 module.exports = router;

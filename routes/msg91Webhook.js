@@ -1,27 +1,40 @@
-// routes/msg91Webhook.js
+// routes/websiteConfig.js — UPDATED
+// Added requireFeature("websiteTracking") gate to all website config routes.
+// The existing checkLimit("websites") on POST is preserved.
+// GET (read) routes are also gated so companies without websiteTracking
+// cannot even list website integrations.
+
 const express = require("express");
-const router  = express.Router();
-const { receiveMSG91Webhook } = require("../controllers/msg91WebhookController");
+const router = express.Router();
+const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
+const { checkLimit, requireFeature } = require("../middlewares/entitlementMiddleware");
+const WebsiteConfig = require("../models/WebsiteConfig");
+const {
+  getConfigs,
+  createConfig,
+  updateConfig,
+  toggleConfig,
+  deleteConfig,
+} = require("../controllers/websiteConfigController");
 
-// ── DEBUG endpoint — logs the raw payload MSG91 sends ──────────────────────
-// HOW TO USE:
-//   1. Temporarily point your MSG91 webhook to:
-//      https://skyup-crm-backend.onrender.com/msg91-webhook/debug
-//   2. Have a lead send a WhatsApp message to your number
-//   3. Check your Render logs — you'll see the EXACT payload MSG91 sends
-//   4. Once confirmed working, switch the URL back to /msg91-webhook/
-// ──────────────────────────────────────────────────────────────────────────
-router.post("/debug", (req, res) => {
-  console.log("🔍 MSG91 DEBUG PAYLOAD ─────────────────────────────");
-  console.log("Headers:", JSON.stringify(req.headers, null, 2));
-  console.log("Body:",    JSON.stringify(req.body,    null, 2));
-  console.log("────────────────────────────────────────────────────");
-  res.status(200).json({ received: true, body: req.body, headers: req.headers });
-});
+// Count existing website configs for the caller's company.
+const countCompanyWebsiteConfigs = async (req) => {
+  const companyId = req.admin?.company?._id || req.admin?.company || null;
+  if (!companyId) return 0;
+  return WebsiteConfig.countDocuments({ company: companyId });
+};
 
-// ── Main inbound webhook ───────────────────────────────────────────────────
-// MSG91 dashboard webhook URL: https://your-backend.onrender.com/msg91-webhook/
-router.post("/",      receiveMSG91Webhook);
-router.post("/msg91", receiveMSG91Webhook);  // backward compat
+// All routes require websiteTracking feature
+router.get("/",    protectAdmin, requireFeature("websiteTracking"), getConfigs);
+router.post(
+  "/",
+  protectAdmin,
+  requireFeature("websiteTracking"),
+  checkLimit("websites", countCompanyWebsiteConfigs), // limit gate: max website integrations
+  createConfig,
+);
+router.put("/:id",           protectAdmin, requireFeature("websiteTracking"), updateConfig);
+router.patch("/:id/toggle",  protectAdmin, requireFeature("websiteTracking"), toggleConfig);
+router.delete("/:id",        protectAdmin, requireFeature("websiteTracking"), deleteConfig);
 
 module.exports = router;

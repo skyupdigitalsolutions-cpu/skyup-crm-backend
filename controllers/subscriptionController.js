@@ -57,6 +57,10 @@ const DEFAULT_PLAN_FEATURES = {
       { key: "api-access",     label: "API / Webhooks",       enabled: false },
       { key: "custom-reports", label: "Custom Reports",       enabled: false },
       { key: "white-label",    label: "White Label",          enabled: false },
+      { key: "projects",         label: "Projects",         enabled: false },
+      { key: "tasks",            label: "Tasks",            enabled: false },
+      { key: "payroll",          label: "Payroll",          enabled: false },
+      { key: "website-tracking", label: "Website Tracking", enabled: false },
     ],
   },
   basic: {
@@ -91,6 +95,10 @@ const DEFAULT_PLAN_FEATURES = {
       { key: "api-access",     label: "API / Webhooks",       enabled: false },
       { key: "custom-reports", label: "Custom Reports",       enabled: false },
       { key: "white-label",    label: "White Label",          enabled: false },
+      { key: "projects",         label: "Projects",         enabled: false },
+      { key: "tasks",            label: "Tasks",            enabled: false },
+      { key: "payroll",          label: "Payroll",          enabled: false },
+      { key: "website-tracking", label: "Website Tracking", enabled: false },
     ],
   },
   pro: {
@@ -125,6 +133,10 @@ const DEFAULT_PLAN_FEATURES = {
       { key: "api-access",     label: "API / Webhooks",       enabled: true  },
       { key: "custom-reports", label: "Custom Reports",       enabled: false },
       { key: "white-label",    label: "White Label",          enabled: false },
+      { key: "projects",         label: "Projects",         enabled: true  },
+      { key: "tasks",            label: "Tasks",            enabled: true  },
+      { key: "payroll",          label: "Payroll",          enabled: false },
+      { key: "website-tracking", label: "Website Tracking", enabled: true  },
     ],
   },
   enterprise: {
@@ -159,6 +171,10 @@ const DEFAULT_PLAN_FEATURES = {
       { key: "api-access",     label: "API / Webhooks",       enabled: true },
       { key: "custom-reports", label: "Custom Reports",       enabled: true },
       { key: "white-label",    label: "White Label",          enabled: true },
+      { key: "projects",         label: "Projects",         enabled: true },
+      { key: "tasks",            label: "Tasks",            enabled: true },
+      { key: "payroll",          label: "Payroll",          enabled: true },
+      { key: "website-tracking", label: "Website Tracking", enabled: true },
     ],
   },
 };
