@@ -933,7 +933,7 @@ const _saveConversationAndMessage = async ({
 // ─────────────────────────────────────────────────────────────────────────────
 const bulkSendToLeads = async (req, res) => {
   try {
-    const { templateName, languageCode = "en_US", campaign } = req.body;
+    const { templateName, languageCode = "en_US", campaign, filter: blastFilter } = req.body;
     const { companyId, userId } = req.user;
 
     if (!templateName?.trim())
@@ -955,6 +955,21 @@ const bulkSendToLeads = async (req, res) => {
 
     const filter = { company: companyId, mobile: { $exists: true, $ne: "" } };
     if (campaign && campaign.trim()) filter.campaign = campaign.trim();
+
+    // Apply optional blast filters (status, source, date range)
+    if (blastFilter) {
+      if (blastFilter.status) filter.status = blastFilter.status;
+      if (blastFilter.source) filter.campaign = blastFilter.source; // source maps to campaign field for Meta/Google/Website
+      if (blastFilter.dateFrom || blastFilter.dateTo) {
+        filter.createdAt = {};
+        if (blastFilter.dateFrom) filter.createdAt.$gte = new Date(blastFilter.dateFrom);
+        if (blastFilter.dateTo) {
+          const end = new Date(blastFilter.dateTo);
+          end.setHours(23, 59, 59, 999);
+          filter.createdAt.$lte = end;
+        }
+      }
+    }
 
     const leads = await Lead.find(filter).lean();
     if (leads.length === 0)

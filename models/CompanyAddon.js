@@ -97,6 +97,21 @@ const companyAddonSchema = new mongoose.Schema(
       default: "",
       trim:    true,
     },
+
+    // Price charged for this addon (0 = free/gifted, >0 = paid or custom-priced)
+    price: {
+      type:    Number,
+      default: 0,
+      min:     0,
+    },
+
+    // Currency code for the price
+    currency: {
+      type:    String,
+      default: "INR",
+      trim:    true,
+      uppercase: true,
+    },
   },
   { timestamps: true }
 );

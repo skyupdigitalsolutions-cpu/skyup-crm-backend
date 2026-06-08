@@ -87,12 +87,12 @@ const purchaseAddon = async (req, res) => {
 };
 
 // ── POST /api/addons/:companyId/grant ─────────────────────────────────────────
-// Create a FREE addon granted by developer/superadmin.
-// Body: { addonType, quantity?, durationMonths?, notes? }
+// Create an addon granted by developer/superadmin (free or custom-priced).
+// Body: { addonType, quantity?, durationMonths?, notes?, price?, currency? }
 const grantAddon = async (req, res) => {
   try {
     const { companyId } = req.params;
-    const { addonType, quantity = 1, durationMonths, notes = "" } = req.body;
+    const { addonType, quantity = 1, durationMonths, notes = "", price = 0, currency = "INR" } = req.body;
     const { actorId, actorRole } = getActor(req);
 
     if (!addonType) return res.status(400).json({ success: false, message: "addonType is required" });
@@ -107,15 +107,19 @@ const grantAddon = async (req, res) => {
       expiryDate.setMonth(expiryDate.getMonth() + parseInt(durationMonths, 10));
     }
 
+    const numericPrice = Math.max(0, parseFloat(price) || 0);
+
     const addon = await CompanyAddon.create({
       companyId,
       addonType,
-      quantity:      Math.max(1, parseInt(quantity, 10)),
+      quantity:       Math.max(1, parseInt(quantity, 10)),
       startDate,
       expiryDate,
-      status:        "active",
-      paymentStatus: "free",
-      createdBy:     actorId,
+      status:         "active",
+      paymentStatus:  numericPrice > 0 ? "paid" : "free",
+      price:          numericPrice,
+      currency:       (currency || "INR").toString().toUpperCase().trim() || "INR",
+      createdBy:      actorId,
       createdByModel: actorRole === "developer" ? "Developer" : "Admin",
       notes,
     });
@@ -127,7 +131,7 @@ const grantAddon = async (req, res) => {
       action:   "addon_granted",
       field:    "addonType",
       newValue: addonType,
-      reason:   notes || `Free addon granted: ${addonType} × ${quantity}`,
+      reason:   notes || `Addon granted: ${addonType} × ${quantity}${numericPrice > 0 ? ` @ ${currency} ${numericPrice}` : " (free)"}`,
     });
 
     res.status(201).json({ success: true, addon });
