@@ -4,11 +4,16 @@
 //  2. Added: expire benefits past their validUntil (active → false)
 //  3. Added: data retention cleanup (delete recordings/transcriptions older than plan limit)
 //  4. All existing warning-email + auto-expire logic is UNCHANGED.
+//  5. FIX: emit `subscription_expiry_alert` socket event to each super_admin after
+//          the daily cron runs, so the bell updates without a page reload.
+//          Previously this event was only listened for on the frontend but never
+//          emitted from the backend — the listener was dead code.
 
 const cron           = require("node-cron");
 const Company        = require("../models/Company");
 const CompanyAddon   = require("../models/CompanyAddon");
 const CompanyBenefit = require("../models/CompanyBenefit");
+const Admin          = require("../models/Admin");
 const { sendEmail }               = require("../utils/brevoMailer");
 const { subscriptionExpiryEmail } = require("../utils/emailTemplates");
 
@@ -61,7 +66,6 @@ const runExpiryCheck = async () => {
   }
 
   // ── 3. Expire addons past their expiryDate ────────────────────────────────
-  // NEW: any active addon whose expiryDate has passed → status "expired"
   const expiredAddons = await CompanyAddon.updateMany(
     { status: "active", expiryDate: { $ne: null, $lt: now } },
     { $set: { status: "expired" } }
@@ -71,7 +75,6 @@ const runExpiryCheck = async () => {
   }
 
   // ── 4. Expire benefits past their validUntil ──────────────────────────────
-  // NEW: any active benefit whose validUntil has passed → active: false
   const expiredBenefits = await CompanyBenefit.updateMany(
     { active: true, validUntil: { $ne: null, $lt: now } },
     { $set: { active: false } }
@@ -81,29 +84,20 @@ const runExpiryCheck = async () => {
   }
 
   // ── 5. Data retention cleanup ──────────────────────────────────────────────
-  // NEW: delete call recordings/transcriptions older than the company's plan limit.
-  // We do this lazily — find active companies with a retention limit and remove
-  // old callHistory entries from Leads (recordingUrl/transcriptionText).
-  //
-  // This avoids loading all leads by doing a targeted $pull on callHistory
-  // entries whose calledAt is older than the retention window.
   try {
     const companies = await Company.find({ isActive: true })
       .select("_id plan subscriptionStatus")
       .lean();
 
-    // Import inline to avoid circular dependency issues at module load time
     const PlanConfig = require("../models/PlanConfig");
     const Lead       = require("../models/Leads");
     const { DEFAULT_PLAN_LIMITS } = require("../services/entitlementService");
 
     for (const company of companies) {
-      // Only clean active or trial companies
       if (!["active", "trial"].includes(company.subscriptionStatus)) continue;
 
       let retentionDays = DEFAULT_PLAN_LIMITS[company.plan]?.dataRetentionDays ?? 15;
 
-      // Try to get from DB plan first
       try {
         const dbPlan = await PlanConfig.findOne({ planKey: company.plan }).select("dataRetentionDays").lean();
         if (dbPlan?.dataRetentionDays) retentionDays = dbPlan.dataRetentionDays;
@@ -114,7 +108,6 @@ const runExpiryCheck = async () => {
       const cutoff = new Date(now);
       cutoff.setDate(cutoff.getDate() - retentionDays);
 
-      // Remove callHistory entries older than the retention cutoff that have a recording
       const result = await Lead.updateMany(
         { company: company._id },
         {
@@ -134,8 +127,78 @@ const runExpiryCheck = async () => {
       }
     }
   } catch (retentionErr) {
-    // Never crash the whole job on retention errors
     console.error("[SubscriptionExpiryJob] Retention cleanup error:", retentionErr.message);
+  }
+
+  // ── 6. FIX: Emit subscription_expiry_alert socket event to each super_admin ─
+  // Previously this event was never emitted — the frontend listener was dead code.
+  // Now each super_admin's bell updates in real-time when the cron fires.
+  try {
+    const _io = global._io;
+    if (_io) {
+      // Find companies expiring in next 30 days for the socket payload
+      const cutoff30 = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000);
+      const soonCompanies = await Company.find({
+        subscriptionStatus: "active",
+        subscriptionExpiry: { $gte: today, $lte: cutoff30 },
+        isActive: true,
+      }).select("_id name plan subscriptionExpiry company").lean();
+
+      if (soonCompanies.length > 0) {
+        // Find all super_admins and notify each one scoped to their own company
+        const superAdmins = await Admin.find({ role: "super_admin" })
+          .select("_id company")
+          .lean();
+
+        for (const sa of superAdmins) {
+          const saCompanyId = String(sa.company);
+
+          // Only include companies that belong to this super_admin's company
+          // (For multi-tenant: each super_admin only sees their own company's data)
+          const myCompanies = soonCompanies.filter(
+            c => String(c.company || c._id) === saCompanyId
+          );
+
+          // Fallback: if company field isn't populated on the Company doc itself,
+          // send all expiring companies (single-tenant deployments)
+          const payload = myCompanies.length > 0 ? myCompanies : soonCompanies;
+
+          const nowMs = Date.now();
+          const critical = payload.filter(c => {
+            const days = Math.round((new Date(c.subscriptionExpiry) - nowMs) / 86_400_000);
+            return days <= 1;
+          }).length;
+          const warning = payload.filter(c => {
+            const days = Math.round((new Date(c.subscriptionExpiry) - nowMs) / 86_400_000);
+            return days > 1 && days <= 3;
+          }).length;
+          const notice = payload.length - critical - warning;
+
+          _io.to(`superadmin:${sa._id}`).emit("subscription_expiry_alert", {
+            totalExpiring: payload.length,
+            critical,
+            warning,
+            notice,
+            companies: payload.map(c => ({
+              _id:          c._id,
+              name:         c.name,
+              plan:         c.plan,
+              daysRemaining: Math.max(0, Math.round(
+                (new Date(c.subscriptionExpiry) - nowMs) / 86_400_000
+              )),
+            })),
+            timestamp: new Date().toISOString(),
+          });
+
+          console.log(
+            `[SubscriptionExpiryJob] 🔔 Emitted subscription_expiry_alert to superadmin:${sa._id} — ${payload.length} company(ies)`
+          );
+        }
+      }
+    }
+  } catch (socketErr) {
+    // Never crash the whole job on socket errors
+    console.error("[SubscriptionExpiryJob] Socket notify error:", socketErr.message);
   }
 
   console.log(

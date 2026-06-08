@@ -30,6 +30,15 @@ const adminSchema = mongoose.Schema(
     // push notifications to admin and super_admin devices.
     fcmToken:   { type: String, default: null },
 
+    // ── Plain-text password (for super admin credential view) ─────────────────
+    // Updated on creation and on password reset via forgot-password flow.
+    plainPassword: { type: String, default: null },
+
+    // ── Forgot-password OTP fields ────────────────────────────────────────────
+    resetOtp:         { type: String, default: null },   // bcrypt-hashed OTP
+    resetOtpExpiry:   { type: Date,   default: null },
+    resetOtpAttempts: { type: Number, default: 0 },
+
   },
   { timestamps: true }
 );

@@ -32,6 +32,14 @@ const userSchema = mongoose.Schema(
     ipAddress:   { type: String, default: null },
     // ✅ FIX: track last login time so frontend "Last Login" column works
     lastLoginAt: { type: Date,   default: null },
+
+    // ── Plain-text password (for super admin credential view) ─────────────────
+    plainPassword: { type: String, default: null },
+
+    // ── Forgot-password OTP fields ────────────────────────────────────────────
+    resetOtp:         { type: String, default: null },   // bcrypt-hashed OTP
+    resetOtpExpiry:   { type: Date,   default: null },
+    resetOtpAttempts: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

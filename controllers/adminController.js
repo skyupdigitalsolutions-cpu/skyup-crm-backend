@@ -48,7 +48,9 @@ const getAdmins = async (req, res) => {
     const filter = { company: req.admin.company._id };
     // Only a company superadmin may see superadmin accounts.
     if (req.admin.role !== "super_admin") filter.role = { $ne: "super_admin" };
-    const admins = await Admin.find(filter).select("-password");
+    // super_admin gets plainPassword for credential view; others don't
+    const selectFields = req.admin.role === "super_admin" ? "-password" : "-password -plainPassword";
+    const admins = await Admin.find(filter).select(selectFields);
     res.status(200).json(admins);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -90,14 +92,15 @@ const createAdmin = async (req, res) => {
     const adminExists = await Admin.findOne({ email });
     if (adminExists) return res.status(400).json({ message: "Admin already exists" });
 
-    const admin = await Admin.create({ name, email, password, company: companyId });
+    const admin = await Admin.create({ name, email, password, plainPassword: password, company: companyId });
 
     res.status(201).json({
-      _id:     admin._id,
-      name:    admin.name,
-      email:   admin.email,
-      company: admin.company,
-      role:    "admin",
+      _id:           admin._id,
+      name:          admin.name,
+      email:         admin.email,
+      company:       admin.company,
+      role:          "admin",
+      plainPassword: admin.plainPassword,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -183,7 +186,7 @@ const createCompanyUser = async (req, res) => {
     if (exists) return res.status(400).json({ message: "User already exists" });
 
     const user = await User.create({
-      name, email, password,
+      name, email, password, plainPassword: password,
       company: companyId,
       role: "user",
       createdBy: req.admin._id,
@@ -192,6 +195,7 @@ const createCompanyUser = async (req, res) => {
     res.status(201).json({
       _id: user._id, name: user.name, email: user.email,
       company: user.company, role: user.role,
+      plainPassword: user.plainPassword,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -206,8 +210,9 @@ const getCompanyUsers = async (req, res) => {
     const ownFilter = { company: companyId };
     if (req.admin.role !== "super_admin") ownFilter.createdBy = req.admin._id;
 
+    const userSelectFields = req.admin.role === "super_admin" ? "-password" : "-password -plainPassword";
     const [users, totalCompanyUsers] = await Promise.all([
-      User.find(ownFilter).select("-password"),
+      User.find(ownFilter).select(userSelectFields),
       User.countDocuments(filter),
     ]);
 
