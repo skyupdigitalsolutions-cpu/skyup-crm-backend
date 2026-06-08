@@ -154,6 +154,20 @@ const companySchema = mongoose.Schema(
     brevoSenderEmail: { type: String, default: "", trim: true },
     brevoSenderName:  { type: String, default: "", trim: true },
 
+    // ── MSG91 Email (primary email blast, 5000/day limit → falls back to Brevo) ──
+    msg91EmailApiKey: {
+      type:    String,
+      default: "",
+      trim:    true,
+      select:  false,
+    },
+    msg91EmailDomain:      { type: String, default: "", trim: true },
+    msg91EmailSenderEmail: { type: String, default: "", trim: true },
+    msg91EmailSenderName:  { type: String, default: "", trim: true },
+    // Tracks how many emails sent via MSG91 today (resets at midnight UTC)
+    msg91EmailDailyCount:  { type: Number, default: 0 },
+    msg91EmailCountDate:   { type: String, default: "" }, // "YYYY-MM-DD" UTC
+
 
     // ── Telegram Notification Settings ────────────────────────────────────────
     // Campaign-only: only Meta / Google Ads / Website leads trigger notifications.

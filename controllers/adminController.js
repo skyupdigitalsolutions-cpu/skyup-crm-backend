@@ -709,7 +709,7 @@ const deleteMsg91Config = async (req, res) => {
 const getTelegramConfig = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    // Exclude telegramBotToken — never return the raw token to the frontend
+    // Explicitly select telegramBotToken (it has select:false on the schema)
     const company = await Company.findById(companyId)
       .select('telegramEnabled telegramChatId telegramBotToken')
       .lean();
@@ -717,7 +717,7 @@ const getTelegramConfig = async (req, res) => {
     res.json({
       telegramEnabled:  company.telegramEnabled  || false,
       telegramChatId:   company.telegramChatId   || '',
-      // Only indicate whether a token is set — never return the actual value
+      // Only indicate whether a token is set — never return the actual token
       hasToken: !!(company.telegramBotToken),
     });
   } catch (err) {
@@ -766,6 +766,76 @@ const testTelegramConfig = async (req, res) => {
   }
 };
 
+// ── MSG91 Email config ────────────────────────────────────────────────────────
+// GET /api/admin/company/msg91-email-config
+const getMsg91EmailConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const company   = await Company.findById(companyId)
+      .select("+msg91EmailApiKey msg91EmailDomain msg91EmailSenderEmail msg91EmailSenderName msg91EmailDailyCount msg91EmailCountDate")
+      .lean();
+
+    const MSG91_EMAIL_DAILY_LIMIT = 5000;
+    const today = new Date().toISOString().slice(0, 10);
+    const count = company?.msg91EmailCountDate === today ? (company?.msg91EmailDailyCount || 0) : 0;
+
+    res.json({
+      connected:   !!(company?.msg91EmailApiKey && company?.msg91EmailSenderEmail && company?.msg91EmailDomain),
+      domain:      company?.msg91EmailDomain      || "",
+      senderEmail: company?.msg91EmailSenderEmail || "",
+      senderName:  company?.msg91EmailSenderName  || "",
+      dailyLimit:  MSG91_EMAIL_DAILY_LIMIT,
+      usedToday:   count,
+      remaining:   Math.max(0, MSG91_EMAIL_DAILY_LIMIT - count),
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// PUT /api/admin/company/msg91-email-config
+const saveMsg91EmailConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { apiKey, domain, senderEmail, senderName } = req.body;
+    if (!apiKey       || !apiKey.trim())       return res.status(400).json({ message: "MSG91 Auth Key is required" });
+    if (!domain       || !domain.trim())       return res.status(400).json({ message: "Sending domain is required" });
+    if (!senderEmail  || !senderEmail.trim())  return res.status(400).json({ message: "Sender email is required" });
+
+    await Company.findByIdAndUpdate(companyId, {
+      msg91EmailApiKey:      apiKey.trim(),
+      msg91EmailDomain:      domain.trim(),
+      msg91EmailSenderEmail: senderEmail.trim(),
+      msg91EmailSenderName:  (senderName || "CRM").trim(),
+    });
+    res.json({
+      success:     true,
+      connected:   true,
+      domain:      domain.trim(),
+      senderEmail: senderEmail.trim(),
+      senderName:  (senderName || "CRM").trim(),
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// DELETE /api/admin/company/msg91-email-config
+const deleteMsg91EmailConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    await Company.findByIdAndUpdate(companyId, {
+      msg91EmailApiKey:      "",
+      msg91EmailDomain:      "",
+      msg91EmailSenderEmail: "",
+      msg91EmailSenderName:  "",
+    });
+    res.json({ success: true, connected: false });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -789,6 +859,9 @@ module.exports = {
   getMsg91Config,
   saveMsg91Config,
   deleteMsg91Config,
+  getMsg91EmailConfig,
+  saveMsg91EmailConfig,
+  deleteMsg91EmailConfig,
   getTelegramConfig,
   saveTelegramConfig,
   testTelegramConfig,

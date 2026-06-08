@@ -28,6 +28,9 @@ const {
   getMsg91Config,
   saveMsg91Config,
   deleteMsg91Config,
+  getMsg91EmailConfig,
+  saveMsg91EmailConfig,
+  deleteMsg91EmailConfig,
   getTelegramConfig,
   saveTelegramConfig,
   testTelegramConfig,
@@ -72,6 +75,11 @@ router.delete("/company/brevo-config", protectAdmin, requireCompanySuperAdmin, d
 router.get("/company/msg91-config",    protectAdmin, getMsg91Config);
 router.put("/company/msg91-config",    protectAdmin, requireCompanySuperAdmin, saveMsg91Config);
 router.delete("/company/msg91-config", protectAdmin, requireCompanySuperAdmin, deleteMsg91Config);
+
+// ── MSG91 Email config — primary email blast provider (GET + PUT + DELETE) ────
+router.get("/company/msg91-email-config",    protectAdmin, getMsg91EmailConfig);
+router.put("/company/msg91-email-config",    protectAdmin, requireCompanySuperAdmin, saveMsg91EmailConfig);
+router.delete("/company/msg91-email-config", protectAdmin, requireCompanySuperAdmin, deleteMsg91EmailConfig);
 
 // ── Telegram notification config (campaign leads only) ────────────────────────
 router.get("/company/telegram",       protectAdmin, getTelegramConfig);

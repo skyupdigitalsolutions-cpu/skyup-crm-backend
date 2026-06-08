@@ -5,12 +5,20 @@ const {
   previewCampaign,
   sendSingleEmail,
   sendCsvEmails,
+  getBrevoStatus,
+  getMsg91EmailStatus,
 } = require("../controllers/emailCampaignController");
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 const { requireFeature } = require("../middlewares/entitlementMiddleware");
 
 // GET  /api/email-campaign/preview?campaign=XYZ
 router.get("/preview", protectAdmin, previewCampaign);
+
+// GET  /api/email-campaign/brevo-status
+router.get("/brevo-status", protectAdmin, getBrevoStatus);
+
+// GET  /api/email-campaign/msg91-email-status
+router.get("/msg91-email-status", protectAdmin, getMsg91EmailStatus);
 
 // POST /api/email-campaign/send — requires emailBlast feature
 router.post("/send", protectAdmin, requireFeature("emailBlast"), sendBulkEmails);
