@@ -128,17 +128,37 @@ const updatePlan = async (req, res) => {
     const plan = await PlanConfig.findById(req.params.id);
     if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
 
-    const { name, description, color, price, maxUsers, maxAdmins, maxLeads, features, sortOrder, isActive } = req.body;
+    const {
+      name, description, color, price,
+      maxUsers, maxAdmins, maxLeads,
+      maxWebsites, maxMetaCampaigns, maxGoogleAccounts, maxStorageMB,
+      transcriptionsPerMonth, summariesPerMonth, voiceBotPerMonth,
+      recordingEnabled, dataRetentionDays,
+      features, sortOrder, isActive,
+    } = req.body;
 
-    if (name       !== undefined) plan.name        = name.trim();
-    if (description!== undefined) plan.description = description.trim();
-    if (color      !== undefined) plan.color        = color;
-    if (maxUsers   !== undefined) plan.maxUsers     = Number(maxUsers);
-    if (maxAdmins  !== undefined) plan.maxAdmins    = Number(maxAdmins);
-    if (maxLeads   !== undefined) plan.maxLeads     = Number(maxLeads);
-    if (features   !== undefined) plan.features     = features;
-    if (sortOrder  !== undefined) plan.sortOrder    = Number(sortOrder);
-    if (isActive   !== undefined) plan.isActive     = Boolean(isActive);
+    if (name        !== undefined) plan.name        = name.trim();
+    if (description !== undefined) plan.description = description.trim();
+    if (color       !== undefined) plan.color        = color;
+    if (maxUsers    !== undefined) plan.maxUsers     = Number(maxUsers);
+    if (maxAdmins   !== undefined) plan.maxAdmins    = Number(maxAdmins);
+    if (maxLeads    !== undefined) plan.maxLeads     = Number(maxLeads);
+    // Extended resource limits
+    if (maxWebsites       !== undefined) plan.maxWebsites       = Number(maxWebsites);
+    if (maxMetaCampaigns  !== undefined) plan.maxMetaCampaigns  = Number(maxMetaCampaigns);
+    if (maxGoogleAccounts !== undefined) plan.maxGoogleAccounts = Number(maxGoogleAccounts);
+    if (maxStorageMB      !== undefined) plan.maxStorageMB      = Number(maxStorageMB);
+    // AI quotas
+    if (transcriptionsPerMonth !== undefined) plan.transcriptionsPerMonth = Number(transcriptionsPerMonth);
+    if (summariesPerMonth      !== undefined) plan.summariesPerMonth      = Number(summariesPerMonth);
+    if (voiceBotPerMonth       !== undefined) plan.voiceBotPerMonth       = Number(voiceBotPerMonth);
+    // Flags
+    if (recordingEnabled  !== undefined) plan.recordingEnabled  = Boolean(recordingEnabled);
+    if (dataRetentionDays !== undefined) plan.dataRetentionDays = Number(dataRetentionDays);
+
+    if (features  !== undefined) plan.features  = features;
+    if (sortOrder !== undefined) plan.sortOrder  = Number(sortOrder);
+    if (isActive  !== undefined) plan.isActive   = Boolean(isActive);
 
     if (price !== undefined) {
       plan.price = {

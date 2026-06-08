@@ -368,10 +368,14 @@ const applyDevOverride = async (req, res) => {
       setPayload["devOverrides.recordingEnabled"] = (r === null || r === "") ? null : !!r;
     }
 
-    // Merge new featureToggles on top of existing ones
-    if (featureToggles && typeof featureToggles === "object") {
-      const merged = { ...existingToggles, ...featureToggles };
-      setPayload["devOverrides.featureToggles"] = merged;
+    // featureToggles: REPLACE entirely with what the frontend sends.
+    // The frontend iterates ALL_FEATURE_KEYS and includes every key that is
+    // explicitly "on" or "off". "inherit" keys are omitted. So the incoming
+    // featureToggles object is already the complete desired state — we must NOT
+    // merge with existing values, otherwise resetting a key to "inherit" never
+    // clears the old override (the old value would persist in the merge).
+    if (featureToggles !== undefined && typeof featureToggles === "object") {
+      setPayload["devOverrides.featureToggles"] = featureToggles;
     }
 
     const updated = await Company.findByIdAndUpdate(
