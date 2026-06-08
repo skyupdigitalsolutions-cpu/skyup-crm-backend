@@ -18,10 +18,10 @@ const { normalizePhone: _sharedNormalizePhone } = require("../utils/normalizePho
 function normalizePhone(raw) {
   if (!raw) return "";
   const ten = _sharedNormalizePhone(raw);
-  if (ten) return "91" + ten;         // shared util returns 10-digit → prepend 91
-  // Fallback: strip non-digits and return as-is for non-Indian numbers
+  if (ten) return "91" + ten;         // shared util strips country code → prepend 91
+  // Fallback: strip non-digits and return as-is (e.g. non-Indian numbers already in E.164)
   const digits = String(raw).replace(/\D/g, "");
-  return digits.startsWith("91") ? digits : digits;
+  return digits;
 }
 
 function safeWaPhone(stored) {
