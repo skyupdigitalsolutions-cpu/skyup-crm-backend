@@ -157,7 +157,7 @@ const companySchema = mongoose.Schema(
 
     // ── Telegram Notification Settings ────────────────────────────────────────
     // Campaign-only: only Meta / Google Ads / Website leads trigger notifications.
-    telegramBotToken: { type: String, default: null, trim: true, select: false },
+    telegramBotToken: { type: String, default: null, trim: true },
     telegramChatId:   { type: String, default: null, trim: true },
     telegramEnabled:  { type: Boolean, default: false },
 

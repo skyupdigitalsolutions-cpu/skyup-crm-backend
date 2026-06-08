@@ -340,26 +340,18 @@ const applyDevOverride = async (req, res) => {
     const companyId = req.params.id;
     const { featureToggles, reason = "" } = req.body;
 
-    const company = await Company.findById(companyId);
+    const company = await Company.findById(companyId).lean();
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
 
-    // Serialize the current devOverrides to a plain JS object.
-    // toObject() converts the Mongoose subdoc but may leave the featureToggles
-    // field as a Map instance when using Mongoose 9.x with Map type fields.
-    // We explicitly convert it to a plain object to ensure safe spreading.
-    const rawOverrides = company.devOverrides?.toObject?.() || company.devOverrides || {};
-    const oldOverrides = {
-      ...rawOverrides,
-      featureToggles: rawOverrides.featureToggles instanceof Map
-        ? Object.fromEntries(rawOverrides.featureToggles)
-        : (rawOverrides.featureToggles || {}),
-    };
-    const newOverrides = { ...oldOverrides };
+    // Normalize existing featureToggles (Mongoose Map → plain object)
+    const rawOverrides = company.devOverrides || {};
+    const existingToggles = rawOverrides.featureToggles instanceof Map
+      ? Object.fromEntries(rawOverrides.featureToggles)
+      : (rawOverrides.featureToggles || {});
 
-    // Numeric / limit overrides. For each field:
-    //   • key ABSENT from body     → leave unchanged
-    //   • key present & a number   → set as ABSOLUTE override (this company only)
-    //   • key present & "" or null → clear it (revert to plan + addon value)
+    // Build $set payload — only include fields present in the request body
+    const setPayload = {};
+
     const NUMERIC_FIELDS = [
       "admins", "users", "leads", "websites",
       "metaCampaigns", "googleAccounts", "storageMB",
@@ -368,36 +360,38 @@ const applyDevOverride = async (req, res) => {
     for (const field of NUMERIC_FIELDS) {
       if (!(field in req.body)) continue;
       const raw = req.body[field];
-      if (raw === null || raw === "") {
-        newOverrides[field] = null;
-      } else {
-        const n = parseInt(raw, 10);
-        newOverrides[field] = Number.isFinite(n) ? n : null;
-      }
+      setPayload[`devOverrides.${field}`] = (raw === null || raw === "") ? null : (Number.isFinite(parseInt(raw, 10)) ? parseInt(raw, 10) : null);
     }
 
-    // recordingEnabled tri-state: true / false / null (inherit)
     if ("recordingEnabled" in req.body) {
       const r = req.body.recordingEnabled;
-      newOverrides.recordingEnabled = (r === null || r === "") ? null : !!r;
+      setPayload["devOverrides.recordingEnabled"] = (r === null || r === "") ? null : !!r;
     }
 
-    // featureToggles replaced wholesale when provided (object keyed by camelCase feature key)
+    // Merge new featureToggles on top of existing ones
     if (featureToggles && typeof featureToggles === "object") {
-      newOverrides.featureToggles = featureToggles;
+      const merged = { ...existingToggles, ...featureToggles };
+      setPayload["devOverrides.featureToggles"] = merged;
     }
 
-    company.devOverrides = newOverrides;
-    await company.save();
+    const updated = await Company.findByIdAndUpdate(
+      companyId,
+      { $set: setPayload },
+      { new: true, runValidators: false }
+    ).lean();
+
+    // Build newOverrides for audit log
+    const newOverrides = updated?.devOverrides || {};
+    const oldOverrides = rawOverrides;
 
     await logAudit({
       companyId,
-      actorId:   req.developer?._id || null,
+      actorId:   req.developer?._id || req.user?._id || null,
       actorRole: "developer",
       action:    "dev_override_applied",
       field:     "devOverrides",
-      oldValue:  oldOverrides,
-      newValue:  newOverrides,
+      oldValue:  JSON.parse(JSON.stringify(oldOverrides)), // serialize safely
+      newValue:  JSON.parse(JSON.stringify(newOverrides)),
       reason:    reason || "Dev override applied from Developer Panel",
     });
 

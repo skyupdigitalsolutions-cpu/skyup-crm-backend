@@ -709,7 +709,7 @@ const deleteMsg91Config = async (req, res) => {
 const getTelegramConfig = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    // Explicitly select telegramBotToken (it has select:false on the schema)
+    // Exclude telegramBotToken — never return the raw token to the frontend
     const company = await Company.findById(companyId)
       .select('telegramEnabled telegramChatId telegramBotToken')
       .lean();
@@ -717,7 +717,7 @@ const getTelegramConfig = async (req, res) => {
     res.json({
       telegramEnabled:  company.telegramEnabled  || false,
       telegramChatId:   company.telegramChatId   || '',
-      // Only indicate whether a token is set — never return the actual token
+      // Only indicate whether a token is set — never return the actual value
       hasToken: !!(company.telegramBotToken),
     });
   } catch (err) {
