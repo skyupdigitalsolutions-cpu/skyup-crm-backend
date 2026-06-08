@@ -22,7 +22,7 @@ router.post(
   checkLimit("googleAccounts", countCompanyGoogleConfigs),  // limit gate: max Google accounts
   createConfig,
 );
-router.patch("/:id/toggle", protectAdmin, toggleConfig);
-router.delete("/:id",       protectAdmin, deleteConfig);
+router.patch("/:id/toggle", protectAdmin, requireFeature("googleAds"), toggleConfig);
+router.delete("/:id",       protectAdmin, requireFeature("googleAds"), deleteConfig);
 
 module.exports = router;

@@ -34,7 +34,7 @@ router.post(
   addConfig,
 );
 router.put("/:id", protectAdmin, updateConfig);
-router.patch("/:id/toggle", protectAdmin, toggleConfig);
+router.patch("/:id/toggle", protectAdmin, requireFeature("metaAds"), toggleConfig);
 router.delete("/:id", protectAdmin, deleteConfig);
 
 module.exports = router;
