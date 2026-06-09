@@ -460,8 +460,12 @@ const sendTemplate = async (req, res) => {
     await WhatsAppConversation.findByIdAndUpdate(conversationId, {
       lastMessage: templatePreview,
       lastMessageAt: new Date(),
-      status: "open",
-      sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      // A template send does NOT open WhatsApp's 24h window — only an inbound
+      // reply from the customer does (handled in the webhook). Marking the
+      // session "open" here previously tricked the UI into showing a text box
+      // and let agents send free-form messages that WhatsApp silently rejects.
+      status: "waiting", // waiting on the customer to reply
+      // sessionExpiresAt intentionally NOT changed.
     });
 
     res.json({ success: true, message: savedMsg });
@@ -758,10 +762,13 @@ const startConversation = async (req, res) => {
         company: companyId,
         assignedAgent: userId,
         lead: lead?._id || null,
-        status: "open",
+        // Starting a conversation with a template does NOT open WhatsApp's 24h
+        // window — only the customer's reply does. Leave the session closed so
+        // the UI keeps the template/Re-engage flow until they respond.
+        status: "waiting",
         lastMessage: "",
         lastMessageAt: new Date(),
-        sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        // sessionExpiresAt intentionally left unset (session not open yet).
       });
     } else {
       const patch = {};
@@ -791,12 +798,12 @@ const startConversation = async (req, res) => {
       templateName: templateName.trim(),
     });
 
-    const sessionExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
     await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
       lastMessage: templatePreview,
       lastMessageAt: new Date(),
-      status: "open",
-      sessionExpiresAt: sessionExpiry,
+      // Template send does not open the 24h window — wait for the customer reply.
+      status: "waiting",
+      // sessionExpiresAt intentionally NOT changed.
     });
 
     const io = global._io;
@@ -949,15 +956,17 @@ const _saveConversationAndMessage = async ({
       company: companyId,
       assignedAgent: userId,
       lead: leadId || null,
-      status: "open",
+      // Template send does not open WhatsApp's 24h window — only the customer's
+      // reply does. Keep the session closed so free-form text stays disabled.
+      status: "waiting",
       lastMessage: templatePreview,
       lastMessageAt: new Date(),
-      sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      // sessionExpiresAt intentionally left unset.
     });
   } else {
     await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
-      sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      status: "open",
+      // sessionExpiresAt intentionally NOT changed by a template send.
+      status: "waiting",
       lastMessage: templatePreview,
       lastMessageAt: new Date(),
     });
