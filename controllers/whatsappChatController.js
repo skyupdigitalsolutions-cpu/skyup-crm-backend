@@ -28,6 +28,53 @@ function safeWaPhone(stored) {
   return normalizePhone(stored);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// describeWaApiError — turn an axios error from the WA provider into a useful,
+// user-facing message AND log the full upstream context so 404s stop being a
+// mystery. The old code returned axios's generic "Request failed with status
+// code 404" whenever the provider's 404 body was non-JSON (e.g. a gateway/HTML
+// 404), which hid the real cause. This surfaces status, URL and body instead.
+// ─────────────────────────────────────────────────────────────────────────────
+function describeWaApiError(apiErr, context = "WA send") {
+  const status = apiErr?.response?.status;
+  const url = apiErr?.config?.url;
+  const body = apiErr?.response?.data;
+
+  // Log everything for the server operator.
+  console.error(`[${context}] WhatsApp API error`, {
+    status,
+    url,
+    method: apiErr?.config?.method,
+    body: typeof body === "string" ? body.slice(0, 800) : body,
+    message: apiErr?.message,
+  });
+
+  // Pick the most specific human-readable message available.
+  const apiMsg =
+    body?.message ||
+    body?.error?.message ||
+    body?.errors?.[0]?.message ||
+    (typeof body === "string" && body.trim()
+      ? body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200)
+      : null) ||
+    apiErr?.message;
+
+  // A 404 with no JSON body almost always means the endpoint URL/path was
+  // rejected by the provider gateway (deprecated route, wrong path, or the
+  // template/language combination does not exist for this account).
+  let hint = "";
+  if (status === 404 && !body?.message && !body?.error?.message) {
+    hint =
+      " (404 from provider — the endpoint or the template/language combination was not found. " +
+      "Verify the template name and that its approved language code matches exactly.)";
+  }
+
+  return {
+    status: status || 502,
+    message: `WhatsApp API error${status ? ` (${status})` : ""}: ${apiMsg}${hint}`,
+  };
+}
+
 // ── Find a lead by phone, searching BOTH primaryPhone and secondaryPhone ──────
 async function findLeadByPhoneDual(cleanPhone, companyId) {
   const norm = _sharedNormalizePhone(cleanPhone);
@@ -219,11 +266,8 @@ const sendMessage = async (req, res) => {
           `out_${Date.now()}_${crypto.randomUUID()}`;
       }
     } catch (apiErr) {
-      const errMsg =
-        apiErr.response?.data?.message ||
-        apiErr.response?.data?.error?.message ||
-        apiErr.message;
-      return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
+      const { status, message } = describeWaApiError(apiErr, "sendMessage");
+      return res.status(502).json({ error: message, providerStatus: status });
     }
 
     const savedMsg = await WhatsAppMessage.create({
@@ -395,11 +439,8 @@ const sendTemplate = async (req, res) => {
         waMessageId = metaResponse.data?.messages?.[0]?.id;
       }
     } catch (apiErr) {
-      const errMsg =
-        apiErr.response?.data?.message ||
-        apiErr.response?.data?.error?.message ||
-        apiErr.message;
-      return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
+      const { status, message } = describeWaApiError(apiErr, "sendTemplate");
+      return res.status(502).json({ error: message, providerStatus: status });
     }
 
     const templatePreview = `[Template: ${templateName}]`;
@@ -487,6 +528,8 @@ const saveConfig = async (req, res) => {
       provider = "msg91",
       msg91AuthKey,
       msg91IntegratedNumber,
+      msg91Namespace,
+      msg91BrochureUrl,
       phoneNumberId,
       accessToken,
       verifyToken,
@@ -517,6 +560,13 @@ const saveConfig = async (req, res) => {
     if (provider === "msg91") {
       updateData.msg91AuthKey = msg91AuthKey || "";
       updateData.msg91IntegratedNumber = msg91IntegratedNumber || "";
+      // Bug fix: these were collected by the config UI ("required for templates")
+      // but never persisted, so the template payload always omitted the namespace.
+      // Only overwrite when the field is actually sent, so partial saves don't wipe it.
+      if (msg91Namespace !== undefined)
+        updateData.msg91Namespace = (msg91Namespace || "").trim();
+      if (msg91BrochureUrl !== undefined)
+        updateData.msg91BrochureUrl = (msg91BrochureUrl || "").trim();
     } else {
       updateData.phoneNumberId = phoneNumberId || "";
       updateData.accessToken = accessToken || "";
@@ -553,6 +603,8 @@ const getConfig = async (req, res) => {
       isActive: config.isActive,
       msg91Configured: !!(config.msg91AuthKey && config.msg91IntegratedNumber),
       msg91IntegratedNumber: config.msg91IntegratedNumber || "",
+      msg91Namespace: config.msg91Namespace || "",
+      msg91BrochureUrl: config.msg91BrochureUrl || "",
       ...(provider === "meta" && {
         phoneNumberId: config.phoneNumberId,
         businessAccountId: config.businessAccountId,
@@ -690,11 +742,8 @@ const startConversation = async (req, res) => {
           `tmpl_${Date.now()}_${crypto.randomUUID()}`;
       }
     } catch (apiErr) {
-      const errMsg =
-        apiErr.response?.data?.message ||
-        apiErr.response?.data?.error?.message ||
-        apiErr.message;
-      return res.status(502).json({ error: `WhatsApp API error: ${errMsg}` });
+      const { status, message } = describeWaApiError(apiErr, "startConversation");
+      return res.status(502).json({ error: message, providerStatus: status });
     }
 
     let conversation = await WhatsAppConversation.findOne({
