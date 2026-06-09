@@ -1,40 +1,33 @@
-// routes/websiteConfig.js — UPDATED
-// Added requireFeature("websiteTracking") gate to all website config routes.
-// The existing checkLimit("websites") on POST is preserved.
-// GET (read) routes are also gated so companies without websiteTracking
-// cannot even list website integrations.
+// routes/msg91Webhook.js
+// ─────────────────────────────────────────────────────────────────────────────
+// MSG91 inbound WhatsApp webhook.
+//
+// MSG91 POSTs here for EVERY incoming WhatsApp event tied to your integrated
+// number: customer replies (inbound messages) AND delivery/status updates
+// (sent / delivered / read / failed).
+//
+// This endpoint must be PUBLIC (no auth) because MSG91's servers call it
+// directly and cannot present a CRM login token.
+//
+// Mounted in server.js as:  app.use('/msg91-webhook', msg91WebhookRoute);
+// So the URL you configure in the MSG91 dashboard (WhatsApp → Webhook) is:
+//     https://<your-backend-domain>/msg91-webhook
+//
+// NOTE: the previous version of this file had been overwritten with the
+// website-config routes by mistake, so inbound messages were being routed to
+// admin-protected handlers and silently rejected — which is why lead replies
+// never appeared in Communications. This wires the webhook to its real handler.
+// ─────────────────────────────────────────────────────────────────────────────
 
 const express = require("express");
 const router = express.Router();
-const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
-const { checkLimit, requireFeature } = require("../middlewares/entitlementMiddleware");
-const WebsiteConfig = require("../models/WebsiteConfig");
-const {
-  getConfigs,
-  createConfig,
-  updateConfig,
-  toggleConfig,
-  deleteConfig,
-} = require("../controllers/websiteConfigController");
 
-// Count existing website configs for the caller's company.
-const countCompanyWebsiteConfigs = async (req) => {
-  const companyId = req.admin?.company?._id || req.admin?.company || null;
-  if (!companyId) return 0;
-  return WebsiteConfig.countDocuments({ company: companyId });
-};
+const { receiveMSG91Webhook } = require("../controllers/msg91WebhookController");
 
-// All routes require websiteTracking feature
-router.get("/",    protectAdmin, requireFeature("websiteTracking"), getConfigs);
-router.post(
-  "/",
-  protectAdmin,
-  requireFeature("websiteTracking"),
-  checkLimit("websites", countCompanyWebsiteConfigs), // limit gate: max website integrations
-  createConfig,
-);
-router.put("/:id",           protectAdmin, requireFeature("websiteTracking"), updateConfig);
-router.patch("/:id/toggle",  protectAdmin, requireFeature("websiteTracking"), toggleConfig);
-router.delete("/:id",        protectAdmin, requireFeature("websiteTracking"), deleteConfig);
+// Health check / verification — some dashboards ping the URL with a GET first.
+router.get("/", (req, res) => res.status(200).send("MSG91 WhatsApp webhook OK"));
+
+// Inbound messages + delivery reports from MSG91 (public — no auth).
+router.post("/", receiveMSG91Webhook);
 
 module.exports = router;
