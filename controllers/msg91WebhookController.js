@@ -45,24 +45,56 @@ function parseTimestamp(ts) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extract the core item — handles both flat payloads and data[] wrapped ones
+// pick — return the first non-empty value among several possible key names.
+// Lets every extractor accept camelCase AND snake_case variants in one shot.
 // ─────────────────────────────────────────────────────────────────────────────
-function extractItem(rawBody) {
-  if (!rawBody.data) return rawBody;
-  if (Array.isArray(rawBody.data) && rawBody.data.length > 0) return rawBody.data[0];
-  if (typeof rawBody.data === "object") return rawBody.data;
-  return rawBody;
+function pick(obj, ...keys) {
+  if (!obj || typeof obj !== "object") return undefined;
+  for (const k of keys) {
+    const v = obj[k];
+    if (v !== undefined && v !== null && v !== "") return v;
+  }
+  return undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extract sender phone — covers all known MSG91 field names
+// Extract the core item — unwraps data[] / data{} / messages[] / message{}
+// envelopes so the field extractors see the object that actually holds the
+// message fields. Only descends into a wrapper that looks message-shaped.
 // ─────────────────────────────────────────────────────────────────────────────
-function extractSenderPhone(item) {
-  return (
-    item.customerNumber ||   // ← confirmed field in production payload
-    item.from           ||
-    item.mobile         ||
-    item.sender         ||
+function looksMessageShaped(o) {
+  return !!(o && typeof o === "object" && (
+    o.customerNumber || o.customer_number || o.from || o.mobile || o.sender ||
+    o.text || o.content || o.contentType || o.content_type || o.messageType ||
+    o.message_type || o.uuid || o.message_uuid || o.status
+  ));
+}
+
+function extractItem(rawBody) {
+  if (!rawBody || typeof rawBody !== "object") return rawBody || {};
+  let item = rawBody;
+  // Walk down at most a few wrapper levels.
+  for (let depth = 0; depth < 4; depth++) {
+    let next = null;
+    for (const key of ["data", "messages", "message", "entry"]) {
+      const v = item[key];
+      if (Array.isArray(v) && v.length && looksMessageShaped(v[0])) { next = v[0]; break; }
+      if (v && typeof v === "object" && !Array.isArray(v) && looksMessageShaped(v)) { next = v; break; }
+    }
+    if (!next || next === item) break;
+    item = next;
+  }
+  return item;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extract sender phone — covers camelCase, snake_case, and nested contact.
+// ─────────────────────────────────────────────────────────────────────────────
+function extractSenderPhone(item, rawBody = {}) {
+  return String(
+    pick(item, "customerNumber", "customer_number", "from", "mobile", "sender", "waId", "wa_id", "msisdn") ||
+    pick(item.contact || {}, "wa_id", "waId", "number") ||
+    pick(rawBody, "customerNumber", "customer_number", "from", "mobile", "sender") ||
     ""
   );
 }
@@ -71,76 +103,81 @@ function extractSenderPhone(item) {
 // Extract recipient (your integrated number)
 // ─────────────────────────────────────────────────────────────────────────────
 function extractRecipientNumber(item, rawBody) {
-  return (
-    item.integratedNumber ||  // ← confirmed field in production payload
-    item.to               ||
-    item.recipient        ||
-    rawBody.integratedNumber ||
-    rawBody.to            ||
+  return String(
+    pick(item, "integratedNumber", "integrated_number", "to", "recipient", "receiver") ||
+    pick(rawBody, "integratedNumber", "integrated_number", "to") ||
     ""
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extract message text — flat "text" field confirmed in production
+// Extract message text — handles flat strings, nested objects ({"text":"Hi"}),
+// `content` (object or string), `payload`, and interactive/button replies.
 // ─────────────────────────────────────────────────────────────────────────────
-function extractText(item) {
-  // Flat text field (confirmed production format)
-  if (item.text && typeof item.text === "string" && item.text.trim()) return item.text.trim();
-  // Nested payload object (older/alternate format)
-  if (item.payload && typeof item.payload === "object") {
-    if (item.payload.text)    return item.payload.text;
-    if (item.payload.caption) return item.payload.caption;
-    if (item.payload.url)     return item.payload.url;
+function valToText(v) {
+  if (!v) return "";
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "object") {
+    return String(v.text || v.body || v.caption || v.title || v.url || "").trim();
   }
-  return item.message || item.body || item.caption || "";
+  return "";
+}
+
+function extractText(item) {
+  let t = valToText(item.text);          // string OR { text: "..." }
+  if (t) return t;
+  t = valToText(item.content);           // MSG91 logs show {"text":"Hello"}
+  if (t) return t;
+  if (item.payload && typeof item.payload === "object") {
+    t = item.payload.text || item.payload.caption || item.payload.body || item.payload.url || "";
+    if (t) return String(t).trim();
+  }
+  t = valToText(item.message) || valToText(item.body) || valToText(item.caption) ||
+      valToText(item.button) || valToText(item.interactive) || valToText(item.button_reply) ||
+      valToText(item.list_reply);
+  return t || "";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extract content type — "contentType" confirmed in production payload
+// Extract content type — camelCase + snake_case
 // ─────────────────────────────────────────────────────────────────────────────
 function extractContentType(item) {
-  const raw = (
-    item.contentType ||   // ← confirmed field in production payload
-    item.type        ||
-    item.messageType ||
-    "text"
+  const raw = String(
+    pick(item, "contentType", "content_type", "type", "messageType", "message_type") || "text"
   ).toLowerCase();
-  return raw.replace(/^(inbound|incoming|outbound)\s*/, "").trim() || "text";
+  return raw.replace(/^(inbound|incoming|outbound)[\s_-]*/, "").trim() || "text";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extract message ID — "uuid" confirmed in production payload
+// Extract message ID — camelCase + snake_case + nested content.id
 // ─────────────────────────────────────────────────────────────────────────────
 function extractMessageId(item, rawBody, waPhone) {
   return (
-    item.uuid       ||   // ← confirmed field in production payload
-    item.id         ||
-    item.messageId  ||
-    item.requestId  ||
-    rawBody.uuid    ||
-    rawBody.requestId ||
+    pick(item, "uuid", "id", "messageId", "message_id", "message_uuid", "requestId", "request_id", "wamid") ||
+    pick(item.content || {}, "id") ||
+    pick(rawBody, "uuid", "requestId", "request_id", "message_uuid") ||
     `msg91_${Date.now()}_${waPhone}`
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extract contact name — "customerName" confirmed in production payload
+// Extract contact name — camelCase + snake_case + nested contact.profile.name
 // ─────────────────────────────────────────────────────────────────────────────
 function extractContactName(item) {
-  return item.customerName || item.name || item.senderName || "";
+  return (
+    pick(item, "customerName", "customer_name", "name", "senderName", "sender_name") ||
+    pick((item.contact && item.contact.profile) || {}, "name") ||
+    ""
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extract timestamp — "ts" confirmed in production payload
+// Extract timestamp — camelCase + snake_case
 // ─────────────────────────────────────────────────────────────────────────────
 function extractTimestamp(item, rawBody) {
   return parseTimestamp(
-    item.ts        ||   // ← confirmed field in production payload
-    item.timestamp ||
-    rawBody.ts     ||
-    rawBody.timestamp ||
-    rawBody.requestedAt ||
+    pick(item, "ts", "timestamp", "message_timestamp", "messageTimestamp", "time", "date") ||
+    pick(rawBody, "ts", "timestamp", "requestedAt", "requested_at") ||
     null
   );
 }
@@ -149,14 +186,18 @@ function extractTimestamp(item, rawBody) {
 // Is this a delivery/status report?
 // ONLY treat as delivery report if there is an explicit delivery status value.
 // Never use the absence of a sender phone as a signal — real inbound messages
-// may have phone in customerNumber which was historically not checked first.
+// carry the phone in customerNumber/customer_number.
 // ─────────────────────────────────────────────────────────────────────────────
 const DELIVERY_STATUSES = new Set(["sent", "delivered", "read", "failed", "outbound"]);
 
 function isDeliveryReport(rawBody, item) {
-  const topStatus  = (rawBody.status || "").toLowerCase();
-  const itemStatus = (item.status   || "").toLowerCase();
-  return DELIVERY_STATUSES.has(topStatus) || DELIVERY_STATUSES.has(itemStatus);
+  const candidates = [
+    rawBody.status, item.status,
+    rawBody.report_status, item.report_status,
+    rawBody.delivery_status, item.delivery_status,
+    rawBody.event, item.event,
+  ].map((v) => String(v || "").toLowerCase());
+  return candidates.some((v) => DELIVERY_STATUSES.has(v));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -216,7 +257,7 @@ async function processMSG91Payload(rawBody) {
     }
 
     // ── Inbound message ───────────────────────────────────────────────────────
-    const rawPhone = extractSenderPhone(item);
+    const rawPhone = extractSenderPhone(item, rawBody);
     if (!rawPhone) {
       console.warn("⚠️  MSG91 inbound: no sender phone — rawBody keys:", Object.keys(rawBody).join(", "));
       return;
