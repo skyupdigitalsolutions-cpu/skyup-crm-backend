@@ -146,10 +146,10 @@ async function fetchLogs(config) {
     } else {
       body = { integratedNumber: integratedNumber };
     }
-    // Always override direction to fetch INBOUND only — this is the key filter.
-    // MSG91 logs API uses "1" for inbound in the filter even though the response
-    // returns "INBOUND"/"OUTBOUND" as text. Always set today's date range.
-    body.direction = "1";
+    // Always set today's date range to limit results.
+    // Do NOT filter by direction here — let isInboundRow() handle it locally.
+    // MSG91's direction filter causes 0 results; fetch all and filter ourselves.
+    delete body.direction;
     body.startDate = today;
     body.endDate = today;
     body.limit = body.limit || 100;
