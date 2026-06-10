@@ -153,32 +153,27 @@ async function fetchLogs(config) {
     const yesterday = new Date(istNow.getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     delete body.direction; // fetch all directions; isInboundRow() filters locally
 
+    // ── CRITICAL: Remove status filter entirely ──────────────────────────────
+    // From MSG91 logs (confirmed from production screenshots):
+    //   INBOUND messages have Delivery Report = "-" (no status at all).
+    //   OUTBOUND messages have Delivery Report = "Read"/"Delivered".
+    // The MSG91_LOGS_API_BODY env var has status="delivered,failed,hold,read,sent,submitted"
+    // which only matches rows that HAVE a delivery status. Inbound rows have NO status,
+    // so they are EXCLUDED by the filter — causing 0 results every time.
+    // FIX: Delete the status filter so MSG91 returns ALL rows. We filter locally.
+    delete body.status;
+    console.log(`🗑  Removed status filter from MSG91 API body (inbound rows have no status)`);
+
     // ── Date range ───────────────────────────────────────────────────────────
     body.startDate = yesterday;
     body.endDate = today;
     body.limit = body.limit || 100;
     body.offset = body.offset || 0;
 
-    // ── Ensure "received" is in the status filter ────────────────────────────
-    // MSG91 marks inbound messages from leads as status="received".
-    // The env var MSG91_LOGS_API_BODY typically lists only outbound statuses
-    // (delivered, read, sent, etc.) and omits "received", so inbound rows
-    // are filtered out server-side and we get 0 results. Fix: always add it.
-    if (body.status && typeof body.status === "string") {
-      const statuses = body.status.split(",").map(s => s.trim());
-      if (!statuses.includes("received")) {
-        statuses.push("received");
-        body.status = statuses.join(",");
-        console.log(`📋 Added "received" to MSG91 status filter → ${body.status}`);
-      }
-    }
-
     // ── Ensure all origins are included ─────────────────────────────────────
-    // Some MSG91 inbound messages have origin="none" or empty — make sure
-    // we're not accidentally filtering those out.
-    if (!body.origin) {
-      body.origin = "marketing,marketing_lite,utility,user_initiated,referral_conversion,authentication,none";
-    }
+    // Inbound messages have origin="-" (empty) in MSG91 logs.
+    // Include all possible origin values to avoid filtering them out.
+    body.origin = "marketing,marketing_lite,utility,user_initiated,referral_conversion,authentication,none";
 
     console.log(`📤 MSG91 poll request body: startDate=${body.startDate} endDate=${body.endDate} integratedNumber=${body.integratedNumber || body.integrated_number}`);
     resp = await axios.post(LOGS_API_URL, body, { headers, timeout: 15000 });
