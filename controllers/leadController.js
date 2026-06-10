@@ -945,7 +945,7 @@ const getMyLeads = async (req, res) => {
     );
     const skip = (page - 1) * limit;
 
-    const query = { company: getCompanyId(req), user: req.user._id, mergedInto: null };
+    const query = { company: getCompanyId(req), user: req.user._id, mergedInto: null, isClosed: { $ne: true } };
 
     const [leads, total] = await Promise.all([
       Lead.find(query)
@@ -989,7 +989,14 @@ const patchLead = async (req, res) => {
     const pushOps = {};
     const setOps = {};
 
-    if (remark && remark.trim()) {
+    // ── Call history — only push when this is a genuine call interaction.
+    // A bare remark-only edit (no outcome, no calledNumber) should NOT create
+    // a new call log entry. We require at least one of:
+    //   • outcome (employee chose a call outcome from the dropdown)
+    //   • calledNumber (mobile app passed the dialled number)
+    // This prevents the "Update Lead" remark textarea from inflating call counts.
+    const isGenuineCall = !!(outcome || req.body.calledNumber);
+    if (remark && remark.trim() && isGenuineCall) {
       const histEntry = {
         userId: req.user._id,
         userName: req.user.name || "",
@@ -1333,6 +1340,75 @@ const closeLeadWrongEntry = async (req, res) => {
       },
       { new: true },
     );
+    return res.status(200).json(updated);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── closeLeadByUser (employee closes a lead with a phone number + remark) ──────
+// POST /lead/:id/close-by-user
+// Body: { phone: "9876543210", remark: "Customer not reachable after 5 attempts" }
+// Marks the lead as closed, records the closing phone number and remark, then
+// emits a real-time socket notification to the admin's room.
+const closeLeadByUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { phone, remark } = req.body;
+    if (!phone || !phone.trim())
+      return res.status(400).json({ message: "Phone number is required to close a lead." });
+    if (!remark || !remark.trim())
+      return res.status(400).json({ message: "Remark is required to close a lead." });
+
+    const companyId = getCompanyId(req);
+    const lead = await Lead.findOne({ _id: id, company: companyId, user: req.user._id });
+    if (!lead) return res.status(404).json({ message: "Lead not found or not assigned to you." });
+    if (lead.isClosed) return res.status(400).json({ message: "Lead is already closed." });
+
+    const updated = await Lead.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          isClosed:       true,
+          closeReason:    remark.trim(),
+          closedAt:       new Date(),
+          closedBy:       req.user._id,
+          status:         "Not Interested",
+        },
+        $push: {
+          callHistory: {
+            userId:   req.user._id,
+            userName: req.user.name || "",
+            remark:   remark.trim(),
+            outcome:  "Closed",
+            calledAt: new Date(),
+            calledNumber: phone.replace(/\D/g, ""),
+            numberType: "Closing",
+          },
+        },
+      },
+      { new: true }
+    );
+
+    // ── Notify admin via socket ───────────────────────────────────────────────
+    const _io = global._io;
+    if (_io) {
+      // Find the admin linked to this lead (assignedAdmin or createdBy on the user)
+      const User = require("../models/Users");
+      const employee = await User.findById(req.user._id).select("createdBy name").lean();
+      const adminId = lead.assignedAdmin || employee?.createdBy || null;
+      if (adminId) {
+        _io.to(`admin_room:${adminId}`).emit("lead_closed_by_user", {
+          leadId:       String(lead._id),
+          leadName:     lead.name,
+          phone:        phone.replace(/\D/g, ""),
+          remark:       remark.trim(),
+          closedBy:     req.user.name || "Employee",
+          closedAt:     new Date().toISOString(),
+        });
+      }
+    }
+
     return res.status(200).json(updated);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1946,6 +2022,7 @@ module.exports = {
   adminUpdateLead,
   adminDeleteLead,
   closeLeadWrongEntry,
+  closeLeadByUser,
   getMyLeads,
   updateLeadEmail,
   bulkUpdateEmails,

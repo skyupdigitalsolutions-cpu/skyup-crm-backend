@@ -21,6 +21,7 @@ const {
   adminUpdateLead,
   adminDeleteLead,
   closeLeadWrongEntry,
+  closeLeadByUser,
   getMyLeads,
   updateLeadEmail,
   bulkUpdateEmails,
@@ -101,6 +102,8 @@ router.put("/:id", protect, updateLead);
 
 // ── Close lead as wrong entry ─────────────────────────────────────────────────
 router.patch("/admin/:id/close-wrong-entry", protectAdmin, closeLeadWrongEntry);
+// Employee closes a lead with phone number + remark → notifies admin
+router.post("/:id/close-by-user", protect, closeLeadByUser);
 
 // ── Additional (secondary) phone number management ────────────────────────────
 // Add/replace additional number
