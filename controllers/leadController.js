@@ -995,7 +995,13 @@ const patchLead = async (req, res) => {
     //   • outcome (employee chose a call outcome from the dropdown)
     //   • calledNumber (mobile app passed the dialled number)
     // This prevents the "Update Lead" remark textarea from inflating call counts.
-    const isGenuineCall = !!(outcome || req.body.calledNumber);
+    // isGenuineCall: only true when outcome is a non-empty string (user explicitly
+    // chose a call outcome) OR mobile app passed a calledNumber.
+    // outcome="" (blank placeholder) means user did NOT make a call — no callHistory entry.
+    const isGenuineCall = !!(
+      (outcome && typeof outcome === "string" && outcome.trim().length > 0) ||
+      req.body.calledNumber
+    );
     if (remark && remark.trim() && isGenuineCall) {
       const histEntry = {
         userId: req.user._id,
@@ -1393,19 +1399,37 @@ const closeLeadByUser = async (req, res) => {
     // ── Notify admin via socket ───────────────────────────────────────────────
     const _io = global._io;
     if (_io) {
-      // Find the admin linked to this lead (assignedAdmin or createdBy on the user)
-      const User = require("../models/Users");
-      const employee = await User.findById(req.user._id).select("createdBy name").lean();
-      const adminId = lead.assignedAdmin || employee?.createdBy || null;
-      if (adminId) {
-        _io.to(`admin_room:${adminId}`).emit("lead_closed_by_user", {
-          leadId:       String(lead._id),
-          leadName:     lead.name,
-          phone:        phone.replace(/\D/g, ""),
-          remark:       remark.trim(),
-          closedBy:     req.user.name || "Employee",
-          closedAt:     new Date().toISOString(),
-        });
+      try {
+        const UserModel = require("../models/Users");
+        const employee  = await UserModel.findById(req.user._id).select("createdBy name").lean();
+
+        // Resolve adminId: prefer lead.assignedAdmin, then employee.createdBy
+        const rawAdminId = lead.assignedAdmin || employee?.createdBy || null;
+        const adminId    = rawAdminId ? String(rawAdminId) : null;
+
+        if (adminId) {
+          _io.to(`admin_room:${adminId}`).emit("lead_closed_by_user", {
+            leadId:   String(lead._id),
+            leadName: lead.name,
+            phone:    phone.replace(/\D/g, ""),
+            remark:   remark.trim(),
+            closedBy: req.user.name || "Employee",
+            closedAt: new Date().toISOString(),
+          });
+        }
+        // Also emit to company-wide admin room as fallback so any admin on duty sees it
+        if (lead.company) {
+          _io.to(`company_admin:${String(lead.company)}`).emit("lead_closed_by_user", {
+            leadId:   String(lead._id),
+            leadName: lead.name,
+            phone:    phone.replace(/\D/g, ""),
+            remark:   remark.trim(),
+            closedBy: req.user.name || "Employee",
+            closedAt: new Date().toISOString(),
+          });
+        }
+      } catch (socketErr) {
+        console.error("[closeLeadByUser] socket error:", socketErr.message);
       }
     }
 

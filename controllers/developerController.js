@@ -668,6 +668,26 @@ const getCompanyPayments = async (req, res) => {
   }
 };
 
+// ── Toggle device call-log sync per company (developer panel) ─────────────────
+const toggleCallLogSync = async (req, res) => {
+  try {
+    const { id }      = req.params;
+    const { enabled } = req.body;
+    const company     = await Company.findById(id);
+    if (!company) return res.status(404).json({ message: 'Company not found' });
+    company.callLogSyncEnabled = Boolean(enabled);
+    await company.save();
+    res.json({
+      message:            `Device call-log sync ${enabled ? 'enabled' : 'disabled'} for ${company.name}.`,
+      callLogSyncEnabled: company.callLogSyncEnabled,
+      companyId:          company._id,
+      companyName:        company.name,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   // Existing
   developerLogin,
@@ -688,4 +708,5 @@ module.exports = {
   grantFreeAddon,
   grantBenefit,
   getCompanyPayments,
+  toggleCallLogSync,
 };

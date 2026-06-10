@@ -49,6 +49,10 @@ const attendanceSchema = new mongoose.Schema({
   osVersion:   { type: String, default: null },
   fcmToken:    { type: String, default: null },
 
+  // ── Clock-in location (captured from device GPS) ──────────────────────────
+  clockInLatitude:  { type: Number, default: null },
+  clockInLongitude: { type: Number, default: null },
+
 }, { timestamps: true });
 
 attendanceSchema.index({ user: 1, date: 1 }, { unique: true });

@@ -25,6 +25,7 @@ const {
   grantFreeAddon,
   grantBenefit,
   getCompanyPayments,
+  toggleCallLogSync,
 } = require("../controllers/developerController");
 
 const {
@@ -52,6 +53,7 @@ router.post("/companies",                 createCompany);
 router.post("/companies/:id/super-admin", createCompanySuperAdmin);
 router.put("/companies/:id",              updateCompany);
 router.put("/companies/:id/toggle",       toggleCompanyStatus);
+router.put("/companies/:id/call-log-sync", toggleCallLogSync);   // enable/disable device call-log sync per company
 
 // ── Company detail actions (Phase 3) ─────────────────────────────────────────
 router.get("/companies/:id/details",        getCompanyDetails);

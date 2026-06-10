@@ -45,6 +45,18 @@ function deriveCrmStatus(rec) {
   return "present";
 }
 
+// ── Haversine distance (metres) between two lat/lng points ───────────────────
+function haversineMetres(lat1, lon1, lat2, lon2) {
+  const R    = 6_371_000; // Earth radius in metres
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a    =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 // ── USER: Clock In ────────────────────────────────────────────────────────────
 const DEVICE_FIELDS_ATT = ["appName", "appVersion", "platform", "deviceModel", "osVersion", "fcmToken"];
 
@@ -54,6 +66,52 @@ const clockIn = async (req, res) => {
     const companyId = req.user.company;
     const date      = todayStr();
 
+    // ── Location enforcement ─────────────────────────────────────────────────
+    const Company = require('../models/Company');
+    const company = await Company.findById(companyId)
+      .select('clockInLocationEnabled clockInLatitude clockInLongitude clockInRadiusMeters')
+      .lean();
+
+    if (company?.clockInLocationEnabled && company.clockInLatitude && company.clockInLongitude) {
+      // Check if employee has client-meeting permission (bypasses location check)
+      const userDoc = await User.findById(userId)
+        .select('clientMeetingPermission clientMeetingPermissionGrantedAt')
+        .lean();
+
+      const hasMeetingPermission = (() => {
+        if (!userDoc?.clientMeetingPermission) return false;
+        // Permission auto-expires after 24 hours
+        if (!userDoc.clientMeetingPermissionGrantedAt) return false;
+        const grantedAt = new Date(userDoc.clientMeetingPermissionGrantedAt);
+        return (Date.now() - grantedAt.getTime()) < 24 * 60 * 60 * 1000;
+      })();
+
+      if (!hasMeetingPermission) {
+        // Require device location from request body
+        const { latitude, longitude } = req.body;
+        if (latitude == null || longitude == null) {
+          return res.status(400).json({
+            message: 'Location required. Please enable location and try again.',
+            code: 'location_required',
+          });
+        }
+
+        const dist = haversineMetres(
+          Number(latitude), Number(longitude),
+          company.clockInLatitude, company.clockInLongitude,
+        );
+
+        if (dist > (company.clockInRadiusMeters || 100)) {
+          return res.status(403).json({
+            message: `You are ${Math.round(dist)}m from the office. Clock-in is only allowed within ${company.clockInRadiusMeters || 100}m. If you are at a client meeting, request remote clock-in permission from your admin.`,
+            code:          'outside_radius',
+            distanceMetres: Math.round(dist),
+            radiusMetres:   company.clockInRadiusMeters || 100,
+          });
+        }
+      }
+    }
+
     // ── Pull device / app info if the mobile app sent it ──────────────────────
     const deviceFields = {};
     DEVICE_FIELDS_ATT.forEach(f => {
@@ -61,6 +119,10 @@ const clockIn = async (req, res) => {
         deviceFields[f] = req.body[f];
       }
     });
+
+    // Store clock-in coordinates for audit
+    if (req.body.latitude != null) deviceFields.clockInLatitude  = Number(req.body.latitude);
+    if (req.body.longitude != null) deviceFields.clockInLongitude = Number(req.body.longitude);
 
     let record = await Attendance.findOne({ user: userId, date });
     if (record && record.loginTime && !record.logoutTime)

@@ -35,6 +35,9 @@ const {
   saveTelegramConfig,
   testTelegramConfig,
   updateUserTelegram,
+  getClockInLocation,
+  saveClockInLocation,
+  updateMeetingPermission,
 } = adminController;
 const {
   registerAdmin,
@@ -89,6 +92,13 @@ router.post("/company/telegram/test", protectAdmin, testTelegramConfig);
 
 // ── Employee personal Telegram chat ID (admin sets for any employee) ──────────
 router.put("/user/:id/telegram", protectAdmin, updateUserTelegram);
+
+// ── Clock-in location restriction settings ────────────────────────────────────
+router.get("/company/clock-in-location", protectAdmin, getClockInLocation);
+router.put("/company/clock-in-location", protectAdmin, requireCompanySuperAdmin, saveClockInLocation);
+
+// ── Client meeting remote clock-in permission (per employee) ──────────────────
+router.put("/user/:id/meeting-permission", protectAdmin, updateMeetingPermission);
 
 // ── Legacy brevo-status (kept for backward compat) ───────────────────────────
 // router.get("/company/brevo-status",  protectAdmin, getBrevoStatus);

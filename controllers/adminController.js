@@ -857,6 +857,63 @@ const updateUserTelegram = async (req, res) => {
   }
 };
 
+// ── GET /admin/company/clock-in-location ─────────────────────────────────────
+const getClockInLocation = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const company   = await Company.findById(companyId)
+      .select('clockInLocationEnabled clockInLatitude clockInLongitude clockInRadiusMeters')
+      .lean();
+    if (!company) return res.status(404).json({ message: 'Company not found' });
+    res.json({
+      enabled:   company.clockInLocationEnabled || false,
+      latitude:  company.clockInLatitude  || null,
+      longitude: company.clockInLongitude || null,
+      radius:    company.clockInRadiusMeters || 100,
+    });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
+// ── PUT /admin/company/clock-in-location ─────────────────────────────────────
+const saveClockInLocation = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { enabled, latitude, longitude, radius } = req.body;
+    const update = {};
+    if (enabled   !== undefined) update.clockInLocationEnabled = Boolean(enabled);
+    if (latitude  != null)       update.clockInLatitude        = Number(latitude);
+    if (longitude != null)       update.clockInLongitude       = Number(longitude);
+    if (radius    != null)       update.clockInRadiusMeters    = Math.max(50, Number(radius));
+    await Company.findByIdAndUpdate(companyId, { $set: update });
+    res.json({ message: 'Clock-in location settings saved.' });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
+// ── PUT /admin/user/:id/meeting-permission ────────────────────────────────────
+// Admin grants/revokes client-meeting remote clock-in permission for an employee.
+const updateMeetingPermission = async (req, res) => {
+  try {
+    const { id }    = req.params;
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { grant } = req.body; // true = grant, false = revoke
+
+    const user = await User.findOne({ _id: id, company: companyId });
+    if (!user) return res.status(404).json({ message: 'Employee not found' });
+
+    user.clientMeetingPermission          = Boolean(grant);
+    user.clientMeetingPermissionGrantedBy = grant ? (req.admin?._id || null) : null;
+    user.clientMeetingPermissionGrantedAt = grant ? new Date() : null;
+    await user.save();
+
+    res.json({
+      message:   grant ? 'Remote clock-in permission granted (24h).' : 'Permission revoked.',
+      userId:    user._id,
+      granted:   user.clientMeetingPermission,
+      grantedAt: user.clientMeetingPermissionGrantedAt,
+    });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -887,4 +944,7 @@ module.exports = {
   saveTelegramConfig,
   testTelegramConfig,
   updateUserTelegram,
+  getClockInLocation,
+  saveClockInLocation,
+  updateMeetingPermission,
 };

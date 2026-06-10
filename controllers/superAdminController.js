@@ -377,6 +377,27 @@ const getExpiringSubscriptions = async (req, res) => {
   }
 };
 
+// ── PUT /superadmin/company/:id/call-log-sync ─────────────────────────────────
+// Super admin enables or disables device call-log sync for a specific company.
+// When disabled, the backend rejects all /call-logs/sync requests from that company.
+const toggleCallLogSync = async (req, res) => {
+  try {
+    const { id }     = req.params;
+    const { enabled } = req.body;
+    const Company    = require('../models/Company');
+    const company    = await Company.findById(id);
+    if (!company) return res.status(404).json({ message: 'Company not found' });
+    company.callLogSyncEnabled = Boolean(enabled);
+    await company.save();
+    res.json({
+      message:            `Device call-log sync ${enabled ? 'enabled' : 'disabled'} for ${company.name}.`,
+      callLogSyncEnabled: company.callLogSyncEnabled,
+      companyId:          company._id,
+      companyName:        company.name,
+    });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
 module.exports = {
   registerSuperAdmin,
   loginSuperAdmin,
@@ -392,5 +413,6 @@ module.exports = {
   getAdminDetails,
   getAllAdminsWithStats,
   getCompanyEntitlementDetails,
-  getExpiringSubscriptions,     // NEW
+  getExpiringSubscriptions,
+  toggleCallLogSync,
 };

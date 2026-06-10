@@ -46,6 +46,14 @@ const userSchema = mongoose.Schema(
     // When a lead is assigned to them, a notification is sent to this chat.
     // Get your chat ID: message @userinfobot on Telegram.
     telegramChatId: { type: String, default: null, trim: true },
+
+    // ── Client Meeting Permission ─────────────────────────────────────────────
+    // Grants this employee the right to clock in from any location (client visit).
+    // Only effective when company.clockInLocationEnabled = true.
+    // Admin grants/revokes this; expires automatically after 1 day unless renewed.
+    clientMeetingPermission:          { type: Boolean, default: false },
+    clientMeetingPermissionGrantedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', default: null },
+    clientMeetingPermissionGrantedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

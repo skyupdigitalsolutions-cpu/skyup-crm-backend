@@ -88,6 +88,19 @@ const syncCallLogs = async (req, res) => {
     if (!Array.isArray(logs) || logs.length === 0)
       return res.status(400).json({ message: 'No logs provided' });
 
+    // ── Company-level call-log sync gate ─────────────────────────────────────
+    // Super admin can disable device call-log sync per company.
+    const Company = require('../models/Company');
+    const company = await Company.findById(req.user.company)
+      .select('callLogSyncEnabled')
+      .lean();
+    if (company && company.callLogSyncEnabled === false) {
+      return res.status(403).json({
+        message: 'Device call-log sync is disabled for your company.',
+        code:    'call_log_sync_disabled',
+      });
+    }
+
     const batch = logs.slice(0, 500);
 
     // ── Load all company leads ONCE, build phone Maps (primary + secondary) ──

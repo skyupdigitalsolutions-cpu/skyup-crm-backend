@@ -16,6 +16,7 @@ const {
   getCompanies,
   getCompany,
   toggleCompany,
+  toggleCallLogSync,
   deleteCompany,
   getDashboardStats,
   getAdminDetails,
@@ -62,6 +63,7 @@ router.get("/companies",        protectSuperAdmin, getCompanies);
 router.post("/companies",       protectSuperAdmin, createCompany);
 router.get("/companies/:id",    protectSuperAdmin, getCompany);
 router.put("/companies/:id",    protectSuperAdmin, toggleCompany);
+router.put("/companies/:id/call-log-sync", protectSuperAdmin, toggleCallLogSync);
 router.delete("/companies/:id", protectSuperAdmin, deleteCompany);
 
 module.exports = router;
