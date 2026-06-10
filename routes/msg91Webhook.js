@@ -28,6 +28,23 @@ const router = express.Router();
 
 const { receiveMSG91Webhook } = require("../controllers/msg91WebhookController");
 const { recordHit, recentHits } = require("../utils/webhookDebug");
+const { probeLogsApi } = require("../utils/msg91Probe");
+
+// ── Discovery probe: server-side test of MSG91 log/report endpoints ───────────
+// Gated by WEBHOOK_DEBUG_KEY. Open in a browser:
+//   /msg91-webhook/_probe/logs?key=KEY                      (try candidate endpoints)
+//   /msg91-webhook/_probe/logs?key=KEY&url=<ENC>&method=GET (confirm a specific one)
+router.get("/_probe/logs", async (req, res) => {
+  const key = process.env.WEBHOOK_DEBUG_KEY;
+  if (!key) return res.status(404).json({ error: "diagnostics disabled (set WEBHOOK_DEBUG_KEY)" });
+  if (req.query.key !== key) return res.status(403).json({ error: "bad key" });
+  try {
+    const out = await probeLogsApi({ overrideUrl: req.query.url, overrideMethod: req.query.method });
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── Diagnostic viewer (must be registered BEFORE the catch-all GET) ───────────
 // Gated by WEBHOOK_DEBUG_KEY so it isn't world-readable. If the env var is unset
