@@ -43,34 +43,60 @@ function firstVal(obj, ...keys) {
   return undefined;
 }
 
+// MSG91 logs API wraps every field as { value: "...", metaData: null }.
+// This unwraps the entire row so downstream code sees plain strings/numbers.
+// Example input:  { customerNumber: { value: "919876543210", metaData: null } }
+// Example output: { customerNumber: "919876543210" }
+function flattenRow(row) {
+  if (!row || typeof row !== "object") return row;
+  const flat = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (v && typeof v === "object" && "value" in v && !Array.isArray(v) && Object.keys(v).length <= 2) {
+      flat[k] = v.value; // unwrap { value: "...", metaData: null }
+    } else {
+      flat[k] = v;
+    }
+  }
+  return flat;
+}
+
 // Find the array of log rows wherever MSG91 nests it.
 function extractRows(resp) {
   if (!resp) return [];
-  if (Array.isArray(resp)) return resp;
+  if (Array.isArray(resp)) return resp.map(flattenRow);
   const candidates = [
     resp.data, resp.logs, resp.messages, resp.result, resp.results, resp.records,
     resp.data && resp.data.logs, resp.data && resp.data.data,
     resp.data && resp.data.records, resp.data && resp.data.messages,
   ];
-  for (const c of candidates) if (Array.isArray(c)) return c;
+  for (const c of candidates) if (Array.isArray(c)) return c.map(flattenRow);
   return [];
 }
 
 // Decide whether a log row is an inbound message from the customer (the lead).
-// Tolerant: works off origin/direction markers, falling back to "has a customer
-// sender + text, and was not sent BY us".
+// MSG91 logs API uses direction "1" = inbound (user-initiated), "0" = outbound.
+// Also handles text labels for robustness.
 function isInboundRow(row, integratedNumber) {
+  // MSG91 numeric direction: "1" = inbound, "0" = outbound
+  const dirRaw = firstVal(row, "direction", "Direction");
+  if (dirRaw !== undefined && dirRaw !== null && dirRaw !== "") {
+    const dirStr = String(dirRaw).trim();
+    if (dirStr === "1") return true;
+    if (dirStr === "0") return false;
+  }
+
+  // Text-based origin/direction labels
   const origin = String(firstVal(row, "origin", "Origin", "messageOrigin") || "").toLowerCase();
-  if (origin.includes("user") || origin.includes("inbound") || origin.includes("incoming")) return true;
+  if (origin.includes("user") || origin.includes("inbound") || origin.includes("incoming") || origin === "user_initiated") return true;
+  if (origin.includes("marketing") || origin.includes("utility") || origin.includes("authentication")) return false;
 
-  const dir = String(firstVal(row, "direction", "Direction", "type", "messageType", "message_type") || "").toLowerCase();
+  const dir = String(firstVal(row, "type", "messageType", "message_type") || "").toLowerCase();
   if (dir.includes("inbound") || dir.includes("incoming") || dir.includes("received")) return true;
-  if (dir.includes("outbound") || dir.includes("sent")) return false;
+  if (dir.includes("outbound") || dir.includes("sent") || dir === "template") return false;
 
-  // Heuristic fallback: a customer-sent row has a sender that isn't our number
-  // and carries message content, and has no "sentAt" (we didn't send it).
+  // Heuristic fallback: customer-sent row has a sender that isn't our number
   const sender = String(firstVal(row, "customerNumber", "customer_number", "from", "mobile", "sender", "waId", "wa_id") || "");
-  const sentAt = firstVal(row, "sentAt", "sent_at", "requestedAt", "requested_at");
+  const sentAt = firstVal(row, "sentAt", "sent_at");
   const hasText = !!firstVal(row, "text", "content", "message", "body");
   const intl = String(integratedNumber || "").replace(/\D/g, "");
   const senderDigits = sender.replace(/\D/g, "");
@@ -80,7 +106,8 @@ function isInboundRow(row, integratedNumber) {
 }
 
 function rowTimestamp(row) {
-  const t = firstVal(row, "ts", "timestamp", "receivedAt", "received_at", "date", "createdAt", "created_at");
+  // MSG91 logs use "requestedAt" for the message timestamp
+  const t = firstVal(row, "requestedAt", "ts", "timestamp", "receivedAt", "received_at", "date", "createdAt", "created_at");
   if (!t) return null;
   const d = new Date(isNaN(t) ? t : Number(t) * (String(t).length <= 10 ? 1000 : 1));
   return isNaN(d.getTime()) ? null : d;
@@ -162,6 +189,7 @@ async function pollOnce() {
   }
 
   if (ingested) console.log(`📥 MSG91 inbound poll: ingested ${ingested} candidate row(s) (dedup applied)`);
+  else console.log(`🔍 MSG91 poll: no new inbound rows found`);
 }
 
 function startMsg91InboundPollJob() {
