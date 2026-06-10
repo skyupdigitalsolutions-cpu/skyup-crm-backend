@@ -74,33 +74,36 @@ function extractRows(resp) {
 }
 
 // Decide whether a log row is an inbound message from the customer (the lead).
-// MSG91 logs API uses direction "1" = inbound (user-initiated), "0" = outbound.
-// Also handles text labels for robustness.
+// MSG91 logs API returns direction as "INBOUND" or "OUTBOUND" text (after flattenRow unwraps it).
+// Also handles numeric "1"/"0" for robustness.
 function isInboundRow(row, integratedNumber) {
-  // MSG91 numeric direction: "1" = inbound, "0" = outbound
   const dirRaw = firstVal(row, "direction", "Direction");
   if (dirRaw !== undefined && dirRaw !== null && dirRaw !== "") {
-    const dirStr = String(dirRaw).trim();
+    const dirStr = String(dirRaw).trim().toUpperCase();
+    // Text values from MSG91 logs UI
+    if (dirStr === "INBOUND") return true;
+    if (dirStr === "OUTBOUND") return false;
+    // Numeric values (some API variants)
     if (dirStr === "1") return true;
     if (dirStr === "0") return false;
+    // Partial match
+    if (dirStr.includes("IN")) return true;
+    if (dirStr.includes("OUT")) return false;
   }
 
-  // Text-based origin/direction labels
+  // Origin field fallback
   const origin = String(firstVal(row, "origin", "Origin", "messageOrigin") || "").toLowerCase();
-  if (origin.includes("user") || origin.includes("inbound") || origin.includes("incoming") || origin === "user_initiated") return true;
+  if (origin.includes("user") || origin.includes("inbound") || origin.includes("incoming")) return true;
   if (origin.includes("marketing") || origin.includes("utility") || origin.includes("authentication")) return false;
 
-  const dir = String(firstVal(row, "type", "messageType", "message_type") || "").toLowerCase();
-  if (dir.includes("inbound") || dir.includes("incoming") || dir.includes("received")) return true;
-  if (dir.includes("outbound") || dir.includes("sent") || dir === "template") return false;
+  // Message type fallback — "template" means we sent it (outbound)
+  const msgType = String(firstVal(row, "messageType", "message_type", "type") || "").toLowerCase();
+  if (msgType === "template") return false;
 
-  // Heuristic fallback: customer-sent row has a sender that isn't our number
-  const sender = String(firstVal(row, "customerNumber", "customer_number", "from", "mobile", "sender", "waId", "wa_id") || "");
-  const sentAt = firstVal(row, "sentAt", "sent_at");
-  const hasText = !!firstVal(row, "text", "content", "message", "body");
-  const intl = String(integratedNumber || "").replace(/\D/g, "");
-  const senderDigits = sender.replace(/\D/g, "");
-  if (hasText && senderDigits && senderDigits !== intl && !sentAt) return true;
+  // Heuristic: inbound rows have no campaign/template name
+  const campaign = firstVal(row, "campaign", "Campaign", "campaignName");
+  const template = firstVal(row, "template", "Template", "templateName");
+  if (campaign || template) return false; // outbound blast
 
   return false;
 }
@@ -165,8 +168,17 @@ async function pollOnce() {
       continue;
     }
 
+    console.log(`🔎 MSG91 poll: fetched ${rows.length} rows for ${config.msg91IntegratedNumber}`);
+    if (rows.length > 0) {
+      // Log first row structure to help debug field mapping
+      const sample = rows[0];
+      console.log(`   Sample row fields: direction="${sample.direction}" customerNumber="${sample.customerNumber}" text="${String(sample.text||"").slice(0,30)}" requestedAt="${sample.requestedAt}"`);
+    }
+
     for (const row of rows) {
-      if (!isInboundRow(row, config.msg91IntegratedNumber)) continue;
+      const isInbound = isInboundRow(row, config.msg91IntegratedNumber);
+      console.log(`   Row: direction="${row.direction}" inbound=${isInbound} customer="${row.customerNumber}" text="${String(row.text||row.content||"").slice(0,20)}"`);
+      if (!isInbound) continue;
 
       const ts = rowTimestamp(row);
       if (ts && ts.getTime() < cutoff) continue; // too old — skip
