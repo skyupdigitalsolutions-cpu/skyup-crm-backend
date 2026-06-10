@@ -345,7 +345,15 @@ async function processMSG91Payload(rawBody, opts = {}) {
     // ── Dedup ─────────────────────────────────────────────────────────────────
     const exists = await WhatsAppMessage.findOne({ waMessageId });
     if (exists) {
-      console.log(`⏭  Dedup: already saved ${waMessageId}`);
+      // If the message was previously saved as outbound (due to a bug) but we now
+      // know it's inbound (forceInbound from poll job), correct the direction.
+      if (exists.direction === "outbound" && forceInbound) {
+        await WhatsAppMessage.findByIdAndUpdate(exists._id, { direction: "inbound", sentBy: null });
+        console.log(`🔁 Corrected direction: outbound→inbound for ${waMessageId}`);
+        // Also return here — conversation/socket update not needed for old messages
+      } else {
+        console.log(`⏭  Dedup: already saved ${waMessageId}`);
+      }
       return;
     }
 
