@@ -151,11 +151,34 @@ async function fetchLogs(config) {
     // "today" in UTC is still "yesterday" in IST, causing 0 results.
     // Sending a 2-day window guarantees we always catch today's IST messages.
     const yesterday = new Date(istNow.getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    delete body.direction;
+    delete body.direction; // fetch all directions; isInboundRow() filters locally
+
+    // ── Date range ───────────────────────────────────────────────────────────
     body.startDate = yesterday;
     body.endDate = today;
     body.limit = body.limit || 100;
     body.offset = body.offset || 0;
+
+    // ── Ensure "received" is in the status filter ────────────────────────────
+    // MSG91 marks inbound messages from leads as status="received".
+    // The env var MSG91_LOGS_API_BODY typically lists only outbound statuses
+    // (delivered, read, sent, etc.) and omits "received", so inbound rows
+    // are filtered out server-side and we get 0 results. Fix: always add it.
+    if (body.status && typeof body.status === "string") {
+      const statuses = body.status.split(",").map(s => s.trim());
+      if (!statuses.includes("received")) {
+        statuses.push("received");
+        body.status = statuses.join(",");
+        console.log(`📋 Added "received" to MSG91 status filter → ${body.status}`);
+      }
+    }
+
+    // ── Ensure all origins are included ─────────────────────────────────────
+    // Some MSG91 inbound messages have origin="none" or empty — make sure
+    // we're not accidentally filtering those out.
+    if (!body.origin) {
+      body.origin = "marketing,marketing_lite,utility,user_initiated,referral_conversion,authentication,none";
+    }
 
     console.log(`📤 MSG91 poll request body: startDate=${body.startDate} endDate=${body.endDate} integratedNumber=${body.integratedNumber || body.integrated_number}`);
     resp = await axios.post(LOGS_API_URL, body, { headers, timeout: 15000 });

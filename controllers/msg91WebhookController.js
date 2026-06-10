@@ -126,8 +126,27 @@ function valToText(v) {
 function extractText(item) {
   let t = valToText(item.text);          // string OR { text: "..." }
   if (t) return t;
-  t = valToText(item.content);           // MSG91 logs show {"text":"Hello"}
-  if (t) return t;
+  // MSG91 logs API returns content as a JSON string: '{"text":"Hello"}'
+  // valToText handles plain strings and objects, but NOT a JSON-stringified object.
+  // Try parsing it first before falling through.
+  if (item.content) {
+    if (typeof item.content === "string") {
+      // May be plain text ("Hello") or a JSON string ('{"text":"Hello"}')
+      const trimmed = item.content.trim();
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          t = valToText(parsed);
+          if (t) return t;
+        } catch {}
+      }
+      t = trimmed;
+      if (t) return t;
+    } else {
+      t = valToText(item.content);
+      if (t) return t;
+    }
+  }
   if (item.payload && typeof item.payload === "object") {
     t = item.payload.text || item.payload.caption || item.payload.body || item.payload.url || "";
     if (t) return String(t).trim();
