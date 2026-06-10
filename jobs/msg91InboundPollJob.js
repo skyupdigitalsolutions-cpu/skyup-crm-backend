@@ -118,9 +118,14 @@ function rowTimestamp(row) {
 }
 
 async function fetchLogs(config) {
-  const authKey = config.msg91AuthKey;
-  const integratedNumber = config.msg91IntegratedNumber;
-  if (!authKey) return [];
+  // Try DB value first, then fall back to env vars
+  const authKey = config.msg91AuthKey || process.env.MSG91_AUTH_KEY || process.env.MSG91_AUTHKEY || "";
+  const integratedNumber = config.msg91IntegratedNumber || "";
+  console.log(`🔑 fetchLogs: authKey present=${!!authKey} integratedNumber=${integratedNumber}`);
+  if (!authKey) {
+    console.warn("⚠️  fetchLogs: no authKey found in DB or env — skipping");
+    return [];
+  }
 
   const headers = { authkey: authKey, "Content-Type": "application/json" };
   let resp;
@@ -191,7 +196,7 @@ async function pollOnce() {
   // Find active configs by isActive (not a strict provider filter — the provider
   // field may be unset on older records). fetchLogs() skips any without an authkey.
   const configs = await WhatsAppConfig.find({ isActive: true })
-    .select("+msg91AuthKey msg91IntegratedNumber company")
+    .select("msg91AuthKey msg91IntegratedNumber company provider")
     .lean();
 
   const cutoff = Date.now() - LOOKBACK_MIN * 60 * 1000;
