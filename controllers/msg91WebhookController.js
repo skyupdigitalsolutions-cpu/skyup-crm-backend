@@ -184,9 +184,17 @@ function extractTimestamp(item, rawBody) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Is this a delivery/status report?
-// ONLY treat as delivery report if there is an explicit delivery status value.
-// Never use the absence of a sender phone as a signal — real inbound messages
-// carry the phone in customerNumber/customer_number.
+//
+// MSG91 inbound messages CAN carry a "status" field like "read" or "delivered"
+// that refers to the read-state of the lead's own message — NOT a delivery
+// report for an outbound message. We must NOT treat those as delivery reports.
+//
+// Rule: only treat as a delivery report when:
+//   1. An explicit delivery status field is set  AND
+//   2. There is NO sender phone (customerNumber) on the payload
+//      — a genuine inbound reply always carries the sender's phone.
+//
+// The forceInbound flag (set by the poll job) short-circuits this entirely.
 // ─────────────────────────────────────────────────────────────────────────────
 const DELIVERY_STATUSES = new Set(["sent", "delivered", "read", "failed", "outbound"]);
 
@@ -197,7 +205,16 @@ function isDeliveryReport(rawBody, item) {
     rawBody.delivery_status, item.delivery_status,
     rawBody.event, item.event,
   ].map((v) => String(v || "").toLowerCase());
-  return candidates.some((v) => DELIVERY_STATUSES.has(v));
+
+  const hasDeliveryStatus = candidates.some((v) => DELIVERY_STATUSES.has(v));
+  if (!hasDeliveryStatus) return false;
+
+  // If the payload also has a sender phone it's an inbound message that
+  // happens to include a status field — do NOT treat it as a delivery report.
+  const senderPhone = extractSenderPhone(item, rawBody);
+  if (senderPhone && senderPhone.replace(/\D/g, "").length >= 10) return false;
+
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,7 +222,18 @@ function isDeliveryReport(rawBody, item) {
 // ─────────────────────────────────────────────────────────────────────────────
 const receiveMSG91Webhook = async (req, res) => {
   res.sendStatus(200); // ACK immediately
-  await processMSG91Payload(req.body);
+
+  const body = req.body;
+  // If the payload clearly contains a sender phone AND message content,
+  // treat it as inbound even if it also carries a status field.
+  // This prevents the isDeliveryReport() check from swallowing lead replies
+  // that include a "status":"read" field on the inbound message itself.
+  const item = extractItem(body || {});
+  const senderPhone = extractSenderPhone(item, body || {});
+  const hasText = !!extractText(item);
+  const forceInbound = !!(senderPhone && senderPhone.replace(/\D/g, "").length >= 10 && hasText);
+
+  await processMSG91Payload(body, { forceInbound });
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
