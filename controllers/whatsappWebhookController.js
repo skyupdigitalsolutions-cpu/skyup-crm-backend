@@ -8,6 +8,7 @@ const WhatsAppMessage        = require("../models/WhatsAppMessage");
 const Lead                   = require("../models/Leads");
 const User                   = require("../models/Users");
 const { acquireWaDedupLock } = require("../middlewares/rateLimiter"); // ✅ Redis dedup
+const { processMSG91Payload, looksLikeMsg91Payload } = require("./msg91WebhookController");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /wa-webhook  — Meta's one-time verification handshake
@@ -52,6 +53,14 @@ const receiveWebhook = async (req, res) => {
 
     // Only process WhatsApp Business Account events
     if (body.object !== "whatsapp_business_account") {
+      // Some deployments accidentally point MSG91's inbound webhook at this
+      // (/wa-webhook) endpoint instead of /msg91-webhook. Rather than silently
+      // drop the lead's reply, detect an MSG91-shaped payload and process it.
+      if (looksLikeMsg91Payload(body)) {
+        console.log("↪️  Meta webhook received an MSG91-shaped payload — forwarding to MSG91 processor");
+        await processMSG91Payload(body);
+        return;
+      }
       console.log(`⚠️  WA Webhook: unexpected object type "${body.object}"`);
       return;
     }

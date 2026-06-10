@@ -164,9 +164,17 @@ function isDeliveryReport(rawBody, item) {
 // ─────────────────────────────────────────────────────────────────────────────
 const receiveMSG91Webhook = async (req, res) => {
   res.sendStatus(200); // ACK immediately
+  await processMSG91Payload(req.body);
+};
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Core processing — split out from the HTTP handler so it can be reused.
+// The Meta webhook endpoint (/wa-webhook) also calls this when it receives an
+// MSG91-shaped payload, so lead replies are processed no matter which of the
+// two webhook URLs MSG91 is pointed at in the dashboard.
+// ─────────────────────────────────────────────────────────────────────────────
+async function processMSG91Payload(rawBody) {
   try {
-    const rawBody = req.body;
     console.log("📲 MSG91 Webhook RAW body:", JSON.stringify(rawBody, null, 2));
 
     if (!rawBody || typeof rawBody !== "object") {
@@ -539,4 +547,20 @@ async function getAvailableAgent(companyId) {
   return agents[0];
 }
 
-module.exports = { receiveMSG91Webhook };
+// ─────────────────────────────────────────────────────────────────────────────
+// Heuristic: does this payload look like an MSG91 WhatsApp event (not Meta)?
+// Used by the Meta webhook endpoint to forward misrouted MSG91 payloads here
+// instead of silently dropping them.
+// ─────────────────────────────────────────────────────────────────────────────
+function looksLikeMsg91Payload(body) {
+  if (!body || typeof body !== "object") return false;
+  if (body.object === "whatsapp_business_account") return false; // that's Meta
+  const item = extractItem(body);
+  return !!(
+    item.customerNumber || item.integratedNumber ||
+    body.customerNumber || body.integratedNumber ||
+    item.uuid || item.contentType
+  );
+}
+
+module.exports = { receiveMSG91Webhook, processMSG91Payload, looksLikeMsg91Payload };
