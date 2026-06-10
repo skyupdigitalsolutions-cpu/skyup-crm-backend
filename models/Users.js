@@ -40,6 +40,12 @@ const userSchema = mongoose.Schema(
     resetOtp:         { type: String, default: null },   // bcrypt-hashed OTP
     resetOtpExpiry:   { type: Date,   default: null },
     resetOtpAttempts: { type: Number, default: 0 },
+
+    // ── Telegram personal notification ────────────────────────────────────────
+    // Employee stores their own Telegram chat ID here.
+    // When a lead is assigned to them, a notification is sent to this chat.
+    // Get your chat ID: message @userinfobot on Telegram.
+    telegramChatId: { type: String, default: null, trim: true },
   },
   { timestamps: true }
 );

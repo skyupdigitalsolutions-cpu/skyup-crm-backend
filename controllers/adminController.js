@@ -836,6 +836,27 @@ const deleteMsg91EmailConfig = async (req, res) => {
   }
 };
 
+// ── PUT /admin/user/:id/telegram ─────────────────────────────────────────────
+// Admin sets a specific employee's Telegram chat ID.
+// Employee can also call this on their own (via authController self-update).
+const updateUserTelegram = async (req, res) => {
+  try {
+    const { id }            = req.params;
+    const { telegramChatId } = req.body;
+    const companyId          = req.admin?.company?._id || req.admin?.company;
+
+    const user = await User.findOne({ _id: id, company: companyId });
+    if (!user) return res.status(404).json({ message: 'Employee not found' });
+
+    user.telegramChatId = telegramChatId ? String(telegramChatId).trim() : null;
+    await user.save();
+
+    res.json({ message: 'Telegram chat ID updated.', telegramChatId: user.telegramChatId });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -865,4 +886,5 @@ module.exports = {
   getTelegramConfig,
   saveTelegramConfig,
   testTelegramConfig,
+  updateUserTelegram,
 };

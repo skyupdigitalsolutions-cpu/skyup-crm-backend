@@ -22,7 +22,7 @@ const getCompanyId = (req) =>
 
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
 const { autoSendTemplates } = require("../services/autoTemplateService");
-const { notifyCampaignLead } = require("../services/telegramService");
+const { notifyCampaignLead, notifyEmployeeLead } = require("../services/telegramService");
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
 async function getNextUser(companyId, excludeIds = []) {
@@ -325,6 +325,12 @@ const adminCreateLead = async (req, res) => {
     notifyCampaignLead(lead, companyId).catch(e =>
       console.error("[Telegram] adminCreateLead notify error:", e.message)
     );
+    // Telegram — notify assigned employee personally for ANY lead source
+    if (assignedUser) {
+      notifyEmployeeLead(assignedUser, lead, companyId).catch(e =>
+        console.error("[Telegram] employee notify error:", e.message)
+      );
+    }
 
     if (assignedUser) {
       sendNewLeadNotification(assignedUser, lead).catch((e) =>
@@ -886,6 +892,10 @@ const adminUpdateLead = async (req, res) => {
       sendReassignedLeadNotification(newUserId, updatedLead).catch((e) =>
         console.error("[FCM] adminUpdateLead push error:", e.message),
       );
+      // Telegram — notify newly assigned employee personally
+      notifyEmployeeLead(newUserId, updatedLead, companyId).catch(e =>
+        console.error("[Telegram] adminUpdateLead employee notify error:", e.message)
+      );
 
       if (companyId) {
         const fromAdminName =
@@ -1169,6 +1179,10 @@ const markNotInterested = async (req, res) => {
       sendReassignedLeadNotification(nextUserId, updatedLead).catch((e) =>
         console.error("[FCM] reassign push error:", e.message),
       );
+      // Telegram — notify newly assigned employee personally
+      notifyEmployeeLead(nextUserId, updatedLead, updatedLead.company).catch(e =>
+        console.error("[Telegram] NI-reassign employee notify error:", e.message)
+      );
     }
 
     return res.status(200).json({
@@ -1279,6 +1293,10 @@ const markColdReassign = async (req, res) => {
       }
       sendReassignedLeadNotification(nextUserId, updatedLead).catch((e) =>
         console.error("[FCM] cold-reassign push error:", e.message),
+      );
+      // Telegram — notify newly assigned employee personally
+      notifyEmployeeLead(nextUserId, updatedLead, updatedLead.company).catch(e =>
+        console.error("[Telegram] cold-reassign employee notify error:", e.message)
       );
     }
 

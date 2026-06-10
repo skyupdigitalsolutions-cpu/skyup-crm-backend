@@ -208,8 +208,71 @@ async function sendTestNotification(botToken, chatId, companyName) {
   return { ok: true };
 }
 
+// ── Build employee assignment message ─────────────────────────────────────────
+function buildEmployeeMessage(lead, employeeName) {
+  const now = new Date().toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day:      '2-digit', month: 'short', year: 'numeric',
+    hour:     '2-digit', minute: '2-digit', hour12: true,
+  });
+
+  const phone   = lead.primaryPhone || lead.mobile || '—';
+  const source  = lead.source   || '—';
+  const status  = lead.status   || 'New';
+  const quality = lead.temperature || lead.Quality || '—';
+
+  return (
+    `📋 <b>New Lead Assigned to You</b>\n\n` +
+    `👤 <b>Lead Name:</b> ${escapeHtml(lead.name || 'Unknown')}\n` +
+    `📞 <b>Phone:</b> <code>${escapeHtml(phone)}</code>\n` +
+    `📋 <b>Source:</b> ${escapeHtml(source)}\n` +
+    `🔥 <b>Quality:</b> ${escapeHtml(quality)}\n` +
+    `📌 <b>Status:</b> ${escapeHtml(status)}\n` +
+    `👷 <b>Assigned To:</b> ${escapeHtml(employeeName)}\n` +
+    `🕐 <b>Time:</b> ${now}`
+  );
+}
+
+// ── Notify employee on their personal Telegram chat when a lead is assigned ───
+// Uses the employee's own telegramChatId (stored on User document).
+// Uses the company's bot token (stored on Company document).
+// Both must be configured; silently skips if either is missing.
+//
+// Usage:
+//   const { notifyEmployeeLead } = require('../services/telegramService');
+//   await notifyEmployeeLead(userId, lead, companyId);
+async function notifyEmployeeLead(userId, lead, companyId) {
+  if (!userId || !lead || !companyId) return;
+
+  try {
+    // Fetch employee's personal chat ID
+    const employee = await User.findById(userId)
+      .select('name telegramChatId')
+      .lean();
+
+    if (!employee?.telegramChatId) return; // not configured — skip silently
+
+    // Fetch company bot token
+    const company = await Company.findById(companyId)
+      .select('telegramBotToken telegramEnabled')
+      .lean();
+
+    if (!company?.telegramEnabled)  return;
+    if (!company?.telegramBotToken) return;
+
+    const text = buildEmployeeMessage(lead, employee.name);
+    await sendTelegramMessage(company.telegramBotToken, employee.telegramChatId, text);
+    console.log(`[Telegram] ✅ Lead assignment notified → employee "${employee.name}"`);
+
+  } catch (err) {
+    // Never crash lead assignment because of a Telegram failure
+    console.error('[Telegram] notifyEmployeeLead error:', err.message);
+  }
+}
+
 module.exports = {
   notifyCampaignLead,
+  notifyEmployeeLead,
   sendTestNotification,
   isCampaignLead,
   CAMPAIGN_SOURCES,

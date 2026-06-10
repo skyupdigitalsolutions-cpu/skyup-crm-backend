@@ -34,6 +34,7 @@ const {
   getTelegramConfig,
   saveTelegramConfig,
   testTelegramConfig,
+  updateUserTelegram,
 } = adminController;
 const {
   registerAdmin,
@@ -85,6 +86,9 @@ router.delete("/company/msg91-email-config", protectAdmin, requireCompanySuperAd
 router.get("/company/telegram",       protectAdmin, getTelegramConfig);
 router.put("/company/telegram",       protectAdmin, requireCompanySuperAdmin, saveTelegramConfig);
 router.post("/company/telegram/test", protectAdmin, testTelegramConfig);
+
+// ── Employee personal Telegram chat ID (admin sets for any employee) ──────────
+router.put("/user/:id/telegram", protectAdmin, updateUserTelegram);
 
 // ── Legacy brevo-status (kept for backward compat) ───────────────────────────
 // router.get("/company/brevo-status",  protectAdmin, getBrevoStatus);
