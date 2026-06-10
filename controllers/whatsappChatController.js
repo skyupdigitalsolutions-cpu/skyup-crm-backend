@@ -28,6 +28,13 @@ function safeWaPhone(stored) {
   return normalizePhone(stored);
 }
 
+// Fallback value for the template's {{1}} body parameter (the recipient's name)
+// when we don't have a contact/lead name. Templates like `crm_followup_leads`
+// REQUIRE this parameter — sending zero params makes WhatsApp reject the message
+// with "number of localizable_params (0) does not match the expected number of
+// params (1)". Change this default if your template's {{1}} isn't a name.
+const DEFAULT_TEMPLATE_BODY_PARAM = "there";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // describeWaApiError — turn an axios error from the WA provider into a useful,
 // user-facing message AND log the full upstream context so 404s stop being a
@@ -372,14 +379,11 @@ const sendTemplate = async (req, res) => {
                 },
               }
             : {}),
-          ...(conversation.contactName?.trim()
-            ? {
-                body_1: {
-                  type: "text",
-                  value: conversation.contactName.trim(),
-                },
-              }
-            : {}),
+          // Always include the {{1}} body param — the template requires it.
+          body_1: {
+            type: "text",
+            value: conversation.contactName?.trim() || DEFAULT_TEMPLATE_BODY_PARAM,
+          },
         };
         if (
           reqComponents &&
@@ -690,9 +694,11 @@ const startConversation = async (req, res) => {
                 },
               }
             : {}),
-          ...(contactName?.trim()
-            ? { body_1: { type: "text", value: contactName.trim() } }
-            : {}),
+          // Always include the {{1}} body param — the template requires it.
+          body_1: {
+            type: "text",
+            value: contactName?.trim() || lead?.name?.trim() || DEFAULT_TEMPLATE_BODY_PARAM,
+          },
         };
         if (components && Array.isArray(components) && components.length > 0)
           msg91Components = components;
@@ -879,9 +885,11 @@ const _sendTemplateToPhone = async ({
             },
           }
         : {}),
-      ...(contactName.trim()
-        ? { body_1: { type: "text", value: contactName.trim() } }
-        : {}),
+      // Always include the {{1}} body param — the template requires it.
+      body_1: {
+        type: "text",
+        value: contactName?.trim() || DEFAULT_TEMPLATE_BODY_PARAM,
+      },
     };
     const resp = await axios.post(
       "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
