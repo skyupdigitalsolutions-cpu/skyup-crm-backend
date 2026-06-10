@@ -146,16 +146,20 @@ async function fetchLogs(config) {
     } else {
       body = { integratedNumber: integratedNumber };
     }
-    // Always set today's date range to limit results.
-    // Do NOT filter by direction here — let isInboundRow() handle it locally.
-    // MSG91's direction filter causes 0 results; fetch all and filter ourselves.
+    // Send yesterday+today as date range to avoid IST/UTC boundary mismatches.
+    // The server runs in UTC; MSG91 uses IST (+5:30). If it's before 05:30 UTC
+    // "today" in UTC is still "yesterday" in IST, causing 0 results.
+    // Sending a 2-day window guarantees we always catch today's IST messages.
+    const yesterday = new Date(istNow.getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     delete body.direction;
-    body.startDate = today;
+    body.startDate = yesterday;
     body.endDate = today;
     body.limit = body.limit || 100;
     body.offset = body.offset || 0;
 
+    console.log(`📤 MSG91 poll request body: startDate=${body.startDate} endDate=${body.endDate} integratedNumber=${body.integratedNumber || body.integrated_number}`);
     resp = await axios.post(LOGS_API_URL, body, { headers, timeout: 15000 });
+    console.log(`📥 MSG91 poll raw response: status=${resp.status} dataKeys=${Object.keys(resp.data || {}).join(",")}`);
   }
   return extractRows(resp.data);
 }
