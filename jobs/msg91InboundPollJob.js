@@ -109,10 +109,11 @@ function isInboundRow(row, integratedNumber) {
 }
 
 function rowTimestamp(row) {
-  // MSG91 logs use "requestedAt" for the message timestamp
-  const t = firstVal(row, "requestedAt", "ts", "timestamp", "receivedAt", "received_at", "date", "createdAt", "created_at");
+  // MSG91 logs use "requestedAt" for the message timestamp (after flattenRow unwrap)
+  const t = firstVal(row, "requestedAt", "sentTime", "ts", "timestamp", "receivedAt", "received_at", "date", "createdAt", "created_at");
   if (!t) return null;
-  const d = new Date(isNaN(t) ? t : Number(t) * (String(t).length <= 10 ? 1000 : 1));
+  // MSG91 format: "2026-06-10 14:40:46" — needs parsing
+  const d = new Date(isNaN(t) ? t.replace(" ", "T") + "+05:30" : Number(t) * (String(t).length <= 10 ? 1000 : 1));
   return isNaN(d.getTime()) ? null : d;
 }
 
@@ -123,6 +124,12 @@ async function fetchLogs(config) {
 
   const headers = { authkey: authKey, "Content-Type": "application/json" };
   let resp;
+
+  // Build date range: today in IST (MSG91 uses IST dates)
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const istNow = new Date(now.getTime() + istOffset);
+  const today = istNow.toISOString().slice(0, 10); // "YYYY-MM-DD"
 
   if (LOGS_API_METHOD === "GET") {
     resp = await axios.get(LOGS_API_URL, { headers, timeout: 15000 });
@@ -137,8 +144,17 @@ async function fetchLogs(config) {
         console.warn("⚠️  MSG91_LOGS_API_BODY is not valid JSON:", e.message);
       }
     } else {
-      body = { integrated_number: integratedNumber };
+      body = { integratedNumber: integratedNumber };
     }
+    // Always override direction to fetch INBOUND only — this is the key filter.
+    // MSG91 logs API uses "1" for inbound in the filter even though the response
+    // returns "INBOUND"/"OUTBOUND" as text. Always set today's date range.
+    body.direction = "1";
+    body.startDate = today;
+    body.endDate = today;
+    body.limit = body.limit || 100;
+    body.offset = body.offset || 0;
+
     resp = await axios.post(LOGS_API_URL, body, { headers, timeout: 15000 });
   }
   return extractRows(resp.data);
