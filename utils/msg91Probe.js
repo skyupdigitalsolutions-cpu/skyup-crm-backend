@@ -49,9 +49,21 @@ async function tryRequest(method, url, headers, body) {
 }
 
 async function probeLogsApi({ overrideUrl, overrideMethod } = {}) {
-  const config = await WhatsAppConfig.findOne({ provider: "msg91", isActive: true })
+  // Find the active config the SAME way the working send code does: by isActive,
+  // not by a strict provider filter (the provider field may be unset on older
+  // records even though MSG91 is in use). Prefer one that actually has an authkey.
+  let config = await WhatsAppConfig.findOne({
+    isActive: true,
+    msg91AuthKey: { $exists: true, $nin: [null, ""] },
+  })
     .select("+msg91AuthKey msg91IntegratedNumber")
     .lean();
+
+  if (!config) {
+    config = await WhatsAppConfig.findOne({ isActive: true })
+      .select("+msg91AuthKey msg91IntegratedNumber")
+      .lean();
+  }
 
   if (!config || !config.msg91AuthKey) {
     return { error: "No active MSG91 config with an authkey found." };

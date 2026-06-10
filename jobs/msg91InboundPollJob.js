@@ -120,7 +120,9 @@ async function pollOnce() {
     return;
   }
 
-  const configs = await WhatsAppConfig.find({ provider: "msg91", isActive: true })
+  // Find active configs by isActive (not a strict provider filter — the provider
+  // field may be unset on older records). fetchLogs() skips any without an authkey.
+  const configs = await WhatsAppConfig.find({ isActive: true })
     .select("+msg91AuthKey msg91IntegratedNumber company")
     .lean();
 
