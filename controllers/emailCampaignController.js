@@ -20,7 +20,7 @@ const {
 // STRICT company isolation: reads ONLY credentials saved for this company in DB.
 // No .env fallback — if a company has not connected Brevo, the call fails with
 // a clear message. This prevents one company's Brevo key being used for another.
-const sendViaBrevo = async ({ to, subject, html, fromName, companyId }) => {
+const sendViaBrevo = async ({ to, toName, subject, html, fromName, companyId }) => {
   if (!companyId) {
     throw new Error("Company ID is required to send email.");
   }
@@ -44,7 +44,9 @@ const sendViaBrevo = async ({ to, subject, html, fromName, companyId }) => {
     "https://api.brevo.com/v3/smtp/email",
     {
       sender: { name: dbFromName || "CRM", email: fromEmail },
-      to,
+      // Brevo requires `to` to be an array of { email, name } objects — a bare
+      // string is rejected with a validation error and the email never sends.
+      to: [{ email: to, name: toName || to }],
       subject,
       htmlContent: html,
     },
@@ -88,7 +90,7 @@ const sendEmail = async ({ to, toName, subject, html, fromName, companyId, _msg9
   }
 
   // Fall back to Brevo
-  await sendViaBrevo({ to, subject, html, fromName, companyId });
+  await sendViaBrevo({ to, toName, subject, html, fromName, companyId });
   return "brevo";
 };
 
