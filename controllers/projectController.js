@@ -4,7 +4,7 @@ const Lead    = require("../models/Leads");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/**
+/**a
  * Build the Mongo query filter that applies project visibility rules:
  *
  *  Creator      | isGlobal | Visible to
@@ -84,7 +84,7 @@ exports.getProjectsAdmin = async (req, res) => {
 // ── POST /api/project  (user route) ──────────────────────────────────────────
 exports.createProject = async (req, res) => {
   try {
-    const { name, color, isGlobal } = req.body;
+    const { name, color, isGlobal, description } = req.body;
     const company = req.user?.company;
     const userId  = req.user?._id;
 
@@ -97,6 +97,7 @@ exports.createProject = async (req, res) => {
 
     const project = await Project.create({
       name:          name.trim(),
+      description:   (description || "").trim(),
       color:         color || "#2563EB",
       company,
       createdByUser: userId,
@@ -113,7 +114,7 @@ exports.createProject = async (req, res) => {
 // ── POST /api/project/admin  (admin route) ───────────────────────────────────
 exports.createProjectAdmin = async (req, res) => {
   try {
-    const { name, color, isGlobal } = req.body;
+    const { name, color, isGlobal, description } = req.body;
     const company = req.admin?.company;
     const adminId = req.admin?._id;
 
@@ -126,10 +127,10 @@ exports.createProjectAdmin = async (req, res) => {
 
     const project = await Project.create({
       name:           name.trim(),
+      description:    (description || "").trim(),
       color:          color || "#2563EB",
       company,
       createdByAdmin: adminId,
-      // Admin-created projects are global by default; can be overridden
       isGlobal:       isGlobal === false ? false : true,
     });
 
@@ -170,19 +171,19 @@ exports.updateProject = async (req, res) => {
 exports.updateProjectAdmin = async (req, res) => {
   try {
     const { id }       = req.params;
-    const { name, color, isGlobal, isActive } = req.body;
+    const { name, color, isGlobal, isActive, description } = req.body;
     const company      = req.admin?.company;
 
-    // Admin can update any project in their company
     const project = await Project.findOne({ _id: id, company });
     if (!project) {
       return res.status(404).json({ message: "Project not found" });
     }
 
-    if (name?.trim())           project.name     = name.trim();
-    if (color)                  project.color    = color;
-    if (isGlobal !== undefined) project.isGlobal = Boolean(isGlobal);
-    if (isActive !== undefined) project.isActive = Boolean(isActive);
+    if (name?.trim())           project.name        = name.trim();
+    if (description !== undefined) project.description = (description || "").trim();
+    if (color)                  project.color       = color;
+    if (isGlobal !== undefined) project.isGlobal    = Boolean(isGlobal);
+    if (isActive !== undefined) project.isActive    = Boolean(isActive);
 
     await project.save();
     res.json(project);

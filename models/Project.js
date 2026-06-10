@@ -9,6 +9,13 @@ const projectSchema = new mongoose.Schema(
       trim:     true,
     },
 
+    // Optional description / notes for the project
+    description: {
+      type:    String,
+      default: "",
+      trim:    true,
+    },
+
     // Display color (hex string, e.g. "#2563EB")
     color: {
       type:    String,
