@@ -214,9 +214,23 @@ const receiveMSG91Webhook = async (req, res) => {
 // MSG91-shaped payload, so lead replies are processed no matter which of the
 // two webhook URLs MSG91 is pointed at in the dashboard.
 // ─────────────────────────────────────────────────────────────────────────────
-async function processMSG91Payload(rawBody) {
+async function processMSG91Payload(rawBody, opts = {}) {
+  const forceInbound = !!opts.forceInbound; // poller sets this for known-inbound log rows
   try {
-    console.log("📲 MSG91 Webhook RAW body:", JSON.stringify(rawBody, null, 2));
+    // Some senders POST JSON with a non-JSON Content-Type (text/plain, or none),
+    // in which case Express leaves req.body as a raw string. Try to parse it so
+    // we don't silently drop the message.
+    if (typeof rawBody === "string") {
+      const s = rawBody.trim();
+      try {
+        rawBody = JSON.parse(s);
+      } catch {
+        // Or a urlencoded "payload={...}" / "data={...}" style body
+        const m = s.match(/(?:payload|data|body)=(\{.*\}|\[.*\])/s);
+        if (m) { try { rawBody = JSON.parse(decodeURIComponent(m[1])); } catch {} }
+      }
+    }
+    console.log("📲 MSG91 inbound payload:", JSON.stringify(rawBody, null, 2));
 
     if (!rawBody || typeof rawBody !== "object") {
       console.warn("⚠️  MSG91 webhook: empty or non-JSON body");
@@ -224,10 +238,12 @@ async function processMSG91Payload(rawBody) {
     }
 
     const item = extractItem(rawBody);
-    console.log("📲 MSG91 Webhook extracted item:", JSON.stringify(item, null, 2));
 
     // ── Delivery status update ────────────────────────────────────────────────
-    if (isDeliveryReport(rawBody, item)) {
+    // Skipped when forceInbound is set: a log row for an inbound message can
+    // legitimately carry a "read"/"delivered" status (the read state of the
+    // lead's own message), and we must NOT treat that as a delivery report.
+    if (!forceInbound && isDeliveryReport(rawBody, item)) {
       const msgId     = item.uuid || item.id || item.requestId || rawBody.uuid || rawBody.requestId;
       const rawStatus = (item.status || rawBody.status || "").toLowerCase();
       const statusMap = { sent: "sent", delivered: "delivered", read: "read", failed: "failed", outbound: "sent" };
