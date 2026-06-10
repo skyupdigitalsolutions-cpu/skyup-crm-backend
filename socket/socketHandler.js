@@ -272,8 +272,13 @@ const initSocket = (io) => {
 
       broadcastOnlineMap(io, company);
 
-      // Push any pending follow-up alerts immediately so the bell is pre-populated
-      pushPendingFollowUps(socket, adminId, company, 'admin');
+      // Push pending follow-up alerts ONLY on the first admin_join per socket connection.
+      // If the client re-emits admin_join (e.g. due to React effect re-runs or component
+      // remounts), we skip pushPendingFollowUps to prevent duplicate bell notifications.
+      if (!socket._adminJoinHandled) {
+        socket._adminJoinHandled = true;
+        pushPendingFollowUps(socket, adminId, company, 'admin');
+      }
     });
 
     // ════════════════════════════════════════════════════════════════════════
@@ -317,6 +322,8 @@ const initSocket = (io) => {
 
       // super_admin does not receive on-connect follow-up alerts.
       // Their notifications come from lead_reassigned_notify only.
+      // Guard flag prevents any future pushPendingFollowUps calls on re-emit.
+      socket._adminJoinHandled = true;
     });
 
     // ════════════════════════════════════════════════════════════════════════
