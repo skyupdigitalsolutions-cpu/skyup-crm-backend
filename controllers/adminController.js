@@ -723,30 +723,50 @@ const registerMsg91Webhook = async (req, res) => {
     const backendUrl = process.env.BACKEND_URL || `${protocol}://${host}`;
     const webhookUrl = `${backendUrl}/msg91-webhook`;
 
-    // MSG91 Webhook API — create or update an inbound webhook
-    const response = await axios.post(
-      "https://control.msg91.com/api/v5/webhook",
-      {
-        name:    "CRM Inbound",
-        url:     webhookUrl,
-        service: "whatsapp",
-        event:   "inbound",
-      },
-      {
-        headers: {
-          authkey:        config.msg91AuthKey,
-          "Content-Type": "application/json",
-        },
-        timeout: 10000,
-      }
-    );
+    // Attempt 1: MSG91 generic webhook registry API
+    let registered = false;
+    let msg91Response = null;
+    try {
+      const r1 = await axios.post(
+        "https://control.msg91.com/api/v5/webhook",
+        { name: "CRM Inbound", url: webhookUrl, service: "whatsapp", event: "inbound" },
+        { headers: { authkey: config.msg91AuthKey, "Content-Type": "application/json" }, timeout: 10000 }
+      );
+      msg91Response = r1.data;
+      registered = true;
+      console.log("✅ MSG91 webhook registered via v5 API:", webhookUrl, r1.data);
+    } catch (e1) {
+      console.warn("⚠️  MSG91 v5 webhook API failed:", e1.response?.data || e1.message);
+    }
 
-    console.log("✅ MSG91 webhook registered:", webhookUrl, response.data);
+    // Attempt 2: MSG91 WhatsApp number-level response webhook setting
+    // This is the setting under: MSG91 → WhatsApp → Integrated Numbers → your number → Settings → Response Webhook
+    if (!registered && config.msg91IntegratedNumber) {
+      try {
+        const r2 = await axios.post(
+          "https://api.msg91.com/api/v5/whatsapp/setWebhook",
+          { integrated_number: config.msg91IntegratedNumber, webhook_url: webhookUrl },
+          { headers: { authkey: config.msg91AuthKey, "Content-Type": "application/json" }, timeout: 10000 }
+        );
+        msg91Response = r2.data;
+        registered = true;
+        console.log("✅ MSG91 WhatsApp number webhook set:", webhookUrl, r2.data);
+      } catch (e2) {
+        console.warn("⚠️  MSG91 setWebhook API failed:", e2.response?.data || e2.message);
+      }
+    }
+
+    // Even if both API calls failed, return success=true with the webhook URL
+    // so the admin can paste it manually — the URL itself is always correct.
+    console.log(registered ? "✅ MSG91 webhook registered:" : "ℹ️  MSG91 auto-register failed — URL provided for manual setup:", webhookUrl);
     res.json({
-      success:    true,
+      success:    true, // always true — URL is correct even if API registration failed
       webhookUrl,
-      msg91Response: response.data,
-      message: "Webhook registered with MSG91. Lead replies will now arrive instantly.",
+      autoRegistered: registered,
+      msg91Response,
+      message: registered
+        ? "Webhook registered with MSG91! Lead replies will now arrive instantly (<2s)."
+        : `Auto-registration failed — paste this URL manually: MSG91 → WhatsApp → Integrated Numbers → your number → Settings → Response Webhook → ${webhookUrl}`,
     });
   } catch (err) {
     const msg91Error = err.response?.data;

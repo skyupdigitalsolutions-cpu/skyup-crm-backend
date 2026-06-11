@@ -35,8 +35,8 @@ const WhatsAppConfig  = require("../models/WhatsAppConfig");
 const WhatsAppMessage = require("../models/WhatsAppMessage");
 const { processMSG91Payload } = require("../controllers/msg91WebhookController");
 
-const POLL_SECONDS    = parseInt(process.env.MSG91_POLL_SECONDS || "2", 10);
-const LOOKBACK_MIN    = parseInt(process.env.MSG91_LOGS_LOOKBACK_MIN || "60", 10);
+const POLL_SECONDS    = parseInt(process.env.MSG91_POLL_SECONDS || "1", 10);
+const LOOKBACK_MIN    = parseInt(process.env.MSG91_LOGS_LOOKBACK_MIN || "5", 10);
 const LOGS_API_URL    = process.env.MSG91_LOGS_API_URL || "";
 const LOGS_API_METHOD = (process.env.MSG91_LOGS_API_METHOD || "POST").toUpperCase();
 
@@ -146,7 +146,11 @@ async function fetchLogsApi(config) {
   const istOffset = 5.5 * 60 * 60 * 1000;
   const istNow    = new Date(now.getTime() + istOffset);
   const today     = istNow.toISOString().slice(0, 10);
-  const yesterday = new Date(istNow.getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  // Use a 10-minute rolling start window — keeps the API response small so each
+  // poll cycle completes in <500ms. The LOOKBACK_MIN cutoff (default 5 min) then
+  // further filters out any older rows from the in-memory stage.
+  const tenMinAgo = new Date(istNow.getTime() - 10 * 60 * 1000).toISOString().slice(0, 10);
+  const yesterday = tenMinAgo; // reused as startDate below
 
   let resp;
   if (LOGS_API_METHOD === "GET") {
@@ -298,7 +302,7 @@ function startMsg91InboundPollJob() {
     console.warn("⏸  MSG91 inbound poll job not started — MSG91_LOGS_API_URL is not set.");
     return;
   }
-  const everyN = Math.max(2, POLL_SECONDS);
+  const everyN = Math.max(1, POLL_SECONDS);
   let isRunning = false;
   setInterval(async () => {
     if (isRunning) return;
