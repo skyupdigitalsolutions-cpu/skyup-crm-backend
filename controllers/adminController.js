@@ -1,4 +1,5 @@
 const Admin   = require("../models/Admin");
+const axios   = require("axios");
 const User    = require("../models/Users");
 const Lead    = require("../models/Leads");
 const Company = require("../models/Company");
@@ -704,6 +705,62 @@ const deleteMsg91Config = async (req, res) => {
   }
 };
 
+// ── POST /api/admin/company/msg91-register-webhook ───────────────────────────
+// Programmatically registers the inbound webhook URL with MSG91 so lead replies
+// arrive instantly (< 2s) instead of via the 30s polling fallback.
+const registerMsg91Webhook = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const WhatsAppConfig = require("../models/WhatsAppConfig");
+    const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true }).lean();
+    if (!config?.msg91AuthKey) {
+      return res.status(400).json({ message: "MSG91 not configured for this company" });
+    }
+
+    // Build the webhook URL from the request host
+    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+    const host = req.headers["x-forwarded-host"] || req.headers.host;
+    const backendUrl = process.env.BACKEND_URL || `${protocol}://${host}`;
+    const webhookUrl = `${backendUrl}/msg91-webhook`;
+
+    // MSG91 Webhook API — create or update an inbound webhook
+    const response = await axios.post(
+      "https://control.msg91.com/api/v5/webhook",
+      {
+        name:    "CRM Inbound",
+        url:     webhookUrl,
+        service: "whatsapp",
+        event:   "inbound",
+      },
+      {
+        headers: {
+          authkey:        config.msg91AuthKey,
+          "Content-Type": "application/json",
+        },
+        timeout: 10000,
+      }
+    );
+
+    console.log("✅ MSG91 webhook registered:", webhookUrl, response.data);
+    res.json({
+      success:    true,
+      webhookUrl,
+      msg91Response: response.data,
+      message: "Webhook registered with MSG91. Lead replies will now arrive instantly.",
+    });
+  } catch (err) {
+    const msg91Error = err.response?.data;
+    console.error("❌ MSG91 webhook registration failed:", msg91Error || err.message);
+    // Don't fail hard — the webhook URL is still shown in UI for manual setup
+    res.status(502).json({
+      success: false,
+      message: "Could not auto-register with MSG91. Please set the webhook URL manually in MSG91 dashboard.",
+      error:   msg91Error || err.message,
+      webhookUrl: `${process.env.BACKEND_URL || ""}/msg91-webhook`,
+    });
+  }
+};
+
 // ── Single clean export block ─────────────────────────────────────────────────
 // ── GET /admin/company/telegram ───────────────────────────────────────────────
 const getTelegramConfig = async (req, res) => {
@@ -949,6 +1006,7 @@ module.exports = {
   deleteBrevoConfig,
   getMsg91Config,
   saveMsg91Config,
+  registerMsg91Webhook,
   deleteMsg91Config,
   getMsg91EmailConfig,
   saveMsg91EmailConfig,

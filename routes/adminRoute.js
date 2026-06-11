@@ -38,6 +38,7 @@ const {
   getClockInLocation,
   saveClockInLocation,
   updateMeetingPermission,
+  registerMsg91Webhook,
 } = adminController;
 const {
   registerAdmin,
@@ -79,6 +80,7 @@ router.delete("/company/brevo-config", protectAdmin, requireCompanySuperAdmin, d
 router.get("/company/msg91-config",    protectAdmin, getMsg91Config);
 router.put("/company/msg91-config",    protectAdmin, requireCompanySuperAdmin, saveMsg91Config);
 router.delete("/company/msg91-config", protectAdmin, requireCompanySuperAdmin, deleteMsg91Config);
+router.post("/company/msg91-register-webhook", protectAdmin, requireCompanySuperAdmin, registerMsg91Webhook);
 
 // ── MSG91 Email config — primary email blast provider (GET + PUT + DELETE) ────
 router.get("/company/msg91-email-config",    protectAdmin, getMsg91EmailConfig);
