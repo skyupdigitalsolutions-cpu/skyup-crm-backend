@@ -10,6 +10,7 @@ const {
   syncCallLogs, getCallLogs, getTodayCallLogs, matchPhone,
   uploadRecording, upload, getCompanyRecordings,
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
+  summarizeUnmatchedCall,
 } = require('../controllers/mobileCallLogController');
 
 router.get('/match',        protect,    matchPhone);
@@ -18,6 +19,7 @@ router.get('/',             protect,    getCallLogs);        // supports ?date=Y
 router.post('/sync',        protect,    syncCallLogs);
 router.post('/recording',   protect,    upload.single('recording'), uploadRecording);
 router.post('/remark',      protect,    saveRemark);
+router.post('/summarize-unmatched', protectAny, summarizeUnmatchedCall); // AI summary for non-lead calls
 router.get('/recordings',   protectAny, getCompanyRecordings);
 router.get('/all',          protectAny, getCompanyAllLogs);
 router.get('/lead/:leadId', protectAny, getCallLogsForLead);

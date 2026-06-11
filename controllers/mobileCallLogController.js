@@ -508,10 +508,18 @@ const getCompanyAllLogs = async (req, res) => {
     const company = req.callerCompany || req.user?.company;
     if (!company) return res.status(400).json({ message: 'Company not found in token' });
 
-    // Optional `since` param — only return logs from this date onwards.
-    // Used by the admin panel to show call logs from a specific employee's
-    // sign-in / account creation date so older irrelevant logs are excluded.
     const filter = { company };
+
+    // ── Optional userId — scope to a single employee (used by admin drawer) ──
+    // Without this, the limit applies company-wide and the employee's logs
+    // could be cut off if other users filled the limit.
+    if (req.query.userId) {
+      filter.user = req.query.userId;
+    }
+
+    // ── Optional since — only return logs from this date onwards ──
+    // Used with userId to exclude logs predating the employee's account creation
+    // (prevents old device logs from a prior employee appearing).
     if (req.query.since) {
       const sinceDate = new Date(req.query.since);
       if (!isNaN(sinceDate.getTime())) {
@@ -532,8 +540,79 @@ const getCompanyAllLogs = async (req, res) => {
   }
 };
 
+// ── POST /api/call-logs/summarize-unmatched ───────────────────────────────────
+// Generates an AI summary for a non-lead call log entry using GPT.
+// Body: { logId } — the MobileCallLog _id to summarize.
+// Only works if the log has at least one recording with a transcript.
+// If no transcript is available, returns a basic metadata-based summary.
+const summarizeUnmatchedCall = async (req, res) => {
+  try {
+    const { logId } = req.body;
+    if (!logId) return res.status(400).json({ message: 'logId is required' });
+
+    const company = req.callerCompany || req.user?.company;
+    const log = await MobileCallLog.findOne({ _id: logId, company });
+    if (!log) return res.status(404).json({ message: 'Call log not found' });
+
+    // Build a summary from metadata if no transcript exists
+    const hasTranscript = log.recordings?.some(r => r.transcript);
+
+    let summary;
+    if (hasTranscript) {
+      const { summarizeCallTranscript } = require('../utils/summarizeCall');
+      // Combine all transcripts from this call
+      const combinedTranscript = log.recordings
+        .filter(r => r.transcript)
+        .map(r => r.transcript)
+        .join('\n\n---\n\n');
+      summary = await summarizeCallTranscript(combinedTranscript, log.name || 'Unknown contact');
+    } else {
+      // No transcript — build a metadata-only summary
+      const durMin  = Math.floor((log.duration || 0) / 60);
+      const durSec  = (log.duration || 0) % 60;
+      const durStr  = log.duration > 0 ? `${durMin > 0 ? durMin + 'm ' : ''}${durSec}s` : 'no duration recorded';
+      const dateStr = log.timestamp ? new Date(log.timestamp).toLocaleDateString('en-IN') : 'unknown date';
+      summary = {
+        summary:       `${log.callType || 'Unknown'} call with ${log.phoneNumber} on ${dateStr}, lasting ${durStr}. This number is not in the CRM.`,
+        keyPoints:     [
+          `Call type: ${log.callType || 'unknown'}`,
+          `Duration: ${durStr}`,
+          log.name ? `Contact name on device: ${log.name}` : 'No contact name saved on device',
+          'Number not matched to any CRM lead',
+        ],
+        sentiment:     'Neutral',
+        nextAction:    'Review if this contact should be added as a lead.',
+        suggestedTemp: null,
+      };
+    }
+
+    // Persist the summary on the first recording (or create a placeholder recording)
+    if (log.recordings?.length > 0) {
+      log.recordings[0].summary = summary;
+      if (!log.recordings[0].transcribeStatus || log.recordings[0].transcribeStatus === 'pending') {
+        log.recordings[0].transcribeStatus = 'done';
+      }
+      log.markModified('recordings');
+    } else {
+      log.recordings = [{
+        url:              '',
+        name:             'auto-summary',
+        uploadedAt:       new Date(),
+        summary,
+        transcribeStatus: 'done',
+      }];
+    }
+
+    await log.save();
+    res.json({ message: 'Summary generated', summary, log });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   upload, syncCallLogs, getCallLogs, getTodayCallLogs,
   matchPhone, uploadRecording, getCompanyRecordings,
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
+  summarizeUnmatchedCall,
 };
