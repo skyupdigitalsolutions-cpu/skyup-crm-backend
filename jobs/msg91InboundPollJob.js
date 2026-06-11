@@ -43,6 +43,56 @@ function firstVal(obj, ...keys) {
   return undefined;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MSG91 logs API MASKS the customerNumber field with literal "XXX" characters
+// e.g. "919538281XXX1" instead of "919538281101".
+// normalizePhone strips non-digits, so XXX disappears → wrong 10-digit number
+// gets 91 prepended → completely wrong phone.
+//
+// Fix: detect XXX-masked numbers and reconstruct the correct number from the
+// uuid field, which contains the real number base64-encoded in the wamid.
+// If uuid is not available, skip the row entirely rather than save wrong data.
+//
+// The wamid format: wamid.HBgMOTE5NTM4MjgxMTAxFQIA...
+// The base64 segment after "HBgM" decodes to the phone number.
+// "OTE5NTM4MjgxMTAx" -> base64 decode -> "919538281101" ✓
+// ─────────────────────────────────────────────────────────────────────────────
+function decodePhoneFromWamid(uuid) {
+  if (!uuid || !uuid.startsWith("wamid.")) return null;
+  try {
+    // wamid structure: wamid.HBgM{base64phone}FQIA...
+    // After "HBgM" comes the base64-encoded phone number, terminated by "FQIA"
+    const inner = uuid.replace("wamid.", "");
+    // Decode the full base64 portion
+    const decoded = Buffer.from(inner, "base64").toString("binary");
+    // The phone digits appear as ASCII in the decoded string
+    // Extract longest digit sequence of 10-14 chars
+    const match = decoded.match(/\d{10,14}/);
+    if (match) return match[0];
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function unmaskedCustomerNumber(row) {
+  const raw = row.customerNumber || "";
+  // Check if MSG91 has masked this number with XXX
+  if (!/[xX]/.test(raw)) return raw; // no masking, use as-is
+
+  // Try to recover real number from wamid uuid
+  const uuid = row.uuid || row.CRQID || "";
+  const fromWamid = decodePhoneFromWamid(uuid);
+  if (fromWamid) {
+    console.log(`🔧 Unmasked ${raw} → ${fromWamid} (from wamid)`);
+    return fromWamid;
+  }
+
+  // Cannot recover — skip this row to avoid saving wrong number
+  console.warn(`⚠️  Skipping row with masked customerNumber "${raw}" and no recoverable uuid`);
+  return null;
+}
+
 // MSG91 logs API wraps every field as { value: "...", metaData: null }.
 // This unwraps the entire row so downstream code sees plain strings/numbers.
 // Example input:  { customerNumber: { value: "919876543210", metaData: null } }
@@ -225,6 +275,12 @@ async function pollOnce() {
 
       const ts = rowTimestamp(row);
       if (ts && ts.getTime() < cutoff) continue; // too old — skip
+
+      // Unmask the customerNumber if MSG91 returned it with XXX masking
+      // e.g. "919538281XXX1" → "919538281101" (recovered from wamid uuid)
+      const unmasked = unmaskedCustomerNumber(row);
+      if (!unmasked) continue; // skip rows where we can't recover the real number
+      row.customerNumber = unmasked;
 
       // Make sure the recipient (our number) is present so config resolution in
       // processMSG91Payload matches the right company.
