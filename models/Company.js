@@ -175,6 +175,24 @@ const companySchema = mongoose.Schema(
     telegramChatId:   { type: String, default: null, trim: true },
     telegramEnabled:  { type: Boolean, default: false },
 
+    // ── Clock-in Location Restriction ─────────────────────────────────────────
+    // If clockInLocationEnabled=true, employees must be within clockInRadiusMeters
+    // of the company coordinates to clock in.
+    clockInLocationEnabled: { type: Boolean, default: false },
+    clockInLatitude:        { type: Number,  default: null },
+    clockInLongitude:       { type: Number,  default: null },
+    clockInRadiusMeters:    { type: Number,  default: 100 },
+
+    // ── Client Meeting Location Tracking ─────────────────────────────────────
+    // When an employee has clientMeetingPermission active, the app pings GPS
+    // every meetingLocationIntervalMinutes and stores it in LiveLocation.
+    // Employee must explicitly consent (grant location permission) on device.
+    meetingLocationTrackingEnabled: { type: Boolean, default: false },
+    meetingLocationIntervalMinutes: { type: Number,  default: 15, min: 5, max: 60 },
+
+    // ── Device Call-Log Sync ─────────────────────────────────────────────────
+    callLogSyncEnabled: { type: Boolean, default: true },
+
         // ── Auto-template settings for new leads ─────────────────────────────────
     autoTemplate: {
       whatsapp: {

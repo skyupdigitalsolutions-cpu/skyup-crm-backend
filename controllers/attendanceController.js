@@ -540,9 +540,221 @@ function formatWorkHours(mins) {
   return `${Math.floor(mins / 60)}h ${(mins % 60).toString().padStart(2, "0")}m`;
 }
 
+// ── POST /attendance/request-meeting-permission ───────────────────────────────
+// Employee requests remote clock-in (client meeting).
+// Stores the request on the User document and emits a socket event to the admin.
+const requestMeetingPermission = async (req, res) => {
+  try {
+    const userId    = req.user._id;
+    const companyId = req.user.company;
+    const { reason, location } = req.body;
+
+    // Store the pending request on the user document
+    const user = await User.findByIdAndUpdate(
+      userId,
+      {
+        $set: {
+          meetingPermissionRequested:   true,
+          meetingPermissionRequestedAt: new Date(),
+          meetingPermissionReason:      (reason || '').trim(),
+          meetingPermissionLocation:    (location || '').trim(),
+          meetingPermissionStatus:      'pending',
+        },
+      },
+      { new: true }
+    ).select('name email clientMeetingPermission meetingPermissionStatus createdBy');
+
+    // Emit socket notification to admin
+    const _io = global._io;
+    if (_io) {
+      const adminId = user.createdBy || null;
+      const payload = {
+        userId:    String(userId),
+        userName:  user.name,
+        reason:    (reason || '').trim(),
+        location:  (location || '').trim(),
+        requestedAt: new Date().toISOString(),
+      };
+      if (adminId) {
+        _io.to(`admin_room:${String(adminId)}`).emit('meeting_permission_requested', payload);
+      }
+      // Also emit to company-wide admin room so any online admin sees it
+      _io.to(`company_admin:${String(companyId)}`).emit('meeting_permission_requested', payload);
+    }
+
+    res.json({ message: 'Request sent to admin. You will be notified once approved.', status: 'pending' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── GET /attendance/meeting-permission-status ─────────────────────────────────
+// Employee polls their permission status (approved / pending / denied)
+const getMeetingPermissionStatus = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id)
+      .select('clientMeetingPermission clientMeetingPermissionGrantedAt meetingPermissionStatus meetingPermissionRequested')
+      .lean();
+
+    const isActive = (() => {
+      if (!user.clientMeetingPermission) return false;
+      if (!user.clientMeetingPermissionGrantedAt) return false;
+      return (Date.now() - new Date(user.clientMeetingPermissionGrantedAt).getTime()) < 24 * 60 * 60 * 1000;
+    })();
+
+    res.json({
+      hasPermission: isActive,
+      grantedAt:     user.clientMeetingPermissionGrantedAt || null,
+      status:        isActive ? 'approved' : (user.meetingPermissionStatus || 'none'),
+      isPending:     user.meetingPermissionRequested && user.meetingPermissionStatus === 'pending',
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── POST /attendance/location-ping ───────────────────────────────────────────
+// Mobile app sends periodic GPS pings while employee has clientMeetingPermission.
+// Requires employee's explicit location consent (app already requested permission).
+// Silently rejects if:
+//   - company.meetingLocationTrackingEnabled is false
+//   - employee does not have active (< 24h) clientMeetingPermission
+const locationPing = async (req, res) => {
+  try {
+    const userId    = req.user._id;
+    const companyId = req.user.company;
+    const { latitude, longitude, accuracy, address } = req.body;
+
+    if (latitude == null || longitude == null) {
+      return res.status(400).json({ message: 'latitude and longitude required' });
+    }
+
+    // Check company tracking toggle
+    const Company = require('../models/Company');
+    const company = await Company.findById(companyId)
+      .select('meetingLocationTrackingEnabled')
+      .lean();
+    if (!company?.meetingLocationTrackingEnabled) {
+      return res.json({ stored: false, reason: 'tracking_disabled' });
+    }
+
+    // Check employee has active meeting permission (< 24h)
+    const userDoc = await User.findById(userId)
+      .select('clientMeetingPermission clientMeetingPermissionGrantedAt')
+      .lean();
+    const hasPermission = (() => {
+      if (!userDoc?.clientMeetingPermission) return false;
+      if (!userDoc.clientMeetingPermissionGrantedAt) return false;
+      return (Date.now() - new Date(userDoc.clientMeetingPermissionGrantedAt).getTime()) < 24 * 60 * 60 * 1000;
+    })();
+    if (!hasPermission) {
+      return res.json({ stored: false, reason: 'no_meeting_permission' });
+    }
+
+    const LiveLocation = require('../models/LiveLocation');
+    const ping = await LiveLocation.create({
+      user:      userId,
+      company:   companyId,
+      latitude:  Number(latitude),
+      longitude: Number(longitude),
+      accuracy:  accuracy != null ? Number(accuracy) : null,
+      address:   (address || '').trim() || null,
+      date:      todayStr(),
+      context:   'meeting',
+      capturedAt: new Date(),
+    });
+
+    // Emit to admin room so live map updates in real-time (optional enhancement)
+    const _io = global._io;
+    if (_io) {
+      _io.to(`company_admin:${String(companyId)}`).emit('employee_location_ping', {
+        userId:    String(userId),
+        userName:  req.user.name,
+        latitude:  ping.latitude,
+        longitude: ping.longitude,
+        address:   ping.address,
+        capturedAt: ping.capturedAt,
+      });
+    }
+
+    res.json({ stored: true, pingId: ping._id });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── GET /attendance/live-locations ────────────────────────────────────────────
+// Admin/superadmin fetches today's location trail for all employees with
+// meeting permission. Returns the last N pings per employee.
+const getLiveLocations = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const date      = todayStr();
+    const limit     = Math.min(200, parseInt(req.query.limit || '50', 10));
+    const userId    = req.query.userId || null; // optional filter by employee
+
+    const LiveLocation = require('../models/LiveLocation');
+    const query = { company: companyId, date };
+    if (userId) query.user = userId;
+
+    const pings = await LiveLocation.find(query)
+      .sort({ capturedAt: -1 })
+      .limit(limit)
+      .populate('user', 'name email')
+      .lean();
+
+    res.json({ pings, date, total: pings.length });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── GET /attendance/meeting-tracking-config ────────────────────────────────────
+// Employee fetches current tracking settings (enabled + interval) on clock-in
+const getMeetingTrackingConfig = async (req, res) => {
+  try {
+    const Company = require('../models/Company');
+    const company = await Company.findById(req.user.company)
+      .select('meetingLocationTrackingEnabled meetingLocationIntervalMinutes')
+      .lean();
+    res.json({
+      enabled:          company?.meetingLocationTrackingEnabled || false,
+      intervalMinutes:  company?.meetingLocationIntervalMinutes || 15,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── PUT /admin/company/meeting-tracking ───────────────────────────────────────
+// Admin sets the meeting location tracking toggle + interval
+const saveMeetingTrackingConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { enabled, intervalMinutes } = req.body;
+    const Company = require('../models/Company');
+    const update = {};
+    if (enabled !== undefined) update.meetingLocationTrackingEnabled = Boolean(enabled);
+    if (intervalMinutes != null) {
+      const mins = Math.max(5, Math.min(60, parseInt(intervalMinutes, 10)));
+      update.meetingLocationIntervalMinutes = mins;
+    }
+    await Company.findByIdAndUpdate(companyId, { $set: update });
+    res.json({ message: 'Meeting tracking config saved.', ...update });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   clockIn, clockOut, startBreak, endBreak, pingActivity, getMyToday,
   getCompanyAttendance, markIdleUsers,
   getAttendanceReport, editAttendance, deleteAttendance, exportAttendance,
   getCompanyUsers,
+  requestMeetingPermission,
+  getMeetingPermissionStatus,
+  locationPing,
+  getLiveLocations,
+  getMeetingTrackingConfig,
+  saveMeetingTrackingConfig,
 };

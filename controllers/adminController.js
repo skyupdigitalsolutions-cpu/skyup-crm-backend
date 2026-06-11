@@ -903,7 +903,20 @@ const updateMeetingPermission = async (req, res) => {
     user.clientMeetingPermission          = Boolean(grant);
     user.clientMeetingPermissionGrantedBy = grant ? (req.admin?._id || null) : null;
     user.clientMeetingPermissionGrantedAt = grant ? new Date() : null;
+    // Clear the pending request when admin responds
+    user.meetingPermissionRequested  = false;
+    user.meetingPermissionStatus     = grant ? 'approved' : 'denied';
     await user.save();
+
+    // Notify the employee via socket so the app updates in real-time
+    const _io = global._io;
+    if (_io) {
+      _io.to(`agent:${String(id)}`).emit('meeting_permission_response', {
+        approved:  Boolean(grant),
+        grantedAt: user.clientMeetingPermissionGrantedAt?.toISOString() || null,
+        adminName: req.admin?.name || 'Admin',
+      });
+    }
 
     res.json({
       message:   grant ? 'Remote clock-in permission granted (24h).' : 'Permission revoked.',

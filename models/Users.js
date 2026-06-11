@@ -54,6 +54,14 @@ const userSchema = mongoose.Schema(
     clientMeetingPermission:          { type: Boolean, default: false },
     clientMeetingPermissionGrantedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', default: null },
     clientMeetingPermissionGrantedAt: { type: Date, default: null },
+
+    // ── Meeting permission request flow ───────────────────────────────────────
+    // Employee requests remote clock-in → admin approves/denies via Adminchat bell
+    meetingPermissionRequested:   { type: Boolean, default: false },
+    meetingPermissionRequestedAt: { type: Date,    default: null },
+    meetingPermissionReason:      { type: String,  default: null, trim: true },
+    meetingPermissionLocation:    { type: String,  default: null, trim: true },
+    meetingPermissionStatus:      { type: String,  default: 'none', enum: ['none', 'pending', 'approved', 'denied'] },
   },
   { timestamps: true }
 );
