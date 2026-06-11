@@ -1056,4 +1056,5 @@ module.exports = {
   getClockInLocation,
   saveClockInLocation,
   updateMeetingPermission,
+  registerMsg91Webhook,
 };
