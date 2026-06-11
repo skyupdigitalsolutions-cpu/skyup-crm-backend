@@ -345,14 +345,23 @@ async function processMSG91Payload(rawBody, opts = {}) {
     // ── Dedup ─────────────────────────────────────────────────────────────────
     const exists = await WhatsAppMessage.findOne({ waMessageId });
     if (exists) {
-      // If the message was previously saved as outbound (due to a bug) but we now
-      // know it's inbound (forceInbound from poll job), correct the direction.
+      // Fix 1: If saved as outbound but actually inbound — correct the direction
       if (exists.direction === "outbound" && forceInbound) {
         await WhatsAppMessage.findByIdAndUpdate(exists._id, { direction: "inbound", sentBy: null });
         console.log(`🔁 Corrected direction: outbound→inbound for ${waMessageId}`);
-        // Also return here — conversation/socket update not needed for old messages
-      } else {
-        console.log(`⏭  Dedup: already saved ${waMessageId}`);
+      }
+
+      // Fix 2: If saved in wrong conversation — move it to the correct one.
+      // This happens when the XXX phone masking bug previously saved the message
+      // to a wrong conversation (e.g. waPhone=919195382811 instead of 919538281101).
+      // We detect this by finding the correct conversation for the current waPhone
+      // and checking if the existing message belongs to a different conversation.
+      if (exists.conversation) {
+        const correctConv = await WhatsAppConversation.findOne({ waPhone, company: (await WhatsAppConfig.findOne({ isActive: true }))?.company }).sort({ lastMessageAt: -1 }).lean();
+        if (correctConv && exists.conversation.toString() !== correctConv._id.toString()) {
+          await WhatsAppMessage.findByIdAndUpdate(exists._id, { conversation: correctConv._id });
+          console.log(`🔀 Moved message ${waMessageId} from conv ${exists.conversation} → ${correctConv._id} (correct waPhone=${waPhone})`);
+        }
       }
       return;
     }
