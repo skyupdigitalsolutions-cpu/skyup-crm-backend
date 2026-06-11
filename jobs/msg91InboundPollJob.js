@@ -29,8 +29,8 @@ const axios = require("axios");
 const WhatsAppConfig = require("../models/WhatsAppConfig");
 const { processMSG91Payload } = require("../controllers/msg91WebhookController");
 
-const POLL_SECONDS   = parseInt(process.env.MSG91_POLL_SECONDS || "30", 10);
-const LOOKBACK_MIN   = parseInt(process.env.MSG91_LOGS_LOOKBACK_MIN || "60", 10);
+const POLL_SECONDS   = parseInt(process.env.MSG91_POLL_SECONDS || "2", 10);
+const LOOKBACK_MIN   = parseInt(process.env.MSG91_LOGS_LOOKBACK_MIN || "5", 10);
 const LOGS_API_URL   = process.env.MSG91_LOGS_API_URL || "";
 const LOGS_API_METHOD = (process.env.MSG91_LOGS_API_METHOD || "POST").toUpperCase();
 
@@ -261,11 +261,17 @@ async function pollOnce() {
       continue;
     }
 
-    console.log(`🔎 MSG91 poll: fetched ${rows.length} rows for ${config.msg91IntegratedNumber}`);
+    // Sort rows oldest-first so messages are ingested in correct chronological order
+    rows.sort((a, b) => {
+      const ta = rowTimestamp(a); const tb = rowTimestamp(b);
+      if (!ta && !tb) return 0;
+      if (!ta) return 1;
+      if (!tb) return -1;
+      return ta.getTime() - tb.getTime();
+    });
+
     if (rows.length > 0) {
-      // Log first row structure to help debug field mapping
-      const sample = rows[0];
-      console.log(`   Sample row fields: direction="${sample.direction}" customerNumber="${sample.customerNumber}" text="${String(sample.text||"").slice(0,30)}" requestedAt="${sample.requestedAt}"`);
+      console.log(`🔎 MSG91 poll: fetched ${rows.length} rows for ${config.msg91IntegratedNumber}`);
     }
 
     for (const row of rows) {
@@ -308,12 +314,21 @@ function startMsg91InboundPollJob() {
     console.warn("⏸  MSG91 inbound poll job not started — MSG91_LOGS_API_URL is not set.");
     return;
   }
-  // node-cron uses 6-field syntax with seconds when 6 fields are given.
-  const everyN = Math.max(10, POLL_SECONDS); // floor at 10s to be gentle
-  const expr = `*/${everyN} * * * * *`;
-  cron.schedule(expr, () => {
-    pollOnce().catch((e) => console.error("MSG91 inbound poll uncaught:", e.message));
-  });
+  // Use setInterval for fast polling (supports sub-10s intervals unlike node-cron).
+  // Default is 2 seconds for near-realtime delivery. Set MSG91_POLL_SECONDS in env to adjust.
+  const everyN = Math.max(2, POLL_SECONDS); // floor at 2s
+  let isRunning = false;
+  setInterval(async () => {
+    if (isRunning) return; // skip if previous poll still running (avoids pile-up)
+    isRunning = true;
+    try {
+      await pollOnce();
+    } catch (e) {
+      console.error("MSG91 inbound poll uncaught:", e.message);
+    } finally {
+      isRunning = false;
+    }
+  }, everyN * 1000);
   console.log(`🔄 MSG91 inbound poll job started — every ${everyN}s → ${LOGS_API_URL}`);
 }
 
