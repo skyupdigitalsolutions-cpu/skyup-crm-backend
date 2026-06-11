@@ -42,6 +42,8 @@ const {
   saveClockInLocation,
   updateMeetingPermission,
   registerMsg91Webhook,
+  getLateLoginConfig,
+  saveLateLoginConfig,
 } = adminController;
 const {
   registerAdmin,
@@ -106,6 +108,10 @@ router.put("/user/:id/telegram", protectAdmin, updateUserTelegram);
 // ── Clock-in location restriction settings ────────────────────────────────────
 router.get("/company/clock-in-location", protectAdmin, getClockInLocation);
 router.put("/company/clock-in-location", protectAdmin, requireCompanySuperAdmin, saveClockInLocation);
+
+// ── Late login threshold (admin sets what time counts as "Late") ──────────────
+router.get("/company/late-login-config", protectAdmin, getLateLoginConfig);
+router.put("/company/late-login-config", protectAdmin, requireCompanySuperAdmin, saveLateLoginConfig);
 
 // ── Client meeting remote clock-in permission (per employee) ──────────────────
 router.put("/user/:id/meeting-permission", protectAdmin, updateMeetingPermission);

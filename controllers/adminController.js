@@ -1130,6 +1130,35 @@ const updateMeetingPermission = async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
+// ── GET /admin/company/late-login-config ─────────────────────────────────────
+const getLateLoginConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const company   = await Company.findById(companyId)
+      .select('lateLoginHour lateLoginMinute')
+      .lean();
+    if (!company) return res.status(404).json({ message: 'Company not found' });
+    res.json({
+      hour:   company.lateLoginHour   ?? 10,
+      minute: company.lateLoginMinute ?? 30,
+    });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
+// ── PUT /admin/company/late-login-config ──────────────────────────────────────
+const saveLateLoginConfig = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { hour, minute } = req.body;
+    const h = Math.max(0, Math.min(23, parseInt(hour   ?? 10, 10)));
+    const m = Math.max(0, Math.min(59, parseInt(minute ?? 30, 10)));
+    await Company.findByIdAndUpdate(companyId, {
+      $set: { lateLoginHour: h, lateLoginMinute: m },
+    });
+    res.json({ message: 'Late login threshold saved.', hour: h, minute: m });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -1167,4 +1196,6 @@ module.exports = {
   saveClockInLocation,
   updateMeetingPermission,
   registerMsg91Webhook,
+  getLateLoginConfig,
+  saveLateLoginConfig,
 };

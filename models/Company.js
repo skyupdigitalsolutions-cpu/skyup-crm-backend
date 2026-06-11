@@ -193,6 +193,12 @@ const companySchema = mongoose.Schema(
     // ── Device Call-Log Sync ─────────────────────────────────────────────────
     callLogSyncEnabled: { type: Boolean, default: true },
 
+    // ── Late Login Threshold ──────────────────────────────────────────────────
+    // Employees clocking in after this time are marked "Late" in attendance.
+    // Default: 10:30 AM
+    lateLoginHour:   { type: Number, default: 10, min: 0, max: 23 },
+    lateLoginMinute: { type: Number, default: 30, min: 0, max: 59 },
+
         // ── Auto-template settings for new leads ─────────────────────────────────
     autoTemplate: {
       whatsapp: {

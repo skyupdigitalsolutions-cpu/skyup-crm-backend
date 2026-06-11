@@ -35,7 +35,7 @@ const attendanceSchema = new mongoose.Schema({
   // If null, status is auto-derived in the controller (present / late / half_day / absent).
   crmStatus: {
     type: String,
-    enum: ["present", "absent", "late", "half_day", "leave", null],
+    enum: ["present", "absent", "late", "half_day", "leave", "holiday", null],
     default: null,
   },
 
