@@ -61,7 +61,6 @@ const { startIdleJob }               = require('./jobs/markIdleJob');
 const { startLeadAlertsJob }         = require('./jobs/leadAlertsJob');
 // NEW: Monthly usage counter reset
 const { startUsageResetJob }         = require('./jobs/usageResetJob');
-const { startMsg91InboundPollJob }   = require('./jobs/msg91InboundPollJob');
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute         = require('./routes/smsCampaign');
@@ -308,7 +307,7 @@ connectDB().then(() => {
     startIdleJob();
     startLeadAlertsJob();
     startUsageResetJob();   // NEW
-    startMsg91InboundPollJob();   // NEW: pull lead replies from MSG91 logs
+    // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();
   });
