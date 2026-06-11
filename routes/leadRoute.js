@@ -102,6 +102,7 @@ router.put("/:id", protect, updateLead);
 
 // ── Close lead as wrong entry ─────────────────────────────────────────────────
 router.patch("/admin/:id/close-wrong-entry", protectAdmin, closeLeadWrongEntry);
+router.patch("/:id/close-wrong-entry",       protect,      closeLeadWrongEntry); // employee-level (own leads only)
 // Employee closes a lead with phone number + remark → notifies admin
 router.post("/:id/close-by-user", protect, closeLeadByUser);
 

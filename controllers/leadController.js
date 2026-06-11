@@ -194,9 +194,9 @@ const createLead = async (req, res) => {
 
     const lead = await Lead.create({
       ...req.body,
-      mobile:        normPrimary,        // store clean 10-digit — no country code prefix
-      primaryPhone:  normPrimary,
-      secondaryPhone: normSecondary ? normSecondary : null,
+      mobile:        primaryMobile,
+      primaryPhone:  primaryMobile,
+      secondaryPhone: normSecondary ? secondaryMobile : null,
       user:    req.body.user || req.user._id,
       company: companyId,
     });
@@ -261,9 +261,9 @@ const adminCreateLead = async (req, res) => {
 
     const lead = await Lead.create({
       name: req.body.name,
-      mobile: normPrimary,               // store clean 10-digit — no country code prefix
-      primaryPhone: normPrimary,
-      secondaryPhone: normSecondary ? normSecondary : null,
+      mobile: primaryMobile,
+      primaryPhone: primaryMobile,
+      secondaryPhone: normSecondary ? secondaryMobile : null,
       email: req.body.email || "",
       source: req.body.source || "Web Form",
       campaign: req.body.campaign || null,
@@ -275,7 +275,7 @@ const adminCreateLead = async (req, res) => {
         computeQuality(
           {
             name: req.body.name || "",
-            mobile: normPrimary,
+            mobile: primaryMobile,
             email: req.body.email || "",
             _extraAnswers: [],
           },
@@ -401,9 +401,9 @@ const adminCreateLeadsBulk = async (req, res) => {
 
         const lead = await Lead.create({
           name:          row.name,
-          mobile:        normPrimary,     // store clean 10-digit — no country code prefix
-          primaryPhone:  normPrimary,
-          secondaryPhone: normSecondary || null,
+          mobile:        primaryMobile,
+          primaryPhone:  primaryMobile,
+          secondaryPhone: normSecondary ? secondaryMobile : null,
           source:        row.source   || "Web Form",
           campaign:      row.campaign || null,
           status:        row.status   || "New",
@@ -769,9 +769,9 @@ const updateLead = async (req, res) => {
             duplicate: true, lead: conflict,
           });
         }
-        // Store clean 10-digit number — country code added at API-send time by whatsappChatController
-        safeBody.mobile       = normNew;
-        safeBody.primaryPhone = normNew;
+        // Keep mobile + primaryPhone in sync
+        safeBody.mobile       = newPrimary;
+        safeBody.primaryPhone = newPrimary;
       }
     }
 
@@ -945,7 +945,7 @@ const getMyLeads = async (req, res) => {
     );
     const skip = (page - 1) * limit;
 
-    const query = { company: getCompanyId(req), user: req.user._id, mergedInto: null };
+    const query = { company: getCompanyId(req), user: req.user._id, mergedInto: null, isClosed: { $ne: true } };
 
     const [leads, total] = await Promise.all([
       Lead.find(query)
@@ -989,7 +989,20 @@ const patchLead = async (req, res) => {
     const pushOps = {};
     const setOps = {};
 
-    if (remark && remark.trim()) {
+    // ── Call history — only push when this is a genuine call interaction.
+    // A bare remark-only edit (no outcome, no calledNumber) should NOT create
+    // a new call log entry. We require at least one of:
+    //   • outcome (employee chose a call outcome from the dropdown)
+    //   • calledNumber (mobile app passed the dialled number)
+    // This prevents the "Update Lead" remark textarea from inflating call counts.
+    // isGenuineCall: only true when outcome is a non-empty string (user explicitly
+    // chose a call outcome) OR mobile app passed a calledNumber.
+    // outcome="" (blank placeholder) means user did NOT make a call — no callHistory entry.
+    const isGenuineCall = !!(
+      (outcome && typeof outcome === "string" && outcome.trim().length > 0) ||
+      req.body.calledNumber
+    );
+    if (remark && remark.trim() && isGenuineCall) {
       const histEntry = {
         userId: req.user._id,
         userName: req.user.name || "",
@@ -1013,42 +1026,36 @@ const patchLead = async (req, res) => {
       setOps[`scheduledCalls.${idx}.doneAt`] = new Date();
     }
 
-    // ── Schedule follow-up ────────────────────────────────────────────────────
-    // A scheduledCalls entry is created when:
-    //   a) status is set AND (followUpDate is given OR outcome is "Call Back")
-    //   b) followUpDate is given WITHOUT a status change (e.g. mobile remark-only)
-    // Previously, case (b) was silently dropped because the condition required
-    // status !== undefined. Mobile app sends { remark, outcome, followUpDate }
-    // without a status field — this fix makes followUpDate always work.
-    const hasStatusChange = status !== undefined && status !== "Not Interested";
-    const shouldSchedule  = !!(followUpDate || (hasStatusChange && outcome === "Call Back"));
+    if (status !== undefined && status !== "Not Interested") {
+      const shouldSchedule = !!(followUpDate || outcome === "Call Back");
 
-    if (shouldSchedule) {
-      let scheduledAt;
-      if (followUpDate) {
-        const provided = new Date(followUpDate);
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
-        if (provided < todayStart) {
-          return res
-            .status(400)
-            .json({ message: "Follow-up date cannot be in the past." });
+      if (shouldSchedule) {
+        let scheduledAt;
+        if (followUpDate) {
+          const provided = new Date(followUpDate);
+          const todayStart = new Date();
+          todayStart.setHours(0, 0, 0, 0);
+          if (provided < todayStart) {
+            return res
+              .status(400)
+              .json({ message: "Follow-up date cannot be in the past." });
+          }
+          scheduledAt = provided;
+        } else {
+          const tomorrow = new Date();
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          tomorrow.setHours(9, 0, 0, 0);
+          scheduledAt = tomorrow;
         }
-        scheduledAt = provided;
-      } else {
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        tomorrow.setHours(9, 0, 0, 0);
-        scheduledAt = tomorrow;
-      }
 
-      pushOps.scheduledCalls = {
-        type: "follow-up",
-        scheduledAt,
-        done: false,
-        doneAt: null,
-        note: `Follow-up after status "${status || lead.status}" — outcome: ${outcome || "Manual"}`,
-      };
+        pushOps.scheduledCalls = {
+          type: "follow-up",
+          scheduledAt,
+          done: false,
+          doneAt: null,
+          note: `Follow-up after status "${status}" — outcome: ${outcome || "Call Back"}`,
+        };
+      }
     }
 
     if (Object.keys(pushOps).length > 0) update.$push = pushOps;
@@ -1324,28 +1331,108 @@ const closeLeadWrongEntry = async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
     const companyId = getCompanyId(req);
-
-    // Employees can only close leads assigned to them
-    const query = { _id: id, company: companyId };
-    if (req.user && !req.admin && !req.superAdmin) {
-      query.user = req.user._id;
-    }
-
-    const lead = await Lead.findOne(query);
+    const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const updated = await Lead.findByIdAndUpdate(
       id,
       {
         $set: {
-          isClosed:    true,
+          isClosed: true,
           closeReason: reason || "Wrong entry",
-          closedAt:    new Date(),
-          closedBy:    req.admin?._id || req.superAdmin?._id || req.user?._id || null,
+          closedAt: new Date(),
+          closedBy: req.admin?._id || req.superAdmin?._id || null,
         },
       },
       { new: true },
     );
+    return res.status(200).json(updated);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── closeLeadByUser (employee closes a lead with a phone number + remark) ──────
+// POST /lead/:id/close-by-user
+// Body: { phone: "9876543210", remark: "Customer not reachable after 5 attempts" }
+// Marks the lead as closed, records the closing phone number and remark, then
+// emits a real-time socket notification to the admin's room.
+const closeLeadByUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { phone, remark } = req.body;
+    if (!phone || !phone.trim())
+      return res.status(400).json({ message: "Phone number is required to close a lead." });
+    if (!remark || !remark.trim())
+      return res.status(400).json({ message: "Remark is required to close a lead." });
+
+    const companyId = getCompanyId(req);
+    const lead = await Lead.findOne({ _id: id, company: companyId, user: req.user._id });
+    if (!lead) return res.status(404).json({ message: "Lead not found or not assigned to you." });
+    if (lead.isClosed) return res.status(400).json({ message: "Lead is already closed." });
+
+    const updated = await Lead.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          isClosed:       true,
+          closeReason:    remark.trim(),
+          closedAt:       new Date(),
+          closedBy:       req.user._id,
+          status:         "Not Interested",
+        },
+        $push: {
+          callHistory: {
+            userId:   req.user._id,
+            userName: req.user.name || "",
+            remark:   remark.trim(),
+            outcome:  "Closed",
+            calledAt: new Date(),
+            calledNumber: phone.replace(/\D/g, ""),
+            numberType: "Closing",
+          },
+        },
+      },
+      { new: true }
+    );
+
+    // ── Notify admin via socket ───────────────────────────────────────────────
+    const _io = global._io;
+    if (_io) {
+      try {
+        const UserModel = require("../models/Users");
+        const employee  = await UserModel.findById(req.user._id).select("createdBy name").lean();
+
+        // Resolve adminId: prefer lead.assignedAdmin, then employee.createdBy
+        const rawAdminId = lead.assignedAdmin || employee?.createdBy || null;
+        const adminId    = rawAdminId ? String(rawAdminId) : null;
+
+        if (adminId) {
+          _io.to(`admin_room:${adminId}`).emit("lead_closed_by_user", {
+            leadId:   String(lead._id),
+            leadName: lead.name,
+            phone:    phone.replace(/\D/g, ""),
+            remark:   remark.trim(),
+            closedBy: req.user.name || "Employee",
+            closedAt: new Date().toISOString(),
+          });
+        }
+        // Also emit to company-wide admin room as fallback so any admin on duty sees it
+        if (lead.company) {
+          _io.to(`company_admin:${String(lead.company)}`).emit("lead_closed_by_user", {
+            leadId:   String(lead._id),
+            leadName: lead.name,
+            phone:    phone.replace(/\D/g, ""),
+            remark:   remark.trim(),
+            closedBy: req.user.name || "Employee",
+            closedAt: new Date().toISOString(),
+          });
+        }
+      } catch (socketErr) {
+        console.error("[closeLeadByUser] socket error:", socketErr.message);
+      }
+    }
+
     return res.status(200).json(updated);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1637,8 +1724,8 @@ const addSecondaryPhone = async (req, res) => {
       id,
       {
         $set: {
-          secondaryPhone:            normSecondary,   // store clean 10-digit
-          normalizedSecondaryPhone:  normSecondary,
+          secondaryPhone,
+          normalizedSecondaryPhone: normSecondary,
         },
         $push: {
           activityTimeline: {
@@ -1959,6 +2046,7 @@ module.exports = {
   adminUpdateLead,
   adminDeleteLead,
   closeLeadWrongEntry,
+  closeLeadByUser,
   getMyLeads,
   updateLeadEmail,
   bulkUpdateEmails,
