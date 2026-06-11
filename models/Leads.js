@@ -30,6 +30,28 @@ const scheduledCallSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// ── Client meeting remark entry (one per field visit / video call / demo) ─────
+const meetingRemarkSchema = new mongoose.Schema(
+  {
+    userId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    userName:     { type: String, default: '' },
+    meetingType:  {
+      type:    String,
+      enum:    ['In-Person', 'Video Call', 'Phone Call', 'Site Visit', 'Demo'],
+      default: 'In-Person',
+    },
+    outcome:      { type: String, default: '' },
+    remark:       { type: String, default: '' },
+    metAt:        { type: Date, default: Date.now },
+    followUpDate: { type: Date, default: null },
+    documentUrl:  { type: String, default: null },
+    documentName: { type: String, default: null },
+    recordingUrl: { type: String, default: null },
+    recordingName:{ type: String, default: null },
+  },
+  { _id: true },
+);
+
 const leadSchema = mongoose.Schema(
   {
     leadgenId: { type: String, unique: true, sparse: true },
@@ -96,6 +118,14 @@ const leadSchema = mongoose.Schema(
     // ── Full history of every agent who handled this lead ────────────────────
     callHistory: {
       type: [callHistorySchema],
+      default: [],
+    },
+
+    // ── Client meeting remarks (field visits, demos, video calls) ─────────────
+    // Logged from the mobile app's "Client Meeting" screen.
+    // Each entry can carry a document and/or recording attachment.
+    meetingRemarks: {
+      type: [meetingRemarkSchema],
       default: [],
     },
 
