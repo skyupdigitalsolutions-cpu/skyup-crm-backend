@@ -44,6 +44,8 @@ const {
   registerMsg91Webhook,
   getLateLoginConfig,
   saveLateLoginConfig,
+  getAttendanceConfig,
+  saveAttendanceConfig,
 } = adminController;
 const {
   registerAdmin,
@@ -112,6 +114,10 @@ router.put("/company/clock-in-location", protectAdmin, requireCompanySuperAdmin,
 // ── Late login threshold (admin sets what time counts as "Late") ──────────────
 router.get("/company/late-login-config", protectAdmin, getLateLoginConfig);
 router.put("/company/late-login-config", protectAdmin, requireCompanySuperAdmin, saveLateLoginConfig);
+
+// ── Full company-wide attendance config (shift, holidays, weekly off) ─────────
+router.get("/company/attendance-config", protectAdmin, getAttendanceConfig);
+router.put("/company/attendance-config", protectAdmin, requireCompanySuperAdmin, saveAttendanceConfig);
 
 // ── Client meeting remote clock-in permission (per employee) ──────────────────
 router.put("/user/:id/meeting-permission", protectAdmin, updateMeetingPermission);

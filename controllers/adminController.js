@@ -1130,32 +1130,63 @@ const updateMeetingPermission = async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
-// ── GET /admin/company/late-login-config ─────────────────────────────────────
-const getLateLoginConfig = async (req, res) => {
+// ── GET /admin/company/attendance-config ──────────────────────────────────────
+const getAttendanceConfig = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    const company   = await Company.findById(companyId)
-      .select('lateLoginHour lateLoginMinute')
-      .lean();
+    const company   = await Company.findById(companyId).select('attendanceConfig').lean();
     if (!company) return res.status(404).json({ message: 'Company not found' });
+
+    const cfg = company.attendanceConfig || {};
     res.json({
-      hour:   company.lateLoginHour   ?? 10,
-      minute: company.lateLoginMinute ?? 30,
+      shiftStartHour:    cfg.shiftStartHour    ?? 9,
+      shiftStartMinute:  cfg.shiftStartMinute  ?? 0,
+      shiftEndHour:      cfg.shiftEndHour       ?? 18,
+      shiftEndMinute:    cfg.shiftEndMinute     ?? 0,
+      lateLoginHour:     cfg.lateLoginHour      ?? 10,
+      lateLoginMinute:   cfg.lateLoginMinute    ?? 30,
+      halfDayMinMinutes: cfg.halfDayMinMinutes  ?? 240,
+      fullDayMinMinutes: cfg.fullDayMinMinutes  ?? 480,
+      weeklyOffDays:     cfg.weeklyOffDays       ?? [0],
+      holidays:          cfg.holidays            ?? [],
     });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
-// ── PUT /admin/company/late-login-config ──────────────────────────────────────
-const saveLateLoginConfig = async (req, res) => {
+// ── PUT /admin/company/attendance-config ──────────────────────────────────────
+const saveAttendanceConfig = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    const { hour, minute } = req.body;
-    const h = Math.max(0, Math.min(23, parseInt(hour   ?? 10, 10)));
-    const m = Math.max(0, Math.min(59, parseInt(minute ?? 30, 10)));
-    await Company.findByIdAndUpdate(companyId, {
-      $set: { lateLoginHour: h, lateLoginMinute: m },
-    });
-    res.json({ message: 'Late login threshold saved.', hour: h, minute: m });
+    const b = req.body || {};
+
+    const clamp = (v, lo, hi, def) => {
+      const n = parseInt(v, 10);
+      return isNaN(n) ? def : Math.max(lo, Math.min(hi, n));
+    };
+
+    const attendanceConfig = {
+      shiftStartHour:    clamp(b.shiftStartHour,   0, 23, 9),
+      shiftStartMinute:  clamp(b.shiftStartMinute, 0, 59, 0),
+      shiftEndHour:      clamp(b.shiftEndHour,     0, 23, 18),
+      shiftEndMinute:    clamp(b.shiftEndMinute,   0, 59, 0),
+      lateLoginHour:     clamp(b.lateLoginHour,    0, 23, 10),
+      lateLoginMinute:   clamp(b.lateLoginMinute,  0, 59, 30),
+      halfDayMinMinutes: clamp(b.halfDayMinMinutes, 0, 1440, 240),
+      fullDayMinMinutes: clamp(b.fullDayMinMinutes, 0, 1440, 480),
+      // weeklyOffDays: array of 0-6
+      weeklyOffDays: Array.isArray(b.weeklyOffDays)
+        ? b.weeklyOffDays.map(d => parseInt(d, 10)).filter(d => d >= 0 && d <= 6)
+        : [0],
+      // holidays: array of { date, name }
+      holidays: Array.isArray(b.holidays)
+        ? b.holidays
+            .filter(h => h && h.date)
+            .map(h => ({ date: String(h.date).trim(), name: String(h.name || 'Holiday').trim() }))
+        : [],
+    };
+
+    await Company.findByIdAndUpdate(companyId, { $set: { attendanceConfig } });
+    res.json({ message: 'Attendance settings saved.', attendanceConfig });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
@@ -1196,6 +1227,8 @@ module.exports = {
   saveClockInLocation,
   updateMeetingPermission,
   registerMsg91Webhook,
-  getLateLoginConfig,
-  saveLateLoginConfig,
+  getLateLoginConfig: getAttendanceConfig,   // alias kept for backward compat
+  saveLateLoginConfig: saveAttendanceConfig, // alias kept for backward compat
+  getAttendanceConfig,
+  saveAttendanceConfig,
 };

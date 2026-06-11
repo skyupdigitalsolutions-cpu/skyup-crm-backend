@@ -193,11 +193,35 @@ const companySchema = mongoose.Schema(
     // ── Device Call-Log Sync ─────────────────────────────────────────────────
     callLogSyncEnabled: { type: Boolean, default: true },
 
-    // ── Late Login Threshold ──────────────────────────────────────────────────
-    // Employees clocking in after this time are marked "Late" in attendance.
-    // Default: 10:30 AM
-    lateLoginHour:   { type: Number, default: 10, min: 0, max: 23 },
-    lateLoginMinute: { type: Number, default: 30, min: 0, max: 59 },
+    // ── Company-wide Attendance Settings ──────────────────────────────────────
+    // These apply to ALL employees in the company (not per-employee).
+    attendanceConfig: {
+      // Shift / working hours
+      shiftStartHour:   { type: Number, default: 9,  min: 0, max: 23 },  // 9:00 AM
+      shiftStartMinute: { type: Number, default: 0,  min: 0, max: 59 },
+      shiftEndHour:     { type: Number, default: 18, min: 0, max: 23 },  // 6:00 PM
+      shiftEndMinute:   { type: Number, default: 0,  min: 0, max: 59 },
+
+      // Late threshold — clock-in after this is marked "Late"
+      lateLoginHour:    { type: Number, default: 10, min: 0, max: 23 },  // 10:30 AM
+      lateLoginMinute:  { type: Number, default: 30, min: 0, max: 59 },
+
+      // Half-day threshold — working less than this many minutes = half day
+      halfDayMinMinutes: { type: Number, default: 240 }, // 4 hours
+
+      // Full-day threshold — working at least this many minutes = present
+      fullDayMinMinutes: { type: Number, default: 480 }, // 8 hours
+
+      // Weekly off days — array of weekday numbers (0=Sun, 1=Mon … 6=Sat)
+      // Default: Sunday off
+      weeklyOffDays: { type: [Number], default: [0] },
+
+      // Specific holiday dates — array of "YYYY-MM-DD" strings
+      holidays: [{
+        date: { type: String, required: true },   // "2026-01-26"
+        name: { type: String, default: "Holiday" }, // "Republic Day"
+      }],
+    },
 
         // ── Auto-template settings for new leads ─────────────────────────────────
     autoTemplate: {
