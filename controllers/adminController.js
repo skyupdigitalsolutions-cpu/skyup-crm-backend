@@ -932,6 +932,113 @@ const deleteMsg91EmailConfig = async (req, res) => {
   }
 };
 
+// ── GET /admin/company/telegram/admins ───────────────────────────────────────
+// Returns all admins of this company with their Telegram config.
+// Super-admin only (requireCompanySuperAdmin guard on route).
+const getAdminsTelegramConfig = async (req, res) => {
+  try {
+    const companyId = req.admin.company._id;
+    const admins = await Admin.find({ company: companyId })
+      .select("name email role telegramChatId telegramNotificationsEnabled")
+      .lean();
+
+    res.json(admins.map(a => ({
+      _id:                          a._id,
+      name:                         a.name,
+      email:                        a.email,
+      role:                         a.role,
+      telegramChatId:               a.telegramChatId || "",
+      telegramNotificationsEnabled: a.telegramNotificationsEnabled !== false,
+    })));
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── PUT /admin/company/telegram/admins/:adminId ───────────────────────────────
+// Super-admin updates a specific admin's Telegram chat ID + enabled flag.
+const saveAdminTelegramConfig = async (req, res) => {
+  try {
+    const companyId = req.admin.company._id;
+    const { adminId } = req.params;
+    const { telegramChatId, telegramNotificationsEnabled } = req.body;
+
+    const target = await Admin.findOne({ _id: adminId, company: companyId });
+    if (!target) return res.status(404).json({ message: "Admin not found." });
+
+    if (telegramChatId !== undefined) {
+      target.telegramChatId = telegramChatId ? String(telegramChatId).trim() : null;
+    }
+    if (telegramNotificationsEnabled !== undefined) {
+      target.telegramNotificationsEnabled = Boolean(telegramNotificationsEnabled);
+    }
+    await target.save();
+
+    res.json({
+      message:                      "Admin Telegram config saved.",
+      telegramChatId:               target.telegramChatId || "",
+      telegramNotificationsEnabled: target.telegramNotificationsEnabled,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── POST /admin/company/telegram/admins/:adminId/test ─────────────────────────
+// Sends a test Telegram message to the specified admin's personal chat.
+const testAdminTelegramConfig = async (req, res) => {
+  try {
+    const companyId = req.admin.company._id;
+    const { adminId } = req.params;
+
+    const [company, target] = await Promise.all([
+      Company.findById(companyId).select("name telegramBotToken").lean(),
+      Admin.findOne({ _id: adminId, company: companyId }).select("name telegramChatId").lean(),
+    ]);
+
+    if (!company?.telegramBotToken)
+      return res.status(400).json({ message: "Company bot token not configured." });
+    if (!target?.telegramChatId)
+      return res.status(400).json({ message: "Admin chat ID not configured." });
+
+    const text =
+      `✅ <b>Telegram Connected!</b>\n\n` +
+      `Hello <b>${target.name}</b>, your personal Telegram notifications are now active.\n\n` +
+      `You will receive campaign lead alerts for <b>${company.name}</b> in this chat.`;
+
+    const https = require("https");
+    await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ chat_id: target.telegramChatId, text, parse_mode: "HTML" });
+      const req2 = https.request(
+        {
+          hostname: "api.telegram.org",
+          path:     `/bot${company.telegramBotToken}/sendMessage`,
+          method:   "POST",
+          headers:  { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        },
+        (r) => {
+          let d = "";
+          r.on("data", c => { d += c; });
+          r.on("end", () => {
+            try {
+              const p = JSON.parse(d);
+              p.ok ? resolve(p) : reject(new Error(p.description || "Telegram error"));
+            } catch { reject(new Error("Invalid Telegram response")); }
+          });
+        }
+      );
+      req2.on("error", reject);
+      req2.setTimeout(10000, () => req2.destroy(new Error("Timeout")));
+      req2.write(body);
+      req2.end();
+    });
+
+    res.json({ message: `Test sent to ${target.name}! Check their Telegram.` });
+  } catch (err) {
+    res.status(500).json({ message: err.message || "Test failed — check token & chat ID." });
+  }
+};
+
 // ── PUT /admin/user/:id/telegram ─────────────────────────────────────────────
 // Admin sets a specific employee's Telegram chat ID.
 // Employee can also call this on their own (via authController self-update).
@@ -1052,6 +1159,9 @@ module.exports = {
   getTelegramConfig,
   saveTelegramConfig,
   testTelegramConfig,
+  getAdminsTelegramConfig,
+  saveAdminTelegramConfig,
+  testAdminTelegramConfig,
   updateUserTelegram,
   getClockInLocation,
   saveClockInLocation,
