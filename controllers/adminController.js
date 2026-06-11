@@ -1,5 +1,4 @@
 const Admin   = require("../models/Admin");
-const axios   = require("axios");
 const User    = require("../models/Users");
 const Lead    = require("../models/Leads");
 const Company = require("../models/Company");
@@ -705,6 +704,7 @@ const deleteMsg91Config = async (req, res) => {
   }
 };
 
+
 // ── POST /api/admin/company/msg91-register-webhook ───────────────────────────
 // Programmatically registers the inbound webhook URL with MSG91 so lead replies
 // arrive instantly (< 2s) instead of via the 30s polling fallback.
@@ -717,67 +717,86 @@ const registerMsg91Webhook = async (req, res) => {
       return res.status(400).json({ message: "MSG91 not configured for this company" });
     }
 
-    // Build the webhook URL from the request host
-    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
-    const host = req.headers["x-forwarded-host"] || req.headers.host;
+    const authKey          = config.msg91AuthKey;
+    const integratedNumber = config.msg91IntegratedNumber;
+    const protocol  = req.headers["x-forwarded-proto"] || "https";
+    const host      = req.headers["x-forwarded-host"] || req.headers.host;
     const backendUrl = process.env.BACKEND_URL || `${protocol}://${host}`;
     const webhookUrl = `${backendUrl}/msg91-webhook`;
+    const headers    = { authkey: authKey, "Content-Type": "application/json" };
 
-    // Attempt 1: MSG91 generic webhook registry API
-    let registered = false;
-    let msg91Response = null;
-    try {
-      const r1 = await axios.post(
-        "https://control.msg91.com/api/v5/webhook",
-        { name: "CRM Inbound", url: webhookUrl, service: "whatsapp", event: "inbound" },
-        { headers: { authkey: config.msg91AuthKey, "Content-Type": "application/json" }, timeout: 10000 }
-      );
-      msg91Response = r1.data;
-      registered = true;
-      console.log("✅ MSG91 webhook registered via v5 API:", webhookUrl, r1.data);
-    } catch (e1) {
-      console.warn("⚠️  MSG91 v5 webhook API failed:", e1.response?.data || e1.message);
-    }
+    console.log(`🔧 Registering MSG91 webhook: ${webhookUrl} for number ${integratedNumber}`);
 
-    // Attempt 2: MSG91 WhatsApp number-level response webhook setting
-    // This is the setting under: MSG91 → WhatsApp → Integrated Numbers → your number → Settings → Response Webhook
-    if (!registered && config.msg91IntegratedNumber) {
+    const results = [];
+    let linkedToNumber = false;
+    let webhookCreated = false;
+
+    // ── Method A: Link webhook directly to the integrated number ─────────────
+    // MSG91 requires TWO steps: (1) create webhook, (2) link to specific number.
+    // "Nothing Here" in webhook logs = step 2 was never done.
+    const methodAEndpoints = [
+      { method: "PUT",   url: "https://control.msg91.com/api/v5/whatsapp/integrated-number",
+        body: { integrated_number: integratedNumber, webhook_url: webhookUrl } },
+      { method: "PATCH", url: "https://control.msg91.com/api/v5/whatsapp/integrated-number",
+        body: { integrated_number: integratedNumber, webhookUrl } },
+      { method: "PUT",   url: "https://control.msg91.com/api/v5/whatsapp/integrated-number/settings",
+        body: { integrated_number: integratedNumber, response_url: webhookUrl, inbound_url: webhookUrl } },
+      { method: "POST",  url: `https://control.msg91.com/api/v5/whatsapp/integrated-number/${integratedNumber}/webhook`,
+        body: { webhook_url: webhookUrl, event: "inbound" } },
+    ];
+
+    for (const ep of methodAEndpoints) {
       try {
-        const r2 = await axios.post(
-          "https://api.msg91.com/api/v5/whatsapp/setWebhook",
-          { integrated_number: config.msg91IntegratedNumber, webhook_url: webhookUrl },
-          { headers: { authkey: config.msg91AuthKey, "Content-Type": "application/json" }, timeout: 10000 }
-        );
-        msg91Response = r2.data;
-        registered = true;
-        console.log("✅ MSG91 WhatsApp number webhook set:", webhookUrl, r2.data);
-      } catch (e2) {
-        console.warn("⚠️  MSG91 setWebhook API failed:", e2.response?.data || e2.message);
+        const r = ep.method === "PUT"   ? await axios.put(ep.url, ep.body, { headers, timeout: 8000 })
+                : ep.method === "PATCH" ? await axios.patch(ep.url, ep.body, { headers, timeout: 8000 })
+                :                         await axios.post(ep.url, ep.body, { headers, timeout: 8000 });
+        results.push({ method: ep.method, url: ep.url, status: r.status, data: r.data });
+        console.log(`✅ Method A (${ep.method} ${ep.url}):`, r.data);
+        linkedToNumber = true;
+        break;
+      } catch (e) {
+        results.push({ method: ep.method, url: ep.url, status: e.response?.status, error: e.response?.data || e.message });
+        console.warn(`⚠️  Method A (${ep.method} ${ep.url}):`, e.response?.data || e.message);
       }
     }
 
-    // Even if both API calls failed, return success=true with the webhook URL
-    // so the admin can paste it manually — the URL itself is always correct.
-    console.log(registered ? "✅ MSG91 webhook registered:" : "ℹ️  MSG91 auto-register failed — URL provided for manual setup:", webhookUrl);
+    // ── Method B: Create/update named webhook entry ───────────────────────────
+    if (!linkedToNumber) {
+      const methodBEndpoints = [
+        { url: "https://control.msg91.com/api/v5/webhook",
+          body: { name: "CRM Inbound", url: webhookUrl, service: "whatsapp", event: "inbound", integrated_number: integratedNumber } },
+        { url: "https://control.msg91.com/api/v5/whatsapp/webhook",
+          body: { integrated_number: integratedNumber, webhook_url: webhookUrl, event: "inbound" } },
+      ];
+      for (const ep of methodBEndpoints) {
+        try {
+          const r = await axios.post(ep.url, ep.body, { headers, timeout: 8000 });
+          results.push({ url: ep.url, status: r.status, data: r.data });
+          console.log(`✅ Method B (${ep.url}):`, r.data);
+          webhookCreated = true;
+          break;
+        } catch (e) {
+          results.push({ url: ep.url, status: e.response?.status, error: e.response?.data || e.message });
+          console.warn(`⚠️  Method B (${ep.url}):`, e.response?.data || e.message);
+        }
+      }
+    }
+
+    const autoRegistered = linkedToNumber || webhookCreated;
     res.json({
-      success:    true, // always true — URL is correct even if API registration failed
+      success: true,
       webhookUrl,
-      autoRegistered: registered,
-      msg91Response,
-      message: registered
+      autoRegistered,
+      linkedToNumber,
+      webhookCreated,
+      results,
+      message: autoRegistered
         ? "Webhook registered with MSG91! Lead replies will now arrive instantly (<2s)."
-        : `Auto-registration failed — paste this URL manually: MSG91 → WhatsApp → Integrated Numbers → your number → Settings → Response Webhook → ${webhookUrl}`,
+        : `Auto-registration failed. Set manually: MSG91 → WhatsApp → Integrated Numbers → ${integratedNumber} → Settings → Response Webhook → ${webhookUrl}`,
     });
   } catch (err) {
-    const msg91Error = err.response?.data;
-    console.error("❌ MSG91 webhook registration failed:", msg91Error || err.message);
-    // Don't fail hard — the webhook URL is still shown in UI for manual setup
-    res.status(502).json({
-      success: false,
-      message: "Could not auto-register with MSG91. Please set the webhook URL manually in MSG91 dashboard.",
-      error:   msg91Error || err.message,
-      webhookUrl: `${process.env.BACKEND_URL || ""}/msg91-webhook`,
-    });
+    console.error("❌ MSG91 webhook registration error:", err.message);
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
@@ -1026,7 +1045,6 @@ module.exports = {
   deleteBrevoConfig,
   getMsg91Config,
   saveMsg91Config,
-  registerMsg91Webhook,
   deleteMsg91Config,
   getMsg91EmailConfig,
   saveMsg91EmailConfig,
