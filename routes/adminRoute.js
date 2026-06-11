@@ -34,10 +34,10 @@ const {
   getTelegramConfig,
   saveTelegramConfig,
   testTelegramConfig,
-  updateUserTelegram,
   getAdminsTelegramConfig,
   saveAdminTelegramConfig,
   testAdminTelegramConfig,
+  updateUserTelegram,
   getClockInLocation,
   saveClockInLocation,
   updateMeetingPermission,
@@ -95,13 +95,10 @@ router.get("/company/telegram",       protectAdmin, getTelegramConfig);
 router.put("/company/telegram",       protectAdmin, requireCompanySuperAdmin, saveTelegramConfig);
 router.post("/company/telegram/test", protectAdmin, testTelegramConfig);
 
-// ── Per-admin Telegram config (super_admin manages each admin's chat ID) ──────
-// GET  → list all admins with their telegram settings
-// PUT  /:adminId → update a specific admin's chat ID + enabled flag
-// POST /:adminId/test → send test message to a specific admin
-router.get("/company/telegram/admins",                  protectAdmin, requireCompanySuperAdmin, getAdminsTelegramConfig);
-router.put("/company/telegram/admins/:adminId",         protectAdmin, requireCompanySuperAdmin, saveAdminTelegramConfig);
-router.post("/company/telegram/admins/:adminId/test",   protectAdmin, requireCompanySuperAdmin, testAdminTelegramConfig);
+// ── Per-admin Telegram config (super-admin manages each admin's personal chat) ─
+router.get("/company/telegram/admins",                    protectAdmin, requireCompanySuperAdmin, getAdminsTelegramConfig);
+router.put("/company/telegram/admins/:adminId",           protectAdmin, requireCompanySuperAdmin, saveAdminTelegramConfig);
+router.post("/company/telegram/admins/:adminId/test",     protectAdmin, requireCompanySuperAdmin, testAdminTelegramConfig);
 
 // ── Employee personal Telegram chat ID (admin sets for any employee) ──────────
 router.put("/user/:id/telegram", protectAdmin, updateUserTelegram);
