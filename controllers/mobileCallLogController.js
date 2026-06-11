@@ -507,12 +507,24 @@ const getCompanyAllLogs = async (req, res) => {
     const limit   = parseInt(req.query.limit || 200);
     const company = req.callerCompany || req.user?.company;
     if (!company) return res.status(400).json({ message: 'Company not found in token' });
+
+    // Optional `since` param — only return logs from this date onwards.
+    // Used by the admin panel to show call logs from a specific employee's
+    // sign-in / account creation date so older irrelevant logs are excluded.
+    const filter = { company };
+    if (req.query.since) {
+      const sinceDate = new Date(req.query.since);
+      if (!isNaN(sinceDate.getTime())) {
+        filter.timestamp = { $gte: sinceDate };
+      }
+    }
+
     const [logs, total] = await Promise.all([
-      MobileCallLog.find({ company })
+      MobileCallLog.find(filter)
         .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
         .populate('matchedLead', 'name mobile status')
         .populate('user', 'name email'),
-      MobileCallLog.countDocuments({ company }),
+      MobileCallLog.countDocuments(filter),
     ]);
     res.json({ logs, total, page, totalPages: Math.ceil(total / limit) });
   } catch (error) {

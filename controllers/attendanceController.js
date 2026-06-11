@@ -529,7 +529,7 @@ const getCompanyUsers = async (req, res) => {
       userQuery.createdBy = req.admin._id;
     }
     const users = await User.find(userQuery)
-      .select("name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory").lean();
+      .select("name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory createdAt").lean();
     res.status(200).json(users);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
