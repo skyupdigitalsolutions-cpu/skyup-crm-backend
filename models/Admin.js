@@ -34,6 +34,14 @@ const adminSchema = mongoose.Schema(
     // Updated on creation and on password reset via forgot-password flow.
     plainPassword: { type: String, default: null },
 
+    // ── Telegram personal notification ────────────────────────────────────────
+    // Admin/SuperAdmin stores their own Telegram chat ID here.
+    // When a campaign lead arrives and is assigned under their scope,
+    // a notification is sent to this individual chat.
+    // Get your chat ID: message @userinfobot on Telegram.
+    telegramChatId:             { type: String, default: null, trim: true },
+    telegramNotificationsEnabled: { type: Boolean, default: true },
+
     // ── Forgot-password OTP fields ────────────────────────────────────────────
     resetOtp:         { type: String, default: null },   // bcrypt-hashed OTP
     resetOtpExpiry:   { type: Date,   default: null },

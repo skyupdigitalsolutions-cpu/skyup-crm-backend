@@ -270,9 +270,115 @@ async function notifyEmployeeLead(userId, lead, companyId) {
   }
 }
 
+// ── Build admin campaign lead message ────────────────────────────────────────
+// Slightly different from the company-level message — shows admin context.
+function buildAdminCampaignMessage(lead, adminName, companyName) {
+  const now = new Date().toLocaleString('en-IN', {
+    timeZone:   'Asia/Kolkata',
+    day:        '2-digit',
+    month:      'short',
+    year:       'numeric',
+    hour:       '2-digit',
+    minute:     '2-digit',
+    hour12:     true,
+  });
+
+  const phone    = lead.primaryPhone || lead.mobile || '—';
+  const campaign = lead.campaign     || '—';
+  const platform = platformLabel(lead.source);
+
+  return (
+    `🆕 <b>New Campaign Lead</b>\n\n` +
+    `🏢 <b>Company:</b> ${escapeHtml(companyName)}\n` +
+    `👤 <b>Lead Name:</b> ${escapeHtml(lead.name || 'Unknown')}\n` +
+    `📞 <b>Phone:</b> <code>${escapeHtml(phone)}</code>\n` +
+    `📣 <b>Campaign:</b> ${escapeHtml(campaign)}\n` +
+    `🌐 <b>Platform:</b> ${escapeHtml(platform)}\n` +
+    `📋 <b>Source:</b> ${escapeHtml(lead.source || '—')}\n` +
+    `🕐 <b>Time:</b> ${now}\n\n` +
+    `<i>— Notified to: ${escapeHtml(adminName)}</i>`
+  );
+}
+
+// ── Notify a SINGLE admin on their personal Telegram chat for a campaign lead ─
+// Uses the admin's own telegramChatId + their telegramNotificationsEnabled flag.
+// Uses the company's shared bot token.
+// Silently skips if anything is missing/disabled.
+async function notifyAdminCampaignLead(adminId, lead, companyId) {
+  if (!adminId || !lead || !companyId) return;
+  if (!isCampaignLead(lead)) return;
+
+  try {
+    const Admin = require('../models/Admin');
+    const admin = await Admin.findById(adminId)
+      .select('name telegramChatId telegramNotificationsEnabled')
+      .lean();
+
+    if (!admin?.telegramChatId)                      return; // not configured
+    if (admin.telegramNotificationsEnabled === false) return; // opted out
+
+    const company = await Company.findById(companyId)
+      .select('name telegramBotToken telegramEnabled')
+      .lean();
+
+    if (!company?.telegramEnabled)  return;
+    if (!company?.telegramBotToken) return;
+
+    const text = buildAdminCampaignMessage(lead, admin.name, company.name);
+    await sendTelegramMessage(company.telegramBotToken, admin.telegramChatId, text);
+    console.log(`[Telegram] ✅ Campaign lead notified → admin "${admin.name}"`);
+  } catch (err) {
+    console.error('[Telegram] notifyAdminCampaignLead error:', err.message);
+  }
+}
+
+// ── Notify ALL admins of a company for a campaign lead ────────────────────────
+// Called after a campaign lead is created. Each admin with a configured
+// telegramChatId and telegramNotificationsEnabled=true receives a message.
+// Uses the company's shared bot token — one token, many admin chats.
+async function notifyAllAdminsCampaignLead(lead, companyId) {
+  if (!isCampaignLead(lead)) return;
+  if (!companyId) return;
+
+  try {
+    const company = await Company.findById(companyId)
+      .select('name telegramBotToken telegramEnabled')
+      .lean();
+
+    if (!company?.telegramEnabled)  return;
+    if (!company?.telegramBotToken) return;
+
+    const Admin = require('../models/Admin');
+    const admins = await Admin.find({
+      company: companyId,
+      telegramChatId: { $ne: null, $ne: '' },
+      telegramNotificationsEnabled: { $ne: false },
+    }).select('name telegramChatId').lean();
+
+    if (!admins.length) return;
+
+    // Fire to all admins concurrently; individual failures don't block others
+    await Promise.allSettled(
+      admins.map(async (admin) => {
+        try {
+          const text = buildAdminCampaignMessage(lead, admin.name, company.name);
+          await sendTelegramMessage(company.telegramBotToken, admin.telegramChatId, text);
+          console.log(`[Telegram] ✅ Campaign lead notified → admin "${admin.name}"`);
+        } catch (e) {
+          console.error(`[Telegram] Failed to notify admin "${admin.name}":`, e.message);
+        }
+      })
+    );
+  } catch (err) {
+    console.error('[Telegram] notifyAllAdminsCampaignLead error:', err.message);
+  }
+}
+
 module.exports = {
   notifyCampaignLead,
   notifyEmployeeLead,
+  notifyAdminCampaignLead,
+  notifyAllAdminsCampaignLead,
   sendTestNotification,
   isCampaignLead,
   CAMPAIGN_SOURCES,
