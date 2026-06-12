@@ -87,7 +87,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
   const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true }).lean();
   if (!config) {
     console.warn(`[autoTemplate] ❌ WA skipped — no active WhatsAppConfig found for company ${companyId}`);
-    return;
+    return { channel: "whatsapp", status: "skipped", detail: "No active WhatsApp configuration. Connect WhatsApp in Communications → Integrations." };
   }
 
   const provider     = config.provider || "msg91";
@@ -97,13 +97,13 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
 
   if (!cleanPhone || cleanPhone.length < 10) {
     console.warn(`[autoTemplate] ❌ WA skipped — invalid phone: "${cleanPhone}"`);
-    return;
+    return { channel: "whatsapp", status: "skipped", detail: `Lead has an invalid phone number ("${lead.mobile || ""}")` };
   }
 
   if (provider === "msg91") {
     if (!authKey || !senderNumber) {
       console.warn(`[autoTemplate] ❌ WA skipped — MSG91 credentials missing`);
-      return;
+      return { channel: "whatsapp", status: "skipped", detail: "MSG91 WhatsApp authkey / integrated number missing in WhatsApp settings." };
     }
 
     const namespace  = config.msg91Namespace || "";
@@ -136,15 +136,23 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         { headers: { authkey: authKey, "Content-Type": "application/json" } }
       );
       console.log(`[autoTemplate] ✅ WA sent:`, JSON.stringify(resp.data));
+      // MSG91 can return HTTP 200 with an error status in the body
+      if (resp.data && (resp.data.status === "fail" || resp.data.hasError === true || resp.data.type === "error")) {
+        const detail = JSON.stringify(resp.data.errors || resp.data.message || resp.data);
+        console.error(`[autoTemplate] ❌ WA rejected by MSG91:`, detail);
+        return { channel: "whatsapp", status: "failed", detail: `MSG91 rejected the message: ${detail}` };
+      }
+      return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} using template "${templateName}"` };
     } catch (err) {
-      console.error(`[autoTemplate] ❌ WA error:`, JSON.stringify(err?.response?.data || err.message));
-      throw err;
+      const detail = JSON.stringify(err?.response?.data || err.message);
+      console.error(`[autoTemplate] ❌ WA error:`, detail);
+      return { channel: "whatsapp", status: "failed", detail };
     }
 
   } else {
     if (!config.phoneNumberId || !config.accessToken) {
       console.warn(`[autoTemplate] ❌ WA skipped — Meta credentials missing`);
-      return;
+      return { channel: "whatsapp", status: "skipped", detail: "Meta WhatsApp phoneNumberId / accessToken missing in WhatsApp settings." };
     }
     const apiUrl = `https://graph.facebook.com/${config.graphApiVersion || "v21.0"}/${config.phoneNumberId}/messages`;
     const metaPayload = {
@@ -158,9 +166,11 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         headers: { Authorization: `Bearer ${config.accessToken}`, "Content-Type": "application/json" },
       });
       console.log(`[autoTemplate] ✅ WA Meta sent:`, JSON.stringify(resp.data));
+      return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"` };
     } catch (err) {
-      console.error(`[autoTemplate] ❌ WA Meta error:`, JSON.stringify(err?.response?.data || err.message));
-      throw err;
+      const detail = JSON.stringify(err?.response?.data || err.message);
+      console.error(`[autoTemplate] ❌ WA Meta error:`, detail);
+      return { channel: "whatsapp", status: "failed", detail };
     }
   }
 }
@@ -176,7 +186,7 @@ async function sendAutoEmail({ companyId, lead, emailSettings }) {
 
   if (!lead.email || !lead.email.trim()) {
     console.warn(`[autoTemplate] ❌ Email skipped — lead has no email address`);
-    return;
+    return { channel: "email", status: "skipped", detail: "Lead has no email address." };
   }
 
   const html = bodyTemplate
@@ -210,6 +220,7 @@ async function sendAutoEmail({ companyId, lead, emailSettings }) {
       provider,
       company:    companyId,
     });
+    return { channel: "email", status: "sent", detail: `Sent to ${lead.email.trim()} via ${provider}` };
   } catch (err) {
     const errMsg = err?.response?.data?.message || err.message;
     console.error(`[autoTemplate] ❌ Email failed for ${lead.email}:`, errMsg);
@@ -222,6 +233,7 @@ async function sendAutoEmail({ companyId, lead, emailSettings }) {
       errorMessage: errMsg,
       company:      companyId,
     }).catch(() => {});
+    return { channel: "email", status: "failed", detail: errMsg };
   }
 }
 
@@ -237,7 +249,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
 
   if (!authKey) {
     console.warn(`[autoTemplate] ❌ SMS skipped — MSG91 authKey not configured for company ${companyId}`);
-    return;
+    return { channel: "sms", status: "skipped", detail: "MSG91 SMS authkey not configured. Connect SMS in Communications → Integrations." };
   }
 
   let phone = (lead.mobile || "").replace(/\D/g, "");
@@ -247,7 +259,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
 
   if (phone.length < 12) {
     console.warn(`[autoTemplate] ❌ SMS skipped — invalid phone: "${phone}"`);
-    return;
+    return { channel: "sms", status: "skipped", detail: `Lead has an invalid phone number ("${lead.mobile || ""}")` };
   }
 
   const leadName = (lead.name || "there").trim();
@@ -284,6 +296,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
       msg91RequestId: String(data?.message || data?.requestId || ""),
       company:        companyId,
     });
+    return { channel: "sms", status: "sent", detail: `Sent to ${phone} (template ${resolvedTemplateId}, sender ${resolvedSenderId})` };
   } catch (err) {
     const errMsg = err?.response?.data?.message || err.message;
     console.error(`[autoTemplate] ❌ SMS failed for ${phone}:`, errMsg);
@@ -296,14 +309,17 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
       errorMessage:  errMsg,
       company:       companyId,
     }).catch(() => {});
+    return { channel: "sms", status: "failed", detail: errMsg };
   }
 }
 
 // ─── Main: Auto-send for NEW LEADS ───────────────────────────────────────────
+// Returns an array of per-channel results: { channel, status: "sent"|"skipped"|"failed", detail }
 async function autoSendTemplates(lead, companyId) {
+  const results = [];
   if (!companyId || !lead) {
     console.warn("[autoTemplate] ❌ Skipped — missing lead or companyId");
-    return;
+    return [{ channel: "all", status: "skipped", detail: "Missing lead or companyId" }];
   }
 
   console.log(`[autoTemplate] ▶ New lead: "${lead.name}" company=${companyId}`);
@@ -312,89 +328,137 @@ async function autoSendTemplates(lead, companyId) {
     const company = await Company.findById(companyId).select("autoTemplate").lean();
     if (!company?.autoTemplate) {
       console.warn(`[autoTemplate] ❌ Skipped — autoTemplate not configured`);
-      return;
+      return [{ channel: "all", status: "skipped", detail: "Auto-template settings have never been saved. Open Communications → Auto-Template settings and click Save." }];
     }
 
     const { whatsapp, email, sms } = company.autoTemplate;
     const tasks = [];
 
-    if (whatsapp?.enabled && lead.mobile) {
-      tasks.push(
-        sendAutoWhatsApp({ companyId, lead, whatsappSettings: whatsapp })
-          .catch(err => console.error("[autoTemplate] WA failed:", err.message))
-      );
-    }
-    if (email?.enabled && lead.email) {
-      tasks.push(
-        sendAutoEmail({ companyId, lead, emailSettings: email })
-          .catch(err => console.error("[autoTemplate] Email failed:", err.message))
-      );
-    }
-    if (sms?.enabled && lead.mobile) {
-      tasks.push(
-        sendAutoSms({ companyId, lead, smsSettings: sms })
-          .catch(err => console.error("[autoTemplate] SMS failed:", err.message))
-      );
+    if (whatsapp?.enabled) {
+      if (lead.mobile) {
+        tasks.push(
+          sendAutoWhatsApp({ companyId, lead, whatsappSettings: whatsapp })
+            .catch(err => ({ channel: "whatsapp", status: "failed", detail: err.message }))
+        );
+      } else {
+        results.push({ channel: "whatsapp", status: "skipped", detail: "Lead has no mobile number" });
+      }
+    } else {
+      results.push({ channel: "whatsapp", status: "skipped", detail: "WhatsApp toggle is OFF in Auto-Template settings" });
     }
 
-    await Promise.allSettled(tasks);
-    console.log(`[autoTemplate] ✅ Done for new lead "${lead.name}"`);
+    if (email?.enabled) {
+      if (lead.email) {
+        tasks.push(
+          sendAutoEmail({ companyId, lead, emailSettings: email })
+            .catch(err => ({ channel: "email", status: "failed", detail: err.message }))
+        );
+      } else {
+        results.push({ channel: "email", status: "skipped", detail: "Lead has no email address" });
+      }
+    } else {
+      results.push({ channel: "email", status: "skipped", detail: "Email toggle is OFF in Auto-Template settings" });
+    }
+
+    if (sms?.enabled) {
+      if (lead.mobile) {
+        tasks.push(
+          sendAutoSms({ companyId, lead, smsSettings: sms })
+            .catch(err => ({ channel: "sms", status: "failed", detail: err.message }))
+        );
+      } else {
+        results.push({ channel: "sms", status: "skipped", detail: "Lead has no mobile number" });
+      }
+    } else {
+      results.push({ channel: "sms", status: "skipped", detail: "SMS toggle is OFF in Auto-Template settings" });
+    }
+
+    const settled = await Promise.allSettled(tasks);
+    settled.forEach(s => { if (s.status === "fulfilled" && s.value) results.push(s.value); });
+    console.log(`[autoTemplate] ✅ Done for new lead "${lead.name}":`, JSON.stringify(results));
+    return results;
   } catch (err) {
     console.error("[autoTemplate] ❌ Top-level error:", err.message);
+    results.push({ channel: "all", status: "failed", detail: err.message });
+    return results;
   }
 }
 
-// ─── NEW: Auto-blast for INTERESTED STATUS LEADS ─────────────────────────────
-// Called when a lead's status changes to "Interested"
+// ─── Auto-blast for INTERESTED STATUS LEADS ─────────────────────────────────
+// Called when a lead is marked "Interested" (status or call outcome).
+// Returns an array of per-channel results: { channel, status: "sent"|"skipped"|"failed", detail }
 async function sendInterestedBlast(lead, companyId) {
+  const results = [];
   if (!companyId || !lead) {
     console.warn("[interestedBlast] ❌ Skipped — missing lead or companyId");
-    return;
+    return [{ channel: "all", status: "skipped", detail: "Missing lead or companyId" }];
   }
 
   console.log(`[interestedBlast] ▶ Lead "${lead.name}" marked Interested — company=${companyId}`);
 
   try {
-    const company = await Company.findById(companyId).select("interestedBlast").lean();
-    if (!company?.interestedBlast) {
-      console.warn(`[interestedBlast] ❌ Skipped — interestedBlast not configured`);
-      return;
+    // Uses the same Auto-Blast settings (toggles + templates) as the new-lead
+    // flow — one settings panel in Communications controls both triggers.
+    const company = await Company.findById(companyId).select("autoTemplate interestedBlast").lean();
+    const settingsSource = company?.autoTemplate || company?.interestedBlast;
+    if (!settingsSource) {
+      console.warn(`[interestedBlast] ❌ Skipped — auto-blast settings not configured`);
+      return [{ channel: "all", status: "skipped", detail: "Auto-blast settings have never been saved. Open Communications → New Lead settings and click Save." }];
     }
 
-    const { whatsapp, email, sms } = company.interestedBlast;
+    const { whatsapp, email, sms } = settingsSource;
     const tasks = [];
 
-    if (whatsapp?.enabled && lead.mobile) {
-      tasks.push(
-        sendAutoWhatsApp({ companyId, lead, whatsappSettings: whatsapp })
-          .catch(err => console.error("[interestedBlast] WA failed:", err.message))
-      );
-    } else if (whatsapp?.enabled && !lead.mobile) {
-      console.warn("[interestedBlast] WA enabled but lead has no mobile");
+    if (whatsapp?.enabled) {
+      if (lead.mobile) {
+        tasks.push(
+          sendAutoWhatsApp({ companyId, lead, whatsappSettings: whatsapp })
+            .catch(err => ({ channel: "whatsapp", status: "failed", detail: err.message }))
+        );
+      } else {
+        console.warn("[interestedBlast] WA enabled but lead has no mobile");
+        results.push({ channel: "whatsapp", status: "skipped", detail: "Lead has no mobile number" });
+      }
+    } else {
+      results.push({ channel: "whatsapp", status: "skipped", detail: "WhatsApp toggle is OFF in Auto-Blast (New Lead) settings" });
     }
 
-    if (email?.enabled && lead.email) {
-      tasks.push(
-        sendAutoEmail({ companyId, lead, emailSettings: email })
-          .catch(err => console.error("[interestedBlast] Email failed:", err.message))
-      );
-    } else if (email?.enabled && !lead.email) {
-      console.warn("[interestedBlast] Email enabled but lead has no email");
+    if (email?.enabled) {
+      if (lead.email) {
+        tasks.push(
+          sendAutoEmail({ companyId, lead, emailSettings: email })
+            .catch(err => ({ channel: "email", status: "failed", detail: err.message }))
+        );
+      } else {
+        console.warn("[interestedBlast] Email enabled but lead has no email");
+        results.push({ channel: "email", status: "skipped", detail: "Lead has no email address" });
+      }
+    } else {
+      results.push({ channel: "email", status: "skipped", detail: "Email toggle is OFF in Auto-Blast (New Lead) settings" });
     }
 
-    if (sms?.enabled && lead.mobile) {
-      tasks.push(
-        sendAutoSms({ companyId, lead, smsSettings: sms })
-          .catch(err => console.error("[interestedBlast] SMS failed:", err.message))
-      );
-    } else if (sms?.enabled && !lead.mobile) {
-      console.warn("[interestedBlast] SMS enabled but lead has no mobile");
+    if (sms?.enabled) {
+      if (lead.mobile) {
+        tasks.push(
+          sendAutoSms({ companyId, lead, smsSettings: sms })
+            .catch(err => ({ channel: "sms", status: "failed", detail: err.message }))
+        );
+      } else {
+        console.warn("[interestedBlast] SMS enabled but lead has no mobile");
+        results.push({ channel: "sms", status: "skipped", detail: "Lead has no mobile number" });
+      }
+    } else {
+      results.push({ channel: "sms", status: "skipped", detail: "SMS toggle is OFF in Auto-Blast (New Lead) settings" });
     }
 
-    await Promise.allSettled(tasks);
-    console.log(`[interestedBlast] ✅ Done for lead "${lead.name}"`);
+    const settled = await Promise.allSettled(tasks);
+    settled.forEach(s => { if (s.status === "fulfilled" && s.value) results.push(s.value); });
+    console.log(`[interestedBlast] ✅ Done for lead "${lead.name}":`, JSON.stringify(results));
+    return results;
   } catch (err) {
     console.error("[interestedBlast] ❌ Top-level error:", err.message);
+    results.push({ channel: "all", status: "failed", detail: err.message });
+    return results;
   }
 }
 

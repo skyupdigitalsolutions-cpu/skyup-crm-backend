@@ -18,6 +18,8 @@ const {
   updateAutoTemplateSettings,
   getInterestedBlastSettings,
   updateInterestedBlastSettings,
+  testAutoTemplate,
+  testInterestedBlast,
   getCompanyBrand,
   updateCompanyBrand,
   deleteCompanyLogo,
@@ -73,8 +75,10 @@ router.get("/company/leads",     protectAdmin, getCompanyLeads);
 router.get("/dashboard-stats",   protectAdmin, getDashboardStats);
 router.get("/company/auto-template", protectAdmin, getAutoTemplateSettings);
 router.put("/company/auto-template", protectAdmin, updateAutoTemplateSettings);
+router.post("/company/auto-template/test", protectAdmin, testAutoTemplate);
 router.get("/company/interested-blast", protectAdmin, getInterestedBlastSettings);
 router.put("/company/interested-blast", protectAdmin, updateInterestedBlastSettings);
+router.post("/company/interested-blast/test", protectAdmin, testInterestedBlast);
 
 // ── Company Branding (SuperAdmin only to modify; any authenticated user can read) ──
 router.get("/company/brand",         protectAdmin, getCompanyBrand);

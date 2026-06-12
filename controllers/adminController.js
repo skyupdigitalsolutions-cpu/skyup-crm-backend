@@ -438,6 +438,58 @@ const updateInterestedBlastSettings = async (req, res) => {
   }
 };
 
+// ── POST /api/admin/company/auto-template/test ────────────────────────────────
+// Runs the new-lead auto-template blast SYNCHRONOUSLY against a real lead and
+// returns per-channel results, so the admin can see exactly why a channel
+// sent / skipped / failed. Body: { leadId } (optional — defaults to the most
+// recently created lead in the company).
+const { autoSendTemplates, sendInterestedBlast } = require("../services/autoTemplateService");
+
+const testAutoTemplate = async (req, res) => {
+  try {
+    const companyId = req.admin.company?._id || req.admin.company;
+    const { leadId } = req.body || {};
+    const lead = leadId
+      ? await Lead.findOne({ _id: leadId, company: companyId }).lean()
+      : await Lead.findOne({ company: companyId }).sort({ createdAt: -1 }).lean();
+    if (!lead)
+      return res.status(404).json({ message: "No lead found to test with. Create a lead first." });
+
+    const results = await autoSendTemplates(lead, companyId);
+    res.json({
+      success: true,
+      lead: { _id: lead._id, name: lead.name, mobile: lead.mobile, email: lead.email },
+      results,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── POST /api/admin/company/interested-blast/test ─────────────────────────────
+// Same as above but for the Interested blast. Bypasses the once-per-lead guard
+// (it's a test) and does NOT mark the lead as blasted.
+const testInterestedBlast = async (req, res) => {
+  try {
+    const companyId = req.admin.company?._id || req.admin.company;
+    const { leadId } = req.body || {};
+    const lead = leadId
+      ? await Lead.findOne({ _id: leadId, company: companyId }).lean()
+      : await Lead.findOne({ company: companyId }).sort({ createdAt: -1 }).lean();
+    if (!lead)
+      return res.status(404).json({ message: "No lead found to test with. Create a lead first." });
+
+    const results = await sendInterestedBlast(lead, companyId);
+    res.json({
+      success: true,
+      lead: { _id: lead._id, name: lead.name, mobile: lead.mobile, email: lead.email },
+      results,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // ── Company Branding ──────────────────────────────────────────────────────────
 const getCompanyBrand = async (req, res) => {
   try {
@@ -1022,6 +1074,8 @@ module.exports = {
   updateAutoTemplateSettings,
   getInterestedBlastSettings,
   updateInterestedBlastSettings,
+  testAutoTemplate,
+  testInterestedBlast,
   getCompanyBrand,
   updateCompanyBrand,
   deleteCompanyLogo,

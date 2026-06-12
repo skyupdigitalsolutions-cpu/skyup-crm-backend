@@ -1066,14 +1066,45 @@ const patchLead = async (req, res) => {
 
     // ── Auto-blast when lead is marked Interested ─────────────────────────────
     // Fires SMS, Email, and WhatsApp to the lead when the employee selects
-    // "Interested" as the call outcome. Uses company's interestedBlast settings.
-    if (outcome && outcome.trim() === "Interested") {
+    // "Interested" as the call outcome OR the lead status is set to "Interested".
+    // Uses company's interestedBlast settings. Sends only ONCE per lead
+    // (guarded by interestedBlastSentAt — claimed atomically below).
+    const isInterestedNow =
+      (typeof outcome === "string" && outcome.trim().toLowerCase() === "interested") ||
+      (typeof status === "string" && status.trim().toLowerCase() === "interested");
+
+    if (isInterestedNow && updatedLead) {
       const blastCompanyId =
-        lead.company?._id || lead.company || companyId;
-      if (blastCompanyId && updatedLead) {
-        sendInterestedBlast(updatedLead, blastCompanyId).catch((err) =>
-          console.error("[interestedBlast] patchLead trigger error:", err.message)
-        );
+        lead.company?._id || lead.company || getCompanyId(req);
+      if (blastCompanyId) {
+        // Atomically claim the blast — only one request can ever win this,
+        // so the lead gets each blast exactly one time.
+        Lead.findOneAndUpdate(
+          { _id: id, $or: [{ interestedBlastSentAt: null }, { interestedBlastSentAt: { $exists: false } }] },
+          { $set: { interestedBlastSentAt: new Date() } },
+          { new: true }
+        )
+          .then(async (claimed) => {
+            if (!claimed) {
+              console.log(`[interestedBlast] Skipped — blast already sent for lead ${id}`);
+              return;
+            }
+            const summary = await sendInterestedBlast(claimed, blastCompanyId);
+            // If nothing was even attempted (settings never saved / all toggles off),
+            // release the claim so the blast can still fire once it's configured.
+            const attempted = (summary || []).some(
+              (r) => r.status === "sent" || r.status === "failed"
+            );
+            if (!attempted) {
+              await Lead.updateOne(
+                { _id: id },
+                { $set: { interestedBlastSentAt: null } }
+              ).catch(() => {});
+            }
+          })
+          .catch((err) =>
+            console.error("[interestedBlast] patchLead trigger error:", err.message)
+          );
       }
     }
 

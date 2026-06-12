@@ -249,6 +249,14 @@ const leadSchema = mongoose.Schema(
       type:    Boolean,
       default: false,
     },
+
+    // ── Interested auto-blast guard ───────────────────────────────────────────
+    // Set the first time the WhatsApp/Email/SMS blast fires for this lead
+    // after it's marked Interested — guarantees the blast goes out only once.
+    interestedBlastSentAt: {
+      type:    Date,
+      default: null,
+    },
     closeReason: {
       type:    String,
       default: "",

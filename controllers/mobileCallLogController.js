@@ -10,6 +10,7 @@ const MobileCallLog = require('../models/MobileCallLog');
 const Lead          = require('../models/Leads');
 const multer        = require('multer');
 const { normalizePhone } = require('../utils/normalizePhone');
+const { sendInterestedBlast } = require('../services/autoTemplateService');
 
 // ── Cloudinary storage ────────────────────────────────────────────────────────
 const cloudinary = require('cloudinary').v2;
@@ -489,6 +490,38 @@ const saveRemark = async (req, res) => {
             if (outcome) lead.callHistory[idx].outcome = outcome;
             lead.markModified('callHistory');
             await lead.save();
+          }
+
+          // ── Auto-blast when mobile app marks the call outcome "Interested" ──
+          // Same once-only guard as patchLead: atomically claim before sending.
+          if (typeof outcome === 'string' && outcome.trim().toLowerCase() === 'interested') {
+            const blastCompanyId = lead.company?._id || lead.company || updated.company;
+            if (blastCompanyId) {
+              Lead.findOneAndUpdate(
+                { _id: lead._id, $or: [{ interestedBlastSentAt: null }, { interestedBlastSentAt: { $exists: false } }] },
+                { $set: { interestedBlastSentAt: new Date() } },
+                { new: true }
+              )
+                .then(async (claimed) => {
+                  if (!claimed) {
+                    console.log(`[interestedBlast] Skipped — blast already sent for lead ${lead._id}`);
+                    return;
+                  }
+                  const summary = await sendInterestedBlast(claimed, blastCompanyId);
+                  const attempted = (summary || []).some(
+                    (r) => r.status === 'sent' || r.status === 'failed'
+                  );
+                  if (!attempted) {
+                    await Lead.updateOne(
+                      { _id: lead._id },
+                      { $set: { interestedBlastSentAt: null } }
+                    ).catch(() => {});
+                  }
+                })
+                .catch((err) =>
+                  console.error('[interestedBlast] saveRemark trigger error:', err.message)
+                );
+            }
           }
         }
       } catch (e) { console.error('remark lead update error:', e.message); }
