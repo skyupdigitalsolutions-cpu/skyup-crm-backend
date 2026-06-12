@@ -394,6 +394,50 @@ const updateAutoTemplateSettings = async (req, res) => {
   }
 };
 
+// ── GET /api/admin/company/interested-blast ───────────────────────────────────
+const getInterestedBlastSettings = async (req, res) => {
+  try {
+    const company = await Company.findById(req.admin.company._id).select("interestedBlast");
+    if (!company) return res.status(404).json({ message: "Company not found" });
+    res.json({ interestedBlast: company.interestedBlast || {} });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── PUT /api/admin/company/interested-blast ───────────────────────────────────
+const updateInterestedBlastSettings = async (req, res) => {
+  try {
+    const { whatsapp, email, sms } = req.body;
+    const update = {};
+    if (whatsapp !== undefined) {
+      if (typeof whatsapp.enabled      === "boolean") update["interestedBlast.whatsapp.enabled"]      = whatsapp.enabled;
+      if (whatsapp.templateName !== undefined)         update["interestedBlast.whatsapp.templateName"] = whatsapp.templateName;
+      if (whatsapp.languageCode !== undefined)         update["interestedBlast.whatsapp.languageCode"] = whatsapp.languageCode;
+    }
+    if (email !== undefined) {
+      if (typeof email.enabled       === "boolean") update["interestedBlast.email.enabled"]      = email.enabled;
+      if (email.subject     !== undefined)           update["interestedBlast.email.subject"]      = email.subject;
+      if (email.fromName    !== undefined)           update["interestedBlast.email.fromName"]     = email.fromName;
+      if (email.bodyTemplate !== undefined)          update["interestedBlast.email.bodyTemplate"] = email.bodyTemplate;
+    }
+    if (sms !== undefined) {
+      if (typeof sms.enabled  === "boolean") update["interestedBlast.sms.enabled"]    = sms.enabled;
+      if (sms.message    !== undefined)       update["interestedBlast.sms.message"]    = sms.message;
+      if (sms.templateId !== undefined)       update["interestedBlast.sms.templateId"] = sms.templateId;
+      if (sms.senderId   !== undefined)       update["interestedBlast.sms.senderId"]   = sms.senderId;
+    }
+    const company = await Company.findByIdAndUpdate(
+      req.admin.company._id,
+      { $set: update },
+      { new: true, select: "interestedBlast" }
+    );
+    res.json({ success: true, interestedBlast: company.interestedBlast });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // ── Company Branding ──────────────────────────────────────────────────────────
 const getCompanyBrand = async (req, res) => {
   try {
@@ -976,6 +1020,8 @@ module.exports = {
   getDashboardStats,
   getAutoTemplateSettings,
   updateAutoTemplateSettings,
+  getInterestedBlastSettings,
+  updateInterestedBlastSettings,
   getCompanyBrand,
   updateCompanyBrand,
   deleteCompanyLogo,

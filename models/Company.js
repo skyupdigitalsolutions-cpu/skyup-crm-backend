@@ -259,6 +259,30 @@ const companySchema = mongoose.Schema(
         senderId:   { type: String,  default: "" },
       },
     },
+
+    // ── Auto-blast settings for Interested status leads ───────────────────────
+    interestedBlast: {
+      whatsapp: {
+        enabled:      { type: Boolean, default: false },
+        templateName: { type: String,  default: "skyup_greeting" },
+        languageCode: { type: String,  default: "en" },
+      },
+      email: {
+        enabled:      { type: Boolean, default: false },
+        subject:      { type: String,  default: "Great news — you're a priority lead!" },
+        fromName:     { type: String,  default: "" },
+        bodyTemplate: {
+          type:    String,
+          default: "<p>Hi {{name}},</p><p>We noticed your strong interest and wanted to reach out personally. Our team will connect with you very shortly.</p><p>Regards,<br/>The Team</p>",
+        },
+      },
+      sms: {
+        enabled:    { type: Boolean, default: false },
+        message:    { type: String,  default: "Hi {{name}}, you're now a priority lead with us! Our team will call you shortly." },
+        templateId: { type: String,  default: "" },
+        senderId:   { type: String,  default: "" },
+      },
+    },
   },
   { timestamps: true }
 );
