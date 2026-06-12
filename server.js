@@ -86,6 +86,8 @@ const staticAllowedOrigins = [
   "http://localhost:5173",
   "http://localhost:4173",
   "http://localhost:5000",
+  "https://skyupcrm.com",
+  "https://www.skyupcrm.com",
   "https://skyup-crm-frontend.onrender.com",
   "https://skyup-crm-frontend.skyupdigitalsolutions.workers.dev",
 ];
