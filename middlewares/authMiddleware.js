@@ -31,6 +31,40 @@ const protect = async (req, res, next) => {
         return res.status(401).json({ message: "User not found" });
       }
 
+      // ── Subscription enforcement for employees ──────────────────────────────
+      // Admins are blocked at the auth layer (adminAuthMiddleware). Employees
+      // were previously NOT checked, so they kept full write access after their
+      // company's subscription expired/was suspended. Mirror that behaviour here:
+      // read (GET/HEAD) requests still pass so staff can view their data, but any
+      // write is blocked with the SUBSCRIPTION_EXPIRED code the frontend handles.
+      if (req.user.company) {
+        const now = new Date();
+        const company = await Company.findById(req.user.company)
+          .select("subscriptionStatus subscriptionExpiry trialEndsAt isActive")
+          .catch(() => null);
+
+        if (company) {
+          // Auto-expire if validity has passed (keeps employee + admin views consistent)
+          if (
+            (company.subscriptionStatus === "active" && company.subscriptionExpiry && now > company.subscriptionExpiry) ||
+            (company.subscriptionStatus === "trial"  && company.trialEndsAt       && now > company.trialEndsAt)
+          ) {
+            await Company.findByIdAndUpdate(company._id, { subscriptionStatus: "expired", isActive: false }).catch(() => {});
+            company.subscriptionStatus = "expired";
+            company.isActive = false;
+          }
+
+          const isReadRequest = req.method === "GET" || req.method === "HEAD";
+          if (!company.isActive && !isReadRequest) {
+            return res.status(403).json({
+              message: "Your company's subscription is inactive. Please contact your administrator to renew.",
+              code: "SUBSCRIPTION_EXPIRED",
+              suspended: true,
+            });
+          }
+        }
+      }
+
       return next();
     } catch (error) {
       return res.status(401).json({ message: "Not authorized, invalid token" });
@@ -119,6 +153,36 @@ const protectAny = async (req, res, next) => {
           companyId: userDoc.company?.toString(),
           role:      userDoc.role || "user",
         };
+      }
+
+      // ── Subscription enforcement (writes only) ──────────────────────────────
+      // Mirrors the block in `protect`. Reads pass; writes are blocked when the
+      // company is inactive so suspended/expired tenants can't mutate data on
+      // shared (admin+user) endpoints.
+      if (req.callerCompany) {
+        const now = new Date();
+        const company = await Company.findById(req.callerCompany)
+          .select("subscriptionStatus subscriptionExpiry trialEndsAt isActive")
+          .catch(() => null);
+
+        if (company) {
+          if (
+            (company.subscriptionStatus === "active" && company.subscriptionExpiry && now > company.subscriptionExpiry) ||
+            (company.subscriptionStatus === "trial"  && company.trialEndsAt       && now > company.trialEndsAt)
+          ) {
+            await Company.findByIdAndUpdate(company._id, { subscriptionStatus: "expired", isActive: false }).catch(() => {});
+            company.isActive = false;
+          }
+
+          const isReadRequest = req.method === "GET" || req.method === "HEAD";
+          if (!company.isActive && !isReadRequest) {
+            return res.status(403).json({
+              message: "Your company's subscription is inactive. Please renew to continue.",
+              code: "SUBSCRIPTION_EXPIRED",
+              suspended: true,
+            });
+          }
+        }
       }
 
       return next();
