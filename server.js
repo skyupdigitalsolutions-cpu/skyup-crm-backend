@@ -316,6 +316,18 @@ connectDB().then(() => {
   });
 });
 
+// ── Keep-alive ping (prevents Render free tier cold starts) ──────────────────
+// Pings /api/health every 10 minutes so the server never sleeps.
+if (process.env.RENDER_EXTERNAL_URL) {
+  const PING_URL = `${process.env.RENDER_EXTERNAL_URL}/api/health`;
+  setInterval(() => {
+    fetch(PING_URL)
+      .then(() => console.log('🏓 Keep-alive ping sent'))
+      .catch((err) => console.warn('⚠️  Keep-alive ping failed:', err.message));
+  }, 10 * 60 * 1000); // every 10 minutes
+  console.log(`🏓 Keep-alive enabled → ${PING_URL}`);
+}
+
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 const { redisClient } = require('./middlewares/rateLimiter');
 

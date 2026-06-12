@@ -289,6 +289,22 @@ leadSchema.index({ company: 1, user: 1, status: 1 });
 leadSchema.index({ company: 1, createdAt: -1 });
 leadSchema.index({ company: 1, mobile: 1 });
 
+// ── Critical indexes for Dashboard, Daily Report & Report Page ────────────────
+// date index: used by every daily report query ($gte/$lte date filtering)
+leadSchema.index({ company: 1, date: -1 });
+// temperature index: used by dashboard-stats countDocuments (Hot/Warm/Cold)
+leadSchema.index({ company: 1, temperature: 1 });
+// campaign index: used by report page campaign filtering
+leadSchema.index({ company: 1, campaign: 1 });
+// status index: used by report page and daily report status filtering
+leadSchema.index({ company: 1, status: 1 });
+// user+date compound: used by per-employee daily report queries
+leadSchema.index({ company: 1, user: 1, date: -1 });
+// phoneRevealCount: used by dashboard-stats reveal aggregation
+leadSchema.index({ company: 1, phoneRevealCount: 1 });
+// isClosed: used by employee report excludeClosed filter
+leadSchema.index({ company: 1, isClosed: 1 });
+
 // ── PHONE DEDUP: Partial unique index on normalizedPhone ─────────────────────
 leadSchema.index(
   { company: 1, normalizedPhone: 1 },
