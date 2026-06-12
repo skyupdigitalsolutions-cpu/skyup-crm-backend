@@ -255,7 +255,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
     flow_id:   resolvedTemplateId,
     sender:    resolvedSenderId,
     short_url: "0",
-    route:     "4",
+    route:     "1",  // ✅ Promotional route (not "4" transactional)
     mobiles:   phone,
     VAR1:      leadName,
   };

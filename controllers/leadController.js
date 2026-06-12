@@ -21,7 +21,7 @@ const getCompanyId = (req) =>
   null;
 
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
-const { autoSendTemplates } = require("../services/autoTemplateService");
+const { autoSendTemplates, sendInterestedBlast } = require("../services/autoTemplateService");
 const { notifyCampaignLead, notifyEmployeeLead } = require("../services/telegramService");
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
@@ -1063,6 +1063,20 @@ const patchLead = async (req, res) => {
       update.$set = { ...(update.$set || {}), ...setOps };
 
     const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
+
+    // ── Auto-blast when lead is marked Interested ─────────────────────────────
+    // Fires SMS, Email, and WhatsApp to the lead when the employee selects
+    // "Interested" as the call outcome. Uses company's interestedBlast settings.
+    if (outcome && outcome.trim() === "Interested") {
+      const blastCompanyId =
+        lead.company?._id || lead.company || companyId;
+      if (blastCompanyId && updatedLead) {
+        sendInterestedBlast(updatedLead, blastCompanyId).catch((err) =>
+          console.error("[interestedBlast] patchLead trigger error:", err.message)
+        );
+      }
+    }
+
     return res.status(200).json(updatedLead);
   } catch (error) {
     res.status(500).json({ message: error.message });
