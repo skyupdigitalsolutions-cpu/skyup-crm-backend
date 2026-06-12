@@ -508,10 +508,10 @@ const saveRemark = async (req, res) => {
                     return;
                   }
                   const summary = await sendInterestedBlast(claimed, blastCompanyId);
-                  const attempted = (summary || []).some(
-                    (r) => r.status === 'sent' || r.status === 'failed'
-                  );
-                  if (!attempted) {
+                  // Lock only after at least one channel actually delivered;
+                  // a fully failed/skipped blast releases the claim to retry.
+                  const anySent = (summary || []).some((r) => r.status === 'sent');
+                  if (!anySent) {
                     await Lead.updateOne(
                       { _id: lead._id },
                       { $set: { interestedBlastSentAt: null } }

@@ -1090,12 +1090,14 @@ const patchLead = async (req, res) => {
               return;
             }
             const summary = await sendInterestedBlast(claimed, blastCompanyId);
-            // If nothing was even attempted (settings never saved / all toggles off),
-            // release the claim so the blast can still fire once it's configured.
-            const attempted = (summary || []).some(
-              (r) => r.status === "sent" || r.status === "failed"
-            );
-            if (!attempted) {
+            // Keep the once-only lock ONLY if at least one channel actually
+            // delivered. If everything failed or was skipped (toggles off,
+            // provider misconfigured, template rejected), release the claim
+            // so the blast can retry the next time the lead is saved as
+            // Interested — otherwise a single bad attempt would permanently
+            // lock the lead out of ever receiving the blast.
+            const anySent = (summary || []).some((r) => r.status === "sent");
+            if (!anySent) {
               await Lead.updateOne(
                 { _id: id },
                 { $set: { interestedBlastSentAt: null } }
