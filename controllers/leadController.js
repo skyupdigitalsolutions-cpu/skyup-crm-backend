@@ -1072,23 +1072,11 @@ const patchLead = async (req, res) => {
     if (Object.keys(setOps).length > 0)
       update.$set = { ...(update.$set || {}), ...setOps };
 
-    const oldStatus = lead.status;
-
-    // Guard: check if lead was already marked Interested before (avoid duplicate blasts)
-    const alreadyMarkedInterested =
-      (lead.callHistory || []).some(h => (h.outcome || "").toLowerCase() === "interested") ||
-      (lead.status || "").toLowerCase() === "interested";
-
+    const oldStatus  = lead.status;
     const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
 
-    // Fire interested blast when:
-    //   - Employee panel: outcome is set to "Interested" (first time)
-    //   - Admin panel: status is changed TO "Interested"
-    const shouldBlast =
-      (!alreadyMarkedInterested && outcome === "Interested") ||
-      (status === "Interested" && oldStatus !== "Interested");
-
-    if (shouldBlast) {
+    // Fire interested blast when status just changed TO "Interested"
+    if (status === "Interested" && oldStatus !== "Interested") {
       sendInterestedBlast(updatedLead, getCompanyId(req)).catch(err =>
         console.error("[patchLead] interestedBlast error:", err.message)
       );
