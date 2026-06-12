@@ -259,6 +259,10 @@ const initSocket = (io) => {
       socket.join(`admin_room:${adminId}`);
       // Named room used by fcmService socket push (no_action_alert, follow_up_alert)
       socket.join(`admin:${adminId}`);
+      // Company-wide admin room — fallback target for events that emit to
+      // company_admin:${company} (e.g. lead_closed_by_user, meeting_permission_
+      // requested). Without this join those company-wide fallbacks went nowhere.
+      if (company) socket.join(`company_admin:${company}`);
 
       await ChatUser.findOneAndUpdate(
         { username },
@@ -304,6 +308,8 @@ const initSocket = (io) => {
       socket.join(`admin_room:${adminId}`);
       // Named room used by fcmService socket push (lead_reassigned_notify, no_action_alert, follow_up_alert)
       socket.join(`superadmin:${adminId}`);
+      // Company-wide admin room — fallback for company_admin:${company} emits.
+      if (company) socket.join(`company_admin:${company}`);
 
       await ChatUser.findOneAndUpdate(
         { username },
