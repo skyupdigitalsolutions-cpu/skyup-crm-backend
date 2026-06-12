@@ -106,10 +106,29 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
       return { channel: "whatsapp", status: "skipped", detail: "MSG91 WhatsApp authkey / integrated number missing in WhatsApp settings." };
     }
 
-    const namespace  = config.msg91Namespace || "";
-    const components = (lead.name || "").trim()
-      ? { body_customer_name: { type: "text", value: lead.name.trim(), parameter_name: "customer_name" } }
-      : {};
+    const namespace   = config.msg91Namespace   || "";
+    const brochureUrl = config.msg91BrochureUrl || "";
+
+    // EXACT same component format as the proven-working chat/bulk sender
+    // (_sendTemplateToPhone in whatsappChatController.js):
+    //   • body_1   → positional {{1}} body variable (the lead's name)
+    //   • header_1 → document header (brochure) when configured — templates
+    //                with a document header REJECT sends that omit it.
+    const components = {
+      ...(brochureUrl
+        ? {
+            header_1: {
+              type:     "document",
+              value:    brochureUrl,
+              filename: "Brochure.pdf",
+            },
+          }
+        : {}),
+      body_1: {
+        type:  "text",
+        value: (lead.name || "").trim() || "there",
+      },
+    };
 
     const templateBlock = {
       name:              templateName.trim(),
@@ -244,8 +263,27 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
   const smsConfig = await SmsConfig.findOne({ company: companyId }).lean();
   const authKey   = smsConfig?.msg91AuthKey || "";
 
-  const resolvedTemplateId = templateId || smsConfig?.greetingsTemplateId || "1007503933418344595";
-  const resolvedSenderId   = senderId || smsConfig?.greetingsSenderId || smsConfig?.msg91SenderId || "695382";
+  // MSG91's /api/v5/flow/ endpoint needs the MSG91 FLOW ID (24-char hex,
+  // e.g. "6a1ffe028c6272147b00b233") in flow_id — NOT the 19-digit DLT/TRAI
+  // template number. If the panel value looks like a DLT number (long pure
+  // digits), it would be rejected by MSG91 — fall back to the saved working
+  // Greetings Flow ID instead and note the correction.
+  const looksLikeDltNumber = (v) => /^\d{15,}$/.test((v || "").trim());
+  const greetingsFlowId    = smsConfig?.greetingsTemplateId || "6a1ffe028c6272147b00b233";
+
+  let resolvedTemplateId = (templateId || "").trim();
+  let correctionNote = "";
+  if (!resolvedTemplateId) {
+    resolvedTemplateId = greetingsFlowId;
+  } else if (looksLikeDltNumber(resolvedTemplateId)) {
+    correctionNote = ` (note: "${resolvedTemplateId}" in settings is a DLT number, not an MSG91 Flow ID — used saved Greetings Flow ID instead)`;
+    resolvedTemplateId = greetingsFlowId;
+  }
+
+  // Sender fallback mirrors the working campaign path: panel value →
+  // greetings sender → 695382. (msg91SenderId like "SKYCRM" belongs to a
+  // different DLT registration and would be rejected for the greetings flow.)
+  const resolvedSenderId = (senderId || "").trim() || smsConfig?.greetingsSenderId || "695382";
 
   if (!authKey) {
     console.warn(`[autoTemplate] ❌ SMS skipped — MSG91 authKey not configured for company ${companyId}`);
@@ -296,7 +334,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
       msg91RequestId: String(data?.message || data?.requestId || ""),
       company:        companyId,
     });
-    return { channel: "sms", status: "sent", detail: `Sent to ${phone} (template ${resolvedTemplateId}, sender ${resolvedSenderId})` };
+    return { channel: "sms", status: "sent", detail: `Sent to ${phone} (flow ${resolvedTemplateId}, sender ${resolvedSenderId})${correctionNote}` };
   } catch (err) {
     const errMsg = err?.response?.data?.message || err.message;
     console.error(`[autoTemplate] ❌ SMS failed for ${phone}:`, errMsg);
