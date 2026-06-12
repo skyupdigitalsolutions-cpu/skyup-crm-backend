@@ -87,6 +87,7 @@ const staticAllowedOrigins = [
   "http://localhost:4173",
   "http://localhost:5000",
   "https://skyup-crm-frontend.onrender.com",
+  "https://skyup-crm-frontend.skyupdigitalsolutions.workers.dev",
 ];
 
 async function isDynamicOriginAllowed(origin) {
