@@ -28,6 +28,7 @@ const {
 } = require("../services/entitlementService");
 const { calcDaysRemaining } = require("./subscriptionController");
 const Payment = require("../models/Payment");
+const LimitOverrideInvoice = require("../models/LimitOverrideInvoice");
 
 // ── Cloudinary config ─────────────────────────────────────────────────────────
 cloudinary.config({
@@ -295,7 +296,7 @@ const getCompanyDetails = async (req, res) => {
     const now   = new Date();
     const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 
-    const [company, entitlements, addons, benefits, usage, auditLogs, remaining] = await Promise.all([
+    const [company, entitlements, addons, benefits, usage, auditLogs, remaining, limitInvoices] = await Promise.all([
       Company.findById(companyId)
         .select("-brevoApiKey -encryptionKeyHash -customerOpenAiKey -customerGeminiKey")
         .lean(),
@@ -305,6 +306,7 @@ const getCompanyDetails = async (req, res) => {
       CompanyUsage.findOne({ companyId, month }).lean(),
       EntitlementAuditLog.find({ companyId }).sort({ createdAt: -1 }).limit(50).lean(),
       getRemainingUsage(companyId),
+      LimitOverrideInvoice.find({ company: companyId }).sort({ createdAt: -1 }).limit(100).lean(),
     ]);
 
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
@@ -314,6 +316,10 @@ const getCompanyDetails = async (req, res) => {
     // never see the company's explicit per-feature overrides.
     if (company.devOverrides && company.devOverrides.featureToggles instanceof Map) {
       company.devOverrides.featureToggles = Object.fromEntries(company.devOverrides.featureToggles);
+    }
+    // Same normalization for limitMeta (per-field expiry + price metadata).
+    if (company.devOverrides && company.devOverrides.limitMeta instanceof Map) {
+      company.devOverrides.limitMeta = Object.fromEntries(company.devOverrides.limitMeta);
     }
 
     res.json({
@@ -325,6 +331,7 @@ const getCompanyDetails = async (req, res) => {
       usage:    usage || { month, recordingsUsed: 0, transcriptionsUsed: 0, summariesUsed: 0, voiceBotUsed: 0 },
       remaining,
       auditLogs,
+      limitInvoices: limitInvoices || [],
       daysRemaining: calcDaysRemaining(company),
     });
   } catch (err) {
@@ -338,7 +345,7 @@ const getCompanyDetails = async (req, res) => {
 const applyDevOverride = async (req, res) => {
   try {
     const companyId = req.params.id;
-    const { featureToggles, reason = "" } = req.body;
+    const { featureToggles, limitMeta, reason = "" } = req.body;
 
     const company = await Company.findById(companyId).lean();
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
@@ -348,6 +355,9 @@ const applyDevOverride = async (req, res) => {
     const existingToggles = rawOverrides.featureToggles instanceof Map
       ? Object.fromEntries(rawOverrides.featureToggles)
       : (rawOverrides.featureToggles || {});
+    const existingMeta = rawOverrides.limitMeta instanceof Map
+      ? Object.fromEntries(rawOverrides.limitMeta)
+      : (rawOverrides.limitMeta || {});
 
     // Build $set payload — only include fields present in the request body
     const setPayload = {};
@@ -357,10 +367,21 @@ const applyDevOverride = async (req, res) => {
       "metaCampaigns", "googleAccounts", "storageMB",
       "transcriptionsLimit", "summariesLimit", "voiceBotLimit",
     ];
+    const LIMIT_LABELS = {
+      admins: "Admins", users: "Users", leads: "Leads", websites: "Websites",
+      metaCampaigns: "Meta Campaigns", googleAccounts: "Google Accounts",
+      storageMB: "Storage (MB)", transcriptionsLimit: "Transcriptions / month",
+      summariesLimit: "AI Summaries / month", voiceBotLimit: "Voice Bot / month",
+    };
+
+    // Resolved numeric value per field (after parsing) so we can build meta + invoices
+    const resolvedValues = {};
     for (const field of NUMERIC_FIELDS) {
       if (!(field in req.body)) continue;
       const raw = req.body[field];
-      setPayload[`devOverrides.${field}`] = (raw === null || raw === "") ? null : (Number.isFinite(parseInt(raw, 10)) ? parseInt(raw, 10) : null);
+      const val = (raw === null || raw === "") ? null : (Number.isFinite(parseInt(raw, 10)) ? parseInt(raw, 10) : null);
+      setPayload[`devOverrides.${field}`] = val;
+      resolvedValues[field] = val;
     }
 
     if ("recordingEnabled" in req.body) {
@@ -378,11 +399,92 @@ const applyDevOverride = async (req, res) => {
       setPayload["devOverrides.featureToggles"] = featureToggles;
     }
 
+    // ── Per-field limit metadata (expiry + price) ────────────────────────────
+    // For every numeric field present in this save, compute its meta:
+    //   • field reverted to inherit (null) → clear meta (no expiry / no price)
+    //   • field has a value → store { expiresAt, price, currency, grantedAt }
+    // Invoices are created below for fields whose price is > 0 and is new/changed.
+    const invoicesToCreate = [];
+    if (Array.isArray(NUMERIC_FIELDS)) {
+      const nextMeta = { ...existingMeta };
+      const incomingMeta = (limitMeta && typeof limitMeta === "object") ? limitMeta : {};
+
+      for (const field of Object.keys(resolvedValues)) {
+        const val = resolvedValues[field];
+
+        if (val === null) {
+          // Reverted to inherit — drop any meta for this field
+          delete nextMeta[field];
+          continue;
+        }
+
+        const m = incomingMeta[field] || {};
+        const price = Number(m.price);
+        const safePrice = Number.isFinite(price) && price > 0 ? price : 0;
+        const expiresAt = m.expiresAt ? new Date(m.expiresAt) : null;
+        const currency  = m.currency || "INR";
+
+        const prev = existingMeta[field] || {};
+        const prevExpiry = prev.expiresAt ? new Date(prev.expiresAt).getTime() : null;
+        const newExpiry  = expiresAt ? expiresAt.getTime() : null;
+
+        nextMeta[field] = {
+          expiresAt: expiresAt ? expiresAt.toISOString() : null,
+          price:     safePrice,
+          currency,
+          grantedAt: prev.grantedAt || new Date().toISOString(),
+        };
+
+        // Create an invoice when a price is set AND it's a new/changed charge
+        // (price changed, expiry changed, or value newly set). Avoids
+        // re-invoicing on every unrelated save.
+        const priceChanged  = Number(prev.price || 0) !== safePrice;
+        const expiryChanged = prevExpiry !== newExpiry;
+        const valueChanged  = Number(prev.value ?? NaN) !== val;
+        if (safePrice > 0 && (priceChanged || expiryChanged || valueChanged)) {
+          // Refresh grantedAt for a brand-new charge
+          nextMeta[field].grantedAt = new Date().toISOString();
+          nextMeta[field].value = val;
+          invoicesToCreate.push({ field, value: val, price: safePrice, currency, expiresAt });
+        } else {
+          nextMeta[field].value = val;
+        }
+      }
+
+      setPayload["devOverrides.limitMeta"] = nextMeta;
+    }
+
     const updated = await Company.findByIdAndUpdate(
       companyId,
       { $set: setPayload },
       { new: true, runValidators: false }
     ).lean();
+
+    // ── Create invoice records for priced overrides ──────────────────────────
+    const createdInvoices = [];
+    for (const inv of invoicesToCreate) {
+      try {
+        const invoiceId = `LIM-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        const doc = await LimitOverrideInvoice.create({
+          company:    companyId,
+          invoiceId,
+          limitKey:   inv.field,
+          limitLabel: LIMIT_LABELS[inv.field] || inv.field,
+          value:      inv.value,
+          price:      inv.price,
+          currency:   inv.currency,
+          grantedAt:  new Date(),
+          expiresAt:  inv.expiresAt || null,
+          actorId:    req.developer?._id || req.superAdmin?._id || req.admin?._id || req.user?._id || null,
+          actorRole:  req.developer ? "developer" : (req.superAdmin || req.admin?.role === "super_admin") ? "super_admin" : "system",
+          status:     "paid",
+          note:       reason || "Additional limit granted",
+        });
+        createdInvoices.push(doc);
+      } catch (invErr) {
+        console.error("[applyDevOverride] invoice create failed:", invErr.message);
+      }
+    }
 
     // Build newOverrides for audit log
     const newOverrides = updated?.devOverrides || {};
@@ -400,7 +502,12 @@ const applyDevOverride = async (req, res) => {
     });
 
     const entitlements = await getCompanyEntitlements(companyId);
-    res.json({ success: true, devOverrides: newOverrides, entitlements });
+    res.json({
+      success: true,
+      devOverrides: newOverrides,
+      entitlements,
+      invoices: createdInvoices,
+    });
   } catch (err) {
     console.error("[applyDevOverride]", err.message);
     res.status(500).json({ success: false, message: err.message });

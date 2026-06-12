@@ -113,6 +113,19 @@ const companySchema = mongoose.Schema(
         of:   Boolean,
         default: {},
       },
+
+      // NEW: per-field metadata for priced/time-limited limit overrides.
+      // Keyed by the same numeric override key (e.g. "leads", "storageMB").
+      // Each entry: { expiresAt: Date|null, price: Number, currency: String,
+      //               grantedAt: Date }. The flat numeric value above remains
+      //   the source of truth the entitlement engine reads; this map only
+      //   carries the expiry + billing metadata so it can auto-revert and be
+      //   shown in the UI. Stored as a free-form object map for flexibility.
+      limitMeta: {
+        type:    Map,
+        of:      mongoose.Schema.Types.Mixed,
+        default: {},
+      },
     },
 
     // ── NEW: AI Provider Mode ─────────────────────────────────────────────────
