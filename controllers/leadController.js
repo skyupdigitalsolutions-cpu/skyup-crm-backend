@@ -21,7 +21,7 @@ const getCompanyId = (req) =>
   null;
 
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
-const { autoSendTemplates, sendInterestedBlast } = require("../services/autoTemplateService");
+const { autoSendTemplates } = require("../services/autoTemplateService");
 const { notifyCampaignLead, notifyEmployeeLead } = require("../services/telegramService");
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
@@ -757,8 +757,6 @@ const updateLead = async (req, res) => {
       mergedFrom, ...safeBody
     } = req.body;
 
-    const oldStatus = lead.status;
-
     // If caller is changing primary phone, validate uniqueness
     const newPrimary = safeBody.mobile || safeBody.primaryPhone;
     if (newPrimary) {
@@ -796,14 +794,6 @@ const updateLead = async (req, res) => {
     }
 
     const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, { new: true });
-
-    // Fire interested blast when status just changed TO "Interested"
-    if (safeBody.status === "Interested" && oldStatus !== "Interested") {
-      sendInterestedBlast(updatedLead, companyId).catch(err =>
-        console.error("[updateLead] interestedBlast error:", err.message)
-      );
-    }
-
     return res.status(200).json(updatedLead);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1072,16 +1062,7 @@ const patchLead = async (req, res) => {
     if (Object.keys(setOps).length > 0)
       update.$set = { ...(update.$set || {}), ...setOps };
 
-    const oldStatus  = lead.status;
     const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
-
-    // Fire interested blast when status just changed TO "Interested"
-    if (status === "Interested" && oldStatus !== "Interested") {
-      sendInterestedBlast(updatedLead, getCompanyId(req)).catch(err =>
-        console.error("[patchLead] interestedBlast error:", err.message)
-      );
-    }
-
     return res.status(200).json(updatedLead);
   } catch (error) {
     res.status(500).json({ message: error.message });
