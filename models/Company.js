@@ -240,8 +240,8 @@ const companySchema = mongoose.Schema(
     autoTemplate: {
       whatsapp: {
         enabled:      { type: Boolean, default: false },
-        templateName: { type: String,  default: "skyup_greeting" },
-        languageCode: { type: String,  default: "en_US" },
+        templateName: { type: String,  default: "crm_followup_leads" },
+        languageCode: { type: String,  default: "en" },
       },
       email: {
         enabled:      { type: Boolean, default: false },
@@ -264,7 +264,7 @@ const companySchema = mongoose.Schema(
     interestedBlast: {
       whatsapp: {
         enabled:      { type: Boolean, default: false },
-        templateName: { type: String,  default: "skyup_greeting" },
+        templateName: { type: String,  default: "crm_followup_leads" },
         languageCode: { type: String,  default: "en" },
       },
       email: {
