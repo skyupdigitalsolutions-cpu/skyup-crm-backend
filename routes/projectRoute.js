@@ -12,24 +12,24 @@ const {
   createProjectAdmin,
   updateProject,
   updateProjectAdmin,
-  deleteProject,
   deleteProjectAdmin,
 } = require("../controllers/projectController");
 
 const { protect }        = require("../middlewares/authMiddleware");
-const { protectAdmin }   = require("../middlewares/adminAuthMiddleware");
+const { protectAdmin, requireCompanySuperAdmin }   = require("../middlewares/adminAuthMiddleware");
 const { requireFeature } = require("../middlewares/entitlementMiddleware");
 
 // ── Admin routes ─────────────────────────────────────────────────────────────
 router.get   ("/admin",     protectAdmin, requireFeature("projects"), getProjectsAdmin);
 router.post  ("/admin",     protectAdmin, requireFeature("projects"), createProjectAdmin);
 router.put   ("/admin/:id", protectAdmin, requireFeature("projects"), updateProjectAdmin);
-router.delete("/admin/:id", protectAdmin, requireFeature("projects"), deleteProjectAdmin);
+router.delete("/admin/:id", protectAdmin, requireCompanySuperAdmin, requireFeature("projects"), deleteProjectAdmin);
 
 // ── User (employee) routes ────────────────────────────────────────────────────
+// NOTE: project deletion is restricted to the company super_admin only,
+// so there is no employee-level delete route.
 router.get   ("/",    protect, requireFeature("projects"), getProjects);
 router.post  ("/",    protect, requireFeature("projects"), createProject);
 router.put   ("/:id", protect, requireFeature("projects"), updateProject);
-router.delete("/:id", protect, requireFeature("projects"), deleteProject);
 
 module.exports = router;
