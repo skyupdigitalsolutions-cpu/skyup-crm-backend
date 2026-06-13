@@ -72,6 +72,11 @@ const clockIn = async (req, res) => {
       .select('clockInLocationEnabled clockInLatitude clockInLongitude clockInRadiusMeters')
       .lean();
 
+    // Tracks whether this clock-in relied on a remote meeting permission, so we
+    // can consume (reset) that permission afterwards — a granted permission is
+    // valid for ONE clock-in only, not a standing 24h pass.
+    let usedMeetingPermission = false;
+
     if (company?.clockInLocationEnabled && company.clockInLatitude && company.clockInLongitude) {
       // Check if employee has client-meeting permission (bypasses location check)
       const userDoc = await User.findById(userId)
@@ -85,6 +90,8 @@ const clockIn = async (req, res) => {
         const grantedAt = new Date(userDoc.clientMeetingPermissionGrantedAt);
         return (Date.now() - grantedAt.getTime()) < 24 * 60 * 60 * 1000;
       })();
+
+      usedMeetingPermission = hasMeetingPermission;
 
       if (!hasMeetingPermission) {
         // Require device location from request body
@@ -152,6 +159,21 @@ const clockIn = async (req, res) => {
     // Keep User document current (in case login missed it)
     if (Object.keys(deviceFields).length > 0) {
       await User.findByIdAndUpdate(userId, { $set: deviceFields });
+    }
+
+    // Consume the remote permission: a granted approval is good for ONE clock-in.
+    // After using it, reset so the next clock-in requires a fresh request +
+    // fresh admin approval (no standing 24h pass that auto-shows "approved").
+    if (usedMeetingPermission) {
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          clientMeetingPermission:    false,
+          clientMeetingPermissionGrantedAt: null,
+          clientMeetingPermissionGrantedBy: null,
+          meetingPermissionRequested: false,
+          meetingPermissionStatus:    'none',
+        },
+      });
     }
 
     emitAttendanceUpdate(req, record);
