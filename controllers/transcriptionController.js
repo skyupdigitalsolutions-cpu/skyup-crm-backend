@@ -6,11 +6,21 @@ const {
 } = require('../utils/transcribeAudio');
 const { summarizeCallTranscript, combineLeadSummaries } = require('../utils/summarizeCall');
 const Lead = require('../models/Leads');
+const {
+  getCompanyEntitlements,
+  getRemainingUsage,
+  consumeUsage,
+} = require('../services/entitlementService');
 
 // ── Helper: run full pipeline ─────────────────────────────────────────────────
-async function runPipeline(transcribeFn, contactName) {
+// withSummary=false produces a transcript only (when the company lacks the
+// aiSummary feature or has exhausted its summary quota). Transcription and
+// AI Summary are independent features with independent monthly limits.
+async function runPipeline(transcribeFn, contactName, withSummary = true) {
   const { transcript } = await transcribeFn();
-  const summary = await summarizeCallTranscript(transcript, contactName);
+  const summary = withSummary
+    ? await summarizeCallTranscript(transcript, contactName)
+    : null;
   return { transcript, summary };
 }
 
@@ -24,6 +34,9 @@ function getCaller(req) {
 
 // ── POST /api/transcription/mobile/:callLogId/:recordingId ────────────────────
 // Body: { audioLang?: 'english' | 'mixed' }
+// Enforces the monthly Call Transcription limit. If the company also has the
+// AI Summary feature with remaining summary quota, a summary is generated and
+// counted separately; otherwise only the transcript is produced.
 const transcribeMobileCall = async (req, res) => {
   const { callLogId, recordingId } = req.params;
   const caller    = getCaller(req);
@@ -40,6 +53,25 @@ const transcribeMobileCall = async (req, res) => {
     const recording = log.recordings.id(recordingId);
     if (!recording) return res.status(404).json({ message: 'Recording not found' });
 
+    // ── Enforce monthly limits (transcription + optional summary) ─────────────
+    const [ent, remaining] = await Promise.all([
+      getCompanyEntitlements(caller.company),
+      getRemainingUsage(caller.company),
+    ]);
+
+    if (remaining.transcriptions <= 0) {
+      return res.status(429).json({
+        message: 'Monthly call transcription limit reached. Upgrade your plan or buy a transcription add-on.',
+        code: 'TRANSCRIPTION_LIMIT_REACHED',
+        limit: remaining.limits?.transcriptions ?? ent.transcriptionsLimit,
+        used:  remaining.used?.transcriptions ?? 0,
+      });
+    }
+
+    // Generate a summary only if the company has the AI Summary feature AND
+    // has summary quota left. Transcription proceeds regardless.
+    const withSummary = !!ent.aiSummary && remaining.summaries > 0;
+
     recording.transcribeStatus = 'processing';
     await log.save({ validateBeforeSave: false });
 
@@ -47,14 +79,25 @@ const transcribeMobileCall = async (req, res) => {
     const { transcript, summary } = await runPipeline(
       () => transcribeMobileRecording(recording.url, { audioLang }),
       contactName,
+      withSummary,
     );
 
     recording.transcript       = transcript;
-    recording.summary          = summary;
+    if (summary) recording.summary = summary;
     recording.transcribeStatus = 'done';
     await log.save({ validateBeforeSave: false });
 
-    res.json({ message: 'Transcription complete', transcript, summary, recordingId });
+    // ── Consume usage (transcription always; summary only if produced) ────────
+    await consumeUsage(caller.company, 'transcriptionsUsed', 1).catch(() => {});
+    if (summary) await consumeUsage(caller.company, 'summariesUsed', 1).catch(() => {});
+
+    res.json({
+      message: 'Transcription complete',
+      transcript,
+      summary,
+      summaryGenerated: !!summary,
+      recordingId,
+    });
   } catch (err) {
     console.error('[transcribeMobileCall] error:', err.message);
     try {
@@ -128,7 +171,22 @@ const getLeadCombinedSummary = async (req, res) => {
       });
     }
 
+    // ── Enforce monthly AI Summary limit ──────────────────────────────────────
+    const remaining = await getRemainingUsage(caller.company);
+    if (remaining.summaries <= 0) {
+      return res.status(429).json({
+        message: 'Monthly AI summary limit reached. Upgrade your plan or buy an AI summary add-on.',
+        code: 'SUMMARY_LIMIT_REACHED',
+        limit: remaining.limits?.summaries,
+        used:  remaining.used?.summaries ?? 0,
+      });
+    }
+
     const combinedSummary = await combineLeadSummaries(summaries, lead.name);
+
+    // Consume one summary unit for the combined-summary generation.
+    await consumeUsage(caller.company, 'summariesUsed', 1).catch(() => {});
+
     res.json({
       leadId,
       leadName:        lead.name,
