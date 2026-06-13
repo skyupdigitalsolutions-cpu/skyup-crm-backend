@@ -28,7 +28,7 @@ const companyUsageSchema = new mongoose.Schema(
     // ── Monthly counters ──────────────────────────────────────────────────────
     // Each counter is incremented by consumeUsage() in entitlementService.
 
-    // Mobile / Twilio call recordings consumed this month
+    // Mobile call recordings consumed this month
     recordingsUsed: { type: Number, default: 0, min: 0 },
 
     // AI transcriptions consumed this month

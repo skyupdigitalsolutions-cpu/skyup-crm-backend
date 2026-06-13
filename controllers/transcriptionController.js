@@ -1,9 +1,7 @@
 // controllers/transcriptionController.js
 
-const Call          = require('../models/Call');
 const MobileCallLog = require('../models/MobileCallLog');
 const {
-  transcribeTwilioRecording,
   transcribeMobileRecording,
 } = require('../utils/transcribeAudio');
 const { summarizeCallTranscript, combineLeadSummaries } = require('../utils/summarizeCall');
@@ -23,52 +21,6 @@ function getCaller(req) {
   }
   return { isAdmin: false, userId: req.user._id, company: req.user.company };
 }
-
-// ── POST /api/transcription/twilio/:recordingSid ──────────────────────────────
-// Body: { audioLang?: 'english' | 'mixed', contactName?: string }
-const transcribeTwilioCall = async (req, res) => {
-  const { recordingSid } = req.params;
-  // 'mixed' is the safe default for India — handles Hindi/Kannada/Hinglish etc.
-  const audioLang = req.body.audioLang || 'mixed';
-
-  try {
-    await Call.findOneAndUpdate({ recordingSid }, { transcribeStatus: 'processing' });
-    const call = await Call.findOne({ recordingSid });
-    const contactName = req.body.contactName || call?.contactName || 'the customer';
-
-    const { transcript, summary } = await runPipeline(
-      () => transcribeTwilioRecording(recordingSid, { audioLang }),
-      contactName,
-    );
-
-    const updated = await Call.findOneAndUpdate(
-      { recordingSid },
-      { transcript, summary, transcribeStatus: 'done' },
-      { new: true },
-    );
-
-    res.json({ message: 'Transcription complete', transcript, summary, call: updated });
-  } catch (err) {
-    console.error('[transcribeTwilioCall] error:', err.message);
-    await Call.findOneAndUpdate({ recordingSid }, { transcribeStatus: 'failed' }).catch(() => {});
-    res.status(500).json({ message: err.message || 'Transcription failed' });
-  }
-};
-
-// ── GET /api/transcription/twilio/:recordingSid ───────────────────────────────
-const getTwilioTranscription = async (req, res) => {
-  try {
-    const call = await Call.findOne({ recordingSid: req.params.recordingSid });
-    if (!call) return res.status(404).json({ message: 'Recording not found' });
-    res.json({
-      transcribeStatus: call.transcribeStatus || 'pending',
-      transcript: call.transcript || null,
-      summary:    call.summary    || null,
-    });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-};
 
 // ── POST /api/transcription/mobile/:callLogId/:recordingId ────────────────────
 // Body: { audioLang?: 'english' | 'mixed' }
@@ -191,8 +143,6 @@ const getLeadCombinedSummary = async (req, res) => {
 };
 
 module.exports = {
-  transcribeTwilioCall,
-  getTwilioTranscription,
   transcribeMobileCall,
   getMobileTranscription,
   getLeadCombinedSummary,

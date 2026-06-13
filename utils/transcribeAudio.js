@@ -300,25 +300,6 @@ async function transcribeAudio(audioInput, audioLang = 'mixed') {
 // PUBLIC API  (backward-compatible)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function transcribeTwilioRecording(recordingSid, options = {}) {
-  const audioLang = options.audioLang || 'mixed';
-  const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Recordings/${recordingSid}.mp3`;
-  const tmpPath   = path.join(os.tmpdir(), `twilio_${recordingSid}.mp3`);
-
-  const response = await axios.get(twilioUrl, {
-    responseType: 'arraybuffer',
-    auth: { username: process.env.TWILIO_ACCOUNT_SID, password: process.env.TWILIO_AUTH_TOKEN },
-  });
-  fs.writeFileSync(tmpPath, response.data);
-
-  try {
-    const { text } = await transcribeAudio(tmpPath, audioLang);
-    return { transcript: text };
-  } finally {
-    fs.unlink(tmpPath, () => {});
-  }
-}
-
 async function transcribeMobileRecording(relativeUrl, options = {}) {
   const audioLang = options.audioLang || 'mixed';
 
@@ -342,4 +323,4 @@ async function transcribeMobileRecording(relativeUrl, options = {}) {
   return { transcript: text };
 }
 
-module.exports = { transcribeTwilioRecording, transcribeMobileRecording };
+module.exports = { transcribeMobileRecording };

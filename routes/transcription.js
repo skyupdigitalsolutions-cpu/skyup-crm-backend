@@ -7,20 +7,13 @@
 
 const express      = require('express');
 const router       = express.Router();
-const { protect, protectAny } = require('../middlewares/authMiddleware');
-const { protectAdmin }        = require('../middlewares/adminAuthMiddleware');
-const { requireFeature }      = require('../middlewares/entitlementMiddleware');
+const { protectAny }     = require('../middlewares/authMiddleware');
+const { requireFeature } = require('../middlewares/entitlementMiddleware');
 const {
-  transcribeTwilioCall,
-  getTwilioTranscription,
   transcribeMobileCall,
   getMobileTranscription,
   getLeadCombinedSummary,
 } = require('../controllers/transcriptionController');
-
-// ── Twilio recordings (admin only — Twilio SID is admin-visible data) ─────────
-router.post('/twilio/:recordingSid', protectAdmin, requireFeature("callTranscription"), transcribeTwilioCall);
-router.get('/twilio/:recordingSid',  protectAdmin, requireFeature("callTranscription"), getTwilioTranscription);
 
 // ── Mobile recordings ─────────────────────────────────────────────────────────
 router.post('/mobile/:callLogId/:recordingId', protectAny, requireFeature("callTranscription"), transcribeMobileCall);
