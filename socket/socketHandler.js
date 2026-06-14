@@ -24,6 +24,7 @@
  *  superadmin→ 'superadmin:<Admin._id>'
  */
 
+const mongoose = require('mongoose');
 const Message  = require('../models/Message');
 const ChatUser = require('../models/ChatUser');
 const Admin    = require('../models/Admin');
@@ -592,9 +593,26 @@ async function canSendTo(role, adminId, company, toUsername) {
 async function buildContactList(role, adminId, company) {
   const contacts = [];
 
+  // Guard: without a company we cannot scope the query — bail with an empty
+  // list rather than running an unscoped find that could match nothing (or
+  // everything). A missing company here is the usual cause of "No contacts yet".
+  if (!company) {
+    console.warn('[buildContactList] called without company; returning empty list. role=', role, 'adminId=', adminId);
+    return contacts;
+  }
+
+  // Normalize company to an ObjectId so string/ObjectId mismatches can't cause
+  // an empty result. Fall back to the raw value if it isn't a valid id string.
+  let companyMatch = company;
+  try {
+    if (typeof company === 'string' && mongoose.Types.ObjectId.isValid(company)) {
+      companyMatch = new mongoose.Types.ObjectId(company);
+    }
+  } catch { /* keep raw value */ }
+
   if (role === 'super_admin') {
     // All regular admins in this company
-    const admins = await Admin.find({ company, role: 'admin' }).lean();
+    const admins = await Admin.find({ company: companyMatch, role: 'admin' }).lean();
     for (const a of admins) {
       const username = `admin:${a._id}`;
       const doc = await ChatUser.findOneAndUpdate(
@@ -606,7 +624,7 @@ async function buildContactList(role, adminId, company) {
     }
 
     // All employees in this company
-    const employees = await User.find({ company }).lean();
+    const employees = await User.find({ company: companyMatch }).lean();
     for (const u of employees) {
       const username = u.name;
       const doc = await ChatUser.findOneAndUpdate(
@@ -619,7 +637,7 @@ async function buildContactList(role, adminId, company) {
 
   } else if (role === 'admin') {
     // Super admin of this company
-    const superAdminDoc = await Admin.findOne({ company, role: 'super_admin' }).lean();
+    const superAdminDoc = await Admin.findOne({ company: companyMatch, role: 'super_admin' }).lean();
     if (superAdminDoc) {
       const username = `superadmin:${superAdminDoc._id}`;
       const doc = await ChatUser.findOneAndUpdate(
@@ -631,7 +649,7 @@ async function buildContactList(role, adminId, company) {
     }
 
     // Employees created by this admin
-    const employees = await User.find({ company, createdBy: adminId }).lean();
+    const employees = await User.find({ company: companyMatch, createdBy: adminId }).lean();
     for (const u of employees) {
       const username = u.name;
       const doc = await ChatUser.findOneAndUpdate(
