@@ -134,28 +134,60 @@ const verifySuperAdminOtp = async (req, res) => {
       $set: { otp: null, otpExpiry: null, otpAttempts: 0, otpLockedUntil: null },
     });
 
-    // Try Admin model (new multi-tenant), fallback to legacy SuperAdmin
+    // ── Path A: Admin model (new multi-tenant super admin) ───────────────────
+    // Super admin created via SuperAdmin dashboard → exists in Admin collection
+    // with role "super_admin" and a company reference.
     const adminDoc = await Admin.findOne({ email, role: "super_admin" }).populate("company");
     if (adminDoc) {
-      // FIX: also return flat companyId/companyName alongside the populated
-      // `company` object. The frontend (SuperAdminLogin.jsx) reads
-      // res.data.companyId / res.data.companyName when building the stored
-      // user object — without these the chat widget's companyId resolves to
-      // '' and super_admin_join silently bails out (no contacts, 0 online).
       return res.json({
-        _id: adminDoc._id, name: adminDoc.name, email: adminDoc.email,
-        role: "super_admin",
-        company: adminDoc.company,
-        companyId: adminDoc.company?._id,
+        _id:         adminDoc._id,
+        name:        adminDoc.name,
+        email:       adminDoc.email,
+        role:        "super_admin",
+        company:     adminDoc.company,
+        companyId:   adminDoc.company?._id,
         companyName: adminDoc.company?.name,
-        token: generateToken(adminDoc._id, "super_admin"),
+        token:       generateToken(adminDoc._id, "super_admin"),
       });
     }
 
+    // ── Path B: Legacy SuperAdmin model ──────────────────────────────────────
+    // Super admin was created via the old /superadmin/register route and only
+    // exists in the SuperAdmin collection (no company field on that model).
+    //
+    // FIX: Without this lookup the legacy response had no company/companyId,
+    // so localStorage stored companyId:"", the socket's super_admin_join guard
+    // silently aborted (missing company), and the chat panel showed
+    // "No contacts yet / 0 online" forever.
+    //
+    // We look up the Admin collection by email to find the associated company —
+    // the super admin may have been migrated to Admin since their initial
+    // registration, or a matching Admin record may exist under the same email.
+    // If found, include companyId so the chat widget works correctly.
+    const migratedAdmin = await Admin.findOne({ email }).populate("company");
+    const companyObj    = migratedAdmin?.company || null;
+    const companyId     = companyObj?._id || null;
+    const companyName   = companyObj?.name || "";
+
+    // If no Admin record exists at all for this email, the super admin is a
+    // pure legacy account with no company association. Chat will remain empty
+    // but at least the login succeeds without crashing.
+    if (!companyId) {
+      console.warn(
+        "[verifySuperAdminOtp] Legacy super admin has no Admin record / company — chat will be empty.",
+        "email=", email
+      );
+    }
+
     res.json({
-      _id: shadowDoc._id, name: shadowDoc.name, email: shadowDoc.email,
-      role: "super_admin",
-      token: generateToken(shadowDoc._id, "super_admin"),
+      _id:         shadowDoc._id,
+      name:        shadowDoc.name,
+      email:       shadowDoc.email,
+      role:        "super_admin",
+      company:     companyObj,
+      companyId:   companyId,
+      companyName: companyName,
+      token:       generateToken(shadowDoc._id, "super_admin"),
     });
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
