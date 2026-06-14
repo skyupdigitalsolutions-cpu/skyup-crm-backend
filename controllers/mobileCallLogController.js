@@ -102,6 +102,18 @@ const syncCallLogs = async (req, res) => {
       });
     }
 
+    // ── Per-user call-log sync gate ──────────────────────────────────────────
+    // Super admin can disable sync for an individual employee even when the
+    // company-wide flag is on. req.user is the full User doc (loaded by
+    // `protect`), so the flag is available here. Treat only an explicit `false`
+    // as disabled, so users created before this field existed keep syncing.
+    if (req.user.callLogSyncEnabled === false) {
+      return res.status(403).json({
+        message: 'Device call-log sync is disabled for your account. Contact your administrator.',
+        code:    'call_log_sync_disabled_user',
+      });
+    }
+
     const batch = logs.slice(0, 500);
 
     // ── Load all company leads ONCE, build phone Maps (primary + secondary) ──

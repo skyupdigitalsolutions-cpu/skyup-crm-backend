@@ -327,7 +327,7 @@ const getCompanyAttendance = async (req, res) => {
     const userIds = users.map(u => u._id);
 
     const records = await Attendance.find({ company: companyId, date, user: { $in: userIds } })
-      .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory").lean();
+      .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory callLogSyncEnabled").lean();
 
     const recordMap = {};
     records.forEach(r => { recordMap[String(r.user?._id || r.user)] = r; });
@@ -394,7 +394,7 @@ const getAttendanceReport = async (req, res) => {
     // Fetch records
     const [records, total] = await Promise.all([
       Attendance.find(query)
-        .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory")
+        .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory callLogSyncEnabled")
         .sort({ date: -1, createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(Number(limit))

@@ -47,6 +47,15 @@ const userSchema = mongoose.Schema(
     // Get your chat ID: message @userinfobot on Telegram.
     telegramChatId: { type: String, default: null, trim: true },
 
+    // ── Device Call Log Sync Permission (per-employee) ────────────────────────
+    // Super admin can allow/deny THIS employee's phone from syncing call logs.
+    // Effective gate is AND-ed with company.callLogSyncEnabled: the user can sync
+    // only when both the company-wide flag and this per-user flag are enabled.
+    // Defaults to true so existing users keep syncing unless explicitly disabled.
+    callLogSyncEnabled:          { type: Boolean, default: true },
+    callLogSyncUpdatedBy:        { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', default: null },
+    callLogSyncUpdatedAt:        { type: Date, default: null },
+
     // ── Client Meeting Permission ─────────────────────────────────────────────
     // Grants this employee the right to clock in from any location (client visit).
     // Only effective when company.clockInLocationEnabled = true.

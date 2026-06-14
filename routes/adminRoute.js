@@ -71,6 +71,52 @@ router.post("/logout",   protectAdmin, logoutAdmin);
 // ── Company-specific routes (must be before /:id to avoid conflict) ───────────
 router.get("/company/me",        protectAdmin, getMyCompany || ((req, res) => res.status(501).json({ message: "Not implemented" })));
 router.get("/company/users",     protectAdmin, getCompanyUsers);
+
+// ── Per-employee device call-log sync permission ──────────────────────────────
+// PUT /admin/company/users/:id/call-log-sync  body: { enabled: boolean }
+// Super-admin (company owner) toggles whether THIS employee's phone may sync
+// call logs. Scoped to the caller's company so an admin can't touch another
+// company's users. The effective gate is company flag AND this per-user flag.
+router.put(
+  "/company/users/:id/call-log-sync",
+  protectAdmin,
+  requireCompanySuperAdmin,
+  async (req, res) => {
+    try {
+      const { enabled } = req.body;
+      if (typeof enabled !== "boolean") {
+        return res.status(400).json({ success: false, message: "`enabled` must be a boolean." });
+      }
+
+      const companyId = req.admin?.company?._id || req.admin?.company || req.user?.companyId;
+      if (!companyId) {
+        return res.status(400).json({ success: false, message: "No company context." });
+      }
+
+      // Scope the lookup to the caller's company so cross-company edits are impossible.
+      const user = await User.findOne({ _id: req.params.id, company: companyId });
+      if (!user) {
+        return res.status(404).json({ success: false, message: "Employee not found in your company." });
+      }
+
+      user.callLogSyncEnabled   = enabled;
+      user.callLogSyncUpdatedBy = req.admin?._id || null;
+      user.callLogSyncUpdatedAt = new Date();
+      await user.save();
+
+      return res.json({
+        success: true,
+        message: `Call log sync ${enabled ? "enabled" : "disabled"} for ${user.name}.`,
+        userId: user._id,
+        callLogSyncEnabled: user.callLogSyncEnabled,
+      });
+    } catch (err) {
+      console.error("[call-log-sync per-user]", err.message);
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+);
+
 router.get("/company/leads",     protectAdmin, getCompanyLeads);
 router.get("/dashboard-stats",   protectAdmin, getDashboardStats);
 router.get("/company/auto-template", protectAdmin, getAutoTemplateSettings);
