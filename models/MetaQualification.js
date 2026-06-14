@@ -89,12 +89,14 @@ metaQualificationSchema.statics.validateRules = function (rules = []) {
 };
 
 // Keep maxScore / optionsValid in sync automatically on every save.
-metaQualificationSchema.pre("validate", function (next) {
+// Note: declared WITHOUT a `next` callback so Mongoose treats it as a
+// synchronous hook and proceeds on return. (In Mongoose 7+, `next` is not
+// passed to sync-style hooks, so calling it would throw "next is not a function".)
+metaQualificationSchema.pre("validate", function () {
   const { valid, maxScore } =
     this.constructor.validateRules(this.rules || []);
   this.maxScore     = maxScore;
   this.optionsValid = valid;
-  next();
 });
 
 metaQualificationSchema.statics.POINTS_PER_QUESTION = POINTS_PER_QUESTION;
