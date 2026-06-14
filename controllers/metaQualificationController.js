@@ -16,7 +16,20 @@ const getRules = async (req, res) => {
     }).lean();
 
     if (!doc) return res.status(404).json({ success: false, message: "No rules yet" });
-    res.json({ success: true, data: doc });
+
+    // Re-validate on read so the UI can surface a warning even for rule-sets
+    // saved before the 100-point rule existed (auto-migration of campaigns).
+    const validation = MetaQualification.validateRules(doc.rules || []);
+
+    res.json({
+      success: true,
+      data: {
+        ...doc,
+        maxScore:     validation.maxScore,
+        optionsValid: validation.valid,
+      },
+      validation,
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -39,6 +52,21 @@ const saveRules = async (req, res) => {
       return res.status(404).json({ message: "Ad set not found for this company" });
     }
 
+    // ── Validation: every question's options must sum to EXACTLY 100 ──────────
+    // A rule-set is not allowed to be saved (and therefore not activated) unless
+    // each question totals 100 points. This keeps Maximum Score = questions × 100
+    // consistent across the whole system.
+    const validation = MetaQualification.validateRules(rules || []);
+    if (!validation.valid) {
+      return res.status(422).json({
+        success: false,
+        message:
+          "Each question's answer options must total exactly 100 points. " +
+          "Please correct the highlighted questions before activating.",
+        validation,
+      });
+    }
+
     const doc = await MetaQualification.findOneAndUpdate(
       { adSetId, company: companyId },
       {
@@ -47,9 +75,11 @@ const saveRules = async (req, res) => {
         adSetName:  adSetName  || config.adSetName  || config.campaignName,
         formId:     formId     || config.formId     || "",
         rules:      rules      || [],
-        thresholds: thresholds || { hot: 70, warm: 40 },
+        thresholds: thresholds || { hot: 80, warm: 50 },
+        maxScore:     validation.maxScore,
+        optionsValid: true,
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
     );
 
     res.json({ success: true, data: doc });

@@ -75,6 +75,17 @@ const leadSchema = mongoose.Schema(
       type:    Number,
       default: null,
     },
+    // Maximum possible score for the rule-set that scored this lead
+    // (= number of qualification questions × 100).
+    maxScore: {
+      type:    Number,
+      default: null,
+    },
+    // (leadScore / maxScore) × 100, rounded to 2 decimals.
+    qualificationPercentage: {
+      type:    Number,
+      default: null,
+    },
     leadCategory: {
       type:    String,
       enum:    ["Hot", "Warm", "Cold", null],
@@ -143,6 +154,24 @@ const leadSchema = mongoose.Schema(
 
     // ── Reassignment counter ─────────────────────────────────────────────────
     reassignCount:     { type: Number, default: 0 },
+
+    // ── Not-Interested verification flow ─────────────────────────────────────
+    // When an employee marks a lead Not Interested, it is reassigned to another
+    // agent for verification. niOriginalAgent remembers the employee who first
+    // raised it, so that if the verifier ALSO marks it Not Interested the lead
+    // is sent back to that original employee.
+    niOriginalAgent: {
+      type:    mongoose.Schema.Types.ObjectId,
+      ref:     "User",
+      default: null,
+    },
+    // Stage of the NI flow: null (none) → "verification" (with a verifier)
+    // → "returned" (verifier disagreed, sent back to original employee).
+    niStage: {
+      type:    String,
+      enum:    [null, "verification", "returned"],
+      default: null,
+    },
 
     // ── Cold reassignment counter (separate from NI reassign) ────────────────
     coldReassignCount: { type: Number, default: 0 },

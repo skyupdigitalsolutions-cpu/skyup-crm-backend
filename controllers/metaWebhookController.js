@@ -166,14 +166,21 @@ const receiveWebhook = async (req, res) => {
         try {
           const qualDoc = await MetaQualification.findOne({ adSetId: config._id }).lean();
           if (qualDoc && qualDoc.rules && qualDoc.rules.length > 0) {
-            const { leadScore, leadCategory, qualificationBreakdown } =
-              scoreQualification(leadData.field_data, qualDoc);
-            leadPayload.leadScore              = leadScore;
-            leadPayload.leadCategory           = leadCategory;
-            leadPayload.qualificationBreakdown = qualificationBreakdown;
+            const {
+              leadScore,
+              maxScore,
+              qualificationPercentage,
+              leadCategory,
+              qualificationBreakdown,
+            } = scoreQualification(leadData.field_data, qualDoc);
+            leadPayload.leadScore               = leadScore;
+            leadPayload.maxScore                = maxScore;
+            leadPayload.qualificationPercentage = qualificationPercentage;
+            leadPayload.leadCategory            = leadCategory;
+            leadPayload.qualificationBreakdown  = qualificationBreakdown;
             // Also set temperature so existing UI badges reflect the category
             if (leadCategory) leadPayload.temperature = leadCategory;
-            console.log(`   🎯 Qualification — score: ${leadScore}, category: ${leadCategory}`);
+            console.log(`   🎯 Qualification — score: ${leadScore}/${maxScore} (${qualificationPercentage}%), category: ${leadCategory}`);
           }
         } catch (qualErr) {
           // Non-fatal — lead is still saved without scoring

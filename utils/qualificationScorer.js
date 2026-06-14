@@ -1,6 +1,15 @@
 // utils/qualificationScorer.js
 // Pure function: given Meta's raw field_data array and a MetaQualification doc,
-// compute score + category.
+// compute leadScore, maxScore, percentage + category.
+//
+// Scoring model:
+//   • Each question's answer options sum to exactly 100 points.
+//   • A lead earns the points of the single selected answer for each question.
+//   • Maximum possible score = (number of questions) × 100.
+//   • Percentage = (leadScore / maxScore) × 100.
+//   • Category is decided by admin-configured percentage thresholds.
+
+const POINTS_PER_QUESTION = 100;
 
 /**
  * Accepts Meta's raw field_data array in EITHER format:
@@ -9,16 +18,28 @@
  *
  * @param {Array} fieldData   – raw Meta answers (either shape)
  * @param {Object} qualDoc    – MetaQualification document (plain JS object)
- * @returns {{ leadScore:number, leadCategory:string, qualificationBreakdown:Array }}
+ * @returns {{
+ *   leadScore:number,
+ *   maxScore:number,
+ *   qualificationPercentage:number,
+ *   leadCategory:string,
+ *   qualificationBreakdown:Array
+ * }}
  */
 function scoreQualification(fieldData, qualDoc) {
   if (!qualDoc || !qualDoc.rules || qualDoc.rules.length === 0) {
-    return { leadScore: 0, leadCategory: null, qualificationBreakdown: [] };
+    return {
+      leadScore:               0,
+      maxScore:                0,
+      qualificationPercentage: 0,
+      leadCategory:            null,
+      qualificationBreakdown:  [],
+    };
   }
 
   const { rules, thresholds } = qualDoc;
-  const hot  = thresholds?.hot  ?? 70;
-  const warm = thresholds?.warm ?? 40;
+  const hot  = thresholds?.hot  ?? 80;
+  const warm = thresholds?.warm ?? 50;
 
   // Build a quick lookup: questionKey → submitted answer.
   // Meta's leadgen webhook returns field_data as [{name, values}].
@@ -40,51 +61,56 @@ function scoreQualification(fieldData, qualDoc) {
     }
   });
 
-  let totalScore   = 0;
-  let maxScore     = 0;
-  const breakdown  = [];
+  let totalScore  = 0;
+  const breakdown = [];
+
+  // Maximum possible score is fixed at 100 points per question, regardless of
+  // which answer the lead picked. (Options are validated to sum to 100.)
+  const maxScore = rules.length * POINTS_PER_QUESTION;
 
   for (const rule of rules) {
-    const key        = (rule.questionKey || "").toLowerCase();
-    const submitted  = answerMap[key] ?? null;
-    const bestAnswer = rule.answers.reduce((best, a) => (a.score > best ? a.score : best), 0);
-    maxScore += bestAnswer;
+    const key       = (rule.questionKey || "").toLowerCase();
+    const submitted = answerMap[key] ?? null;
 
-    let earned = 0;
+    let earned        = 0;
     let matchedAnswer = null;
 
     if (submitted !== null) {
-      const match = rule.answers.find(
+      const match = (rule.answers || []).find(
         (a) => (a.value || "").toLowerCase() === submitted
       );
       if (match) {
-        earned        = match.score || 0;
+        earned        = Number(match.score) || 0;
         matchedAnswer = match.value;
       }
     }
 
     totalScore += earned;
     breakdown.push({
-      question:      rule.questionLabel || rule.questionKey,
-      answer:        matchedAnswer ?? submitted ?? "(not answered)",
-      score:         earned,
-      maxScore:      bestAnswer,
+      question: rule.questionLabel || rule.questionKey,
+      answer:   matchedAnswer ?? submitted ?? "(not answered)",
+      score:    earned,
+      maxScore: POINTS_PER_QUESTION,
     });
   }
 
   // Percentage of maximum possible score (avoid divide-by-zero)
-  const pct = maxScore > 0 ? (totalScore / maxScore) * 100 : 0;
+  const pctRaw = maxScore > 0 ? (totalScore / maxScore) * 100 : 0;
+  // Round to 2 decimals for clean display while keeping precision.
+  const qualificationPercentage = Math.round(pctRaw * 100) / 100;
 
   let leadCategory;
-  if (pct >= hot)       leadCategory = "Hot";
-  else if (pct >= warm) leadCategory = "Warm";
-  else                  leadCategory = "Cold";
+  if (qualificationPercentage >= hot)       leadCategory = "Hot";
+  else if (qualificationPercentage >= warm) leadCategory = "Warm";
+  else                                      leadCategory = "Cold";
 
   return {
-    leadScore:              totalScore,
+    leadScore:               totalScore,
+    maxScore,
+    qualificationPercentage,
     leadCategory,
-    qualificationBreakdown: breakdown,
+    qualificationBreakdown:  breakdown,
   };
 }
 
-module.exports = { scoreQualification };
+module.exports = { scoreQualification, POINTS_PER_QUESTION };
