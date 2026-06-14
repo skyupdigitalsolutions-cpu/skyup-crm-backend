@@ -299,13 +299,23 @@ const getDashboardStats = async (req, res) => {
         Lead.aggregate([
           { $match: { company: companyId, "phoneRevealLog.0": { $exists: true } } },
           { $unwind: "$phoneRevealLog" },
+          // First group by (admin, lead) so we get a per-lead reveal count…
           { $group: {
-              _id:          "$phoneRevealLog.userId",
+              _id:          { userId: "$phoneRevealLog.userId", leadId: "$_id" },
               adminName:    { $first: "$phoneRevealLog.userName" },
-              totalReveals: { $sum: 1 },
-              leadIds:      { $addToSet: "$_id" },
+              leadName:     { $first: "$name" },
+              leadMobile:   { $first: "$mobile" },
+              count:        { $sum: 1 },
           }},
-          { $project: { adminName: 1, totalReveals: 1, leadsRevealed: { $size: "$leadIds" } } },
+          // …then roll those up per admin, carrying the lead breakdown along.
+          { $group: {
+              _id:          "$_id.userId",
+              adminName:    { $first: "$adminName" },
+              totalReveals: { $sum: "$count" },
+              leadsRevealed:{ $sum: 1 },
+              leads:        { $push: { name: "$leadName", mobile: "$leadMobile", count: "$count" } },
+          }},
+          { $project: { adminName: 1, totalReveals: 1, leadsRevealed: 1, leads: 1 } },
           { $sort: { totalReveals: -1 } },
           { $limit: 20 },
         ]),
@@ -313,20 +323,42 @@ const getDashboardStats = async (req, res) => {
           { $match: { company: companyId, "emailRevealLog.0": { $exists: true } } },
           { $unwind: "$emailRevealLog" },
           { $group: {
-              _id:          "$emailRevealLog.userId",
+              _id:          { userId: "$emailRevealLog.userId", leadId: "$_id" },
               adminName:    { $first: "$emailRevealLog.userName" },
               adminEmail:   { $first: "$emailRevealLog.userEmail" },
-              totalReveals: { $sum: 1 },
-              leadIds:      { $addToSet: "$_id" },
+              leadName:     { $first: "$name" },
+              leadEmail:    { $first: "$email" },
+              count:        { $sum: 1 },
           }},
-          { $project: { adminName: 1, adminEmail: 1, totalReveals: 1, leadsRevealed: { $size: "$leadIds" } } },
+          { $group: {
+              _id:          "$_id.userId",
+              adminName:    { $first: "$adminName" },
+              adminEmail:   { $first: "$adminEmail" },
+              totalReveals: { $sum: "$count" },
+              leadsRevealed:{ $sum: 1 },
+              leads:        { $push: { name: "$leadName", email: "$leadEmail", count: "$count" } },
+          }},
+          { $project: { adminName: 1, adminEmail: 1, totalReveals: 1, leadsRevealed: 1, leads: 1 } },
           { $sort: { totalReveals: -1 } },
           { $limit: 20 },
         ]),
       ]);
 
-      byAdmin      = phoneAgg.map(a => ({ adminName: a.adminName, totalReveals: a.totalReveals, leadsRevealed: a.leadsRevealed, leads: [] }));
-      byAdminEmail = emailAgg.map(a => ({ adminName: a.adminName, adminEmail: a.adminEmail, totalReveals: a.totalReveals, leadsRevealed: a.leadsRevealed, leads: [] }));
+      // Sort each admin's lead breakdown by reveal count (highest first) so the
+      // drill-down list is ranked, matching the frontend's expectation.
+      byAdmin = phoneAgg.map(a => ({
+        adminName:     a.adminName,
+        totalReveals:  a.totalReveals,
+        leadsRevealed: a.leadsRevealed,
+        leads:         (a.leads || []).slice().sort((x, y) => (y.count || 0) - (x.count || 0)),
+      }));
+      byAdminEmail = emailAgg.map(a => ({
+        adminName:     a.adminName,
+        adminEmail:    a.adminEmail,
+        totalReveals:  a.totalReveals,
+        leadsRevealed: a.leadsRevealed,
+        leads:         (a.leads || []).slice().sort((x, y) => (y.count || 0) - (x.count || 0)),
+      }));
     }
 
     res.status(200).json({
