@@ -1183,73 +1183,122 @@ const markNotInterested = async (req, res) => {
       calledAt: new Date(),
     };
 
-    const newScheduledCalls = buildScheduledCalls();
-    const currentReassignCount = lead.reassignCount || 0;
-    const isSecondNI = currentReassignCount >= 1;
+    const stage = lead.niStage || null;
 
-    let nextUserId = null;
-    let newStatus = "Not Interested";
-
-    if (!isSecondNI) {
-      const excludeIds = [...(lead.previousAgents || []), req.user._id];
-      nextUserId = await getNextUser(req.user.company, excludeIds);
-    } else {
-      newStatus = "New";
-    }
-
+    // Common pieces of the update applied in every branch.
     const updatePayload = {
-      $set: {
-        status: newStatus,
-        remark: remark.trim(),
-        reassignCount: currentReassignCount + 1,
-      },
+      $set: { remark: remark.trim() },
       $push: {
         callHistory: historyEntry,
-        scheduledCalls: { $each: newScheduledCalls },
         previousAgents: req.user._id,
       },
     };
 
-    if (!isSecondNI && nextUserId) {
-      updatePayload.$set.user = nextUserId;
+    let nextUserId  = null;
+    let outcome     = "";   // describes which branch ran (for the client)
+    let message     = "";
+    let scheduledForResponse = [];
+
+    if (!stage) {
+      // ── STAGE 1: first Not Interested ────────────────────────────────────
+      // Reassign to another agent for VERIFICATION. Remember the original
+      // employee so a second NI can be sent back to them. Schedule the 3 calls.
+      const excludeIds = [...(lead.previousAgents || []), req.user._id];
+      nextUserId = await getNextUser(req.user.company, excludeIds);
+
+      const newScheduledCalls = buildScheduledCalls();
+      scheduledForResponse = newScheduledCalls;
+
+      updatePayload.$set.niOriginalAgent = req.user._id;
+      updatePayload.$set.reassignCount   = (lead.reassignCount || 0) + 1;
+      updatePayload.$push.scheduledCalls = { $each: newScheduledCalls };
+
+      if (nextUserId) {
+        updatePayload.$set.user    = nextUserId;
+        updatePayload.$set.niStage = "verification";
+        updatePayload.$set.status  = "Verification";
+      } else {
+        // No other agent available — keep with current employee, no verification.
+        updatePayload.$set.niStage = null;
+        updatePayload.$set.status  = "Not Interested";
+      }
+
+      outcome = nextUserId ? "sent_for_verification" : "no_verifier_available";
+      message = nextUserId
+        ? `Lead sent for verification to ${"another agent"} with 3 scheduled calls.`
+        : "No other agent available; lead kept with you. 3 follow-up calls scheduled.";
+    } else if (stage === "verification") {
+      // ── STAGE 2: verifier ALSO marks Not Interested ──────────────────────
+      // Send the lead BACK to the original employee, keep it active with the
+      // remaining (already-scheduled) follow-ups. Do not schedule new calls.
+      const backTo = lead.niOriginalAgent || null;
+
+      if (backTo) {
+        updatePayload.$set.user = backTo;
+      }
+      updatePayload.$set.niStage = "returned";
+      // Keep the lead actionable for the original employee with its remaining
+      // follow-ups; flag it Not Interested so it's visibly confirmed.
+      updatePayload.$set.status  = "Not Interested";
+
+      outcome = "returned_to_original";
+      message = backTo
+        ? "Verification confirmed Not Interested. Lead returned to the original employee with remaining follow-ups."
+        : "Verification confirmed Not Interested. Original employee unavailable; lead kept with you.";
+
+      nextUserId = backTo;
+    } else {
+      // ── STAGE 3+: already returned once — avoid ping-pong ────────────────
+      // Reset to New so it stays with the current owner; keep follow-ups intact.
+      updatePayload.$set.status = "New";
+      outcome = "kept_no_reassign";
+      message = "Lead marked Not Interested again. Kept with current employee; existing follow-ups retained.";
     }
 
     const updatedLead = await Lead.findByIdAndUpdate(id, updatePayload, {
       new: true,
     })
       .populate("user", "name email")
-      .populate("previousAgents", "name email");
+      .populate("previousAgents", "name email")
+      .populate("niOriginalAgent", "name email");
 
-    const message = isSecondNI
-      ? "Lead marked Not Interested again. 3 follow-up calls scheduled. Status reset to New."
-      : nextUserId
-        ? `Lead reassigned to ${updatedLead.user?.name || "another agent"} with 3 scheduled calls.`
-        : "No other agent available; lead kept with you. 3 follow-up calls scheduled.";
+    // Build a human message that includes the resolved agent name where relevant.
+    if (outcome === "sent_for_verification") {
+      message = `Lead sent for verification to ${updatedLead.user?.name || "another agent"} with 3 scheduled calls.`;
+    } else if (outcome === "returned_to_original") {
+      message = `Verification confirmed Not Interested. Lead returned to ${updatedLead.user?.name || "the original employee"} with remaining follow-ups.`;
+    }
 
-    if (!isSecondNI && nextUserId) {
+    // Notify the receiving agent (verifier in stage 1, original employee in stage 2).
+    if (nextUserId) {
       const _io = global._io;
       if (_io) {
         _io.to(`agent:${nextUserId}`).emit("new_lead_assigned", {
-          leadId: String(updatedLead._id),
+          leadId:   String(updatedLead._id),
           leadName: updatedLead.name,
-          source: updatedLead.source || "",
-          eventType: "reassigned",
+          source:   updatedLead.source || "",
+          eventType: outcome === "sent_for_verification" ? "verification" : "reassigned",
         });
       }
       sendReassignedLeadNotification(nextUserId, updatedLead).catch((e) =>
         console.error("[FCM] reassign push error:", e.message),
       );
-      // Telegram — notify newly assigned employee personally
-      notifyEmployeeLead(nextUserId, updatedLead, updatedLead.company).catch(e =>
-        console.error("[Telegram] NI-reassign employee notify error:", e.message)
+      notifyEmployeeLead(nextUserId, updatedLead, updatedLead.company).catch((e) =>
+        console.error("[Telegram] NI-reassign employee notify error:", e.message),
       );
     }
 
     return res.status(200).json({
-      lead: updatedLead,
-      reassignedTo: isSecondNI ? null : updatedLead.user,
-      scheduledCalls: newScheduledCalls,
-      isSecondNI,
+      lead:           updatedLead,
+      reassignedTo:   nextUserId ? updatedLead.user : null,
+      scheduledCalls: scheduledForResponse,
+      niStage:        updatedLead.niStage,
+      outcome,
+      // Back-compat flag used by the existing modal success screen:
+      // true means "no new reassignment happened" (stage 2 return or stage 3).
+      isSecondNI:     outcome !== "sent_for_verification",
+      isVerification: outcome === "sent_for_verification",
+      isReturned:     outcome === "returned_to_original",
       message,
     });
   } catch (error) {
@@ -1277,7 +1326,7 @@ const markColdReassign = async (req, res) => {
       calledAt: new Date(),
     };
 
-    const newScheduledCalls = [
+    const buildColdScheduledCalls = () => ([
       {
         type: "follow-up",
         scheduledAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
@@ -1296,75 +1345,106 @@ const markColdReassign = async (req, res) => {
         done: false,
         note: "1-month verification call",
       },
-    ];
+    ]);
 
-    const currentColdCount = lead.coldReassignCount || 0;
-    const isSecondCold = currentColdCount >= 1;
-
-    let nextUserId = null;
-    let newStatus = lead.status;
-
-    if (!isSecondCold) {
-      const excludeIds = [...(lead.previousAgents || []), req.user._id];
-      nextUserId = await getNextUser(req.user.company, excludeIds);
-    } else {
-      newStatus = "New";
-    }
+    const stage = lead.coldStage || null;
 
     const updatePayload = {
-      $set: {
-        temperature: "Cold",
-        status: newStatus,
-        remark: remark.trim(),
-        coldReassignCount: currentColdCount + 1,
-      },
+      $set: { temperature: "Cold", remark: remark.trim() },
       $push: {
         callHistory: historyEntry,
-        scheduledCalls: { $each: newScheduledCalls },
         previousAgents: req.user._id,
       },
     };
 
-    if (!isSecondCold && nextUserId) {
-      updatePayload.$set.user = nextUserId;
+    let nextUserId  = null;
+    let outcome     = "";
+    let scheduledForResponse = [];
+
+    if (!stage) {
+      // ── STAGE 1: first Cold mark — send to another agent for VERIFICATION ──
+      const excludeIds = [...(lead.previousAgents || []), req.user._id];
+      nextUserId = await getNextUser(req.user.company, excludeIds);
+
+      const newScheduledCalls = buildColdScheduledCalls();
+      scheduledForResponse = newScheduledCalls;
+
+      updatePayload.$set.coldOriginalAgent = req.user._id;
+      updatePayload.$set.coldReassignCount = (lead.coldReassignCount || 0) + 1;
+      updatePayload.$push.scheduledCalls   = { $each: newScheduledCalls };
+
+      if (nextUserId) {
+        updatePayload.$set.user      = nextUserId;
+        updatePayload.$set.coldStage = "verification";
+        updatePayload.$set.status    = "Verification";
+      } else {
+        updatePayload.$set.coldStage = null;
+        // No verifier available — keep with current agent, status unchanged.
+      }
+
+      outcome = nextUserId ? "sent_for_verification" : "no_verifier_available";
+    } else if (stage === "verification") {
+      // ── STAGE 2: verifier ALSO marks Cold — return to original employee ───
+      const backTo = lead.coldOriginalAgent || null;
+      if (backTo) updatePayload.$set.user = backTo;
+      updatePayload.$set.coldStage = "returned";
+      // Keep it active for the original employee with remaining follow-ups.
+      updatePayload.$set.status    = "New";
+
+      outcome = "returned_to_original";
+      nextUserId = backTo;
+    } else {
+      // ── STAGE 3+: already returned — keep with current owner, no reassign ─
+      updatePayload.$set.status = "New";
+      outcome = "kept_no_reassign";
     }
 
     const updatedLead = await Lead.findByIdAndUpdate(id, updatePayload, {
       new: true,
     })
       .populate("user", "name email")
-      .populate("previousAgents", "name email");
+      .populate("previousAgents", "name email")
+      .populate("coldOriginalAgent", "name email");
 
-    const message = isSecondCold
-      ? "Lead marked Cold again. Status reset to New — 3 follow-up calls scheduled."
-      : nextUserId
-        ? `Cold lead reassigned to ${updatedLead.user?.name || "another agent"} with 3 scheduled calls.`
-        : "No other agent available; lead kept with current agent. 3 follow-up calls scheduled.";
+    let message;
+    if (outcome === "sent_for_verification") {
+      message = `Cold lead sent for verification to ${updatedLead.user?.name || "another agent"} with 3 scheduled calls.`;
+    } else if (outcome === "no_verifier_available") {
+      message = "No other agent available; lead kept with you. 3 follow-up calls scheduled.";
+    } else if (outcome === "returned_to_original") {
+      message = `Verification confirmed Cold. Lead returned to ${updatedLead.user?.name || "the original employee"} with remaining follow-ups.`;
+    } else {
+      message = "Lead marked Cold again. Kept with current employee; existing follow-ups retained.";
+    }
 
-    if (!isSecondCold && nextUserId) {
+    if (nextUserId) {
       const _io = global._io;
       if (_io) {
         _io.to(`agent:${nextUserId}`).emit("new_lead_assigned", {
-          leadId: String(updatedLead._id),
+          leadId:   String(updatedLead._id),
           leadName: updatedLead.name,
-          source: updatedLead.source || "",
-          eventType: "cold_reassigned",
+          source:   updatedLead.source || "",
+          eventType: outcome === "sent_for_verification" ? "verification" : "cold_reassigned",
         });
       }
       sendReassignedLeadNotification(nextUserId, updatedLead).catch((e) =>
         console.error("[FCM] cold-reassign push error:", e.message),
       );
-      // Telegram — notify newly assigned employee personally
-      notifyEmployeeLead(nextUserId, updatedLead, updatedLead.company).catch(e =>
-        console.error("[Telegram] cold-reassign employee notify error:", e.message)
+      notifyEmployeeLead(nextUserId, updatedLead, updatedLead.company).catch((e) =>
+        console.error("[Telegram] cold-reassign employee notify error:", e.message),
       );
     }
 
     return res.status(200).json({
-      lead: updatedLead,
-      reassignedTo: isSecondCold ? null : updatedLead.user,
-      scheduledCalls: newScheduledCalls,
-      isSecondCold,
+      lead:           updatedLead,
+      reassignedTo:   nextUserId ? updatedLead.user : null,
+      scheduledCalls: scheduledForResponse,
+      coldStage:      updatedLead.coldStage,
+      outcome,
+      // Back-compat flag: true when no fresh reassignment happened.
+      isSecondCold:   outcome !== "sent_for_verification",
+      isVerification: outcome === "sent_for_verification",
+      isReturned:     outcome === "returned_to_original",
       message,
     });
   } catch (error) {

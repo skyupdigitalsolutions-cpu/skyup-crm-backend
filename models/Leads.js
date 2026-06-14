@@ -176,6 +176,22 @@ const leadSchema = mongoose.Schema(
     // ── Cold reassignment counter (separate from NI reassign) ────────────────
     coldReassignCount: { type: Number, default: 0 },
 
+    // ── Cold-lead verification flow (mirrors the Not-Interested flow) ────────
+    // When an employee marks a lead Cold, it is reassigned to another agent for
+    // verification. coldOriginalAgent remembers the employee who first marked it
+    // Cold, so that if the verifier ALSO marks it Cold it returns to that agent.
+    coldOriginalAgent: {
+      type:    mongoose.Schema.Types.ObjectId,
+      ref:     "User",
+      default: null,
+    },
+    // Stage of the Cold flow: null → "verification" → "returned".
+    coldStage: {
+      type:    String,
+      enum:    [null, "verification", "returned"],
+      default: null,
+    },
+
     // ── Primary phone (explicit field; mirrors mobile for backward compat) ────
     primaryPhone: {
       type:    String,
