@@ -30,15 +30,8 @@ const FEATURE_CATALOG = [
   { key: 'call-recording',      label: 'Call Recording'      },
   { key: 'call-transcription',  label: 'Call Transcription'  },
   { key: 'ai-summary',          label: 'AI Summary'          },
-  { key: 'voice-bot',           label: 'Voice Bot'           },
   { key: 'whatsapp-automation', label: 'WhatsApp Automation' },
-  { key: 'api-access',          label: 'API Access'          },
-  { key: 'webhook-access',      label: 'Webhook Access'      },
-  { key: 'custom-reports',      label: 'Custom Reports'      },
-  { key: 'white-label',         label: 'White Label'         },
-  { key: 'custom-domain',       label: 'Custom Domain'       },
-  { key: 'custom-branding',     label: 'Custom Branding'     },
-  // NEW: Operations features
+  // Operations features
   { key: 'projects',            label: 'Projects'            },
   { key: 'tasks',               label: 'Tasks'               },
   { key: 'payroll',             label: 'Payroll'             },

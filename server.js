@@ -5,6 +5,7 @@
 //   - benefitRoutes → /api/benefits
 //   - usageResetJob → startUsageResetJob()
 // All existing code is UNCHANGED except the static path fix.
+// ENV: staticAllowedOrigins now loaded from ALLOWED_ORIGINS env variable
 
 require('dotenv').config();
 const express      = require('express');
@@ -81,16 +82,11 @@ app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 
-// ── Allowed origins ───────────────────────────────────────────────────────────
-const staticAllowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:4173",
-  "http://localhost:5000",
-  "https://skyupcrm.com",
-  "https://www.skyupcrm.com",
-  "https://skyup-crm-frontend.onrender.com",
-  "https://skyup-crm-frontend.skyupdigitalsolutions.workers.dev",
-];
+// ── Allowed origins (loaded from ALLOWED_ORIGINS env variable) ────────────────
+// In .env:  ALLOWED_ORIGINS=http://localhost:5173,https://skyupcrm.com,...
+const staticAllowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+  : [];
 
 async function isDynamicOriginAllowed(origin) {
   try {
@@ -307,6 +303,7 @@ connectDB().then(() => {
     console.log(`📦 Addon API:         /api/addons`);
     console.log(`🎁 Benefit API:       /api/benefits`);
     console.log(`🌐 Frontend served:   ${SERVE_FRONTEND ? 'YES (from dist/)' : 'NO (separate Render service)'}`);
+    console.log(`🔒 CORS origins:      ${staticAllowedOrigins.length} origin(s) loaded from ALLOWED_ORIGINS env`);
     startSubscriptionExpiryJob();
     startIdleJob();
     startLeadAlertsJob();
