@@ -292,7 +292,20 @@ const initSocket = (io) => {
     // ════════════════════════════════════════════════════════════════════════
     socket.on('super_admin_join', async (payload = {}) => {
       const { adminId, company, displayName } = payload;
-      if (!adminId || !company) return;
+
+      // DIAGNOSTIC: this guard previously failed completely silently, which
+      // is the #1 cause of "0 online" + "No contacts yet" for super admin —
+      // it means the frontend sent an empty/missing companyId (stale
+      // localStorage user object from before login fix, or the Admin doc's
+      // role isn't exactly "super_admin"). Log it so it's visible in server
+      // logs instead of only manifesting as an empty chat panel.
+      if (!adminId || !company) {
+        console.warn(
+          '[Socket] super_admin_join aborted — missing adminId or company.',
+          'payload=', payload
+        );
+        return;
+      }
 
       const username = `superadmin:${adminId}`;
       const identity = {
@@ -320,6 +333,7 @@ const initSocket = (io) => {
 
       // Super admin sees all admins + all employees in their company
       const contactList = await buildContactList('super_admin', adminId, company);
+      console.log(`[Socket] super_admin_join ok — company=${company} adminId=${adminId} contacts=${contactList.length}`);
       socket.emit('all_users_db', contactList);
 
       const onlineMap = buildOnlineMap(company, 'super_admin', adminId);
