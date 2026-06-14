@@ -137,10 +137,17 @@ const verifySuperAdminOtp = async (req, res) => {
     // Try Admin model (new multi-tenant), fallback to legacy SuperAdmin
     const adminDoc = await Admin.findOne({ email, role: "super_admin" }).populate("company");
     if (adminDoc) {
+      // FIX: also return flat companyId/companyName alongside the populated
+      // `company` object. The frontend (SuperAdminLogin.jsx) reads
+      // res.data.companyId / res.data.companyName when building the stored
+      // user object — without these the chat widget's companyId resolves to
+      // '' and super_admin_join silently bails out (no contacts, 0 online).
       return res.json({
         _id: adminDoc._id, name: adminDoc.name, email: adminDoc.email,
         role: "super_admin",
         company: adminDoc.company,
+        companyId: adminDoc.company?._id,
+        companyName: adminDoc.company?.name,
         token: generateToken(adminDoc._id, "super_admin"),
       });
     }
