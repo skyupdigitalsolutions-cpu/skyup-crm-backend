@@ -30,6 +30,8 @@ const {
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 const { protectAny } = require("../middlewares/authMiddleware");
 
+const { getPublicAddons } = require("../controllers/addonCatalogController");
+
 // ── Middleware: allow either super_admin OR developer ─────────────────────────
 const protectPrivileged = async (req, res, next) => {
   if (!req.headers.authorization?.startsWith("Bearer")) {
@@ -78,6 +80,10 @@ router.get("/my/status",       protectAdmin, getMySubscriptionStatus);
 // protectAny → serves admins, company super-admins AND employees (so employee
 // screens like the WhatsApp blast tab can gate themselves client-side).
 router.get("/my/entitlements", protectAny, getMyEntitlements);
+
+// Customer-facing: priced, plan-filtered add-ons for the Upgrade page Add-ons tab.
+// MUST be above "/:companyId" so it isn't captured as a companyId param.
+router.get("/addons", protectAdmin, getPublicAddons);
 
 // ── Privileged (super_admin or developer) ─────────────────────────────────────
 router.get("/all",                       protectPrivileged, getAllSubscriptions);
