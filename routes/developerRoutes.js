@@ -37,6 +37,12 @@ const {
   savePlansConfig,  // NEW
 } = require("../controllers/planController");
 
+const {
+  getCatalog,
+  saveCatalog,
+  upsertCatalogItem,
+} = require("../controllers/addonCatalogController");
+
 // ── Public ────────────────────────────────────────────────────────────────────
 router.post("/login", developerLogin);
 
@@ -78,5 +84,10 @@ router.post("/plans",        createPlan);
 router.get("/plans/:id",     getPlan);
 router.put("/plans/:id",     updatePlan);
 router.delete("/plans/:id",  deletePlan);
+
+// ── Add-on price catalogue (Plan Customization → Add-on Pricing) ──────────────
+router.get("/addon-catalog",            getCatalog);
+router.put("/addon-catalog",            saveCatalog);          // bulk upsert
+router.put("/addon-catalog/:addonType", upsertCatalogItem);    // single upsert
 
 module.exports = router;

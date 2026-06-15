@@ -507,6 +507,49 @@ const editAttendance = async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
+// ── Admin: create OR update attendance for an employee+date ───────────────────
+// Used when an employee has no record for the day yet (an "Absent" /
+// not-logged-in synthetic row). Upserts by { company, user, date } so admins
+// can set status, login/logout, ideal time and remarks for anyone.
+const adminUpsertAttendance = async (req, res) => {
+  try {
+    const { user, date, loginTime, logoutTime, crmStatus, remarks, idealTime, idealRemark } = req.body;
+    if (!user || !date) {
+      return res.status(400).json({ message: "user and date are required." });
+    }
+
+    const companyId = req.admin.company._id;
+
+    // Confirm the target user belongs to this company.
+    const target = await User.findOne({ _id: user, company: companyId }).select("_id").lean();
+    if (!target) return res.status(403).json({ message: "Forbidden." });
+
+    let record = await Attendance.findOne({ company: companyId, user, date });
+    if (!record) {
+      record = new Attendance({ company: companyId, user, date, status: "not_logged_in", breaks: [] });
+    }
+
+    if (loginTime  !== undefined) record.loginTime  = loginTime  ? new Date(loginTime)  : null;
+    if (logoutTime !== undefined) record.logoutTime = logoutTime ? new Date(logoutTime) : null;
+    if (crmStatus  !== undefined) record.crmStatus  = crmStatus;
+    if (remarks    !== undefined) record.remarks    = remarks;
+    if (idealTime   !== undefined) record.idealTime   = String(idealTime).slice(0, 120);
+    if (idealRemark !== undefined) record.idealRemark = String(idealRemark).slice(0, 500);
+
+    if (record.loginTime && record.logoutTime) {
+      const elapsed            = Math.round((record.logoutTime - record.loginTime) / 60000);
+      record.totalBreakMinutes = calcBreakMinutes(record.breaks);
+      record.totalWorkMinutes  = Math.max(0, elapsed - record.totalBreakMinutes);
+      record.status            = "logged_out";
+    }
+
+    await record.save();
+    res.status(200).json(record);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // ── ADMIN: Delete attendance record ──────────────────────────────────────────
 const deleteAttendance = async (req, res) => {
   try {
@@ -804,6 +847,7 @@ module.exports = {
   clockIn, clockOut, startBreak, endBreak, pingActivity, getMyToday,
   saveIdealTime,
   getCompanyAttendance, markIdleUsers,
+  adminUpsertAttendance,
   getAttendanceReport, editAttendance, deleteAttendance, exportAttendance,
   getCompanyUsers,
   requestMeetingPermission,

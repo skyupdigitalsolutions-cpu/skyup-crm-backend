@@ -10,6 +10,7 @@ const {
   saveIdealTime,
   getCompanyAttendance, markIdleUsers,
   getAttendanceReport, editAttendance, deleteAttendance, exportAttendance,
+  adminUpsertAttendance,
   getCompanyUsers,
   requestMeetingPermission,
   getMeetingPermissionStatus,
@@ -50,6 +51,7 @@ router.put("/meeting-tracking",  protectAdmin, saveMeetingTrackingConfig);
 router.get("/report",       protectAdmin, requireFeature("attendance"), getAttendanceReport);
 router.get("/export",       protectAdmin, requireFeature("attendance"), exportAttendance);
 router.get("/users",        protectAdmin, requireFeature("attendance"), getCompanyUsers);
+router.post("/admin-upsert", protectAdmin, requireFeature("attendance"), adminUpsertAttendance);
 router.put("/:id",          protectAdmin, requireFeature("attendance"), editAttendance);
 router.delete("/:id",       protectAdmin, requireFeature("attendance"), deleteAttendance);
 router.post("/clock-out",   protect, requireFeature("attendance"), clockOut);
@@ -67,6 +69,7 @@ router.post("/mark-idle",   protectAdmin, requireFeature("attendance"), markIdle
 router.get("/report",       protectAdmin, requireFeature("attendance"), getAttendanceReport);
 router.get("/export",       protectAdmin, requireFeature("attendance"), exportAttendance);
 router.get("/users",        protectAdmin, requireFeature("attendance"), getCompanyUsers);
+router.post("/admin-upsert", protectAdmin, requireFeature("attendance"), adminUpsertAttendance);
 router.put("/:id",          protectAdmin, requireFeature("attendance"), editAttendance);
 router.delete("/:id",       protectAdmin, requireFeature("attendance"), deleteAttendance);
 
