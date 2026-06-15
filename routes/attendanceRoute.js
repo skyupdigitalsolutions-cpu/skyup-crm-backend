@@ -7,6 +7,7 @@ const router  = express.Router();
 
 const {
   clockIn, clockOut, startBreak, endBreak, pingActivity, getMyToday,
+  saveIdealTime,
   getCompanyAttendance, markIdleUsers,
   getAttendanceReport, editAttendance, deleteAttendance, exportAttendance,
   getCompanyUsers,
@@ -29,6 +30,7 @@ router.post("/break/start", protect, requireFeature("attendance"), startBreak);
 router.post("/break/end",   protect, requireFeature("attendance"), endBreak);
 router.post("/ping",        protect, requireFeature("attendance"), pingActivity);
 router.get("/my-today",     protect, requireFeature("attendance"), getMyToday);
+ router.post("/ideal-time",  protect, requireFeature("attendance"), saveIdealTime);
 
 // ── Meeting permission request ────────────────────────────────────────────────
 router.post("/request-meeting-permission", protect, requireFeature("attendance"), requestMeetingPermission);
@@ -55,6 +57,7 @@ router.post("/break/start", protect, requireFeature("attendance"), startBreak);
 router.post("/break/end",   protect, requireFeature("attendance"), endBreak);
 router.post("/ping",        protect, requireFeature("attendance"), pingActivity);
 router.get("/my-today",     protect, requireFeature("attendance"), getMyToday);
+ router.post("/ideal-time",  protect, requireFeature("attendance"), saveIdealTime);
 
 // ── Admin routes — Live dashboard ─────────────────────────────────────────────
 router.get("/company",      protectAdmin, requireFeature("attendance"), getCompanyAttendance);

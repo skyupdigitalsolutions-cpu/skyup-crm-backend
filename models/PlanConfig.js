@@ -82,6 +82,9 @@ const planConfigSchema = new mongoose.Schema(
 
     // Whether this plan is visible/selectable by customers
     isActive: { type: Boolean, default: true },
+
+    // Custom "Contact us" tier — no fixed price, not purchasable via Razorpay.
+    custom: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

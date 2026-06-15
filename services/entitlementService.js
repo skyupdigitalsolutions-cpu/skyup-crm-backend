@@ -146,6 +146,25 @@ const DEFAULT_PLAN_LIMITS = {
       projects: true, tasks: true, payroll: false, websiteTracking: true,
     },
   },
+  advance: {
+    admins: 10, users: 999, leads: 999999, websites: 999,
+    metaCampaigns: 999, googleAccounts: 999, storageMB: 51200,
+    transcriptionsPerMonth: 2000, summariesPerMonth: 2000, voiceBotPerMonth: 1000,
+    recordingEnabled: true, dataRetentionDays: 365,
+    features: {
+      leadManagement: true, contacts: true, basicReports: true,
+      attendance: true, dailyReport: true, smsBlast: true,
+      whatsappBlast: true, emailBlast: true, campaigns: true,
+      googleAds: true, metaAds: true, callRecording: true,
+      apiAccess: true, customReports: true, whiteLabel: true,
+      callTranscription: true, aiSummary: true, voiceBot: true,
+      whatsappAutomation: true, webhookAccess: true,
+      customDomain: true, customBranding: true,
+      projects: true, tasks: true, payroll: true, websiteTracking: true,
+    },
+  },
+  // Custom "Contact us" tier. Same generous ceiling as advance by default —
+  // the developer tailors each enterprise company via devOverrides / PlanConfig.
   enterprise: {
     admins: 10, users: 999, leads: 999999, websites: 999,
     metaCampaigns: 999, googleAccounts: 999, storageMB: 51200,

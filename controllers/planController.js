@@ -50,8 +50,19 @@ async function seedDefaultsIfEmpty() {
     description: '',
     color:       plan.color,
     price:       plan.price,
+    custom:      !!plan.custom,
     maxUsers:    plan.maxUsers,
+    maxAdmins:   plan.maxAdmins,
     maxLeads:    plan.maxLeads,
+    maxWebsites:       plan.maxWebsites,
+    maxMetaCampaigns:  plan.maxMetaCampaigns,
+    maxGoogleAccounts: plan.maxGoogleAccounts,
+    maxStorageMB:      plan.maxStorageMB,
+    transcriptionsPerMonth: plan.transcriptionsPerMonth,
+    summariesPerMonth:      plan.summariesPerMonth,
+    voiceBotPerMonth:       plan.voiceBotPerMonth,
+    recordingEnabled:       plan.recordingEnabled,
+    dataRetentionDays:      plan.dataRetentionDays,
     features:    plan.features,
     sortOrder:   idx,
     isActive:    true,
@@ -206,6 +217,7 @@ const getPlansConfig = async (req, res) => {
     for (const p of dbPlans) {
       config[p.planKey] = {
         name:         p.name,
+        custom:       p.custom || p.planKey === "enterprise",
         monthlyPrice: p.price?.monthly ?? 0,
         yearlyPrice:  p.price?.yearly  ?? 0,
         maxUsers:     p.maxUsers,
@@ -304,6 +316,9 @@ const savePlansConfig = async (req, res) => {
       }
       if (cfg.recordingEnabled !== undefined) {
         update.recordingEnabled = !!cfg.recordingEnabled;
+      }
+      if (cfg.custom !== undefined) {
+        update.custom = !!cfg.custom;
       }
 
       const plan = await PlanConfig.findOneAndUpdate(

@@ -16,7 +16,7 @@ const companySchema = mongoose.Schema(
     // ── Plan — extended to include "trial" ────────────────────────────────────
     plan: {
       type:    String,
-      enum:    ["trial", "basic", "pro", "enterprise"],
+      enum:    ["trial", "basic", "pro", "advance", "enterprise"],
       default: "trial",
     },
 

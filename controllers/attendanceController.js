@@ -287,6 +287,34 @@ const getMyToday = async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
+// ── Save ideal working time + reason for today (employee, from mobile app) ────
+// Upserts today's attendance record (a user may set their ideal time before
+// clocking in), and returns the full updated record so the app can refresh.
+const saveIdealTime = async (req, res) => {
+  try {
+    const { idealTime = "", idealRemark = "" } = req.body || {};
+    const userId    = req.user._id;
+    const companyId = req.user.company;
+    const date      = todayStr();
+
+    const record = await Attendance.findOneAndUpdate(
+      { user: userId, date },
+      {
+        $set: {
+          idealTime:   String(idealTime).trim().slice(0, 120),
+          idealRemark: String(idealRemark).trim().slice(0, 500),
+        },
+        $setOnInsert: { user: userId, company: companyId, date },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true },
+    );
+
+    res.status(200).json(record);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // ── ADMIN: Mark idle users ────────────────────────────────────────────────────
 const markIdleUsers = async (req, res) => {
   try {
@@ -450,7 +478,7 @@ const getAttendanceReport = async (req, res) => {
 const editAttendance = async (req, res) => {
   try {
     const { id } = req.params;
-    const { loginTime, logoutTime, crmStatus, remarks } = req.body;
+    const { loginTime, logoutTime, crmStatus, remarks, idealTime, idealRemark } = req.body;
 
     const record = await Attendance.findById(id);
     if (!record) return res.status(404).json({ message: "Record not found." });
@@ -463,6 +491,8 @@ const editAttendance = async (req, res) => {
     if (logoutTime !== undefined) record.logoutTime = logoutTime ? new Date(logoutTime) : null;
     if (crmStatus  !== undefined) record.crmStatus  = crmStatus;
     if (remarks    !== undefined) record.remarks    = remarks;
+    if (idealTime   !== undefined) record.idealTime   = String(idealTime).slice(0, 120);
+    if (idealRemark !== undefined) record.idealRemark = String(idealRemark).slice(0, 500);
 
     // Recalculate work minutes if both times are present
     if (record.loginTime && record.logoutTime) {
@@ -534,6 +564,8 @@ const exportAttendance = async (req, res) => {
       breakMinutes : rec.totalBreakMinutes || 0,
       status       : deriveCrmStatus(rec),
       remarks      : rec.remarks || "",
+      idealTime    : rec.idealTime || "",
+      idealRemark  : rec.idealRemark || "",
     }));
 
     if (crmStatus) enriched = enriched.filter(r => r.status === crmStatus);
@@ -770,6 +802,7 @@ const saveMeetingTrackingConfig = async (req, res) => {
 
 module.exports = {
   clockIn, clockOut, startBreak, endBreak, pingActivity, getMyToday,
+  saveIdealTime,
   getCompanyAttendance, markIdleUsers,
   getAttendanceReport, editAttendance, deleteAttendance, exportAttendance,
   getCompanyUsers,

@@ -112,9 +112,9 @@ const PLANS = {
     admins: 3,
     agents: 30,
   },
-  enterprise: {
-    id: "enterprise",
-    name: "Enterprise",
+  advance: {
+    id: "advance",
+    name: "Advance",
     monthlyPrice: 5999,
     yearlyPrice: 4799,
     admins: 5,
@@ -130,6 +130,10 @@ const createOrder = async (req, res) => {
 
     if (!planId || !billing) {
       return res.status(400).json({ message: "planId and billing are required" });
+    }
+
+    if (planId === "enterprise") {
+      return res.status(400).json({ message: "Enterprise is a custom plan. Please contact sales." });
     }
 
     const plan = PLANS[planId];
@@ -228,7 +232,7 @@ const verifyPayment = async (req, res) => {
     const planEnumMap = {
       starter: "basic",
       growth: "pro",
-      enterprise: "enterprise",
+      advance: "advance",
     };
 
     // Determine new expiry:
@@ -337,8 +341,9 @@ const getSubscription = async (req, res) => {
 
     // Map Company plan enum to display name
     const planDisplayMap = {
-      basic: "Starter",
-      pro: "Growth",
+      basic: "Basic",
+      pro: "Pro",
+      advance: "Advance",
       enterprise: "Enterprise",
     };
 

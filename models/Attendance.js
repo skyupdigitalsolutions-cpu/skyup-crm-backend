@@ -53,6 +53,12 @@ const attendanceSchema = new mongoose.Schema({
   clockInLatitude:  { type: Number, default: null },
   clockInLongitude: { type: Number, default: null },
 
+  // ── Ideal working time + reason (set by the employee from the mobile app) ──
+  // Free-text planned working window (e.g. "11:00 AM - 7:00 PM") and the reason
+  // for it. Displayed on the admin / super-admin attendance pages.
+  idealTime:   { type: String, default: "" },
+  idealRemark: { type: String, default: "" },
+
 }, { timestamps: true });
 
 attendanceSchema.index({ user: 1, date: 1 }, { unique: true });
