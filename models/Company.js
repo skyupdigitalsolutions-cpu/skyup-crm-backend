@@ -1,8 +1,10 @@
 // models/Company.js — UPDATED
-// Adds: subscriptionStatus "suspended"|"paused", plan "trial", maxAdmins,
-//       maxWebsites, maxMetaCampaigns, maxGoogleAccounts, maxStorage,
+// Adds: subscriptionStatus "suspended"|"paused"|"trial_pending", plan "trial",
+//       maxAdmins, maxWebsites, maxMetaCampaigns, maxGoogleAccounts, maxStorage,
 //       devOverrides, aiProviderMode, customerOpenAiKey, customerGeminiKey,
-//       demoCreditGranted
+//       demoCreditGranted, and Razorpay mandate/auto-billing fields
+//       (razorpayCustomerId, razorpayTokenId, paymentMethodProvided, trialPlan,
+//        trialStartedAt, trialExpiredEmailSent, pendingPlanId, pendingBilling).
 // All existing fields are UNCHANGED.
 
 const mongoose = require("mongoose");
@@ -33,17 +35,42 @@ const companySchema = mongoose.Schema(
       default: null,
     },
 
-    // Extended enum — adds "suspended" and "paused"
+    // Extended enum — adds "suspended", "paused" and "trial_pending".
+    // "trial_pending" = company created but the customer has NOT yet added a
+    // payment method. The entitlement engine treats any status other than
+    // "active"/"trial" as read-only, so a trial_pending company is locked until
+    // a card/UPI mandate is registered (see controllers/trialController.js).
     subscriptionStatus: {
       type:    String,
-      enum:    ["active", "expired", "trial", "cancelled", "suspended", "paused"],
-      default: "trial",
+      enum:    ["active", "expired", "trial", "trial_pending", "cancelled", "suspended", "paused"],
+      default: "trial_pending",
     },
 
+    // trialEndsAt is null until the customer adds a payment method. The 7-day
+    // trial clock starts at the moment the mandate is registered, NOT at
+    // company creation, so customers get a full 7 days of usage.
     trialEndsAt: {
       type:    Date,
-      default: () => new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14-day free trial
+      default: null,
     },
+
+    // ── Trial & Auto-billing (Razorpay mandate / saved token) ─────────────────
+    // razorpayCustomerId  — Razorpay customer the mandate token belongs to.
+    // razorpayTokenId     — saved card/UPI mandate token used for server-side
+    //                       recurring charges (auto-billing after the trial).
+    // paymentMethodProvided — true once a mandate has been registered.
+    // trialPlan           — which plan the free trial grants (default "pro").
+    // trialStartedAt      — when the customer added payment + the trial began.
+    // trialExpiredEmailSent — guard so the "trial expired" email fires only once.
+    // pendingPlanId / pendingBilling — plan the customer chose to auto-bill into.
+    razorpayCustomerId:    { type: String,  default: null },
+    razorpayTokenId:       { type: String,  default: null, select: false },
+    paymentMethodProvided: { type: Boolean, default: false },
+    trialPlan:             { type: String,  default: "pro" },
+    trialStartedAt:        { type: Date,    default: null },
+    trialExpiredEmailSent: { type: Boolean, default: false },
+    pendingPlanId:         { type: String,  default: null },
+    pendingBilling:        { type: String,  default: "monthly" },
 
     // ── Data Privacy Settings ─────────────────────────────────────────────────
     dataEncryptionEnabled: {

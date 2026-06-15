@@ -155,9 +155,22 @@ const _createCompanyHandler = async (req, res) => {
 
     const { headerName } = body;
     const companyData = {
-      name, email, phone, plan: plan || "trial",
+      name, email, phone,
       createdBy: req.user._id,
     };
+
+    // Default new companies onto the gated 7-day Pro free trial. They start in
+    // "trial_pending" (read-only) until the customer adds a payment method,
+    // which starts the 7-day clock (see controllers/trialController.js). A
+    // developer may still create a company on an explicit plan if one is passed.
+    if (plan && plan !== "trial") {
+      companyData.plan = plan;
+    } else {
+      companyData.plan               = "pro";
+      companyData.trialPlan          = "pro";
+      companyData.subscriptionStatus = "trial_pending";
+      companyData.trialEndsAt        = null;
+    }
 
     if (req.files?.logo?.[0])       companyData.logo = req.files.logo[0].path;
     if (headerName !== undefined && String(headerName).trim())

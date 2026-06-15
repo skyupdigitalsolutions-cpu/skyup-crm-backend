@@ -225,7 +225,21 @@ const createCompany = async (req, res) => {
     if (!name || !email) return res.status(400).json({ message: "Name and email are required" });
     const exists = await Company.findOne({ email });
     if (exists) return res.status(400).json({ message: "Company with this email already exists" });
-    const company = await Company.create({ name, email, phone, plan: plan || "trial" });
+
+    // Default new companies onto the gated 7-day Pro free trial: "trial_pending"
+    // (read-only) until a payment method is added, which starts the 7-day clock.
+    const companyData =
+      plan && plan !== "trial"
+        ? { name, email, phone, plan }
+        : {
+            name, email, phone,
+            plan:               "pro",
+            trialPlan:          "pro",
+            subscriptionStatus: "trial_pending",
+            trialEndsAt:        null,
+          };
+
+    const company = await Company.create(companyData);
     res.status(201).json(company);
   } catch (error) { res.status(500).json({ message: error.message }); }
 };

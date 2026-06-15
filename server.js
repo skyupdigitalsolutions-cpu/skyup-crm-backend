@@ -43,6 +43,9 @@ const metaConfigRoute  = require('./routes/metaConfig');
 // ── Razorpay Routes ───────────────────────────────────────────────────────────
 const razorpayRoute = require('./routes/razorpayRoute');
 
+// ── Trial + Auto-billing Routes (7-day Pro trial w/ saved payment method) ──────
+const trialRoute = require('./routes/trialRoute');
+
 // ── Google Ads Routes ─────────────────────────────────────────────────────────
 const googleAdsConfigRoute = require('./routes/googleAdsConfig');
 const googleWebhookRoute   = require('./routes/googleWebhook');
@@ -58,6 +61,7 @@ const emailHistoryRoute    = require('./routes/emailHistory');
 
 // ── Jobs ──────────────────────────────────────────────────────────────────────
 const { startSubscriptionExpiryJob } = require('./jobs/subscriptionExpiryJob');
+const { startTrialExpiryJob }        = require('./jobs/trialExpiryJob');
 const { startIdleJob }               = require('./jobs/markIdleJob');
 const { startLeadAlertsJob }         = require('./jobs/leadAlertsJob');
 // NEW: Monthly usage counter reset
@@ -212,6 +216,7 @@ app.use('/api/lead',                leadRoute);
 app.use('/api/project',             projectRoute);
 app.use('/api/attendance',          attendanceRoute);
 app.use('/api/razorpay',            razorpayRoute);
+app.use('/api/trial',               trialRoute);
 app.use('/api/google-ads-config',   googleAdsConfigRoute);
 app.use('/',                        googleWebhookRoute);
 app.use('/api/website-config',      websiteConfigRoute);
@@ -305,6 +310,7 @@ connectDB().then(() => {
     console.log(`🌐 Frontend served:   ${SERVE_FRONTEND ? 'YES (from dist/)' : 'NO (separate Render service)'}`);
     console.log(`🔒 CORS origins:      ${staticAllowedOrigins.length} origin(s) loaded from ALLOWED_ORIGINS env`);
     startSubscriptionExpiryJob();
+    startTrialExpiryJob();   // NEW — emails customers when their 7-day trial lapses
     startIdleJob();
     startLeadAlertsJob();
     startUsageResetJob();   // NEW
