@@ -9,6 +9,11 @@ const {
   getSubscription,
 } = require("../controllers/razorpayController");
 
+const {
+  createAddonOrder,
+  verifyAddonPayment,
+} = require("../controllers/addonPaymentController");
+
 // All routes require a logged-in admin
 router.use(protectAdmin);
 
@@ -23,5 +28,9 @@ router.get("/invoices", getInvoices);
 
 // Get current subscription summary
 router.get("/subscription", getSubscription);
+
+// ── Add-on self-serve purchase (price resolved server-side from AddonCatalog) ──
+router.post("/addon/create-order",   createAddonOrder);
+router.post("/addon/verify-payment", verifyAddonPayment);
 
 module.exports = router;

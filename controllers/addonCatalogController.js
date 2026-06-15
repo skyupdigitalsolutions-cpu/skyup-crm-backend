@@ -38,22 +38,26 @@ const DEFAULT_CATALOG = [
 ];
 
 async function seedCatalogIfEmpty() {
-  const count = await AddonCatalog.countDocuments();
-  if (count > 0) return;
-  const rows = DEFAULT_CATALOG.map((c, idx) => ({
-    ...c,
-    currency:     "INR",
-    isPublic:     false,
-    visiblePlans: [],
-    maxQuantity:  c.category === "feature" ? 1 : 10,
-    sortOrder:    idx,
-    isActive:     true,
-  }));
-  await AddonCatalog.insertMany(rows, { ordered: false }).catch((e) => {
-    // ordered:false still inserts the valid rows; log and continue.
-    console.warn("[addonCatalog] seed partial:", e.message);
-  });
-  console.log("[addonCatalog] Seeded default add-on catalogue rows.");
+  try {
+    const count = await AddonCatalog.countDocuments();
+    if (count > 0) return;
+    const rows = DEFAULT_CATALOG.map((c, idx) => ({
+      ...c,
+      currency:     "INR",
+      isPublic:     false,
+      visiblePlans: [],
+      maxQuantity:  c.category === "feature" ? 1 : 10,
+      sortOrder:    idx,
+      isActive:     true,
+    }));
+    await AddonCatalog.insertMany(rows, { ordered: false }).catch((e) => {
+      console.warn("[addonCatalog] seed partial:", e.message);
+    });
+    console.log("[addonCatalog] Seeded default add-on catalogue rows.");
+  } catch (e) {
+    // Never let seeding throw into a request handler.
+    console.warn("[addonCatalog] seed error:", e.message);
+  }
 }
 
 // ── GET /api/developer/addon-catalog ──────────────────────────────────────────
@@ -162,23 +166,38 @@ const saveCatalog = async (req, res) => {
 // Used by the upgrade page to render priced, buyable cards.
 const getPublicAddons = async (req, res) => {
   try {
-    await seedCatalogIfEmpty();
+    // Seeding must never break the customer page — isolate it.
+    try {
+      await seedCatalogIfEmpty();
+    } catch (seedErr) {
+      console.warn("[getPublicAddons] seed skipped:", seedErr.message);
+    }
 
-    // req.admin.company.plan is populated by protectAdmin middleware.
-    const planKey = req.admin?.company?.plan || req.query.plan || null;
+    // company.plan may be a populated object's field, or absent for some roles.
+    const planKey =
+      (req.admin && req.admin.company && req.admin.company.plan) ||
+      req.query.plan ||
+      null;
 
-    const items = await AddonCatalog.find({ isPublic: true, isActive: true })
-      .sort({ sortOrder: 1, createdAt: 1 })
-      .lean();
+    let items = [];
+    try {
+      items = await AddonCatalog.find({ isPublic: true, isActive: true })
+        .sort({ sortOrder: 1, createdAt: 1 })
+        .lean();
+    } catch (qErr) {
+      // If the catalogue collection/model isn't ready yet, treat as no add-ons
+      // rather than failing the whole page.
+      console.warn("[getPublicAddons] query failed:", qErr.message);
+      return res.json({ success: true, plan: planKey, addons: [] });
+    }
 
-    const visible = items.filter(it =>
+    const visible = (items || []).filter(it =>
       !planKey ||
       !Array.isArray(it.visiblePlans) ||
       it.visiblePlans.length === 0 ||
       it.visiblePlans.includes(planKey)
     );
 
-    // Strip internal fields; expose only what the card needs.
     const addons = visible.map(it => ({
       addonType:     it.addonType,
       name:          it.name,
@@ -192,8 +211,10 @@ const getPublicAddons = async (req, res) => {
 
     res.json({ success: true, plan: planKey, addons });
   } catch (err) {
-    console.error("[getPublicAddons]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    console.error("[getPublicAddons]", err && err.stack ? err.stack : err);
+    // Never 500 the customer page — return empty so it shows the clean
+    // "No add-ons available" state instead of an error banner.
+    res.json({ success: true, plan: null, addons: [], note: "addons_unavailable" });
   }
 };
 

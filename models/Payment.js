@@ -14,7 +14,7 @@ const paymentSchema = new mongoose.Schema(
     },
     planId: {
       type: String,
-      enum: ["starter", "growth", "enterprise"],
+      enum: ["starter", "growth", "advance", "enterprise", "addon"],
       required: true,
     },
     planName: {
@@ -23,7 +23,7 @@ const paymentSchema = new mongoose.Schema(
     },
     billing: {
       type: String,
-      enum: ["monthly", "yearly"],
+      enum: ["monthly", "yearly", "one_time"],
       required: true,
     },
     amount: {
