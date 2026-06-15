@@ -41,37 +41,48 @@ const FEATURE_CATALOG = [
 // ── Seed helper — called lazily on first GET /plans so the DB always
 //    has the three default plans even on a fresh install. ─────────────────────
 async function seedDefaultsIfEmpty() {
-  const count = await PlanConfig.countDocuments();
-  if (count > 0) return;
+  // Backfill: create any DEFAULT plan that does not yet exist (keyed by planKey),
+  // WITHOUT touching plans the developer already customised. This also adds
+  // newly-introduced tiers (e.g. "advance") to databases seeded before the tier
+  // existed — the old version only seeded when the collection was totally empty,
+  // so existing DBs never got the new plan.
+  const existing = await PlanConfig.find().select("planKey").lean();
+  const existingKeys = new Set(existing.map(p => p.planKey));
 
-  const seeds = Object.entries(DEFAULT_PLAN_FEATURES).map(([key, plan], idx) => ({
-    planKey:     key,
-    name:        plan.name,
-    description: '',
-    color:       plan.color,
-    price:       plan.price,
-    custom:      !!plan.custom,
-    maxUsers:    plan.maxUsers,
-    maxAdmins:   plan.maxAdmins,
-    maxLeads:    plan.maxLeads,
-    maxWebsites:       plan.maxWebsites,
-    maxMetaCampaigns:  plan.maxMetaCampaigns,
-    maxGoogleAccounts: plan.maxGoogleAccounts,
-    maxStorageMB:      plan.maxStorageMB,
-    transcriptionsPerMonth: plan.transcriptionsPerMonth,
-    summariesPerMonth:      plan.summariesPerMonth,
-    voiceBotPerMonth:       plan.voiceBotPerMonth,
-    recordingEnabled:       plan.recordingEnabled,
-    dataRetentionDays:      plan.dataRetentionDays,
-    features:    plan.features,
-    sortOrder:   idx,
-    isActive:    true,
-  }));
+  const toInsert = [];
+  Object.entries(DEFAULT_PLAN_FEATURES).forEach(([key, plan], idx) => {
+    if (existingKeys.has(key)) return;
+    toInsert.push({
+      planKey:     key,
+      name:        plan.name,
+      description: '',
+      color:       plan.color,
+      price:       plan.price,
+      custom:      !!plan.custom,
+      maxUsers:    plan.maxUsers,
+      maxAdmins:   plan.maxAdmins,
+      maxLeads:    plan.maxLeads,
+      maxWebsites:       plan.maxWebsites,
+      maxMetaCampaigns:  plan.maxMetaCampaigns,
+      maxGoogleAccounts: plan.maxGoogleAccounts,
+      maxStorageMB:      plan.maxStorageMB,
+      transcriptionsPerMonth: plan.transcriptionsPerMonth,
+      summariesPerMonth:      plan.summariesPerMonth,
+      voiceBotPerMonth:       plan.voiceBotPerMonth,
+      recordingEnabled:       plan.recordingEnabled,
+      dataRetentionDays:      plan.dataRetentionDays,
+      features:    plan.features,
+      sortOrder:   idx,
+      isActive:    true,
+    });
+  });
 
-  await PlanConfig.insertMany(seeds);
-  console.log('[planController] Seeded', seeds.length, 'default plans from hardcoded defaults.');
+  if (toInsert.length === 0) return;
+  await PlanConfig.insertMany(toInsert, { ordered: false }).catch(e =>
+    console.warn("[planController] backfill partial:", e.message)
+  );
+  console.log('[planController] Backfilled plans:', toInsert.map(p => p.planKey).join(", "));
 }
-
 // ── GET /api/developer/plans ──────────────────────────────────────────────────
 const getPlans = async (req, res) => {
   try {
