@@ -139,51 +139,10 @@ const DEFAULT_PLAN_FEATURES = {
       { key: "website-tracking", label: "Website Tracking", enabled: true  },
     ],
   },
-  advance: {
-    name:    "Advance",
-    price:   { monthly: 9999, yearly: 99990 },
-    color:   "#7C3AED",
-    maxAdmins: 10,
-    maxUsers:  999,
-    maxLeads:  999999,
-    maxWebsites: 999,
-    maxMetaCampaigns: 999,
-    maxGoogleAccounts: 999,
-    maxStorageMB: 51200,
-    transcriptionsPerMonth: 2000,
-    summariesPerMonth: 2000,
-    voiceBotPerMonth: 1000,
-    recordingEnabled: true,
-    dataRetentionDays: 365,
-    features: [
-      { key: "leads",          label: "Lead Management",      enabled: true },
-      { key: "contacts",       label: "Contacts",             enabled: true },
-      { key: "basic-reports",  label: "Basic Reports",        enabled: true },
-      { key: "attendance",     label: "Attendance",           enabled: true },
-      { key: "daily-report",   label: "Daily Report (Email)", enabled: true },
-      { key: "sms-blast",      label: "SMS Blast",            enabled: true },
-      { key: "whatsapp-blast", label: "WhatsApp Blast",       enabled: true },
-      { key: "email-blast",    label: "Email Blast",          enabled: true },
-      { key: "campaigns",      label: "Campaigns",            enabled: true },
-      { key: "google-ads",     label: "Google Ads",           enabled: true },
-      { key: "meta-ads",       label: "Facebook / Meta Ads",  enabled: true },
-      { key: "call-recording", label: "Call Recordings",      enabled: true },
-      { key: "api-access",     label: "API / Webhooks",       enabled: true },
-      { key: "custom-reports", label: "Custom Reports",       enabled: true },
-      { key: "white-label",    label: "White Label",          enabled: true },
-      { key: "projects",         label: "Projects",         enabled: true },
-      { key: "tasks",            label: "Tasks",            enabled: true },
-      { key: "payroll",          label: "Payroll",          enabled: true },
-      { key: "website-tracking", label: "Website Tracking", enabled: true },
-    ],
-  },
-  // Custom "Contact us" tier — no fixed price, not purchasable via Razorpay.
-  // The developer tailors limits/features per enterprise customer.
   enterprise: {
     name:    "Enterprise",
-    custom:  true,          // flag: render "Contact us", hide pricing + pay button
-    price:   { monthly: 0, yearly: 0 },
-    color:   "#0F766E",
+    price:   { monthly: 9999, yearly: 99990 },
+    color:   "#7C3AED",
     maxAdmins: 10,
     maxUsers:  999,
     maxLeads:  999999,
@@ -266,7 +225,6 @@ const getPlans = async (req, res) => {
           name:                  p.name,
           price:                 p.price,
           color:                 p.color,
-          custom:                p.custom || p.planKey === "enterprise",
           maxAdmins:             p.maxAdmins,
           maxUsers:              p.maxUsers,
           maxLeads:              p.maxLeads,
@@ -636,12 +594,42 @@ const getMyEntitlements = async (req, res) => {
       null;
     if (!companyId) return res.status(400).json({ success: false, message: "Company not found in token" });
 
-    const [entitlements, remaining] = await Promise.all([
+    const now = new Date();
+    const [entitlements, remaining, company, addonDocs] = await Promise.all([
       getCompanyEntitlements(companyId),
       getRemainingUsage(companyId),
+      Company.findById(companyId).select("name plan subscriptionStatus subscriptionExpiry trialEndsAt").lean(),
+      CompanyAddon.find({
+        companyId,
+        status: "active",
+        $or: [{ expiryDate: null }, { expiryDate: { $gt: now } }],
+      }).sort({ createdAt: -1 }).lean(),
     ]);
 
-    res.json({ success: true, entitlements, remaining });
+    // Plan + expiry summary for the My Features header.
+    const expiresAt = company?.subscriptionExpiry || company?.trialEndsAt || null;
+    const daysRemaining = expiresAt
+      ? Math.ceil((new Date(expiresAt) - now) / (1000 * 60 * 60 * 24))
+      : null;
+
+    const plan = {
+      key:           company?.plan || null,
+      status:        company?.subscriptionStatus || null,
+      expiresAt,
+      daysRemaining,
+      expiringSoon:  daysRemaining != null && daysRemaining <= 5 && daysRemaining > 0,
+    };
+
+    // Active add-ons (customer-safe fields only).
+    const addons = (addonDocs || []).map(a => ({
+      addonType:  a.addonType,
+      quantity:   a.quantity || 1,
+      startDate:  a.startDate || a.createdAt || null,
+      expiryDate: a.expiryDate || null,
+      status:     a.status,
+    }));
+
+    res.json({ success: true, entitlements, remaining, plan, addons });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
