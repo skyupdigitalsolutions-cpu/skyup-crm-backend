@@ -61,6 +61,10 @@ const leadSchema = mongoose.Schema(
     source:    { type: String, required: true, trim: true },
     campaign:  { type: String, required: false, default: null },
     adSetName: { type: String, default: "", trim: true },
+    // Reference to the exact MetaConfig (ad set) this lead came from. Lets the
+    // Campaigns page count leads per AD SET instead of per campaign name (which
+    // collides when several ad sets share a campaign name).
+    metaConfigId: { type: mongoose.Schema.Types.ObjectId, ref: "MetaConfig", default: null, index: true },
     status:    { type: String, required: true, trim: true },
     date:      { type: Date, required: true },
     remark:    { type: String, required: true, trim: true },

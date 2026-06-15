@@ -120,7 +120,23 @@ const getLead = async (req, res) => {
 const getLeadsByCampaign = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    const { campaign, adSetName } = req.query;
+    const { campaign, adSetName, metaConfigId } = req.query;
+
+    // Exact path: when the card passes its metaConfigId, scope strictly to that
+    // ad set (plus any legacy leads matching campaign/adSetName that predate it).
+    if (metaConfigId) {
+      const or = [{ metaConfigId }];
+      if (campaign) {
+        const legacy = { metaConfigId: null, campaign };
+        if (adSetName && adSetName.trim() !== "") legacy.adSetName = adSetName.trim();
+        or.push(legacy);
+      }
+      const leads = await Lead.find({ company: companyId, $or: or })
+        .populate("user", "name email")
+        .populate("previousAgents", "name email");
+      return res.status(200).json(leads);
+    }
+
     if (!campaign)
       return res
         .status(400)

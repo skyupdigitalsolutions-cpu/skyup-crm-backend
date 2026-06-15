@@ -28,29 +28,39 @@ const getAllConfigs = async (req, res) => {
     // naming convention was used when the lead was stored.
     const enriched = await Promise.all(
       configs.map(async (cfg) => {
-        // Always include the stored campaignName itself.
-        const campaignMatchers = [cfg.campaignName];
+        // PRIMARY: leads tied to this exact ad set via metaConfigId. This is the
+        // correct per-ad-set attribution — leads no longer pile onto a sibling
+        // ad set that happens to share the same campaign name.
+        const byConfigQuery = { company: companyId, metaConfigId: cfg._id };
 
-        // If parentCampaignName & adSetName are both set, also try the
-        // canonical composite form in case campaignName was saved differently.
+        // LEGACY FALLBACK: leads created before metaConfigId existed have no
+        // config reference, so match them the old way (by campaign name /
+        // composite / adSetName) BUT only leads that have no metaConfigId, so we
+        // never double-count a lead already attributed above.
+        const campaignMatchers = [cfg.campaignName];
         if (cfg.parentCampaignName && cfg.adSetName) {
           const composite = `${cfg.parentCampaignName} › ${cfg.adSetName}`;
           if (composite !== cfg.campaignName) campaignMatchers.push(composite);
-
-          // Also try the plain adSetName in case an old record used just that.
           campaignMatchers.push(cfg.adSetName);
         }
-
-        const baseQuery = {
-          company:  companyId,
-          campaign: campaignMatchers.length === 1
-            ? campaignMatchers[0]
-            : { $in: campaignMatchers },
+        const legacyQuery = {
+          company: companyId,
+          metaConfigId: null,
+          campaign: campaignMatchers.length === 1 ? campaignMatchers[0] : { $in: campaignMatchers },
         };
 
-        const leadCount      = await Lead.countDocuments(baseQuery);
-        const convertedCount = await Lead.countDocuments({ ...baseQuery, status: "Converted" });
-        return { ...cfg, leads: leadCount, converted: convertedCount };
+        const [cfgLeads, cfgConv, legacyLeads, legacyConv] = await Promise.all([
+          Lead.countDocuments(byConfigQuery),
+          Lead.countDocuments({ ...byConfigQuery, status: "Converted" }),
+          Lead.countDocuments(legacyQuery),
+          Lead.countDocuments({ ...legacyQuery, status: "Converted" }),
+        ]);
+
+        return {
+          ...cfg,
+          leads:     cfgLeads + legacyLeads,
+          converted: cfgConv + legacyConv,
+        };
       })
     );
 
