@@ -59,8 +59,7 @@ const _companyId = (req) => req.admin?.company?._id ?? req.admin?.company;
 // Razorpay's `contact` field only accepts digits and an optional leading "+".
 // Phone numbers in the CRM may contain spaces, dashes, parentheses, etc., which
 // trigger: "Contact number contains invalid characters". This normalises the
-// value and returns undefined if nothing usable remains, so we simply omit the
-// (optional) contact rather than send an invalid one.
+// value and returns undefined if nothing usable remains.
 const sanitizeContact = (raw) => {
   if (!raw) return undefined;
   let s = String(raw).trim();
@@ -69,6 +68,13 @@ const sanitizeContact = (raw) => {
   if (digits.length < 8 || digits.length > 15) return undefined; // not a valid phone
   return hasPlus ? `+${digits}` : digits;
 };
+
+// Recurring / mandate orders REQUIRE a contact ("The contact field is required
+// for recurring links"). So for the mandate flow we always return a valid
+// contact: the sanitised company phone, or a configurable fallback if the
+// company has no usable phone. Override the fallback with TRIAL_FALLBACK_CONTACT.
+const FALLBACK_CONTACT = sanitizeContact(process.env.TRIAL_FALLBACK_CONTACT) || "9999999999";
+const mandateContact   = (raw) => sanitizeContact(raw) || FALLBACK_CONTACT;
 
 // ─── GET /api/trial/status ────────────────────────────────────────────────────
 // Tells the frontend which gate (if any) to show.
@@ -119,18 +125,29 @@ const createMandateOrder = async (req, res) => {
     const company = await Company.findById(_companyId(req)).select("name email phone razorpayCustomerId");
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
 
+    // Recurring mandates REQUIRE a contact, so always compute a valid one.
+    const contact = mandateContact(company.phone);
+
     // Reuse an existing Razorpay customer if we already have one for this company.
     let customerId = company.razorpayCustomerId;
     if (!customerId) {
       const customer = await razorpay.customers.create({
         name:          company.name,
         email:         company.email,
-        contact:       sanitizeContact(company.phone),
+        contact,
         fail_existing: 0, // return the existing customer instead of erroring
       });
       customerId = customer.id;
       company.razorpayCustomerId = customerId;
       await company.save();
+    } else {
+      // An existing customer may have been created earlier WITHOUT a contact
+      // (which makes recurring orders fail). Ensure it now has a valid contact.
+      try {
+        await razorpay.customers.edit(customerId, { contact });
+      } catch (e) {
+        console.warn("[Trial] could not update existing customer contact:", e?.error?.description || e.message);
+      }
     }
 
     // Authorization order with a token block → registers a reusable mandate.
@@ -306,7 +323,7 @@ const selectPlanAndCharge = async (req, res) => {
     try {
       payment = await razorpay.payments.createRecurringPayment({
         email:       company.email,
-        contact:     sanitizeContact(company.phone),
+        contact:     mandateContact(company.phone),
         amount:      amountPaise,
         currency:    "INR",
         order_id:    order.id,
