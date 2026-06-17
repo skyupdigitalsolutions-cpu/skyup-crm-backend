@@ -56,6 +56,20 @@ const PLAN_ENUM_MAP = { starter: "basic", growth: "pro", advance: "advance" };
 
 const _companyId = (req) => req.admin?.company?._id ?? req.admin?.company;
 
+// Razorpay's `contact` field only accepts digits and an optional leading "+".
+// Phone numbers in the CRM may contain spaces, dashes, parentheses, etc., which
+// trigger: "Contact number contains invalid characters". This normalises the
+// value and returns undefined if nothing usable remains, so we simply omit the
+// (optional) contact rather than send an invalid one.
+const sanitizeContact = (raw) => {
+  if (!raw) return undefined;
+  let s = String(raw).trim();
+  const hasPlus = s.startsWith("+");
+  const digits = s.replace(/\D/g, "");        // strip everything non-digit
+  if (digits.length < 8 || digits.length > 15) return undefined; // not a valid phone
+  return hasPlus ? `+${digits}` : digits;
+};
+
 // ─── GET /api/trial/status ────────────────────────────────────────────────────
 // Tells the frontend which gate (if any) to show.
 const getTrialStatus = async (req, res) => {
@@ -111,7 +125,7 @@ const createMandateOrder = async (req, res) => {
       const customer = await razorpay.customers.create({
         name:          company.name,
         email:         company.email,
-        contact:       company.phone || undefined,
+        contact:       sanitizeContact(company.phone),
         fail_existing: 0, // return the existing customer instead of erroring
       });
       customerId = customer.id;
@@ -292,7 +306,7 @@ const selectPlanAndCharge = async (req, res) => {
     try {
       payment = await razorpay.payments.createRecurringPayment({
         email:       company.email,
-        contact:     company.phone || undefined,
+        contact:     sanitizeContact(company.phone),
         amount:      amountPaise,
         currency:    "INR",
         order_id:    order.id,
