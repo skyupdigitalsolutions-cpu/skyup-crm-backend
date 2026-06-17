@@ -4,43 +4,31 @@
 // Handles GET  /lead/:id/meeting-remarks — fetch all meeting remarks for a lead.
 // Handles POST /lead/:id/meeting-whatsapp — send WhatsApp meeting confirmation
 //
-// Supports two content types:
-//   1. application/json      — remark only, no attachments
-//   2. multipart/form-data   — with optional document and/or recording file
-//      Files are uploaded to Cloudinary (same pipeline as call recordings).
-//
 // WhatsApp Integration:
-//   After scheduling a meeting, the employee can send a WhatsApp confirmation
-//   to the client using the MSG91 `client_meeting_reminder` approved template.
-//   Variables: {{1}} client name, {{2}} company name, {{3}} date, {{4}} time,
-//              {{5}} mode, {{6}} agent name
-//
-// Security:
-//   • protect middleware ensures user is authenticated
-//   • lead must belong to the authenticated user's company
-//   • lead must be assigned to req.user OR user must be admin
+//   Sends the MSG91 `client_meeting_reminder` approved template.
+//   Variables: {{1}} client name, {{2}} company name, {{3}} date,
+//              {{4}} time, {{5}} mode, {{6}} agent name
 // ─────────────────────────────────────────────────────────────────────────────
 
-const Lead          = require('../models/Leads');
-const multer        = require('multer');
-const cloudinary    = require('cloudinary').v2;
+const Lead           = require('../models/Leads');
+const multer         = require('multer');
+const cloudinary     = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const axios         = require('axios');
+const axios          = require('axios');
 const WhatsAppConfig = require('../models/WhatsAppConfig');
 const WhatsAppConversation = require('../models/WhatsAppConversation');
 const WhatsAppMessage = require('../models/WhatsAppMessage');
-const Company       = require('../models/Company');
-const crypto        = require('crypto');
+const Company        = require('../models/Company');
+const crypto         = require('crypto');
 const { normalizePhone: _sharedNormalizePhone } = require('../utils/normalizePhone');
 
-// ── Cloudinary config (shared with mobileCallLogController) ──────────────────
+// ── Cloudinary config ─────────────────────────────────────────────────────────
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ── Cloudinary storage for meeting attachments ────────────────────────────────
 const meetingStorage = new CloudinaryStorage({
   cloudinary,
   params: async (req, file) => {
@@ -48,7 +36,7 @@ const meetingStorage = new CloudinaryStorage({
     return {
       folder:        isAudio ? 'skyup-crm/meeting-recordings' : 'skyup-crm/meeting-docs',
       resource_type: 'auto',
-      public_id:     `${req.user._id}_${Date.now()}_${file.fieldname}`,
+      public_id:     `${req.user._id || req.user.userId}_${Date.now()}_${file.fieldname}`,
       allowed_formats: isAudio
         ? ['mp3', 'm4a', 'aac', 'wav', 'amr', '3gp', 'ogg', 'opus', 'mp4']
         : ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'webp'],
@@ -64,14 +52,25 @@ const meetingUpload = multer({
   { name: 'recording', maxCount: 1 },
 ]);
 
-// ── Helper: resolve companyId from req ────────────────────────────────────────
+// ── Helper: resolve companyId from req — covers ALL role patterns ─────────────
+// authMiddleware sets:
+//   • employee (protect):   req.user.companyId  AND  req.user.company
+//   • admin (protectAdmin): req.admin.company   AND  req.user.companyId (normalized)
 const getCompanyId = (req) =>
-  req.companyId ||
-  (req.admin  ? req.admin.company?._id  || req.admin.company  : null) ||
-  req.user?.company || null;
+  req.user?.companyId  ||
+  req.user?.company?._id ||
+  req.user?.company    ||
+  req.admin?.company?._id ||
+  req.admin?.company   ||
+  req.companyId        ||
+  null;
 
-// ── WhatsApp phone normalizer (E.164 for India) ───────────────────────────────
-function normalizePhone(raw) {
+// ── Helper: resolve user name from req ───────────────────────────────────────
+const getUserName = (req) => req.user?.name || req.admin?.name || '';
+const getUserId   = (req) => req.user?._id  || req.user?.userId || req.admin?._id || null;
+
+// ── WhatsApp phone normalizer — converts to 12-digit Indian E.164 ─────────────
+function waPhone(raw) {
   if (!raw) return '';
   const ten = _sharedNormalizePhone(raw);
   if (ten) return '91' + ten;
@@ -79,7 +78,7 @@ function normalizePhone(raw) {
   return digits;
 }
 
-// ── Format date for WhatsApp message (e.g. "20 Jun 2026") ────────────────────
+// ── Format date for WhatsApp e.g. "20 Jun 2026" ──────────────────────────────
 function fmtDate(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -87,11 +86,11 @@ function fmtDate(iso) {
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
-// ── Format time for WhatsApp message (e.g. "11:00 AM") ───────────────────────
+// ── Format time for WhatsApp e.g. "11:00 AM" ─────────────────────────────────
 function fmtTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
-  if (isNaN(d)) return '';
+  if (isNaN(d)) return String(iso);
   return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
 }
 
@@ -101,7 +100,6 @@ const addMeetingRemark = (req, res) => {
     if (multerErr) {
       return res.status(400).json({ message: `File upload error: ${multerErr.message}` });
     }
-
     try {
       const { id } = req.params;
       const companyId = getCompanyId(req);
@@ -117,12 +115,12 @@ const addMeetingRemark = (req, res) => {
         return res.status(400).json({ message: 'Meeting outcome is required.' });
 
       const entry = {
-        userId:      req.user._id,
-        userName:    req.user.name || '',
-        meetingType: meetingType || 'In-Person',
-        outcome:     outcome.trim(),
-        remark:      remark.trim(),
-        metAt:       new Date(),
+        userId:       getUserId(req),
+        userName:     getUserName(req),
+        meetingType:  meetingType || 'In-Person',
+        outcome:      outcome.trim(),
+        remark:       remark.trim(),
+        metAt:        new Date(),
         followUpDate: followUpDate ? new Date(followUpDate) : null,
       };
 
@@ -148,10 +146,7 @@ const addMeetingRemark = (req, res) => {
       );
 
       const saved = updated.meetingRemarks[updated.meetingRemarks.length - 1];
-      return res.status(201).json({
-        message:       'Meeting remark saved.',
-        meetingRemark: saved,
-      });
+      return res.status(201).json({ message: 'Meeting remark saved.', meetingRemark: saved });
 
     } catch (err) {
       console.error('[meetingRemarkController] addMeetingRemark error:', err);
@@ -163,8 +158,8 @@ const addMeetingRemark = (req, res) => {
 // ── GET /lead/:id/meeting-remarks ─────────────────────────────────────────────
 const getMeetingRemarks = async (req, res) => {
   try {
-    const { id } = req.params;
-    const companyId = getCompanyId(req);
+    const { id }      = req.params;
+    const companyId   = getCompanyId(req);
 
     const lead = await Lead.findOne(
       { _id: id, company: companyId },
@@ -187,48 +182,69 @@ const getMeetingRemarks = async (req, res) => {
 // ── POST /lead/:id/meeting-whatsapp ───────────────────────────────────────────
 // Sends the `client_meeting_reminder` WhatsApp template to the lead's phone.
 // Body: { meetingDate, meetingTime, meetingMode, agentName }
-// meetingDate and meetingTime can be ISO strings or plain text strings.
 const sendMeetingWhatsApp = async (req, res) => {
   try {
-    const { id } = req.params;
+    const { id }    = req.params;
     const companyId = getCompanyId(req);
+
+    console.log('[meetingWhatsApp] companyId resolved:', companyId);
+    console.log('[meetingWhatsApp] req.user:', JSON.stringify(req.user));
+
+    if (!companyId) {
+      return res.status(400).json({ success: false, message: 'Could not resolve company. Please re-login.' });
+    }
 
     // ── 1. Load lead ──────────────────────────────────────────────────────────
     const lead = await Lead.findOne({ _id: id, company: companyId }).lean();
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found.' });
 
-    const clientPhone = normalizePhone(lead.phone);
-    if (!clientPhone)
+    const clientPhone = waPhone(lead.phone);
+    console.log('[meetingWhatsApp] clientPhone:', clientPhone, '| raw:', lead.phone);
+
+    if (!clientPhone || clientPhone.length < 10) {
       return res.status(400).json({ success: false, message: 'Lead has no valid phone number.' });
+    }
 
     // ── 2. Load WhatsApp config ───────────────────────────────────────────────
-    const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
-    if (!config)
-      return res.status(400).json({ success: false, message: 'WhatsApp is not configured for this company.' });
+    // Try isActive:true first; fall back to any config for this company
+    let config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
+    if (!config) {
+      config = await WhatsAppConfig.findOne({ company: companyId });
+    }
 
-    const authKey      = config.msg91AuthKey      || process.env.MSG91_AUTH_KEY;
-    const senderNumber = config.msg91IntegratedNumber || process.env.MSG91_INTEGRATED_NUMBER;
+    console.log('[meetingWhatsApp] config found:', !!config, config?._id);
 
-    if (!authKey || !senderNumber)
-      return res.status(500).json({ success: false, message: 'MSG91 credentials not configured.' });
+    const authKey      = config?.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
+    const senderNumber = config?.msg91IntegratedNumber || process.env.MSG91_INTEGRATED_NUMBER;
+
+    console.log('[meetingWhatsApp] authKey present:', !!authKey, '| senderNumber:', senderNumber);
+
+    if (!authKey || !senderNumber) {
+      return res.status(500).json({
+        success: false,
+        message: 'MSG91 WhatsApp credentials are not configured. Please set them in Settings → WhatsApp.',
+      });
+    }
 
     // ── 3. Load company name ──────────────────────────────────────────────────
-    const company = await Company.findById(companyId).select('name').lean();
+    const company     = await Company.findById(companyId).select('name').lean();
     const companyName = company?.name || 'SkyUp Digital Solutions';
 
     // ── 4. Build template variables ───────────────────────────────────────────
     const { meetingDate, meetingTime, meetingMode, agentName } = req.body;
 
-    const clientName  = lead.name || 'there';
-    const dateStr     = meetingDate ? fmtDate(meetingDate)  : fmtDate(new Date());
-    const timeStr     = meetingTime ? fmtTime(meetingTime)  : fmtTime(new Date());
-    const modeStr     = meetingMode || 'In-Person';
-    const agentStr    = agentName   || req.user?.name || 'Our Team';
+    const clientName = lead.name  || 'there';
+    const dateStr    = meetingDate ? fmtDate(meetingDate) : fmtDate(new Date());
+    const timeStr    = meetingTime ? fmtTime(meetingTime) : fmtTime(new Date());
+    const modeStr    = meetingMode || 'In-Person';
+    const agentStr   = agentName   || getUserName(req) || 'Our Team';
 
-    // ── 5. Send via MSG91 bulk WhatsApp API ───────────────────────────────────
+    console.log('[meetingWhatsApp] variables:', { clientName, companyName, dateStr, timeStr, modeStr, agentStr });
+
+    // ── 5. Send via MSG91 ─────────────────────────────────────────────────────
     // Template: client_meeting_reminder
-    // {{1}} = client name, {{2}} = company name, {{3}} = date,
-    // {{4}} = time,        {{5}} = mode,         {{6}} = agent name
+    // {{1}}=client name, {{2}}=company name, {{3}}=date,
+    // {{4}}=time,        {{5}}=mode,         {{6}}=agent name
     const components = {
       body_1: { type: 'text', value: clientName  },
       body_2: { type: 'text', value: companyName },
@@ -240,25 +256,31 @@ const sendMeetingWhatsApp = async (req, res) => {
 
     let waMessageId;
     try {
-      const resp = await axios.post(
-        'https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/',
-        {
-          integrated_number: senderNumber,
-          content_type: 'template',
-          payload: {
-            messaging_product: 'whatsapp',
-            type: 'template',
-            template: {
-              name: 'client_meeting_reminder',
-              language: { code: 'en', policy: 'deterministic' },
-              to_and_components: [
-                { to: [clientPhone], components },
-              ],
-            },
+      const payload = {
+        integrated_number: senderNumber,
+        content_type: 'template',
+        payload: {
+          messaging_product: 'whatsapp',
+          type: 'template',
+          template: {
+            name: 'client_meeting_reminder',
+            language: { code: 'en', policy: 'deterministic' },
+            to_and_components: [
+              { to: [clientPhone], components },
+            ],
           },
         },
+      };
+      console.log('[meetingWhatsApp] MSG91 payload:', JSON.stringify(payload));
+
+      const resp = await axios.post(
+        'https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/',
+        payload,
         { headers: { authkey: authKey, 'Content-Type': 'application/json' } },
       );
+
+      console.log('[meetingWhatsApp] MSG91 response:', JSON.stringify(resp.data));
+
       waMessageId =
         resp.data?.data?.[0]?.id ||
         resp.data?.requestId     ||
@@ -266,24 +288,21 @@ const sendMeetingWhatsApp = async (req, res) => {
     } catch (apiErr) {
       const errBody = apiErr?.response?.data;
       const errMsg  = errBody?.message || errBody?.error?.message || apiErr?.message || 'MSG91 API error';
-      console.error('[meetingWhatsApp] MSG91 error:', errBody || apiErr?.message);
+      console.error('[meetingWhatsApp] MSG91 error:', JSON.stringify(errBody || apiErr?.message));
       return res.status(502).json({ success: false, message: errMsg });
     }
 
-    // ── 6. Save to WhatsApp conversation log ──────────────────────────────────
+    // ── 6. Save to WhatsApp conversation log (non-fatal) ─────────────────────
     try {
-      let conversation = await WhatsAppConversation.findOne({
-        waPhone:  clientPhone,
-        company:  companyId,
-      });
+      let conversation = await WhatsAppConversation.findOne({ waPhone: clientPhone, company: companyId });
       if (!conversation) {
         conversation = await WhatsAppConversation.create({
-          waPhone:     clientPhone,
-          contactName: lead.name || '',
-          company:     companyId,
-          lead:        lead._id,
-          status:      'waiting',
-          lastMessage: '[Template: client_meeting_reminder]',
+          waPhone:       clientPhone,
+          contactName:   lead.name || '',
+          company:       companyId,
+          lead:          lead._id,
+          status:        'waiting',
+          lastMessage:   '[Template: client_meeting_reminder]',
           lastMessageAt: new Date(),
         });
       } else {
@@ -299,14 +318,13 @@ const sendMeetingWhatsApp = async (req, res) => {
         body:          '[Template: client_meeting_reminder]',
         messageType:   'template',
         waMessageId,
-        sentBy:        req.user?._id,
+        sentBy:        getUserId(req),
         status:        'sent',
         waTimestamp:   new Date(),
         isTemplate:    true,
         templateName:  'client_meeting_reminder',
       });
     } catch (logErr) {
-      // Non-fatal — message was sent, just log the save failure
       console.error('[meetingWhatsApp] conversation log error:', logErr.message);
     }
 
