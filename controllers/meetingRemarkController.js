@@ -198,8 +198,10 @@ const sendMeetingWhatsApp = async (req, res) => {
     const lead = await Lead.findOne({ _id: id, company: companyId }).lean();
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found.' });
 
-    const clientPhone = waPhone(lead.phone);
-    console.log('[meetingWhatsApp] clientPhone:', clientPhone, '| raw:', lead.phone);
+    // Lead model uses `mobile` as the primary phone field (not `phone`)
+    const rawPhone    = lead.mobile || lead.primaryPhone || lead.phone;
+    const clientPhone = waPhone(rawPhone);
+    console.log('[meetingWhatsApp] clientPhone:', clientPhone, '| raw:', rawPhone);
 
     if (!clientPhone || clientPhone.length < 10) {
       return res.status(400).json({ success: false, message: 'Lead has no valid phone number.' });
