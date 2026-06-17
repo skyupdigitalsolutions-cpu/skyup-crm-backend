@@ -20,7 +20,9 @@ const runTrialExpiryCheck = async () => {
   const now = new Date();
 
   const lapsed = await Company.find({
-    paymentMethodProvided: true,
+    // A trial that was actually started (works for both billing modes —
+    // onetime mode never sets paymentMethodProvided, so we key off trialStartedAt).
+    trialStartedAt:         { $ne: null },
     trialExpiredEmailSent:  false,
     trialEndsAt:            { $ne: null, $lt: now },
     subscriptionStatus:     { $in: ["trial", "expired"] },
