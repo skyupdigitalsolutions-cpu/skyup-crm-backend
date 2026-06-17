@@ -125,6 +125,50 @@ function extractContentType(item) {
   return raw.replace(/^(inbound|incoming|outbound)[\s_-]*/, "").trim() || "text";
 }
 
+// ── Interactive / button / list reply extraction ──────────────────────────────
+// When a lead taps a quick-reply button (Confirm / Reschedule / Cancel) on a
+// template, MSG91 (and Meta) deliver it in one of MANY nested shapes. We dig
+// through all of them and return the human-readable label, or "" if this isn't
+// an interactive reply.
+function extractInteractiveTitle(item) {
+  if (!item || typeof item !== "object") return "";
+  const candidates = [
+    item.button, item.buttonText, item.button_text,
+    item.button_reply, item.buttonReply,
+    item.list_reply, item.listReply,
+    item.quick_reply, item.quickReply,
+    item.reply,
+    item.interactive,
+    item.interactive?.button_reply, item.interactive?.list_reply, item.interactive?.nfm_reply,
+    item.content?.button, item.content?.button_reply, item.content?.list_reply,
+    item.content?.interactive, item.content?.interactive?.button_reply, item.content?.interactive?.list_reply,
+    item.payload, item.payload?.button, item.payload?.button_reply, item.payload?.list_reply,
+    item.message?.button, item.message?.interactive?.button_reply, item.message?.interactive?.list_reply,
+  ];
+  for (const v of candidates) {
+    if (!v) continue;
+    if (typeof v === "string") { const s = v.trim(); if (s) return s; }
+    else if (typeof v === "object") {
+      const t = String(v.title || v.text || v.body || v.caption || v.payload || "").trim();
+      if (t) return t;
+    }
+  }
+  return "";
+}
+
+// True when the payload is an interactive/button/list reply by content-type OR
+// by the presence of a recognisable nested reply structure.
+function looksInteractive(item, contentType) {
+  if (/button|interactive|list|quick|reply/.test(contentType)) return true;
+  return !!(
+    item.button || item.buttonReply || item.button_reply ||
+    item.list_reply || item.listReply || item.interactive ||
+    item.quick_reply || item.quickReply ||
+    item.content?.button || item.content?.interactive ||
+    item.payload?.button_reply || item.payload?.list_reply
+  );
+}
+
 function extractMessageId(item, rawBody, waPhone) {
   return (
     pick(item, "uuid", "id", "messageId", "message_id", "message_uuid", "requestId", "request_id", "wamid") ||
@@ -369,10 +413,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
     let mediaId     = null;
     let mediaCaption = null;
 
-    if (["text", "inbound", "incoming"].includes(contentType)) {
-      msgBody     = msgText || "";
-      messageType = "text";
-    } else if (["image", "document", "audio", "video", "sticker"].includes(contentType)) {
+    if (["image", "document", "audio", "video", "sticker"].includes(contentType)) {
       messageType  = contentType;
       mediaCaption = item.caption || item.payload?.caption || null;
       mediaId      = item.url || item.payload?.url || item.payload?.id || null;
@@ -380,11 +421,15 @@ async function processMSG91Payload(rawBody, opts = {}) {
     } else if (contentType === "location") {
       messageType = "location";
       msgBody     = `📍 Location: ${item.latitude || "?"}, ${item.longitude || "?"}`;
-    } else if (["button", "interactive", "list_reply", "button_reply"].includes(contentType)) {
+    } else if (looksInteractive(item, contentType)) {
+      // Button / interactive / list reply (e.g. Confirm / Reschedule / Cancel)
       messageType = "text";
-      msgBody     = item.button || item.payload?.title || item.payload?.text || msgText || `[${contentType} reply]`;
+      msgBody     = extractInteractiveTitle(item) || msgText || "[reply]";
+    } else if (["text", "inbound", "incoming"].includes(contentType)) {
+      msgBody     = msgText || "";
+      messageType = "text";
     } else {
-      msgBody = msgText || `[${contentType}]`;
+      msgBody = msgText || extractInteractiveTitle(item) || `[${contentType}]`;
     }
 
     if (!msgBody) msgBody = `[${contentType}]`;

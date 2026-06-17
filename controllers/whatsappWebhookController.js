@@ -177,6 +177,16 @@ async function handleInboundMessage(msg, value, config) {
   } else if (msg.type === "reaction") {
     messageType = "reaction";
     body        = msg.reaction?.emoji || "👍";
+  } else if (msg.type === "button") {
+    // Quick-reply button on a template (Confirm / Reschedule / Cancel)
+    messageType = "text";
+    body        = msg.button?.text || msg.button?.payload || "[reply]";
+  } else if (msg.type === "interactive") {
+    // Interactive button / list reply
+    messageType = "text";
+    const it    = msg.interactive || {};
+    body        = it.button_reply?.title || it.list_reply?.title ||
+                  it.button_reply?.id || it.list_reply?.id || "[reply]";
   } else {
     messageType = "unknown";
     body        = `[${msg.type} message]`;
