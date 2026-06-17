@@ -191,6 +191,9 @@ const _createCompanyHandler = async (req, res) => {
 
     res.status(201).json(company);
   } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(400).json({ message: "A company with this email already exists." });
+    }
     res.status(500).json({ message: error.message });
   }
 };
@@ -208,10 +211,36 @@ const createCompanySuperAdmin = async (req, res) => {
     const exists = await Admin.findOne({ company: companyId, role: "super_admin" });
     if (exists) return res.status(400).json({ message: "This company already has a super admin" });
 
+    // ── Orphan-safe email reclaim ─────────────────────────────────────────────
+    // Admin.email is GLOBALLY unique. If a company was deleted directly in the DB
+    // (without the cascade-delete endpoint), its admin rows are orphaned and still
+    // hold the email — causing an E11000 duplicate-key error when recreating.
+    // Here we reclaim the email ONLY if the clashing admin belongs to a company
+    // that no longer exists. If it belongs to a LIVE company, we refuse — so we
+    // never touch a real, in-use account.
+    if (email) {
+      const clash = await Admin.findOne({ email });
+      if (clash) {
+        const clashCompany = clash.company ? await Company.findById(clash.company) : null;
+        if (clashCompany) {
+          return res.status(400).json({
+            message: "An account with this email already exists in another company. Use a different email.",
+          });
+        }
+        // Orphaned admin (its company is gone) → safe to remove and reclaim email
+        await Admin.deleteOne({ _id: clash._id });
+        console.log(`[createCompanySuperAdmin] Reclaimed orphaned admin email "${email}" (company no longer exists)`);
+      }
+    }
+
     const superAdmin = await Admin.create({ name, email, password, role: "super_admin", company: companyId });
 
     res.status(201).json({ _id: superAdmin._id, name: superAdmin.name, email: superAdmin.email, role: superAdmin.role });
   } catch (error) {
+    // Surface a friendly message for any remaining unique-key collision
+    if (error?.code === 11000) {
+      return res.status(400).json({ message: "An account with this email already exists. Use a different email." });
+    }
     res.status(500).json({ message: error.message });
   }
 };
@@ -245,6 +274,65 @@ const _updateCompanyHandler = async (req, res) => {
   }
 };
 const updateCompany = withOptionalLogo(_updateCompanyHandler);
+
+// ── Delete Company (CASCADE) ────────────────────────────────────────────────
+// Deletes a company AND every document that belongs to it, in a single call.
+//
+// WHY THIS EXISTS:
+//   Previously there was no delete endpoint, so companies were removed manually
+//   in MongoDB — which left orphaned `admins` / `users` rows behind. Because
+//   Admin.email and User.email are GLOBALLY unique, recreating a company with
+//   the same emails then failed with an E11000 duplicate-key error.
+//
+//   This endpoint removes the company together with all related data, so no
+//   orphans are ever created. It is strictly scoped to the single companyId
+//   passed in — no other company's data is ever touched.
+const deleteCompany = async (req, res) => {
+  try {
+    const companyId = req.params.id;
+    const company = await Company.findById(companyId);
+    if (!company) return res.status(404).json({ message: "Company not found" });
+
+    // Every collection that stores company-scoped data. We match on BOTH
+    // `company` and `companyId` because the schemas use one or the other; a
+    // filter key that doesn't exist on a model simply matches nothing (safe).
+    const COMPANY_SCOPED_MODELS = [
+      "Admin", "Users", "Leads", "MetaConfig", "MetaQualification",
+      "WebsiteConfig", "WhatsAppConfig", "WhatsAppConversation", "WhatsAppMessage",
+      "SmsConfig", "SmsLog", "EmailLog", "GoogleAdsConfig", "Project",
+      "Attendance", "CompanyAddon", "CompanyBenefit", "CompanyUsage",
+      "EntitlementAuditLog", "LimitOverrideInvoice", "Payment", "ChatUser",
+      "LiveLocation", "MobileCallLog", "Message", "Contact", "Call",
+    ];
+
+    const scopeFilter = { $or: [{ company: companyId }, { companyId: companyId }] };
+    const summary = {};
+
+    // Delete from each related collection. Each is wrapped so one failure
+    // (e.g. a model that doesn't exist) never aborts the whole cascade.
+    for (const modelName of COMPANY_SCOPED_MODELS) {
+      try {
+        const Model = require(`../models/${modelName}`);
+        const result = await Model.deleteMany(scopeFilter);
+        if (result?.deletedCount) summary[modelName] = result.deletedCount;
+      } catch (e) {
+        console.warn(`[deleteCompany] Skipped ${modelName}: ${e.message}`);
+      }
+    }
+
+    // Finally remove the company itself.
+    await Company.findByIdAndDelete(companyId);
+
+    console.log(`[deleteCompany] Deleted company ${companyId} (${company.name}) + related:`, summary);
+    res.json({
+      success: true,
+      message: "Company and all related data deleted successfully",
+      deleted: summary,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
 
 // ── List companies ────────────────────────────────────────────────────────────
 const getCompanies = async (req, res) => {
@@ -796,6 +884,7 @@ module.exports = {
   createCompanySuperAdmin,
   getCompanies,
   updateCompany,
+  deleteCompany,
   toggleCompanyStatus,
   getSubscriptions,
   updateSubscription,

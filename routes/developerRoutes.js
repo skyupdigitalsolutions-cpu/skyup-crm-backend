@@ -13,6 +13,7 @@ const {
   createCompanySuperAdmin,
   getCompanies,
   updateCompany,
+  deleteCompany,
   toggleCompanyStatus,
   getSubscriptions,
   updateSubscription,
@@ -57,6 +58,7 @@ router.get("/companies",                  getCompanies);
 router.post("/companies",                 createCompany);
 router.post("/companies/:id/super-admin", createCompanySuperAdmin);
 router.put("/companies/:id",              updateCompany);
+router.delete("/companies/:id",           deleteCompany);
 router.put("/companies/:id/toggle",       toggleCompanyStatus);
 
 // ── Company detail actions (Phase 3) ─────────────────────────────────────────
