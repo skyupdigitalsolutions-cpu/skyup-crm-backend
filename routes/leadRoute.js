@@ -185,4 +185,15 @@ router.post("/admin/notify-hot", protectAdmin, async (req, res) => {
   }
 });
 
+// ── Client Meeting Remarks ─────────────────────────────────────────────────────
+const { addMeetingRemark, getMeetingRemarks, sendMeetingWhatsApp } = require('../controllers/meetingRemarkController');
+// Employee routes
+router.post('/:id/meeting-remark',   protect, addMeetingRemark);
+router.get('/:id/meeting-remarks',   protect, getMeetingRemarks);
+router.post('/:id/meeting-whatsapp', protect, sendMeetingWhatsApp);
+// Admin routes
+router.post('/admin/:id/meeting-remark',   protectAdmin, addMeetingRemark);
+router.get('/admin/:id/meeting-remarks',   protectAdmin, getMeetingRemarks);
+router.post('/admin/:id/meeting-whatsapp', protectAdmin, sendMeetingWhatsApp);
+
 module.exports = router;
