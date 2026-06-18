@@ -108,11 +108,28 @@ const receiveWebhook = async (req, res) => {
 
         // Step 3: catch-all — any active config for this page with no specific form
         if (!config) {
-          config = await MetaConfig.findOne({
+          const noFormConfigs = await MetaConfig.find({
             pageId,
             isActive: true,
             $or: [{ formId: "" }, { formId: { $exists: false } }],
-          });
+          }).lean();
+
+          if (noFormConfigs.length > 1) {
+            // AMBIGUOUS: several ad-set configs share this page but none of them
+            // pins the incoming form_id. We cannot reliably tell which ad set the
+            // lead belongs to, so it will be attributed to the first config and
+            // may show under the WRONG ad-set/campaign card. Fix: set the exact
+            // Meta formId on each ad-set config so Step 1 matches precisely.
+            console.warn(
+              `⚠️  AD-SET ROUTING AMBIGUOUS — pageId "${pageId}" has ${noFormConfigs.length} active configs with no formId ` +
+              `(${noFormConfigs.map((c) => `"${c.campaignName}${c.adSetName ? " › " + c.adSetName : ""}"`).join(", ")}). ` +
+              `Incoming form_id "${form_id}" did not match any config's formId/formIds, so this lead will be attributed to ` +
+              `"${noFormConfigs[0].campaignName}". Set the correct formId on each ad-set config to route by ad set.`,
+            );
+          }
+          config = noFormConfigs[0]
+            ? await MetaConfig.findById(noFormConfigs[0]._id)
+            : null;
         }
 
         if (!config) {
@@ -160,6 +177,12 @@ const receiveWebhook = async (req, res) => {
         const parsedFields   = parseFieldData(leadData.field_data);
         const assignedUserId = await getNextAssignedUser(config);
         const leadPayload    = mapToLeadSchema(parsedFields, config, leadgen_id, assignedUserId);
+        // Record the exact Meta form this lead came through. In Meta each lead
+        // form belongs to one ad set, so this is the ground-truth key for
+        // attributing the lead to its ad set even if it was routed via a
+        // catch-all config. Prefer the webhook's form_id; fall back to the
+        // config's own formId when the payload omitted it.
+        leadPayload.formId = form_id || config.formId || "";
 
         // ── Qualification scoring ─────────────────────────────────────────────
         // Look up saved rules for this ad set (config._id) and score the lead.

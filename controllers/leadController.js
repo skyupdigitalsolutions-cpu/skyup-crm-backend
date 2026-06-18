@@ -123,12 +123,27 @@ const getLeadsByCampaign = async (req, res) => {
     const { campaign, adSetName, metaConfigId } = req.query;
 
     // Exact path: when the card passes its metaConfigId, scope strictly to that
-    // ad set (plus any legacy leads matching campaign/adSetName that predate it).
+    // config (plus any LEGACY leads — metaConfigId:null — that predate the
+    // metaConfigId field). Legacy leads are matched carefully so an ad-set
+    // sibling's leads never bleed onto the bare-campaign card and vice-versa:
+    //   • Ad-set config  (adSetName present) → legacy must match campaign + that
+    //     exact adSetName.
+    //   • Bare campaign   (no adSetName)      → legacy must match campaign AND
+    //     have NO adSetName of its own, so leads that belong to a named ad set
+    //     are not absorbed here.
     if (metaConfigId) {
       const or = [{ metaConfigId }];
       if (campaign) {
         const legacy = { metaConfigId: null, campaign };
-        if (adSetName && adSetName.trim() !== "") legacy.adSetName = adSetName.trim();
+        if (adSetName && adSetName.trim() !== "") {
+          legacy.adSetName = adSetName.trim();
+        } else {
+          // Bare campaign: exclude any legacy lead that carries an ad-set name.
+          legacy.$or = [
+            { adSetName: { $in: [null, ""] } },
+            { adSetName: { $exists: false } },
+          ];
+        }
         or.push(legacy);
       }
       const leads = await Lead.find({ company: companyId, $or: or })

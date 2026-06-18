@@ -65,6 +65,12 @@ const leadSchema = mongoose.Schema(
     // Campaigns page count leads per AD SET instead of per campaign name (which
     // collides when several ad sets share a campaign name).
     metaConfigId: { type: mongoose.Schema.Types.ObjectId, ref: "MetaConfig", default: null, index: true },
+    // The exact Meta lead FORM id this lead was submitted through. In Meta, each
+    // lead form belongs to one ad set, so formId is the ground-truth key for
+    // attributing a lead to its ad set — independent of the campaign name. Stored
+    // so leads can be re-attributed to the correct ad-set config if they were
+    // routed to a catch-all config at ingestion time.
+    formId: { type: String, default: "", trim: true, index: true },
     status:    { type: String, required: true, trim: true },
     date:      { type: Date, required: true },
     remark:    { type: String, required: true, trim: true },
