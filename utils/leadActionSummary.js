@@ -19,13 +19,35 @@
 
 const axios = require('axios');
 
-const GROK_API_URL = process.env.GROK_API_URL || 'https://api.x.ai/v1/chat/completions';
-const GROK_MODEL   = process.env.GROK_MODEL   || 'grok-2-latest';
+// ── AI summary provider config ────────────────────────────────────────────────
+// This feature now uses Groq (OpenAI-compatible chat API) so it can reuse the
+// existing GROQ_API_KEY already set on the server. Everything is overridable via
+// env, so you can still point this at xAI Grok or any OpenAI-compatible gateway
+// without a code change:
+//   AI_SUMMARY_API_KEY / GROQ_API_KEY / GROK_API_KEY  — first one set wins
+//   AI_SUMMARY_API_URL  (default: Groq chat completions)
+//   AI_SUMMARY_MODEL    (default: llama-3.3-70b-versatile)
+// Legacy GROK_* names are still honoured so nothing else breaks.
+const AI_SUMMARY_API_KEY =
+  process.env.AI_SUMMARY_API_KEY ||
+  process.env.GROQ_API_KEY ||
+  process.env.GROK_API_KEY ||
+  '';
 
-// ── Low-level Grok call ───────────────────────────────────────────────────────
+const GROK_API_URL =
+  process.env.AI_SUMMARY_API_URL ||
+  process.env.GROK_API_URL ||
+  'https://api.groq.com/openai/v1/chat/completions';
+
+const GROK_MODEL =
+  process.env.AI_SUMMARY_MODEL ||
+  process.env.GROK_MODEL ||
+  'llama-3.3-70b-versatile';
+
+// ── Low-level chat call (OpenAI-compatible: works for Groq or xAI Grok) ───────
 async function callGrok(systemPrompt, userContent, maxTokens = 700) {
-  if (!process.env.GROK_API_KEY) {
-    const err = new Error('GROK_API_KEY is not set. Add it to your environment to enable AI summaries.');
+  if (!AI_SUMMARY_API_KEY) {
+    const err = new Error('No AI summary key set. Add GROQ_API_KEY (or AI_SUMMARY_API_KEY) to your environment to enable AI summaries.');
     err.code = 'GROK_NOT_CONFIGURED';
     throw err;
   }
@@ -43,7 +65,7 @@ async function callGrok(systemPrompt, userContent, maxTokens = 700) {
     },
     {
       headers: {
-        Authorization: `Bearer ${process.env.GROK_API_KEY}`,
+        Authorization: `Bearer ${AI_SUMMARY_API_KEY}`,
         'Content-Type': 'application/json',
       },
       timeout: 45000,
