@@ -363,6 +363,26 @@ const leadSchema = mongoose.Schema(
     voiceBotDuration:   { type: Number,  default: null },
     voiceBotTranscript: { type: String,  default: "" },
     lastCalledByBot:    { type: Date,    default: null },
+
+    // ── AI Action Summary (Grok) ──────────────────────────────────────────────
+    // On-demand summary built from the lead's remarks (call history + meeting
+    // remarks) — plus call transcripts/summaries on Pro/Advance — to suggest the
+    // next best action. Cached here and regenerated only when new activity is
+    // added (guarded by actionSummarySignature, a hash of the inputs).
+    actionSummary: {
+      summary:     { type: String, default: "" },
+      nextAction:  { type: String, default: "" },
+      keyPoints:   { type: [String], default: [] },
+      sentiment:   { type: String, default: "" },   // Positive | Neutral | Negative
+      suggestedTemp: { type: String, default: null }, // Hot | Warm | Cold | null
+      basedOn:     { type: String, default: "" },   // "remarks" | "remarks+calls"
+      generatedAt: { type: Date,   default: null },
+      model:       { type: String, default: "" },
+    },
+    // Signature of the inputs (remark + call counts/timestamps) that produced the
+    // cached actionSummary. If the current signature differs, the summary is stale
+    // and will be regenerated on the next request.
+    actionSummarySignature: { type: String, default: "" },
   },
   { timestamps: true }
 );

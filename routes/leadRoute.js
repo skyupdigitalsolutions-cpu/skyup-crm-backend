@@ -35,6 +35,7 @@ const {
   removeSecondaryPhone,
   swapPhones,
   mergeLead,
+  getLeadActionSummary,
 } = require("../controllers/leadController");
 
 const { protect } = require("../middlewares/authMiddleware");
@@ -68,6 +69,9 @@ router.get("/my-leads", protect, getMyLeads);
 router.get("/by-campaign", protectAdmin, getLeadsByCampaign);
 router.get("/distinct-campaigns", protectAdmin, getDistinctCampaigns);
 router.get("/", protect, getLeads);
+// AI action summary (employee + admin) — must precede the /:id wildcard
+router.get("/:id/action-summary", protect, getLeadActionSummary);
+router.get("/admin/:id/action-summary", protectAdmin, getLeadActionSummary);
 router.get("/:id", protect, getLead);
 
 // ── POST ──────────────────────────────────────────────────────────────────────

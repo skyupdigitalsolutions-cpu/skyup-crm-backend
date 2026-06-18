@@ -2426,6 +2426,109 @@ const mergeLead = async (req, res) => {
   }
 };
 
+// ── getLeadActionSummary ──────────────────────────────────────────────────────
+// GET /lead/:id/action-summary?refresh=0|1
+// Builds (or returns cached) an AI action summary for a lead based on its
+// remarks. On Pro/Advance (callTranscription/aiSummary entitlement) the call
+// transcripts/summaries are folded in for a richer result.
+// Cached on the lead; regenerated only when new remarks/calls were added since
+// the cache was built, or when ?refresh=1 is passed.
+const getLeadActionSummary = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const forceRefresh = String(req.query.refresh || "") === "1";
+    const companyId = getCompanyId(req);
+
+    const lead = await Lead.findOne({ _id: id, company: companyId });
+    if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
+
+    // Resolve entitlements → decide whether transcripts are available.
+    let includeTranscripts = false;
+    try {
+      const { getCompanyEntitlements } = require("../services/entitlementService");
+      const ent = await getCompanyEntitlements(companyId);
+      includeTranscripts = !!(ent && (ent.callTranscription || ent.aiSummary));
+    } catch (e) {
+      console.warn("[actionSummary] entitlement check failed:", e.message);
+    }
+
+    // On Pro/Advance, attach the lead's call transcripts/summaries.
+    if (includeTranscripts) {
+      try {
+        const MobileCallLog = require("../models/MobileCallLog");
+        const logs = await MobileCallLog.find({
+          company: companyId,
+          matchedLead: lead._id,
+        }).select("recordings").lean();
+
+        const recs = [];
+        for (const log of logs) {
+          for (const r of (log.recordings || [])) {
+            if (r.transcript || r.summary) {
+              recs.push({ transcript: r.transcript || "", summary: r.summary || null });
+            }
+          }
+        }
+        lead._callRecordings = recs;
+      } catch (e) {
+        console.warn("[actionSummary] transcript fetch failed:", e.message);
+        lead._callRecordings = [];
+      }
+    }
+
+    const {
+      generateLeadActionSummary,
+      computeSummarySignature,
+    } = require("../utils/leadActionSummary");
+
+    const signature = computeSummarySignature(lead, includeTranscripts);
+
+    // Return cache when fresh and not force-refreshing.
+    if (
+      !forceRefresh &&
+      lead.actionSummarySignature &&
+      lead.actionSummarySignature === signature &&
+      lead.actionSummary &&
+      lead.actionSummary.generatedAt
+    ) {
+      return res.status(200).json({
+        ...lead.actionSummary.toObject?.() ?? lead.actionSummary,
+        cached: true,
+      });
+    }
+
+    // Generate fresh.
+    let result;
+    try {
+      result = await generateLeadActionSummary(lead, { includeTranscripts });
+    } catch (e) {
+      if (e.code === "GROK_NOT_CONFIGURED") {
+        return res.status(503).json({
+          message: "AI summary is not configured. Set GROK_API_KEY on the server.",
+          code: "GROK_NOT_CONFIGURED",
+        });
+      }
+      console.error("[actionSummary] generation error:", e.message);
+      return res.status(502).json({
+        message: "AI summary service is unavailable right now. Please try again shortly.",
+        code: "GROK_UNAVAILABLE",
+      });
+    }
+
+    const generatedAt = new Date();
+    const payload = { ...result, generatedAt };
+
+    // Persist cache (best-effort — never fail the response on a write error).
+    Lead.findByIdAndUpdate(id, {
+      $set: { actionSummary: payload, actionSummarySignature: signature },
+    }).catch((e) => console.error("[actionSummary] cache write failed:", e.message));
+
+    return res.status(200).json({ ...payload, cached: false });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getLead,
   getLeads,
@@ -2459,4 +2562,5 @@ module.exports = {
   removeSecondaryPhone,
   swapPhones,
   mergeLead,
+  getLeadActionSummary,
 };
