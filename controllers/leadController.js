@@ -2504,7 +2504,7 @@ const getLeadActionSummary = async (req, res) => {
     } catch (e) {
       if (e.code === "GROK_NOT_CONFIGURED") {
         return res.status(503).json({
-          message: "AI summary is not configured. Set GROK_API_KEY on the server.",
+          message: "AI summary is not configured. Set GROQ_API_KEY on the server.",
           code: "GROK_NOT_CONFIGURED",
         });
       }
