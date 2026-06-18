@@ -1,4 +1,5 @@
 // controllers/metaWebhookController.js
+const axios              = require("axios");
 const MetaConfig         = require("../models/MetaConfig");
 const MetaQualification  = require("../models/MetaQualification");
 const Lead               = require("../models/Leads");
@@ -106,7 +107,11 @@ const receiveWebhook = async (req, res) => {
           config = await MetaConfig.findOne({ pageId, formIds: form_id, isActive: true });
         }
 
-        // Step 3: catch-all — any active config for this page with no specific form
+        // Step 3: no form-pinned config matched. Before blindly attributing the
+        // lead to the first config (the old behaviour that piled every ad set's
+        // leads onto "skyup_ads"), try to identify the lead's real ad set by
+        // asking Meta which ad set / campaign this form_id belongs to, then match
+        // a config by that name. Only if that also fails do we fall back.
         if (!config) {
           const noFormConfigs = await MetaConfig.find({
             pageId,
@@ -114,22 +119,63 @@ const receiveWebhook = async (req, res) => {
             $or: [{ formId: "" }, { formId: { $exists: false } }],
           }).lean();
 
-          if (noFormConfigs.length > 1) {
-            // AMBIGUOUS: several ad-set configs share this page but none of them
-            // pins the incoming form_id. We cannot reliably tell which ad set the
-            // lead belongs to, so it will be attributed to the first config and
-            // may show under the WRONG ad-set/campaign card. Fix: set the exact
-            // Meta formId on each ad-set config so Step 1 matches precisely.
-            console.warn(
-              `⚠️  AD-SET ROUTING AMBIGUOUS — pageId "${pageId}" has ${noFormConfigs.length} active configs with no formId ` +
-              `(${noFormConfigs.map((c) => `"${c.campaignName}${c.adSetName ? " › " + c.adSetName : ""}"`).join(", ")}). ` +
-              `Incoming form_id "${form_id}" did not match any config's formId/formIds, so this lead will be attributed to ` +
-              `"${noFormConfigs[0].campaignName}". Set the correct formId on each ad-set config to route by ad set.`,
-            );
+          // 3a. Try to resolve the form's ad set / campaign from Meta and match
+          //     a config by adSetName (preferred) or campaignName. This routes
+          //     correctly even when the config's formId was never set.
+          let routed = null;
+          try {
+            const probeToken =
+              noFormConfigs[0]?.pageAccessToken ||
+              (await MetaConfig.findOne({ pageId, isActive: true }).lean())?.pageAccessToken;
+            if (probeToken && form_id) {
+              const ver = process.env.META_GRAPH_API_VERSION || "v21.0";
+              const formMeta = await axios.get(
+                `https://graph.facebook.com/${ver}/${form_id}`,
+                { params: { fields: "id,name,adset_name,campaign_name", access_token: probeToken } },
+              );
+              const fAdset = (formMeta.data?.adset_name || "").trim().toLowerCase();
+              const fCamp  = (formMeta.data?.campaign_name || "").trim().toLowerCase();
+              const all    = await MetaConfig.find({ pageId, isActive: true });
+              routed =
+                (fAdset && all.find((c) => (c.adSetName || "").trim().toLowerCase() === fAdset)) ||
+                (fCamp  && all.find((c) =>
+                  (c.adSetName || "").trim() === "" &&
+                  (c.campaignName || "").trim().toLowerCase() === fCamp)) ||
+                null;
+              if (routed) {
+                console.log(`   🎯 Routed by form ad set/campaign to "${routed.campaignName}"`);
+                // Backfill the formId so next time Step 1 matches directly.
+                if (!routed.formId) {
+                  await MetaConfig.findByIdAndUpdate(routed._id, {
+                    formId: form_id,
+                    formIds: Array.from(new Set([...(routed.formIds || []), form_id])),
+                  });
+                }
+              }
+            }
+          } catch (probeErr) {
+            console.warn(`   ⚠ Could not resolve form ad set from Meta: ${probeErr?.response?.data?.error?.message || probeErr.message}`);
           }
-          config = noFormConfigs[0]
-            ? await MetaConfig.findById(noFormConfigs[0]._id)
-            : null;
+
+          if (routed) {
+            config = routed;
+          } else {
+            if (noFormConfigs.length > 1) {
+              // Truly ambiguous and Meta lookup didn't help. The lead's real
+              // form_id is still saved on the lead (leadPayload.formId), so it
+              // can be re-tagged later by formId once configs are fixed. Run the
+              // Sync Meta button, or scripts/retagMetaLeads.js, to repair these.
+              console.warn(
+                `⚠️  AD-SET ROUTING AMBIGUOUS — pageId "${pageId}" has ${noFormConfigs.length} active configs with no formId ` +
+                `(${noFormConfigs.map((c) => `"${c.campaignName}${c.adSetName ? " › " + c.adSetName : ""}"`).join(", ")}). ` +
+                `Incoming form_id "${form_id}" did not match any config, and Meta lookup failed, so this lead is attributed to ` +
+                `"${noFormConfigs[0].campaignName}". Fix: click "Sync Meta" to backfill formIds on each ad-set config.`,
+              );
+            }
+            config = noFormConfigs[0]
+              ? await MetaConfig.findById(noFormConfigs[0]._id)
+              : null;
+          }
         }
 
         if (!config) {
