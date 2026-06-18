@@ -177,6 +177,27 @@ const leadSchema = mongoose.Schema(
       default: null,
     },
 
+    // ── Invalid verification flow ────────────────────────────────────────────
+    // When an employee marks a lead Invalid, it is reassigned to another agent
+    // for verification. invalidOriginalAgent remembers the employee who first
+    // raised it. If the verifier ALSO marks it Invalid, the lead is CLOSED
+    // (isClosed=true) and removed from every employee panel — it then lives only
+    // in the admin "Closed Leads" view. If the verifier DISAGREES, the lead is
+    // returned to the original employee and the admin is notified.
+    invalidOriginalAgent: {
+      type:    mongoose.Schema.Types.ObjectId,
+      ref:     "User",
+      default: null,
+    },
+    // Stage of the Invalid flow: null (none) → "verification" (with a verifier).
+    invalidStage: {
+      type:    String,
+      enum:    [null, "verification"],
+      default: null,
+    },
+    // Reassignment counter for the Invalid flow.
+    invalidReassignCount: { type: Number, default: 0 },
+
     // ── Cold reassignment counter (separate from NI reassign) ────────────────
     coldReassignCount: { type: Number, default: 0 },
 

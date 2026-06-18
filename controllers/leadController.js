@@ -1468,6 +1468,247 @@ const markColdReassign = async (req, res) => {
   }
 };
 
+// ── markInvalid ───────────────────────────────────────────────────────────────
+// Two-step "Invalid" verification flow, mirroring markNotInterested:
+//   STAGE 1 (first Invalid): reassign round-robin to another agent for
+//     verification. Remember the original employee. Lead status → "Verification".
+//   STAGE 2 (verifier ALSO marks Invalid): CLOSE the lead — isClosed=true,
+//     unassign it (user=null) so it leaves every employee panel, and notify the
+//     admin. It then appears only in the admin "Closed Leads" view.
+//   If the verifier DISAGREES (picks any other outcome), that goes through the
+//     normal patchLead path — the lead returns to the original employee via the
+//     "return" branch below is NOT used; disagreement is handled by the client
+//     simply choosing a different outcome, which we cannot intercept here.
+//     To explicitly support "verifier rejects invalid", the client calls this
+//     endpoint with { reject: true } → lead returns to original employee + admin
+//     is notified.
+const markInvalid = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { remark, reject } = req.body;
+
+    if (!remark || !remark.trim())
+      return res.status(400).json({ message: "A remark/reason is required." });
+
+    const companyId = getCompanyId(req);
+    const lead = await Lead.findOne({ _id: id, company: companyId });
+    if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
+    if (lead.isClosed)
+      return res.status(400).json({ message: "Lead is already closed." });
+
+    const _io = global._io;
+    const UserModel = require("../models/Users");
+
+    // Resolve the admin who should be notified for this lead.
+    const resolveAdminId = async () => {
+      try {
+        const employee = await UserModel.findById(lead.user || req.user._id)
+          .select("createdBy")
+          .lean();
+        const raw = lead.assignedAdmin || employee?.createdBy || null;
+        return raw ? String(raw) : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const stage = lead.invalidStage || null;
+
+    const historyEntry = {
+      userId:   req.user._id,
+      userName: req.user.name || "",
+      remark:   remark.trim(),
+      outcome:  reject ? "Invalid Rejected" : "Invalid",
+      calledAt: new Date(),
+    };
+
+    // ── Verifier REJECTS invalid → return to original employee + notify admin ──
+    if (stage === "verification" && reject) {
+      const backTo = lead.invalidOriginalAgent || null;
+      const updatePayload = {
+        $set: {
+          remark:       remark.trim(),
+          invalidStage: null,
+          status:       "New",
+        },
+        $push: { callHistory: historyEntry },
+      };
+      if (backTo) updatePayload.$set.user = backTo;
+
+      const updatedLead = await Lead.findByIdAndUpdate(id, updatePayload, { new: true })
+        .populate("user", "name email")
+        .populate("invalidOriginalAgent", "name email");
+
+      // Notify the original employee it's back with them.
+      if (backTo && _io) {
+        _io.to(`agent:${backTo}`).emit("new_lead_assigned", {
+          leadId:    String(updatedLead._id),
+          leadName:  updatedLead.name,
+          source:    updatedLead.source || "",
+          eventType: "invalid_rejected",
+        });
+      }
+      if (backTo) {
+        sendReassignedLeadNotification(backTo, updatedLead).catch((e) =>
+          console.error("[FCM] invalid-reject reassign error:", e.message),
+        );
+        notifyEmployeeLead(backTo, updatedLead, updatedLead.company).catch((e) =>
+          console.error("[Telegram] invalid-reject notify error:", e.message),
+        );
+      }
+
+      // Notify admin that the verification rejected the Invalid mark.
+      if (_io) {
+        const adminId = await resolveAdminId();
+        const payload = {
+          leadId:     String(updatedLead._id),
+          leadName:   updatedLead.name,
+          remark:     remark.trim(),
+          verifiedBy: req.user.name || "Employee",
+          returnedTo: updatedLead.user?.name || "original employee",
+          at:         new Date().toISOString(),
+        };
+        if (adminId) _io.to(`admin_room:${adminId}`).emit("lead_invalid_rejected", payload);
+        if (updatedLead.company)
+          _io.to(`company_admin:${String(updatedLead.company)}`).emit("lead_invalid_rejected", payload);
+      }
+
+      return res.status(200).json({
+        lead:         updatedLead,
+        outcome:      "invalid_rejected",
+        invalidStage: null,
+        isClosed:     false,
+        message: `Verification rejected the Invalid mark. Lead returned to ${updatedLead.user?.name || "the original employee"}.`,
+      });
+    }
+
+    // ── STAGE 2: verifier CONFIRMS Invalid → close the lead ────────────────────
+    if (stage === "verification") {
+      const updatedLead = await Lead.findByIdAndUpdate(
+        id,
+        {
+          $set: {
+            remark:       remark.trim(),
+            isClosed:     true,
+            closeReason:  remark.trim() || "Invalid (verified)",
+            closedAt:     new Date(),
+            closedBy:     req.user._id,
+            invalidStage: null,
+            status:       "Not Interested",
+            user:         null,   // remove from every employee panel
+          },
+          $push: { callHistory: historyEntry },
+        },
+        { new: true },
+      ).populate("invalidOriginalAgent", "name email");
+
+      // Notify admin the lead has been verified-invalid and closed.
+      if (_io) {
+        const adminId = await resolveAdminId();
+        const payload = {
+          leadId:     String(updatedLead._id),
+          leadName:   updatedLead.name,
+          remark:     remark.trim(),
+          closedBy:   req.user.name || "Employee",
+          closedAt:   new Date().toISOString(),
+          reason:     "Verified Invalid",
+        };
+        if (adminId) _io.to(`admin_room:${adminId}`).emit("lead_closed_by_user", payload);
+        if (updatedLead.company)
+          _io.to(`company_admin:${String(updatedLead.company)}`).emit("lead_closed_by_user", payload);
+      }
+
+      return res.status(200).json({
+        lead:         updatedLead,
+        outcome:      "closed_invalid",
+        invalidStage: null,
+        isClosed:     true,
+        message: "Verification confirmed Invalid. Lead closed and removed from employee panels.",
+      });
+    }
+
+    // ── STAGE 1: first Invalid → send to another agent for verification ────────
+    const excludeIds = [...(lead.previousAgents || []), req.user._id];
+    const nextUserId = await getNextUser(req.user.company, excludeIds);
+
+    const updatePayload = {
+      $set: {
+        remark:               remark.trim(),
+        invalidOriginalAgent: req.user._id,
+        invalidReassignCount: (lead.invalidReassignCount || 0) + 1,
+      },
+      $push: {
+        callHistory:    historyEntry,
+        previousAgents: req.user._id,
+      },
+    };
+
+    if (nextUserId) {
+      updatePayload.$set.user         = nextUserId;
+      updatePayload.$set.invalidStage = "verification";
+      updatePayload.$set.status       = "Verification";
+    } else {
+      // No other agent available — close immediately with the single mark.
+      updatePayload.$set.invalidStage = null;
+      updatePayload.$set.isClosed     = true;
+      updatePayload.$set.closeReason  = remark.trim() || "Invalid";
+      updatePayload.$set.closedAt     = new Date();
+      updatePayload.$set.closedBy     = req.user._id;
+      updatePayload.$set.status       = "Not Interested";
+      updatePayload.$set.user         = null;
+    }
+
+    const updatedLead = await Lead.findByIdAndUpdate(id, updatePayload, { new: true })
+      .populate("user", "name email")
+      .populate("invalidOriginalAgent", "name email");
+
+    if (nextUserId) {
+      // Notify the verifier.
+      if (_io) {
+        _io.to(`agent:${nextUserId}`).emit("new_lead_assigned", {
+          leadId:    String(updatedLead._id),
+          leadName:  updatedLead.name,
+          source:    updatedLead.source || "",
+          eventType: "invalid_verification",
+        });
+      }
+      sendReassignedLeadNotification(nextUserId, updatedLead).catch((e) =>
+        console.error("[FCM] invalid-verify reassign error:", e.message),
+      );
+      notifyEmployeeLead(nextUserId, updatedLead, updatedLead.company).catch((e) =>
+        console.error("[Telegram] invalid-verify notify error:", e.message),
+      );
+    } else if (_io) {
+      // No verifier — closed straight away; notify admin.
+      const adminId = await resolveAdminId();
+      const payload = {
+        leadId:   String(updatedLead._id),
+        leadName: updatedLead.name,
+        remark:   remark.trim(),
+        closedBy: req.user.name || "Employee",
+        closedAt: new Date().toISOString(),
+        reason:   "Invalid (no verifier available)",
+      };
+      if (adminId) _io.to(`admin_room:${adminId}`).emit("lead_closed_by_user", payload);
+      if (updatedLead.company)
+        _io.to(`company_admin:${String(updatedLead.company)}`).emit("lead_closed_by_user", payload);
+    }
+
+    return res.status(200).json({
+      lead:         updatedLead,
+      reassignedTo: nextUserId ? updatedLead.user : null,
+      outcome:      nextUserId ? "sent_for_verification" : "closed_no_verifier",
+      invalidStage: updatedLead.invalidStage,
+      isClosed:     !!updatedLead.isClosed,
+      message: nextUserId
+        ? `Lead marked Invalid and sent to ${updatedLead.user?.name || "another agent"} for verification.`
+        : "Lead marked Invalid. No other agent available, so it was closed immediately.",
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // ── closeLeadWrongEntry ───────────────────────────────────────────────────────
 const closeLeadWrongEntry = async (req, res) => {
   try {
@@ -2185,6 +2426,7 @@ module.exports = {
   patchLeadTemperature,
   markNotInterested,
   markColdReassign,
+  markInvalid,
   deleteLead,
   adminUpdateLead,
   adminDeleteLead,

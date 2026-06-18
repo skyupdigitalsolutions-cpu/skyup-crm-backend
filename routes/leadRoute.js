@@ -17,6 +17,7 @@ const {
   patchLeadTemperature,
   markNotInterested,
   markColdReassign,
+  markInvalid,
   deleteLead,
   adminUpdateLead,
   adminDeleteLead,
@@ -83,6 +84,7 @@ router.post("/",           protect, checkLimit("leads", countCompanyLeads), crea
 // ── PATCH ─────────────────────────────────────────────────────────────────────
 router.patch("/:id/not-interested", protect, markNotInterested);
 router.patch("/:id/cold-reassign", protect, markColdReassign);
+router.patch("/:id/invalid", protect, markInvalid);
 
 // ── Phone reveal tracking ────────────────────────────────────────────────────
 router.post("/:id/reveal-phone", protect, logPhoneReveal);
