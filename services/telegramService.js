@@ -25,6 +25,25 @@ const https    = require('https');
 const Company  = require('../models/Company');
 const User     = require('../models/Users');
 
+// ── Plan entitlement gate ─────────────────────────────────────────────────────
+// Telegram notifications require the "telegramNotification" feature, which is
+// granted on Pro / Advance / Enterprise plans. Even if a company has toggled
+// telegram on and configured a bot, we never send unless the plan allows it.
+// Fails OPEN only if the entitlement service itself errors (so a transient DB
+// issue never silently kills notifications for paying customers).
+async function telegramEntitled(companyId) {
+  try {
+    const { getCompanyEntitlements } = require('./entitlementService');
+    const ent = await getCompanyEntitlements(companyId);
+    if (!ent) return true; // unknown → don't block
+    // Respect explicit false; treat undefined as allowed for backward compat.
+    return ent.telegramNotification !== false;
+  } catch (e) {
+    console.warn('[Telegram] entitlement check failed, allowing send:', e.message);
+    return true;
+  }
+}
+
 // ── Campaign source whitelist ─────────────────────────────────────────────────
 // These are the ONLY lead.source values that trigger Telegram notifications.
 // All other sources (Web Form, Excel Import, CSV Import, etc.) are silently skipped.
@@ -167,6 +186,12 @@ async function notifyCampaignLead(lead, companyId) {
       return;
     }
 
+    // Plan gate — Pro/Advance/Enterprise only
+    if (!(await telegramEntitled(companyId))) {
+      console.debug('[Telegram] Skipping — telegramNotification not in plan for this company');
+      return;
+    }
+
     const company = await Company
       .findById(companyId)
       .select('name telegramBotToken telegramChatId telegramEnabled')
@@ -245,6 +270,9 @@ async function notifyEmployeeLead(userId, lead, companyId) {
   if (!userId || !lead || !companyId) return;
 
   try {
+    // Plan gate — Pro/Advance/Enterprise only
+    if (!(await telegramEntitled(companyId))) return;
+
     // Fetch employee's personal chat ID
     const employee = await User.findById(userId)
       .select('name telegramChatId')

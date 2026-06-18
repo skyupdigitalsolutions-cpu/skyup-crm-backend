@@ -90,10 +90,24 @@ const PLAN_FEATURE_KEY_MAP = {
   "tasks":               "tasks",
   "payroll":             "payroll",
   "website-tracking":    "websiteTracking",
+  "telegram-notification": "telegramNotification",
 };
 
 // DEFAULT_PLAN_LIMITS — fallback when PlanConfig record is missing from DB.
 // Mirrors the spec and DEFAULT_PLAN_FEATURES in subscriptionController.
+//
+// PLAN STRUCTURE (kept in sync with subscriptionController.DEFAULT_PLAN_FEATURES
+// and the frontend UpgradePlan.PLAN_DEFAULTS):
+//   • The MOBILE APP (dashboard, notifications, reports, lead management, daily
+//     report, attendance, live employee status) is included on EVERY paid plan
+//     and is NOT a toggleable feature — the corresponding feature flags below
+//     (leadManagement, attendance, dailyReport, basicReports) are always true.
+//   • COMMUNICATION = the 3 blasts (email/whatsapp/sms) — Pro, Advance, Enterprise.
+//   • TELEGRAM NOTIFICATION — toggleable; Pro, Advance, Enterprise.
+//   • transcriptionsPerMonth / summariesPerMonth are expressed in MINUTES/month
+//     of call transcription + summary (0 = not available on this plan).
+//   • ENTERPRISE is a fully-custom "Contact us" tier: unlimited defaults here,
+//     tailored per company by the developer via PlanConfig / devOverrides.
 const DEFAULT_PLAN_LIMITS = {
   trial: {
     admins: 1, users: 3, leads: 100, websites: 1,
@@ -110,8 +124,11 @@ const DEFAULT_PLAN_LIMITS = {
       whatsappAutomation: false, webhookAccess: false,
       customDomain: false, customBranding: false,
       projects: false, tasks: false, payroll: false, websiteTracking: false,
+      telegramNotification: false,
     },
   },
+  // BASIC — mobile app + core CRM. 1 admin, 5 users, 1000 leads,
+  // 1 meta / 1 website / 1 google. No communication blasts, no telegram, no AI.
   basic: {
     admins: 1, users: 5, leads: 1000, websites: 1,
     metaCampaigns: 1, googleAccounts: 1, storageMB: 100,
@@ -120,19 +137,23 @@ const DEFAULT_PLAN_LIMITS = {
     features: {
       leadManagement: true, contacts: true, basicReports: true,
       attendance: true, dailyReport: true, smsBlast: false,
-      whatsappBlast: false, emailBlast: false, campaigns: false,
-      googleAds: false, metaAds: false, callRecording: false,
+      whatsappBlast: false, emailBlast: false, campaigns: true,
+      googleAds: true, metaAds: true, callRecording: false,
       apiAccess: false, customReports: false, whiteLabel: false,
       callTranscription: false, aiSummary: false, voiceBot: false,
       whatsappAutomation: false, webhookAccess: false,
       customDomain: false, customBranding: false,
-      projects: false, tasks: false, payroll: false, websiteTracking: false,
+      projects: false, tasks: false, payroll: false, websiteTracking: true,
+      telegramNotification: false,
     },
   },
+  // PRO — everything in Basic + Communication (3 blasts) + Telegram +
+  // 6000 min transcription/summary. 3 admins, 20 users, 2000 leads,
+  // 3 meta / 3 website / 3 google.
   pro: {
-    admins: 3, users: 20, leads: 10000, websites: 3,
-    metaCampaigns: 5, googleAccounts: 3, storageMB: 5120,
-    transcriptionsPerMonth: 200, summariesPerMonth: 200, voiceBotPerMonth: 100,
+    admins: 3, users: 20, leads: 2000, websites: 3,
+    metaCampaigns: 3, googleAccounts: 3, storageMB: 5120,
+    transcriptionsPerMonth: 6000, summariesPerMonth: 6000, voiceBotPerMonth: 100,
     recordingEnabled: true, dataRetentionDays: 60,
     features: {
       leadManagement: true, contacts: true, basicReports: true,
@@ -144,12 +165,15 @@ const DEFAULT_PLAN_LIMITS = {
       whatsappAutomation: true, webhookAccess: true,
       customDomain: false, customBranding: false,
       projects: true, tasks: true, payroll: false, websiteTracking: true,
+      telegramNotification: true,
     },
   },
+  // ADVANCE — everything in Pro, larger limits + 15000 min transcription/summary.
+  // 5 admins, 50 users, 5000 leads, 5 meta / 5 website / 5 google.
   advance: {
-    admins: 10, users: 999, leads: 999999, websites: 999,
-    metaCampaigns: 999, googleAccounts: 999, storageMB: 51200,
-    transcriptionsPerMonth: 2000, summariesPerMonth: 2000, voiceBotPerMonth: 1000,
+    admins: 5, users: 50, leads: 5000, websites: 5,
+    metaCampaigns: 5, googleAccounts: 5, storageMB: 51200,
+    transcriptionsPerMonth: 15000, summariesPerMonth: 15000, voiceBotPerMonth: 1000,
     recordingEnabled: true, dataRetentionDays: 365,
     features: {
       leadManagement: true, contacts: true, basicReports: true,
@@ -161,15 +185,16 @@ const DEFAULT_PLAN_LIMITS = {
       whatsappAutomation: true, webhookAccess: true,
       customDomain: true, customBranding: true,
       projects: true, tasks: true, payroll: true, websiteTracking: true,
+      telegramNotification: true,
     },
   },
-  // Custom "Contact us" tier. Same generous ceiling as advance by default —
-  // the developer tailors each enterprise company via devOverrides / PlanConfig.
+  // Custom "Contact us" tier. Unlimited ceiling by default — the developer
+  // tailors each enterprise company via devOverrides / PlanConfig.
   enterprise: {
-    admins: 10, users: 999, leads: 999999, websites: 999,
-    metaCampaigns: 999, googleAccounts: 999, storageMB: 51200,
-    transcriptionsPerMonth: 2000, summariesPerMonth: 2000, voiceBotPerMonth: 1000,
-    recordingEnabled: true, dataRetentionDays: 365,
+    admins: 999, users: 999, leads: 999999, websites: 999,
+    metaCampaigns: 999, googleAccounts: 999, storageMB: 512000,
+    transcriptionsPerMonth: 999999, summariesPerMonth: 999999, voiceBotPerMonth: 999999,
+    recordingEnabled: true, dataRetentionDays: 3650,
     features: {
       leadManagement: true, contacts: true, basicReports: true,
       attendance: true, dailyReport: true, smsBlast: true,
@@ -180,6 +205,7 @@ const DEFAULT_PLAN_LIMITS = {
       whatsappAutomation: true, webhookAccess: true,
       customDomain: true, customBranding: true,
       projects: true, tasks: true, payroll: true, websiteTracking: true,
+      telegramNotification: true,
     },
   },
 };
