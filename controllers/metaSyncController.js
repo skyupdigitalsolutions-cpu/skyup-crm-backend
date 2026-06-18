@@ -108,7 +108,39 @@ const syncFromMeta = async (req, res) => {
     const results = [];
 
     for (const form of enrichedForms) {
-      const existing = await MetaConfig.findOne({ pageId, formId: form.id });
+      // Primary match: a config already pinned to this exact (pageId, formId).
+      let existing = await MetaConfig.findOne({ pageId, formId: form.id });
+
+      // FIX: also try to ADOPT a pre-existing config that was created manually
+      // WITHOUT a formId. Before this, sync only matched by (pageId, formId), so
+      // your old formId-less configs (e.g. "skyup_ads", "AI_cold …") were never
+      // matched — sync created brand-new duplicate configs and left the old
+      // formId-less ones in place, which kept swallowing every lead via the
+      // webhook's Step-3 catch-all. We now find the formId-less config that
+      // matches this form's ad set / campaign and BACKFILL its formId, so the
+      // webhook's precise Step-1 match (pageId + formId) starts working.
+      const adoptName = (form.adset_name || "").trim();
+      const adoptCampaign = (form.campaign_name || "").trim();
+      if (!existing && (adoptName || adoptCampaign)) {
+        const candidates = await MetaConfig.find({
+          pageId,
+          $or: [{ formId: "" }, { formId: { $exists: false } }],
+        });
+        existing =
+          // Best: same ad-set name (most specific).
+          (adoptName &&
+            candidates.find(
+              (c) => (c.adSetName || "").trim().toLowerCase() === adoptName.toLowerCase(),
+            )) ||
+          // Next: a bare-campaign config whose name matches the Meta campaign.
+          (adoptCampaign &&
+            candidates.find(
+              (c) =>
+                (c.adSetName || "").trim() === "" &&
+                (c.campaignName || "").trim().toLowerCase() === adoptCampaign.toLowerCase(),
+            )) ||
+          null;
+      }
 
       // FIX: Derive parentCampaignName and adSetName first so we can use them
       // in both the "skipped" result and the "created" document consistently.
@@ -129,14 +161,27 @@ const syncFromMeta = async (req, res) => {
       }
 
       if (existing) {
-        // FIX: also update parentCampaignName / adSetName on skipped records
-        // so that re-syncing fixes previously broken grouping data.
+        // FIX: backfill the formId (and the grouping fields) onto the existing
+        // config so the webhook can route precisely by form from now on. Only
+        // set formId when the existing config doesn't already have one, so we
+        // never steal a form from another correctly-pinned config.
+        const update = {};
+        if (!existing.formId) update.formId = form.id;
+        if (!Array.isArray(existing.formIds) || !existing.formIds.includes(form.id)) {
+          update.formIds = Array.from(new Set([...(existing.formIds || []), form.id]));
+        }
         if (!existing.parentCampaignName && parentCampaignName) {
-          await MetaConfig.findByIdAndUpdate(existing._id, {
-            parentCampaignName,
-            adSetName: existing.adSetName || adSetName,
-          });
-          console.log(`🔄 Updated parentCampaignName for existing config: "${existing.campaignName}"`);
+          update.parentCampaignName = parentCampaignName;
+        }
+        if (!existing.adSetName && adSetName) {
+          update.adSetName = adSetName;
+        }
+
+        if (Object.keys(update).length > 0) {
+          await MetaConfig.findByIdAndUpdate(existing._id, update);
+          console.log(
+            `🔄 Backfilled config "${existing.campaignName}" → formId="${update.formId || existing.formId}" adSet="${update.adSetName || existing.adSetName || ""}"`,
+          );
         }
 
         skipped++;
@@ -146,7 +191,7 @@ const syncFromMeta = async (req, res) => {
           campaignName:       existing.campaignName,
           adSetName:          existing.adSetName || adSetName,
           parentCampaignName: existing.parentCampaignName || parentCampaignName,
-          status:             "skipped (already exists)",
+          status:             update.formId ? "updated (formId backfilled)" : "skipped (already exists)",
         });
         continue;
       }
