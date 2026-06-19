@@ -52,25 +52,39 @@ async function callGrok(systemPrompt, userContent, maxTokens = 700) {
     throw err;
   }
 
-  const { data } = await axios.post(
-    GROK_API_URL,
-    {
-      model:       GROK_MODEL,
-      max_tokens:  maxTokens,
-      temperature: 0.3,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: userContent  },
-      ],
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${AI_SUMMARY_API_KEY}`,
-        'Content-Type': 'application/json',
+  let data;
+  try {
+    ({ data } = await axios.post(
+      GROK_API_URL,
+      {
+        model:       GROK_MODEL,
+        max_tokens:  maxTokens,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userContent  },
+        ],
       },
-      timeout: 45000,
-    },
-  );
+      {
+        headers: {
+          Authorization: `Bearer ${AI_SUMMARY_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 45000,
+      },
+    ));
+  } catch (e) {
+    const status = e?.response?.status;
+    // A 413 means the prompt was too large for the provider. buildContext now
+    // bounds the size so this should not happen, but if it still does we tag it
+    // clearly instead of masking it as a generic "busy" error.
+    if (status === 413) {
+      const err = new Error('AI summary input was too large to process.');
+      err.code = 'GROK_PAYLOAD_TOO_LARGE';
+      throw err;
+    }
+    throw e;
+  }
 
   // OpenAI-compatible response shape
   return (data.choices?.[0]?.message?.content || '').trim();
@@ -78,16 +92,31 @@ async function callGrok(systemPrompt, userContent, maxTokens = 700) {
 
 // ── Build the text block from a lead's remarks + (optional) transcripts ───────
 // Returns { text, hasTranscripts, remarkCount }.
+//
+// SIZE LIMITS (prevents HTTP 413 "payload too large" from the LLM API):
+//   A lead with a long history (dozens of calls / many transcripts) used to
+//   concatenate EVERYTHING into one prompt, which exceeded the provider's
+//   request-size limit → 413, surfaced to the app as "AI summary service is
+//   busy". We now keep only the MOST RECENT entries (recency matters most for
+//   deciding the next action) and enforce a hard total character ceiling.
+const MAX_REMARKS        = 40;     // most recent call-history remarks
+const MAX_MEETINGS       = 15;     // most recent meeting remarks
+const MAX_TRANSCRIPTS    = 6;      // most recent transcripts folded in
+const MAX_TRANSCRIPT_LEN = 1500;   // per-transcript char cap
+const MAX_CONTEXT_CHARS  = 12000;  // hard ceiling on the whole context block
+
 function buildContext(lead, { includeTranscripts } = {}) {
   const lines = [];
   let remarkCount = 0;
   let hasTranscripts = false;
 
-  // 1. Call-history remarks (the core signal on every plan)
+  // 1. Call-history remarks (the core signal on every plan).
+  // Keep only the most recent MAX_REMARKS — sorted oldest→newest for reading,
+  // but we slice the TAIL so the latest activity is always included.
   const callHistory = Array.isArray(lead.callHistory) ? lead.callHistory : [];
-  const sortedCalls = [...callHistory].sort(
-    (a, b) => new Date(a.calledAt || 0) - new Date(b.calledAt || 0),
-  );
+  const sortedCalls = [...callHistory]
+    .sort((a, b) => new Date(a.calledAt || 0) - new Date(b.calledAt || 0))
+    .slice(-MAX_REMARKS);
   for (const c of sortedCalls) {
     const date = c.calledAt ? new Date(c.calledAt).toLocaleDateString('en-IN') : '';
     const parts = [
@@ -98,8 +127,9 @@ function buildContext(lead, { includeTranscripts } = {}) {
     if (c.remark || c.outcome) { lines.push(parts.join(' | ')); remarkCount++; }
   }
 
-  // 2. Meeting remarks (field visits / demos)
-  const meetingRemarks = Array.isArray(lead.meetingRemarks) ? lead.meetingRemarks : [];
+  // 2. Meeting remarks (field visits / demos) — most recent only.
+  const meetingRemarks = (Array.isArray(lead.meetingRemarks) ? lead.meetingRemarks : [])
+    .slice(-MAX_MEETINGS);
   for (const m of meetingRemarks) {
     const date = m.metAt ? new Date(m.metAt).toLocaleDateString('en-IN') : '';
     const parts = [
@@ -111,12 +141,15 @@ function buildContext(lead, { includeTranscripts } = {}) {
     if (m.remark || m.outcome) { lines.push(parts.join(' | ')); remarkCount++; }
   }
 
-  // 3. Pro/Advance only — call transcripts + per-call AI summaries
+  // 3. Pro/Advance only — call transcripts + per-call AI summaries.
+  // Cap the COUNT of transcripts (each was already length-capped) — many
+  // recordings × full transcripts is the main 413 driver. Prefer the most recent.
   if (includeTranscripts && Array.isArray(lead._callRecordings)) {
-    for (const rec of lead._callRecordings) {
+    const recs = lead._callRecordings.slice(-MAX_TRANSCRIPTS);
+    for (const rec of recs) {
       if (rec.transcript && rec.transcript.trim()) {
         hasTranscripts = true;
-        const t = rec.transcript.trim().slice(0, 2000); // keep prompt bounded
+        const t = rec.transcript.trim().slice(0, MAX_TRANSCRIPT_LEN);
         lines.push(`[Call Transcript]\n${t}`);
       }
       if (rec.summary && rec.summary.summary) {
@@ -126,7 +159,18 @@ function buildContext(lead, { includeTranscripts } = {}) {
     }
   }
 
-  return { text: lines.join('\n\n'), hasTranscripts, remarkCount };
+  // Hard ceiling: if the combined block is still too big, keep the TAIL
+  // (most recent content) up to MAX_CONTEXT_CHARS. This guarantees the request
+  // never trips the provider's payload limit regardless of history size.
+  let text = lines.join('\n\n');
+  if (text.length > MAX_CONTEXT_CHARS) {
+    text = text.slice(text.length - MAX_CONTEXT_CHARS);
+    // Drop a possibly-truncated first line so we don't start mid-entry.
+    const nl = text.indexOf('\n');
+    if (nl > 0) text = text.slice(nl + 1);
+  }
+
+  return { text, hasTranscripts, remarkCount };
 }
 
 // ── Main: generate an action summary for a lead ───────────────────────────────
