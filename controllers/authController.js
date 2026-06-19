@@ -101,7 +101,19 @@ const login = async (req, res) => {
         token:     generateToken(user._id, user.role || "employee"),
       });
     } else {
-      res.status(401).json({ message: "Invalid email or password" });
+      // Specific reason so the UI can highlight the right field.
+      if (!user) {
+        return res.status(401).json({
+          message: "No account found with this email.",
+          code: "EMAIL_NOT_FOUND",
+          field: "email",
+        });
+      }
+      return res.status(401).json({
+        message: "Incorrect password. Please try again.",
+        code: "WRONG_PASSWORD",
+        field: "password",
+      });
     }
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -167,7 +179,34 @@ const loginUnified = async (req, res) => {
       });
     }
 
-    return res.status(401).json({ message: "Invalid email or password" });
+    // No role matched on email+password. Distinguish WHY so the UI can show a
+    // specific message instead of a generic "invalid email or password".
+    //   • If no account anywhere has this email  → email not found.
+    //   • If the email exists but password failed → wrong password.
+    // NOTE: this intentionally reveals whether an email is registered (account
+    // enumeration). For an internal CRM that's an accepted UX tradeoff; if you
+    // want to hide it, revert to a single generic 401 message.
+    const emailExists =
+      !!dev ||
+      !!admin ||
+      !!user ||
+      !!(await Developer.findOne({ email }).select("_id").lean()) ||
+      !!(await Admin.findOne({ email }).select("_id").lean()) ||
+      !!(await User.findOne({ email }).select("_id").lean());
+
+    if (!emailExists) {
+      return res.status(401).json({
+        message: "No account found with this email.",
+        code: "EMAIL_NOT_FOUND",
+        field: "email",
+      });
+    }
+
+    return res.status(401).json({
+      message: "Incorrect password. Please try again.",
+      code: "WRONG_PASSWORD",
+      field: "password",
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
