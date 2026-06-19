@@ -43,6 +43,13 @@ const RESOURCE_ADDON_DELTA = {
   transcriptions_500:  { field: "transcriptionsLimit", delta: 500 },
   summaries_100:       { field: "summariesLimit",      delta: 100 },
   summaries_500:       { field: "summariesLimit",      delta: 500 },
+  // Minute-based AI credit packs — add minutes to the same monthly pools that
+  // transcription/summary usage is billed against (1 unit = 1 minute). Without
+  // these entries a purchased minute pack validated and charged but added 0 min.
+  transcriptions_5000mins:  { field: "transcriptionsLimit", delta: 5000  },
+  transcriptions_20000mins: { field: "transcriptionsLimit", delta: 20000 },
+  summaries_5000mins:       { field: "summariesLimit",      delta: 5000  },
+  summaries_20000mins:      { field: "summariesLimit",      delta: 20000 },
 };
 
 // Feature addons — unlock a boolean flag
