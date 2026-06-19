@@ -18,6 +18,12 @@ const recordingSchema = new mongoose.Schema(
     // ── AI Transcription & Summary ──────────────────────────────────────────
     transcript:       { type: String, default: null },
     summary:          { type: Object, default: null }, // { summary, keyPoints[], sentiment, nextAction, suggestedTemp }
+    // Audio length (seconds) measured from the transcript timestamps, and the
+    // whole minutes billed against the company's monthly transcription pool.
+    // Stored so usage is auditable and a re-transcribe of the same recording
+    // doesn't double-bill (see transcriptionController).
+    durationSec:    { type: Number, default: 0 },
+    billedMinutes:  { type: Number, default: 0 },
     transcribeStatus: {
       type:    String,
       enum:    ['pending', 'processing', 'done', 'failed'],
