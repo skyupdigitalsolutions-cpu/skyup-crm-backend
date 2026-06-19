@@ -17,11 +17,11 @@ const {
 // aiSummary feature or has exhausted its summary quota). Transcription and
 // AI Summary are independent features with independent monthly limits.
 async function runPipeline(transcribeFn, contactName, withSummary = true) {
-  const { transcript } = await transcribeFn();
+  const { transcript, durationSec } = await transcribeFn();
   const summary = withSummary
     ? await summarizeCallTranscript(transcript, contactName)
     : null;
-  return { transcript, summary };
+  return { transcript, summary, durationSec: durationSec || 0 };
 }
 
 // ── Helper: resolve caller from protectAny middleware ─────────────────────────
@@ -59,43 +59,73 @@ const transcribeMobileCall = async (req, res) => {
       getRemainingUsage(caller.company),
     ]);
 
+    // Feature gate: the company must have call transcription enabled at all.
+    if (!ent.callTranscription) {
+      return res.status(403).json({
+        message: 'Call transcription is not included in your plan. Upgrade to enable it.',
+        code: 'TRANSCRIPTION_NOT_AVAILABLE',
+      });
+    }
+
+    // Minute-based billing: limits and usage are counted in MINUTES, shared
+    // across both engines (ElevenLabs + Whisper). We can't know the exact length
+    // until the audio is transcribed, so block here only when the pool is
+    // already exhausted (<= 0). After transcription we bill ceil(seconds/60).
     if (remaining.transcriptions <= 0) {
       return res.status(429).json({
         message: 'Monthly call transcription limit reached. Upgrade your plan or buy a transcription add-on.',
         code: 'TRANSCRIPTION_LIMIT_REACHED',
         limit: remaining.limits?.transcriptions ?? ent.transcriptionsLimit,
         used:  remaining.used?.transcriptions ?? 0,
+        unit:  'minutes',
       });
     }
 
+    // If this recording was already transcribed and billed before, don't bill
+    // again on a re-run — just re-use the prior minute count for the summary
+    // decision. (alreadyBilled minutes were consumed on the first successful run.)
+    const alreadyBilled = recording.billedMinutes || 0;
+
     // Generate a summary only if the company has the AI Summary feature AND
-    // has summary quota left. Transcription proceeds regardless.
+    // has summary quota (minutes) left. Transcription proceeds regardless.
     const withSummary = !!ent.aiSummary && remaining.summaries > 0;
 
     recording.transcribeStatus = 'processing';
     await log.save({ validateBeforeSave: false });
 
     const contactName = log.name || 'the customer';
-    const { transcript, summary } = await runPipeline(
+    const { transcript, summary, durationSec } = await runPipeline(
       () => transcribeMobileRecording(recording.url, { audioLang }),
       contactName,
       withSummary,
     );
 
+    // Compute minutes to bill from the measured audio length. Always at least 1
+    // minute for any non-empty transcription, rounded UP to the next whole minute.
+    const measuredSec  = Math.max(0, Math.round(durationSec || 0));
+    const billedMinutes = measuredSec > 0 ? Math.ceil(measuredSec / 60) : 1;
+
     recording.transcript       = transcript;
+    recording.durationSec      = measuredSec;
+    recording.billedMinutes    = alreadyBilled || billedMinutes;
     if (summary) recording.summary = summary;
     recording.transcribeStatus = 'done';
     await log.save({ validateBeforeSave: false });
 
-    // ── Consume usage (transcription always; summary only if produced) ────────
-    await consumeUsage(caller.company, 'transcriptionsUsed', 1).catch(() => {});
-    if (summary) await consumeUsage(caller.company, 'summariesUsed', 1).catch(() => {});
+    // ── Consume usage in MINUTES (only on the first successful run) ───────────
+    if (!alreadyBilled) {
+      await consumeUsage(caller.company, 'transcriptionsUsed', billedMinutes).catch(() => {});
+      // Summary draws from its own monthly minute pool, billed the same length.
+      if (summary) await consumeUsage(caller.company, 'summariesUsed', billedMinutes).catch(() => {});
+    }
 
     res.json({
       message: 'Transcription complete',
       transcript,
       summary,
       summaryGenerated: !!summary,
+      durationSec: measuredSec,
+      minutesBilled: alreadyBilled ? 0 : billedMinutes,
       recordingId,
     });
   } catch (err) {
