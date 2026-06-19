@@ -164,7 +164,7 @@ async function runElevenLabs(audioInput) {
 
   if (!data?.words || data.words.length === 0) {
     // Fall back to flat transcript if no word data
-    return { text: data?.text?.trim() || '' };
+    return { text: data?.text?.trim() || '', durationSec: 0 };
   }
 
   const lang = data.language_code || 'unknown';
@@ -228,9 +228,17 @@ async function runElevenLabs(audioInput) {
   const rawTranscript = lines.join('\n');
   console.log(`[ElevenLabs] Raw transcript (first 200 chars): ${rawTranscript.slice(0, 200)}`);
 
+  // Audio duration = the end timestamp of the last spoken word (seconds).
+  // Used for minute-based billing in the transcription controller.
+  let durationSec = 0;
+  for (const w of data.words) {
+    if (typeof w.end === 'number' && w.end > durationSec) durationSec = w.end;
+  }
+  console.log(`[ElevenLabs] Audio duration: ${durationSec.toFixed(1)}s`);
+
   // Romanize any native-script (Devanagari etc.) words → Roman phonetic
   const transcript = await romanizeTranscript(rawTranscript);
-  return { text: transcript };
+  return { text: transcript, durationSec };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,8 +286,16 @@ async function runGroqWhisper(audioInput) {
     ? segments.map(seg => `[${formatTime(seg.start)}] ${seg.text.trim()}`).join('\n')
     : data.text.trim();
 
+  // Groq verbose_json returns a top-level `duration` (seconds). Fall back to the
+  // last segment's end time if it's missing. Used for minute-based billing.
+  let durationSec = typeof data.duration === 'number' ? data.duration : 0;
+  if (!durationSec && segments.length > 0) {
+    durationSec = segments.reduce((m, s) => Math.max(m, s.end || 0), 0);
+  }
+
   console.log(`[Groq] Transcript (first 100 chars): ${transcript.slice(0, 100)}`);
-  return { text: transcript };
+  console.log(`[Groq] Audio duration: ${durationSec.toFixed(1)}s`);
+  return { text: transcript, durationSec };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -304,8 +320,8 @@ async function transcribeMobileRecording(relativeUrl, options = {}) {
   const audioLang = options.audioLang || 'mixed';
 
   if (relativeUrl && relativeUrl.startsWith('http')) {
-    const { text } = await transcribeAudio(relativeUrl, audioLang);
-    return { transcript: text };
+    const { text, durationSec } = await transcribeAudio(relativeUrl, audioLang);
+    return { transcript: text, durationSec: durationSec || 0 };
   }
 
   const clean      = (relativeUrl || '').replace(/^\/+/, '');
@@ -319,8 +335,8 @@ async function transcribeMobileRecording(relativeUrl, options = {}) {
     `Recording file not found.\n  Tried: ${candidate1}\n  Tried: ${candidate2}\n  URL stored: ${relativeUrl}`
   );
 
-  const { text } = await transcribeAudio(filePath, audioLang);
-  return { transcript: text };
+  const { text, durationSec } = await transcribeAudio(filePath, audioLang);
+  return { transcript: text, durationSec: durationSec || 0 };
 }
 
 module.exports = { transcribeMobileRecording };
