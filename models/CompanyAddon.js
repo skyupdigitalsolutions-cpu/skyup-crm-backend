@@ -30,10 +30,17 @@ const ADDON_TYPES = [
   "custom_domain",
   "custom_branding",
   // AI credit packs
+  // AI credit packs (one-time). Counted in MINUTES, matching the minute-based
+  // transcription/summary billing. The legacy *_100 / *_500 packs are kept so
+  // any existing purchases still validate; new packs are minute-denominated.
   "transcriptions_100",
   "transcriptions_500",
   "summaries_100",
   "summaries_500",
+  "transcriptions_5000mins",
+  "transcriptions_20000mins",
+  "summaries_5000mins",
+  "summaries_20000mins",
 ];
 
 const companyAddonSchema = new mongoose.Schema(
@@ -122,5 +129,73 @@ companyAddonSchema.index({ companyId: 1, addonType: 1, status: 1 });
 
 const CompanyAddon = mongoose.model("CompanyAddon", companyAddonSchema);
 
+// ── Expiry policy ─────────────────────────────────────────────────────────────
+// All one-time AI credit packs (transcription / summary minute packs) expire
+// automatically this many days after purchase. After expiry the CompanyAddon is
+// filtered out by getCompanyEntitlements (expiryDate <= now), so the granted
+// minutes stop counting toward the company's monthly pool.
+const CREDIT_PACK_EXPIRY_DAYS = 30;
+
+// Add-on types that are one-time credit packs and should auto-expire.
+const CREDIT_PACK_TYPES = new Set([
+  "transcriptions_100",
+  "transcriptions_500",
+  "summaries_100",
+  "summaries_500",
+  "transcriptions_5000mins",
+  "transcriptions_20000mins",
+  "summaries_5000mins",
+  "summaries_20000mins",
+]);
+
+/**
+ * Compute the expiryDate for a newly purchased / granted add-on.
+ *
+ * Priority:
+ *   1. Explicit durationMonths (developer override) → start + N months.
+ *   2. Credit pack (one-time AI minutes)            → start + 30 days.
+ *   3. billingPeriod monthly                        → start + 1 month.
+ *   4. billingPeriod yearly                         → start + 1 year.
+ *   5. Anything else (one_time feature/resource)    → null (never expires).
+ *
+ * @param {Object} opts
+ * @param {string}  opts.addonType
+ * @param {string} [opts.billingPeriod]
+ * @param {number} [opts.durationMonths]
+ * @param {Date}   [opts.startDate]
+ * @returns {Date|null}
+ */
+function computeAddonExpiry({ addonType, billingPeriod, durationMonths, startDate } = {}) {
+  const start = startDate ? new Date(startDate) : new Date();
+
+  if (durationMonths) {
+    const d = new Date(start);
+    d.setMonth(d.getMonth() + parseInt(durationMonths, 10));
+    return d;
+  }
+
+  if (CREDIT_PACK_TYPES.has(addonType)) {
+    const d = new Date(start);
+    d.setDate(d.getDate() + CREDIT_PACK_EXPIRY_DAYS);
+    return d;
+  }
+
+  if (billingPeriod === "monthly") {
+    const d = new Date(start);
+    d.setMonth(d.getMonth() + 1);
+    return d;
+  }
+  if (billingPeriod === "yearly") {
+    const d = new Date(start);
+    d.setFullYear(d.getFullYear() + 1);
+    return d;
+  }
+
+  return null; // one_time feature/resource — no expiry
+}
+
 module.exports = CompanyAddon;
 module.exports.ADDON_TYPES = ADDON_TYPES;
+module.exports.CREDIT_PACK_TYPES = CREDIT_PACK_TYPES;
+module.exports.CREDIT_PACK_EXPIRY_DAYS = CREDIT_PACK_EXPIRY_DAYS;
+module.exports.computeAddonExpiry = computeAddonExpiry;
