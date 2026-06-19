@@ -67,6 +67,7 @@ const { startLeadAlertsJob }         = require('./jobs/leadAlertsJob');
 // NEW: Monthly usage counter reset
 const { startUsageResetJob }         = require('./jobs/usageResetJob');
 const { startLimitOverrideExpiryJob } = require('./jobs/limitOverrideExpiryJob');
+const { startAddonExpiryJob }         = require('./jobs/addonExpiryJob');
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute         = require('./routes/smsCampaign');
@@ -315,6 +316,7 @@ connectDB().then(() => {
     startLeadAlertsJob();
     startUsageResetJob();   // NEW
     startLimitOverrideExpiryJob();  // NEW — reverts expired priced limit overrides
+    startAddonExpiryJob();          // NEW — marks expired add-ons (incl. 30-day credit packs) as expired
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();
