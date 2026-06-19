@@ -17,6 +17,8 @@ const crypto   = require("crypto");
 
 const AddonCatalog = require("../models/AddonCatalog");
 const CompanyAddon = require("../models/CompanyAddon");
+const { computeAddonExpiry } = require("../models/CompanyAddon");
+const { sendAddonReceipt }   = require("../services/addonReceiptService");
 const Company      = require("../models/Company");
 const Payment      = require("../models/Payment");
 const { logAudit } = require("../services/entitlementService");
@@ -131,14 +133,17 @@ const verifyAddonPayment = async (req, res) => {
     );
     const amount = Math.round(item.price * qty);
 
-    // ── Compute expiry from billing period ───────────────────────────────────
+    // ── Compute expiry ───────────────────────────────────────────────────────
+    // Credit packs (AI minute packs) auto-expire 30 days after purchase;
+    // monthly/yearly add-ons follow their billing cycle; other one-time
+    // feature/resource add-ons never expire. Centralised in the model so every
+    // purchase path (Razorpay, developer purchase, grant) stays consistent.
     const startDate  = new Date();
-    let   expiryDate = null;
-    if (item.billingPeriod === "monthly") {
-      expiryDate = new Date(startDate); expiryDate.setMonth(expiryDate.getMonth() + 1);
-    } else if (item.billingPeriod === "yearly") {
-      expiryDate = new Date(startDate); expiryDate.setFullYear(expiryDate.getFullYear() + 1);
-    } // one_time → null (never expires)
+    const expiryDate = computeAddonExpiry({
+      addonType,
+      billingPeriod: item.billingPeriod,
+      startDate,
+    });
 
     // ── Create the addon (turns the entitlement on) ──────────────────────────
     const addon = await CompanyAddon.create({
@@ -187,6 +192,22 @@ const verifyAddonPayment = async (req, res) => {
       newValue:  addonType,
       reason:    `Self-serve paid: ${item.name} × ${qty} @ ${item.currency} ${amount}`,
     }).catch(e => console.error("[verifyAddonPayment] audit failed:", e.message));
+
+    // ── Email receipt to the customer (company email + super_admins) ──────────
+    // Fire-and-forget: the add-on is already active and the invoice row exists,
+    // so a receipt failure must not affect the purchase response.
+    sendAddonReceipt({
+      companyId:     company._id,
+      addonName:     item.name,
+      quantity:      qty,
+      billing:       item.billingPeriod,
+      expiryDate,
+      actionType:    "purchase",
+      invoiceId,
+      amount,
+      transactionId: razorpay_payment_id,
+      paymentDate:   now,
+    }).catch(e => console.error("[verifyAddonPayment] receipt failed:", e.message));
 
     return res.status(200).json({
       success:    true,
