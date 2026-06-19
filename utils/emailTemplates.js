@@ -676,9 +676,182 @@ const planInvoiceEmail = ({
   return { subject, html: shell(body), text };
 };
 
+// ── 5. Add-on Invoice / Activation Email ─────────────────────────────────────
+// Sent after an add-on is purchased (Razorpay) or granted (developer panel).
+// Mirrors planInvoiceEmail but with add-on wording (no plan/expiry-renewal copy).
+//
+// @param {object} opts
+//   recipientName   {string}
+//   recipientRole   {string}    — "superadmin" | "developer" | "customer"
+//   companyName     {string}
+//   companyEmail    {string}
+//   addonName       {string}    — e.g. "5000 min Transcriptions"
+//   quantity        {number}
+//   billing         {string}    — "monthly" | "yearly" | "one_time"
+//   expiryDate      {Date|string|null}
+//   actionType      {string}    — "purchase" | "grant"
+//   invoiceId       {string|null}
+//   amount          {number|null}  — INR
+//   transactionId   {string|null}
+//   paymentDate     {Date|string|null}
+//   dashboardUrl    {string}
+const addonInvoiceEmail = ({
+  recipientName  = "Admin",
+  recipientRole  = "customer",
+  companyName,
+  companyEmail   = "",
+  addonName      = "Add-on",
+  quantity       = 1,
+  billing        = "one_time",
+  expiryDate     = null,
+  actionType     = "purchase",
+  invoiceId      = null,
+  amount         = null,
+  transactionId  = null,
+  paymentDate    = null,
+  dashboardUrl   = process.env.FRONTEND_URL
+    ? `${process.env.FRONTEND_URL}/billing`
+    : "https://app.skyupcrm.com/billing",
+}) => {
+  const isPaid     = amount !== null && amount > 0;
+  const actionWord = actionType === "grant" ? "Activated" : "Purchased";
+  const actionIcon = actionType === "grant" ? "✅" : "🧩";
+
+  const billingLabel = billing === "yearly" ? "Annual"
+                     : billing === "monthly" ? "Monthly"
+                     : "One-time";
+  const paymentStr = paymentDate
+    ? new Date(paymentDate).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })
+    : new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+  const expiryStr = expiryDate
+    ? new Date(expiryDate).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })
+    : "No expiry";
+  const amountStr = amount != null ? `\u20B9${Number(amount).toLocaleString("en-IN")}` : "\u2014";
+
+  const roleBadgeColor = recipientRole === "developer" ? ORANGE
+                       : recipientRole === "customer"  ? GREEN
+                       : ACCENT;
+  const roleBadgeLabel = recipientRole === "developer" ? "Developer"
+                       : recipientRole === "customer"  ? "Account"
+                       : "Super Admin";
+
+  const detailRows = [
+    ["Company",        companyName],
+    ["Company Email",  companyEmail || "\u2014"],
+    ["Add-on",         addonName],
+    ["Quantity",       String(quantity || 1)],
+    ["Billing",        billingLabel],
+    ["Valid Until",    expiryStr],
+    ...(isPaid ? [
+      ["Invoice ID",     invoiceId || "\u2014"],
+      ["Amount Paid",    amountStr],
+      ["Transaction ID", transactionId || "\u2014"],
+      ["Payment Date",   paymentStr],
+    ] : [
+      ["Activated On",   paymentStr],
+      ["Activated By",   actionType === "grant" ? "Developer Panel" : "\u2014"],
+    ]),
+  ].map(([label, value], i, arr) => {
+    const isLast = i === arr.length - 1;
+    return `
+    <tr>
+      <td style="padding:10px 0;${!isLast ? `border-bottom:1px solid ${BORDER};` : ""}width:42%;">
+        <span style="font-size:12px;color:${MUTED};">${label}</span>
+      </td>
+      <td style="padding:10px 0;${!isLast ? `border-bottom:1px solid ${BORDER};` : ""}">
+        <span style="font-size:13px;font-weight:600;color:${TEXT};">${value}</span>
+      </td>
+    </tr>`;
+  }).join("");
+
+  const body = `
+  <tr>
+    <td style="padding:0;">
+      <div style="background:${roleBadgeColor}15;border-bottom:2px solid ${roleBadgeColor}40;padding:14px 40px;">
+        <p style="margin:0;font-size:11px;font-weight:700;color:${roleBadgeColor};
+                  letter-spacing:1.5px;text-transform:uppercase;">
+          \uD83D\uDEE1\uFE0F ${roleBadgeLabel} &nbsp;·&nbsp; Add-on ${actionWord} Notification
+        </p>
+      </div>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:28px 40px 0;">
+      <p style="margin:0 0 6px;font-size:24px;font-weight:800;color:${TEXT};line-height:1.25;">
+        ${actionIcon} Add-on ${actionWord}
+      </p>
+      <p style="margin:0 0 24px;font-size:13px;color:${MUTED};line-height:1.6;">
+        Hi <strong style="color:${TEXT};">${recipientName}</strong>,
+        the add-on <strong style="color:${TEXT};">${addonName}</strong>${quantity > 1 ? ` (×${quantity})` : ""}
+        for <strong style="color:${TEXT};">${companyName}</strong>
+        has been successfully <strong style="color:${GREEN};">${actionWord.toLowerCase()}</strong>.
+        ${isPaid
+          ? "The payment has been processed and the invoice details are below."
+          : "The add-on was activated and the details are below."}
+      </p>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:0 40px 24px;">
+      <div style="background:${BG};border:1px solid ${BORDER};border-radius:14px;padding:24px 28px;">
+        <p style="margin:0 0 16px;font-size:11px;font-weight:700;letter-spacing:2px;
+                  text-transform:uppercase;color:${DIM};">${isPaid ? "Invoice Details" : "Activation Details"}</p>
+        <table cellpadding="0" cellspacing="0" width="100%">${detailRows}</table>
+      </div>
+    </td>
+  </tr>
+  ${isPaid ? `
+  <tr>
+    <td style="padding:0 40px 24px;">
+      <div style="background:${GREEN}10;border:1px solid ${GREEN}30;border-radius:14px;padding:20px 28px;text-align:center;">
+        <p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:${GREEN}80;">Amount Paid</p>
+        <p style="margin:0;font-size:32px;font-weight:800;color:${GREEN};">${amountStr}</p>
+        <p style="margin:4px 0 0;font-size:11px;color:${MUTED};">${billingLabel} &nbsp;·&nbsp; ${addonName}</p>
+      </div>
+    </td>
+  </tr>` : ""}
+  <tr>
+    <td style="padding:0 40px 28px;text-align:center;">
+      <a href="${dashboardUrl}"
+         style="display:inline-block;background:${ACCENT};color:#fff;font-size:14px;
+                font-weight:700;text-decoration:none;padding:14px 36px;border-radius:10px;">
+        View Billing \u2192
+      </a>
+    </td>
+  </tr>`;
+
+  const subject = isPaid
+    ? `${actionIcon} Invoice: ${companyName} \u2014 ${addonName} ${actionWord}${invoiceId ? ` (${invoiceId})` : ""}`
+    : `${actionIcon} Add-on ${actionWord}: ${companyName} \u2014 ${addonName}`;
+
+  const text = [
+    `SkyUp CRM \u2014 Add-on ${actionWord} ${isPaid ? "Invoice" : "Notification"}`,
+    ``,
+    `Hi ${recipientName},`,
+    `The add-on ${addonName}${quantity > 1 ? ` (x${quantity})` : ""} for ${companyName} has been ${actionWord.toLowerCase()}.`,
+    ``,
+    `Company:      ${companyName}`,
+    `Add-on:       ${addonName}`,
+    `Quantity:     ${quantity || 1}`,
+    `Billing:      ${billingLabel}`,
+    `Valid Until:  ${expiryStr}`,
+    ...(isPaid ? [
+      `Invoice ID:   ${invoiceId || "\u2014"}`,
+      `Amount Paid:  ${amountStr}`,
+      `Transaction:  ${transactionId || "\u2014"}`,
+      `Date:         ${paymentStr}`,
+    ] : [`Activated On: ${paymentStr}`]),
+    ``,
+    `Billing: ${dashboardUrl}`,
+  ].join("\n");
+
+  return { subject, html: shell(body), text };
+};
+
 module.exports = {
   companyWelcomeEmail,
   subscriptionExpiryEmail,
   superAdminExpiryDigestEmail,
   planInvoiceEmail,
+  addonInvoiceEmail,
 };
