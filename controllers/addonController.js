@@ -4,8 +4,22 @@
 // Every mutation writes an EntitlementAuditLog record via logAudit().
 
 const CompanyAddon = require("../models/CompanyAddon");
+const { computeAddonExpiry } = require("../models/CompanyAddon");
 const Company      = require("../models/Company");
+const AddonCatalog = require("../models/AddonCatalog");
 const { logAudit } = require("../services/entitlementService");
+const { sendAddonReceipt } = require("../services/addonReceiptService");
+
+// ── Resolve a human-friendly add-on name + billing period from the catalog ────
+// Falls back to the raw addonType / "one_time" when no catalog row exists, so a
+// receipt can still be sent even for ad-hoc grants.
+async function resolveAddonMeta(addonType) {
+  try {
+    const item = await AddonCatalog.findOne({ addonType }).select("name billingPeriod").lean();
+    if (item) return { name: item.name || addonType, billing: item.billingPeriod || "one_time" };
+  } catch (_) { /* ignore */ }
+  return { name: addonType, billing: "one_time" };
+}
 
 // ── Resolve actor from request (developer or super_admin) ──────────────────────
 function getActor(req) {
@@ -50,11 +64,8 @@ const purchaseAddon = async (req, res) => {
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
 
     const startDate  = new Date();
-    let   expiryDate = null;
-    if (durationMonths) {
-      expiryDate = new Date(startDate);
-      expiryDate.setMonth(expiryDate.getMonth() + parseInt(durationMonths, 10));
-    }
+    // Credit packs auto-expire after 30 days; explicit durationMonths overrides.
+    const expiryDate = computeAddonExpiry({ addonType, durationMonths, startDate });
 
     const addon = await CompanyAddon.create({
       companyId,
@@ -79,6 +90,19 @@ const purchaseAddon = async (req, res) => {
       reason:   notes || `Paid addon: ${addonType} × ${quantity}`,
     });
 
+    // Email receipt to the customer (best-effort, non-blocking).
+    const meta = await resolveAddonMeta(addonType);
+    sendAddonReceipt({
+      companyId,
+      addonName:   meta.name,
+      quantity:    Math.max(1, parseInt(quantity, 10)),
+      billing:     meta.billing,
+      expiryDate,
+      actionType:  "purchase",
+      amount:      null,           // developer purchase: amount tracked elsewhere
+      paymentDate: startDate,
+    }).catch(e => console.error("[purchaseAddon] receipt failed:", e.message));
+
     res.status(201).json({ success: true, addon });
   } catch (err) {
     console.error("[purchaseAddon]", err.message);
@@ -101,11 +125,8 @@ const grantAddon = async (req, res) => {
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
 
     const startDate  = new Date();
-    let   expiryDate = null;
-    if (durationMonths) {
-      expiryDate = new Date(startDate);
-      expiryDate.setMonth(expiryDate.getMonth() + parseInt(durationMonths, 10));
-    }
+    // Credit packs auto-expire after 30 days; explicit durationMonths overrides.
+    const expiryDate = computeAddonExpiry({ addonType, durationMonths, startDate });
 
     const numericPrice = Math.max(0, parseFloat(price) || 0);
 
@@ -133,6 +154,19 @@ const grantAddon = async (req, res) => {
       newValue: addonType,
       reason:   notes || `Addon granted: ${addonType} × ${quantity}${numericPrice > 0 ? ` @ ${currency} ${numericPrice}` : " (free)"}`,
     });
+
+    // Email receipt/notification to the customer (best-effort, non-blocking).
+    const grantMeta = await resolveAddonMeta(addonType);
+    sendAddonReceipt({
+      companyId,
+      addonName:   grantMeta.name,
+      quantity:    Math.max(1, parseInt(quantity, 10)),
+      billing:     grantMeta.billing,
+      expiryDate,
+      actionType:  "grant",
+      amount:      numericPrice > 0 ? numericPrice : null,
+      paymentDate: startDate,
+    }).catch(e => console.error("[grantAddon] receipt failed:", e.message));
 
     res.status(201).json({ success: true, addon });
   } catch (err) {
