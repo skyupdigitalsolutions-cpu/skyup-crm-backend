@@ -105,6 +105,19 @@ const addonCatalogSchema = new mongoose.Schema(
       type:    Boolean,
       default: true,
     },
+
+    // Whether the developer allows customers to choose auto-renewal for this add-on.
+    // "none"     = no renewal choice shown — purchase is always one-time (default for credit packs).
+    // "optional" = customer can choose monthly auto-renew OR one-time at checkout.
+    // "required" = always auto-renews monthly, customer has no choice (useful for resource seats).
+    //
+    // Credit (transcription/summary minute) packs are ALWAYS "none" — they are
+    // consumed by usage, not by calendar month, so recurring billing makes no sense.
+    renewalMode: {
+      type:    String,
+      enum:    ["none", "optional", "required"],
+      default: "none",
+    },
   },
   { timestamps: true }
 );

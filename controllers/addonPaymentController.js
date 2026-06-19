@@ -39,7 +39,7 @@ async function resolveBuyableAddon(addonType, planKey) {
 // ── POST /api/razorpay/addon/create-order ─────────────────────────────────────
 const createAddonOrder = async (req, res) => {
   try {
-    const { addonType, quantity = 1 } = req.body;
+    const { addonType, quantity = 1, autoRenew = false } = req.body;
     if (!addonType) {
       return res.status(400).json({ success: false, message: "addonType is required" });
     }
@@ -59,6 +59,10 @@ const createAddonOrder = async (req, res) => {
       item.maxQuantity || 1
     );
 
+    // Credit packs never auto-renew — enforce server-side regardless of client value.
+    const wantsAutoRenew = item.category !== "credit" && !!autoRenew &&
+      (item.renewalMode === "optional" || item.renewalMode === "required");
+
     const amount = Math.round(item.price * qty);
     if (amount <= 0) {
       return res.status(400).json({ success: false, message: "This add-on has no purchasable price set." });
@@ -69,21 +73,24 @@ const createAddonOrder = async (req, res) => {
       currency: item.currency || "INR",
       receipt:  `addon_${Date.now()}`,
       notes: {
-        kind:      "addon",
+        kind:        "addon",
         addonType,
-        quantity:  String(qty),
-        companyId: company._id.toString(),
+        quantity:    String(qty),
+        autoRenew:   String(wantsAutoRenew),
+        companyId:   company._id.toString(),
       },
     });
 
     return res.status(200).json({
-      success:  true,
-      orderId:  order.id,
-      amount:   order.amount,
-      currency: order.currency,
-      keyId:    process.env.RAZORPAY_KEY_ID,
-      addonName: item.name,
-      quantity:  qty,
+      success:     true,
+      orderId:     order.id,
+      amount:      order.amount,
+      currency:    order.currency,
+      keyId:       process.env.RAZORPAY_KEY_ID,
+      addonName:   item.name,
+      quantity:    qty,
+      autoRenew:   wantsAutoRenew,
+      renewalMode: item.renewalMode || "none",
     });
   } catch (err) {
     console.error("[createAddonOrder]", err);
@@ -100,6 +107,7 @@ const verifyAddonPayment = async (req, res) => {
       razorpay_signature,
       addonType,
       quantity = 1,
+      autoRenew = false,
     } = req.body;
 
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !addonType) {
@@ -133,11 +141,11 @@ const verifyAddonPayment = async (req, res) => {
     );
     const amount = Math.round(item.price * qty);
 
+    // Credit packs NEVER auto-renew — enforce server-side.
+    const willAutoRenew = item.category !== "credit" && !!autoRenew &&
+      (item.renewalMode === "optional" || item.renewalMode === "required");
+
     // ── Compute expiry ───────────────────────────────────────────────────────
-    // Credit packs (AI minute packs) auto-expire 30 days after purchase;
-    // monthly/yearly add-ons follow their billing cycle; other one-time
-    // feature/resource add-ons never expire. Centralised in the model so every
-    // purchase path (Razorpay, developer purchase, grant) stays consistent.
     const startDate  = new Date();
     const expiryDate = computeAddonExpiry({
       addonType,
@@ -156,9 +164,10 @@ const verifyAddonPayment = async (req, res) => {
       paymentStatus:  "paid",
       price:          amount,
       currency:       item.currency || "INR",
+      autoRenew:      willAutoRenew,
       createdBy:      req.admin?._id || null,
       createdByModel: "Admin",
-      notes:          `Self-serve purchase via Razorpay (${razorpay_payment_id})`,
+      notes:          `Self-serve purchase via Razorpay (${razorpay_payment_id})${willAutoRenew ? " — auto-renew enabled" : ""}`,
     });
 
     // ── Invoice record (mirrors plan payments) ───────────────────────────────
@@ -218,6 +227,7 @@ const verifyAddonPayment = async (req, res) => {
       amount,
       currency:   item.currency || "INR",
       expiryDate,
+      autoRenew:  willAutoRenew,
       transactionId: razorpay_payment_id,
     });
   } catch (err) {

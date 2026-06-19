@@ -35,6 +35,36 @@ const DEFAULT_CATALOG = [
   { addonType: "transcriptions_500",   name: "500 Transcriptions",     category: "credit",   price: 1199, billingPeriod: "one_time", description: "+500 transcription credits" },
   { addonType: "summaries_100",        name: "100 AI Summaries",       category: "credit",   price: 299,  billingPeriod: "one_time", description: "+100 summary credits" },
   { addonType: "summaries_500",        name: "500 AI Summaries",       category: "credit",   price: 1199, billingPeriod: "one_time", description: "+500 summary credits" },
+  // ── Combined Transcription + AI Summary minute packs (one-time) ─────────────
+  // Each pack tops up BOTH the transcription AND the summary minute pools.
+  // The developer sets price per pack via the Addon Pricing Panel — the
+  // defaults below (₹49 / ₹199 / ₹349) are editable at any time.
+  // minuteCount stored in the name/description for display only; the actual
+  // minutes granted come from COMBINED_ADDON_DELTA in entitlementService.
+  {
+    addonType: "transcription_summary_100mins",
+    name: "100 Min Transcription & Summary",
+    category: "credit",
+    price: 49,
+    billingPeriod: "one_time",
+    description: "+100 minutes of call transcription + AI summary (both pools topped up)",
+  },
+  {
+    addonType: "transcription_summary_500mins",
+    name: "500 Min Transcription & Summary",
+    category: "credit",
+    price: 199,
+    billingPeriod: "one_time",
+    description: "+500 minutes of call transcription + AI summary (both pools topped up)",
+  },
+  {
+    addonType: "transcription_summary_1000mins",
+    name: "1000 Min Transcription & Summary",
+    category: "credit",
+    price: 349,
+    billingPeriod: "one_time",
+    description: "+1000 minutes of call transcription + AI summary (both pools topped up)",
+  },
 ];
 
 async function seedCatalogIfEmpty() {
@@ -75,7 +105,7 @@ const getCatalog = async (req, res) => {
 // Whitelist of fields the developer may set — never trust the whole body.
 const EDITABLE = [
   "name", "description", "category", "price", "currency", "billingPeriod",
-  "isPublic", "visiblePlans", "maxQuantity", "sortOrder", "isActive",
+  "isPublic", "visiblePlans", "maxQuantity", "sortOrder", "isActive", "renewalMode",
 ];
 
 function sanitize(cfg) {
@@ -92,6 +122,10 @@ function sanitize(cfg) {
       out.visiblePlans = Array.isArray(cfg.visiblePlans)
         ? cfg.visiblePlans.map(String).map(s => s.trim().toLowerCase()).filter(Boolean)
         : [];
+    else if (key === "renewalMode") {
+      const allowed = ["none", "optional", "required"];
+      out.renewalMode = allowed.includes(cfg.renewalMode) ? cfg.renewalMode : "none";
+    }
     else out[key] = cfg[key];
   }
   return out;
@@ -207,6 +241,8 @@ const getPublicAddons = async (req, res) => {
       currency:      it.currency,
       billingPeriod: it.billingPeriod,
       maxQuantity:   it.maxQuantity,
+      // Credit packs are always "none" — renewal mode only applies to resource/feature addons.
+      renewalMode:   it.category === "credit" ? "none" : (it.renewalMode || "none"),
     }));
 
     res.json({ success: true, plan: planKey, addons });

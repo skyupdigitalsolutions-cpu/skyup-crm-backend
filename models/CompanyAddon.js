@@ -41,6 +41,10 @@ const ADDON_TYPES = [
   "transcriptions_20000mins",
   "summaries_5000mins",
   "summaries_20000mins",
+  // Combined transcription + summary minute packs (both pools topped up together)
+  "transcription_summary_100mins",
+  "transcription_summary_500mins",
+  "transcription_summary_1000mins",
 ];
 
 const companyAddonSchema = new mongoose.Schema(
@@ -119,6 +123,15 @@ const companyAddonSchema = new mongoose.Schema(
       trim:    true,
       uppercase: true,
     },
+
+    // Whether this addon instance should auto-renew when it expires.
+    // Only meaningful for resource/feature addons with billingPeriod "monthly"/"yearly".
+    // Credit packs (transcription/summary minutes) are NEVER auto-renewed — they
+    // are consumed by usage and re-purchased by the customer when exhausted.
+    autoRenew: {
+      type:    Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );
@@ -146,6 +159,10 @@ const CREDIT_PACK_TYPES = new Set([
   "transcriptions_20000mins",
   "summaries_5000mins",
   "summaries_20000mins",
+  // Combined packs — both transcription + summary minutes topped up together
+  "transcription_summary_100mins",
+  "transcription_summary_500mins",
+  "transcription_summary_1000mins",
 ]);
 
 /**
