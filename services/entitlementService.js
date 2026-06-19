@@ -39,17 +39,31 @@ const RESOURCE_ADDON_DELTA = {
   storage_1gb:         { field: "storageMB",      delta: 1024  },
   storage_5gb:         { field: "storageMB",      delta: 5120  },
   storage_10gb:        { field: "storageMB",      delta: 10240 },
+  // ── Retired credit packs (NOT sold any more) ─────────────────────────────
+  // These old single-pool packs are kept ONLY so any company that already
+  // purchased/was granted one before retirement keeps working (renew/disable,
+  // entitlement calc). They are not in the catalog or any picker. New sales use
+  // the combined minute pack in MULTI_FIELD_ADDON_DELTA below.
   transcriptions_100:  { field: "transcriptionsLimit", delta: 100 },
   transcriptions_500:  { field: "transcriptionsLimit", delta: 500 },
   summaries_100:       { field: "summariesLimit",      delta: 100 },
   summaries_500:       { field: "summariesLimit",      delta: 500 },
-  // Minute-based AI credit packs — add minutes to the same monthly pools that
-  // transcription/summary usage is billed against (1 unit = 1 minute). Without
-  // these entries a purchased minute pack validated and charged but added 0 min.
   transcriptions_5000mins:  { field: "transcriptionsLimit", delta: 5000  },
   transcriptions_20000mins: { field: "transcriptionsLimit", delta: 20000 },
   summaries_5000mins:       { field: "summariesLimit",      delta: 5000  },
   summaries_20000mins:      { field: "summariesLimit",      delta: 20000 },
+};
+
+// Multi-field addons — a single addonType that bumps more than one entitlement
+// field at once. The combined AI minute pack is the only credit pack sold now:
+// one purchase adds the same number of MINUTES to BOTH the transcription and
+// summary monthly pools (1 unit = 1 minute in each). quantity multiplies it, so
+// buying ×2 of the 100-min pack gives +200 to each pool.
+const MULTI_FIELD_ADDON_DELTA = {
+  transcription_summary_100mins: [
+    { field: "transcriptionsLimit", delta: 100 },
+    { field: "summariesLimit",      delta: 100 },
+  ],
 };
 
 // Feature addons — unlock a boolean flag
@@ -334,6 +348,14 @@ async function getCompanyEntitlements(companyId) {
       ent[field] = (ent[field] || 0) + delta * qty;
     }
 
+    // Multi-field addon — e.g. the combined transcription+summary minute pack
+    // bumps BOTH pools from one addonType.
+    if (MULTI_FIELD_ADDON_DELTA[addon.addonType]) {
+      for (const { field, delta } of MULTI_FIELD_ADDON_DELTA[addon.addonType]) {
+        ent[field] = (ent[field] || 0) + delta * qty;
+      }
+    }
+
     // Feature addon — unlock the boolean flag
     if (FEATURE_ADDON_FLAG[addon.addonType]) {
       ent[FEATURE_ADDON_FLAG[addon.addonType]] = true;
@@ -347,6 +369,12 @@ async function getCompanyEntitlements(companyId) {
     if (RESOURCE_ADDON_DELTA[benefit.benefitType]) {
       const { field, delta } = RESOURCE_ADDON_DELTA[benefit.benefitType];
       ent[field] = (ent[field] || 0) + delta * qty;
+    }
+
+    if (MULTI_FIELD_ADDON_DELTA[benefit.benefitType]) {
+      for (const { field, delta } of MULTI_FIELD_ADDON_DELTA[benefit.benefitType]) {
+        ent[field] = (ent[field] || 0) + delta * qty;
+      }
     }
 
     if (FEATURE_ADDON_FLAG[benefit.benefitType]) {
@@ -491,6 +519,7 @@ module.exports = {
   logAudit,
   // Export constants so other modules can reference them
   RESOURCE_ADDON_DELTA,
+  MULTI_FIELD_ADDON_DELTA,
   FEATURE_ADDON_FLAG,
   DEFAULT_PLAN_LIMITS,
 };

@@ -13,6 +13,7 @@ const {
   getNextAssignedUser,
 } = require("../utils/metaHelper");
 const { notifyCampaignLead } = require("../services/telegramService");
+const { sendNewLeadNotification } = require("../services/fcmService");
 
 // GET - Meta webhook verification handshake
 const verifyWebhook = async (req, res) => {
@@ -302,6 +303,16 @@ const receiveWebhook = async (req, res) => {
         notifyCampaignLead(newLead, newLead.company).catch(e =>
           console.error("[Telegram] Meta lead notify error:", e.message)
         );
+
+        // FIX: push a mobile notification to the assigned agent for Meta ad
+        // leads too. Previously only manually-created leads (leadController)
+        // triggered sendNewLeadNotification, so agents got NO phone alert for
+        // leads coming in from Meta ads — their main lead source.
+        if (assignedUserId) {
+          sendNewLeadNotification(assignedUserId, newLead).catch(e =>
+            console.error("[FCM] Meta lead push error:", e.message)
+          );
+        }
       }
     }
   } catch (err) {

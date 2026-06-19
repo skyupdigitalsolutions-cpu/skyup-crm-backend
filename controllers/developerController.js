@@ -622,8 +622,9 @@ const addAiCredits = async (req, res) => {
     const companyId = req.params.id;
     const { creditType, quantity = 1, reason = "" } = req.body;
 
-    // creditType: "transcriptions_100" | "transcriptions_500" | "summaries_100" | "summaries_500"
-    const VALID_TYPES = ["transcriptions_100", "transcriptions_500", "summaries_100", "summaries_500"];
+    // creditType: the combined AI minute pack. Each unit (quantity) adds 100
+    // minutes to BOTH the transcription and summary monthly pools.
+    const VALID_TYPES = ["transcription_summary_100mins"];
     if (!VALID_TYPES.includes(creditType)) {
       return res.status(400).json({
         success: false,

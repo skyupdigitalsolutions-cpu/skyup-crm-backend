@@ -30,17 +30,12 @@ const DEFAULT_CATALOG = [
   { addonType: "call_transcription",   name: "Call Transcription",     category: "feature",  price: 699,  billingPeriod: "monthly", description: "Speech-to-text on calls" },
   { addonType: "ai_summary",           name: "AI Summary",             category: "feature",  price: 699,  billingPeriod: "monthly", description: "AI call summaries" },
   { addonType: "whatsapp_automation",  name: "WhatsApp Automation",    category: "feature",  price: 599,  billingPeriod: "monthly", description: "Auto WhatsApp on new lead" },
-  // ── AI credit packs (one-time) ──────────────────────────────────────────────
-  { addonType: "transcriptions_100",   name: "100 Transcriptions",     category: "credit",   price: 299,  billingPeriod: "one_time", description: "+100 transcription credits" },
-  { addonType: "transcriptions_500",   name: "500 Transcriptions",     category: "credit",   price: 1199, billingPeriod: "one_time", description: "+500 transcription credits" },
-  { addonType: "summaries_100",        name: "100 AI Summaries",       category: "credit",   price: 299,  billingPeriod: "one_time", description: "+100 summary credits" },
-  { addonType: "summaries_500",        name: "500 AI Summaries",       category: "credit",   price: 1199, billingPeriod: "one_time", description: "+500 summary credits" },
-  // ── Combined Transcription + AI Summary minute packs (one-time) ─────────────
-  // Each pack tops up BOTH the transcription AND the summary minute pools.
-  // The developer sets price per pack via the Addon Pricing Panel — the
-  // defaults below (₹49 / ₹199 / ₹349) are editable at any time.
-  // minuteCount stored in the name/description for display only; the actual
-  // minutes granted come from COMBINED_ADDON_DELTA in entitlementService.
+  // ── AI credit pack (one-time) — the ONLY credit pack sold ───────────────────
+  // A single combined pack: tops up BOTH the transcription AND summary minute
+  // pools by 100 minutes each. Larger needs are met by upgrading the plan
+  // (Pro 6000 / Advance 15000 min). Buy quantity ×N for N×100 minutes.
+  // The actual minutes granted come from MULTI_FIELD_ADDON_DELTA in
+  // entitlementService; the developer can edit the price in the Addon Pricing Panel.
   {
     addonType: "transcription_summary_100mins",
     name: "100 Min Transcription & Summary",
@@ -48,22 +43,6 @@ const DEFAULT_CATALOG = [
     price: 49,
     billingPeriod: "one_time",
     description: "+100 minutes of call transcription + AI summary (both pools topped up)",
-  },
-  {
-    addonType: "transcription_summary_500mins",
-    name: "500 Min Transcription & Summary",
-    category: "credit",
-    price: 199,
-    billingPeriod: "one_time",
-    description: "+500 minutes of call transcription + AI summary (both pools topped up)",
-  },
-  {
-    addonType: "transcription_summary_1000mins",
-    name: "1000 Min Transcription & Summary",
-    category: "credit",
-    price: 349,
-    billingPeriod: "one_time",
-    description: "+1000 minutes of call transcription + AI summary (both pools topped up)",
   },
 ];
 

@@ -423,30 +423,23 @@ const activateSubscription = async (req, res) => {
 
     await company.save();
 
-    // Create demo credit addons (non-blocking)
+    // Create demo credit addon (non-blocking).
+    // Uses the combined 100-min pack — one record tops up BOTH the transcription
+    // and summary minute pools by 100. expiryDate:null keeps demo credits from
+    // auto-expiring (the 30-day rule applies to PURCHASED packs, not free demo).
     if (shouldGrantDemo) {
       setImmediate(async () => {
         try {
           await CompanyAddon.create([
             {
               companyId,
-              addonType:     "transcriptions_100",
+              addonType:     "transcription_summary_100mins",
               quantity:      1,
               startDate:     now,
               expiryDate:    null,
               status:        "active",
               paymentStatus: "free",
-              notes:         "Demo credits — granted on first activation",
-            },
-            {
-              companyId,
-              addonType:     "summaries_100",
-              quantity:      1,
-              startDate:     now,
-              expiryDate:    null,
-              status:        "active",
-              paymentStatus: "free",
-              notes:         "Demo credits — granted on first activation",
+              notes:         "Demo credits — 100 min transcription + summary, granted on first activation",
             },
           ]);
           console.log(`[activateSubscription] 🎁 Demo credits granted to ${companyId}`);
