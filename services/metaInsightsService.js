@@ -183,7 +183,18 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
   const configured = campaigns.filter((c) => c.configured && c.metrics && (c.metrics.spend > 0 || c.metrics.impressions > 0));
   if (withAI && configured.length > 0) {
     try {
-      result.aiAnalysis = await runMetaAIAnalysis(configured, result.totals);
+      const ai = await runMetaAIAnalysis(configured, result.totals);
+      result.aiAnalysis = ai;
+      // Attach each per-adset suggestion back onto its campaign card by index.
+      if (Array.isArray(ai.perAdset)) {
+        ai.perAdset.forEach((p) => {
+          const idx = Number(p.i);
+          if (Number.isInteger(idx) && configured[idx]) {
+            configured[idx].aiSuggestion = p.suggestion || "";
+            configured[idx].aiVerdict    = p.verdict || "";   // "Scale" | "Optimize" | "Pause" | "Watch"
+          }
+        });
+      }
     } catch (e) {
       result.aiAnalysisError = e.code === "GROK_PAYLOAD_TOO_LARGE"
         ? "Too much data to analyse at once — narrow the date range."
@@ -198,37 +209,40 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
 async function runMetaAIAnalysis(campaigns, totals) {
   const systemPrompt =
     "You are a paid-media (Meta Ads) performance analyst. You are given ad metrics " +
-    "per campaign (spend, impressions, reach, clicks, CPM, CPC, CTR, frequency), the " +
-    "CRM leads captured, and the cost per lead. Analyse performance and respond in " +
-    "STRICT JSON only (no markdown), shape:\n" +
+    "per ad set (spend, impressions, reach, clicks, CPM, CPC, CTR, frequency), the " +
+    "CRM leads captured, and the cost per lead, each prefixed with an index [i]. " +
+    "Analyse performance and respond in STRICT JSON only (no markdown), shape:\n" +
     "{\n" +
     '  "summary": "2-3 sentence overview of overall ad performance & efficiency",\n' +
     '  "topPerformers": [{"campaign":"...","why":"what is working"}],\n' +
-    '  "underperformers": [{"campaign":"...","issue":"what is wrong (high CPL, low CTR, no leads, fatigue, etc.)"}],\n' +
-    '  "suggestions": ["specific, actionable improvements tied to the data"]\n' +
+    '  "underperformers": [{"campaign":"...","issue":"what is wrong"}],\n' +
+    '  "suggestions": ["overall actionable improvements"],\n' +
+    '  "perAdset": [{"i":0,"verdict":"Scale|Optimize|Pause|Watch","suggestion":"ONE specific next action for THIS ad set"}]\n' +
     "}\n" +
-    "Judge CTR (<0.5% weak, >1.5% strong), cost per lead (flag the most expensive), " +
-    "frequency (>4 = fatigue), and spend-with-no-leads. Be specific and practical, " +
-    "referencing campaign names. Keep it concise.";
+    "perAdset MUST contain one entry for EVERY index given, with the matching i. " +
+    "verdict: 'Scale' (working, spend more), 'Optimize' (fixable issue), 'Pause' " +
+    "(wasting money), 'Watch' (too early/low data). Judge CTR (<0.5% weak, >1.5% " +
+    "strong), cost per lead (flag the most expensive), frequency (>4 = fatigue), " +
+    "and spend-with-no-leads. Keep each suggestion under 110 characters.";
 
   const lines = [
     `Overall: spend ₹${totals.spend}, leads ${totals.leads}, cost/lead ${totals.costPerLead ?? "n/a"}, impressions ${totals.impressions}, clicks ${totals.clicks}`,
     "",
-    "Per campaign:",
+    "Per ad set (index in brackets):",
   ];
-  for (const c of campaigns) {
+  campaigns.forEach((c, i) => {
     const m = c.metrics || {};
     lines.push(
-      `- "${c.campaignName}${c.adSetName ? " / " + c.adSetName : ""}": spend ₹${m.spend}, impressions ${m.impressions}, reach ${m.reach}, clicks ${m.clicks}, CPM ₹${m.cpm}, CPC ₹${m.cpc}, CTR ${m.ctr}%, frequency ${m.frequency}, leads ${c.leads}, cost/lead ${c.costPerLead ?? "n/a"}`
+      `[${i}] "${c.campaignName}${c.adSetName ? " / " + c.adSetName : ""}": spend ₹${m.spend}, impressions ${m.impressions}, reach ${m.reach}, clicks ${m.clicks}, CPM ₹${m.cpm}, CPC ₹${m.cpc}, CTR ${m.ctr}%, frequency ${m.frequency}, leads ${c.leads}, cost/lead ${c.costPerLead ?? "n/a"}`
     );
-  }
+  });
 
-  const raw = await callGrok(systemPrompt, lines.join("\n"), 900);
+  const raw = await callGrok(systemPrompt, lines.join("\n"), 1300);
   const cleaned = (raw || "").replace(/```json|```/g, "").trim();
   try {
     return JSON.parse(cleaned);
   } catch {
-    return { summary: cleaned, topPerformers: [], underperformers: [], suggestions: [] };
+    return { summary: cleaned, topPerformers: [], underperformers: [], suggestions: [], perAdset: [] };
   }
 }
 
