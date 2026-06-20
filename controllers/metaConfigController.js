@@ -9,7 +9,7 @@ const getAllConfigs = async (req, res) => {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const configs = await MetaConfig.find({ company: companyId })
       .populate("company", "name")
-      .select("-pageAccessToken")
+      .select("-pageAccessToken -adsToken")
       .lean();
 
     // Attach live lead counts for each campaign config.
@@ -75,7 +75,7 @@ const getConfigById = async (req, res) => {
   try {
     const config = await MetaConfig.findById(req.params.id)
       .populate("company", "name")
-      .select("-pageAccessToken");
+      .select("-pageAccessToken -adsToken");
     if (!config) return res.status(404).json({ message: "Config not found" });
     res.json({ success: true, data: config });
   } catch (err) {

@@ -11,8 +11,10 @@
 //
 // It then:
 //   1. Categorises each lost lead into a reason bucket via keyword heuristics.
-//   2. Aggregates counts / % / by-source / by-agent.
-//   3. Sends the aggregate to the LLM for root-cause patterns + concrete
+//   2. Classifies each lead's ACCOUNTABILITY — is the blocker an agent
+//      follow-up gap, or something lead-side / external (price, fit, etc.)?
+//   3. Aggregates counts / % / by-source / by-agent / by-accountability.
+//   4. Sends the aggregate to the LLM for root-cause patterns + concrete
 //      improvement suggestions.
 //
 // Reuses the existing Groq client (callGrok) — same GROQ_API_KEY, no new creds.
@@ -43,6 +45,35 @@ const REASON_RULES = [
   { reason: "Duplicate / test lead",   kw: ["duplicate", "test", "by mistake", "accidental"] },
 ];
 
+// Canonical accountability buckets (must match frontend ACCT_STYLE keys).
+const ACCOUNTABILITY_LABELS = [
+  "Agent follow-up gap",
+  "Awaiting next step",
+  "Lead not interested",
+  "Price/budget",
+  "Bad lead data",
+  "Product/fit",
+  "No data",
+];
+
+// Quick heuristic fallback (used before/if the AI pass doesn't override it),
+// derived from the keyword-bucketed reason.
+const REASON_TO_ACCOUNTABILITY = {
+  "Price / budget":                "Price/budget",
+  "Bought from competitor":        "Lead not interested",
+  "Not the right time":            "Awaiting next step",
+  "No response / unreachable":     "Awaiting next step",
+  "Wrong / invalid number":        "Bad lead data",
+  "Not decision maker":            "Awaiting next step",
+  "Product / service mismatch":    "Product/fit",
+  "Lost interest":                 "Lead not interested",
+  "Duplicate / test lead":         "Bad lead data",
+  "Other / unspecified":           "No data",
+};
+function defaultAccountability(reason) {
+  return REASON_TO_ACCOUNTABILITY[reason] || "No data";
+}
+
 const startOfDay = (d) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
 const endOfDay   = (d) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 
@@ -61,11 +92,20 @@ function isNonConverted(status = "", isClosed = false) {
 // latest meeting remark → AI summary text.
 function pickReasonText(lead, summaryText) {
   const ch = Array.isArray(lead.callHistory) ? lead.callHistory : [];
-  const lastRemark = ch.length ? (ch[ch.length - 1].remark || "") : "";
+  // Use the last few call remarks (not just the latest) so the AI sees the
+  // progression — e.g. "interested" → "asked for callback" → "no response".
+  const recentRemarks = ch
+    .slice(-4)
+    .map((c) => (c && c.remark ? String(c.remark).trim() : ""))
+    .filter(Boolean);
+
   const mr = Array.isArray(lead.meetingRemarks) ? lead.meetingRemarks : [];
   const lastMeeting = mr.length ? (mr[mr.length - 1].remark || "") : "";
-  return [lastRemark, lead.remark, lastMeeting, summaryText]
-    .filter(Boolean).join(" • ").trim();
+
+  return [...recentRemarks, lead.remark, lastMeeting, summaryText]
+    .filter(Boolean)
+    .join(" • ")
+    .trim();
 }
 
 function categorise(text, status) {
@@ -119,25 +159,35 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
     }).select("normalizedPhone summary").lean();
     for (const lg of logs) {
       const key = (lg.normalizedPhone || "").slice(-10);
-      if (key && lg.summary && lg.summary.summary && !summaryByPhone[key]) {
-        summaryByPhone[key] = lg.summary.summary;
+      const s = lg.summary;
+      if (key && s && !summaryByPhone[key]) {
+        // Combine the richer parts of the AI call summary, not just the headline:
+        // the summary text + key points + recommended next action + sentiment.
+        const parts = [];
+        if (s.summary)    parts.push(s.summary);
+        if (Array.isArray(s.keyPoints) && s.keyPoints.length) parts.push("Key points: " + s.keyPoints.join("; "));
+        if (s.nextAction) parts.push("Suggested next action: " + s.nextAction);
+        if (s.sentiment)  parts.push("Sentiment: " + s.sentiment);
+        const combined = parts.filter(Boolean).join(" • ").trim();
+        if (combined) summaryByPhone[key] = combined;
       }
     }
   }
 
   // Categorise each non-converted lead + build a per-lead detail list.
   const byReason = {};
+  const byAccountability = {};
   const bySource = {};
   const byAgent  = {};
   const samples  = {};   // a few example remarks per reason for the AI
-  const leadDetails = []; // per-lead: name, status, reason, improvement, etc.
+  const leadDetails = []; // per-lead: name, status, reason, accountability, improvement, etc.
 
   for (const l of lost) {
     const phoneKey = (l.primaryPhone || l.mobile || l.phone || "").replace(/\D/g, "").slice(-10);
     const summaryText = summaryByPhone[phoneKey] || "";
     const text   = pickReasonText(l, summaryText);
     // Keyword bucket is the FAST FALLBACK; the AI pass (below) overrides reason
-    // + adds an improvement for each lead when available.
+    // + accountability + adds an improvement for each lead when available.
     const reason = categorise(text, l.status);
 
     const src = l.source || l.campaign || "Unknown";
@@ -148,19 +198,22 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
       name:    l.name || "Unknown",
       status:  l.status || "—",
       temperature: l.temperature || null,
-      reason,                 // may be overridden by AI
-      improvement: "",        // filled by AI
+      reason,                               // may be overridden by AI
+      accountability: defaultAccountability(reason), // may be overridden by AI
+      improvement: "",                      // filled by AI
       source:  src,
       agent,
-      detail:  text ? text.slice(0, 240) : "",
+      detail:  text ? text.slice(0, 240) : "",        // short text for the table
+      _aiText: text ? text.slice(0, 700) : "",        // fuller context for the AI (not sent to client)
       updatedAt: l.updatedAt || l.closedAt || l.createdAt || null,
     });
   }
 
   // ── Per-lead AI reasoning ───────────────────────────────────────────────────
   // Analyse each lead's remark + status + temperature + call summary to produce
-  // a SPECIFIC reason (what's blocking conversion / the mistake) and a concrete
-  // improvement action. Batched into chunks to stay within token limits.
+  // a SPECIFIC reason (what's blocking conversion / the mistake), an
+  // accountability bucket, and a concrete improvement action. Batched into
+  // chunks to stay within token limits.
   if (withAI && leadDetails.length > 0) {
     try {
       await runPerLeadAnalysis(leadDetails);
@@ -173,6 +226,7 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
   // Recompute aggregates AFTER AI so the breakdown reflects the refined reasons.
   for (const d of leadDetails) {
     byReason[d.reason] = (byReason[d.reason] || 0) + 1;
+    byAccountability[d.accountability] = (byAccountability[d.accountability] || 0) + 1;
     bySource[d.source] = bySource[d.source] || {};
     bySource[d.source][d.reason] = (bySource[d.source][d.reason] || 0) + 1;
     byAgent[d.agent] = (byAgent[d.agent] || 0) + 1;
@@ -188,13 +242,18 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
     .map(([reason, count]) => ({ reason, count, percent: total ? Math.round((count / total) * 1000) / 10 : 0 }))
     .sort((a, b) => b.count - a.count);
 
+  const accountabilityBreakdown = Object.entries(byAccountability)
+    .map(([label, count]) => ({ label, count, percent: total ? Math.round((count / total) * 1000) / 10 : 0 }))
+    .sort((a, b) => b.count - a.count);
+
   const result = {
     range: { from: fromDate, to: toDate },
     totalLost: total,
     reasonBreakdown,
+    accountabilityBreakdown,
     bySource,
     byAgent: Object.entries(byAgent).map(([agent, count]) => ({ agent, count })).sort((a, b) => b.count - a.count),
-    leadDetails,
+    leadDetails: leadDetails.map(({ _aiText, ...rest }) => rest),
     aiAnalysis: null,
   };
 
@@ -252,10 +311,11 @@ async function runAIAnalysis(reasonBreakdown, samples, bySource, total) {
   }
 }
 
-// ── Per-lead AI: reason + improvement for each non-converted lead ─────────────
+// ── Per-lead AI: reason + accountability + improvement for each lead ─────────
 // Batches leads to keep each request small. For each lead the model gets the
 // name, status, temperature and the remark/call-summary text, and returns a
-// concise reason (what's blocking conversion / the mistake) plus a concrete
+// concise reason (what's blocking conversion / the mistake), an accountability
+// bucket (is this on the agent, or lead-side / external?), plus a concrete
 // improvement action. Writes results back onto the leadDetails objects in place.
 async function runPerLeadAnalysis(leadDetails) {
   const BATCH = 25;
@@ -268,17 +328,26 @@ async function runPerLeadAnalysis(leadDetails) {
     "it or the mistake being made — e.g. 'Demo scheduled but not yet completed', " +
     "'Awaiting callback — follow-up not done', 'Price concern not addressed', " +
     "'Needs WhatsApp/email automation info', 'No follow-up after first call'), " +
-    "and a short, concrete IMPROVEMENT action the agent should take next. " +
+    "an ACCOUNTABILITY bucket — exactly one of: 'Agent follow-up gap' (the team " +
+    "should have acted and didn't — e.g. a hot lead with no recent activity, a " +
+    "promised callback that never happened, a scheduled demo never completed), " +
+    "'Awaiting next step' (ball is genuinely in the lead's court, or a step is " +
+    "pending that isn't yet overdue), 'Lead not interested' (lead explicitly " +
+    "declined or went cold on their own), 'Price/budget' (cost was the blocker), " +
+    "'Bad lead data' (wrong number, duplicate, invalid, unreachable), or " +
+    "'Product/fit' (the offering didn't match their need) — and a short, " +
+    "concrete IMPROVEMENT action the agent should take next. " +
     "Base it ONLY on the given text; if there's genuinely no info, use reason " +
-    "'No remark logged' and improvement 'Log call notes and set a follow-up'. " +
+    "'No remark logged', accountability 'No data', and improvement 'Log call " +
+    "notes and set a follow-up'. " +
     "Respond with STRICT JSON only — an array, one object per lead, in the same " +
-    "order, shape: [{\"reason\":\"...\",\"improvement\":\"...\"}]. Keep each field " +
-    "under 90 characters.";
+    "order, shape: [{\"reason\":\"...\",\"accountability\":\"...\",\"improvement\":\"...\"}]. " +
+    "Keep reason and improvement under 90 characters each.";
 
   for (let i = 0; i < leadDetails.length; i += BATCH) {
     const chunk = leadDetails.slice(i, i + BATCH);
     const lines = chunk.map((d, idx) =>
-      `${idx + 1}. name="${d.name}" status="${d.status}" temp="${d.temperature || "n/a"}" notes="${(d.detail || "").replace(/"/g, "'").slice(0, 220) || "none"}"`
+      `${idx + 1}. name="${d.name}" status="${d.status}" temp="${d.temperature || "n/a"}" notes="${(d._aiText || d.detail || "").replace(/"/g, "'").slice(0, 650) || "none"}"`
     );
 
     let raw;
@@ -303,6 +372,12 @@ async function runPerLeadAnalysis(leadDetails) {
       if (!d || !item) return;
       if (item.reason)      d.reason = String(item.reason).slice(0, 120);
       if (item.improvement) d.improvement = String(item.improvement).slice(0, 120);
+      // Only accept a known accountability label; otherwise keep the
+      // keyword-derived default rather than letting the model invent labels
+      // the frontend doesn't know how to color.
+      if (item.accountability && ACCOUNTABILITY_LABELS.includes(item.accountability)) {
+        d.accountability = item.accountability;
+      }
     });
   }
 }
