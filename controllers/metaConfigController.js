@@ -224,6 +224,7 @@ const getInsights = async (req, res) => {
       company: companyId,
       from: req.query.from || null,
       to:   req.query.to   || null,
+      withAI: req.query.ai !== "false",
     });
     res.json(report);
   } catch (err) {

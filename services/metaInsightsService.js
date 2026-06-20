@@ -19,6 +19,7 @@
 const axios     = require("axios");
 const MetaConfig = require("../models/MetaConfig");
 const Lead       = require("../models/Leads");
+const { callGrok } = require("../utils/leadActionSummary");
 
 const DEFAULT_VER = process.env.META_GRAPH_API_VERSION || "v21.0";
 
@@ -132,7 +133,7 @@ function detectIssues({ configured, hasData, metrics, error, needsAdsRead, token
 }
 
 // ── Public: full report for a company ─────────────────────────────────────────
-async function getMetaInsightsReport({ company, from, to }) {
+async function getMetaInsightsReport({ company, from, to, withAI = true }) {
   const { since, until, fromD, toD } = dateRange(from, to);
 
   const configs = await Lead.db.model("MetaConfig").find({ company, isActive: true }).lean();
@@ -170,11 +171,65 @@ async function getMetaInsightsReport({ company, from, to }) {
 
   const overallCPL = totals.leads > 0 ? Math.round((totals.spend / totals.leads) * 100) / 100 : null;
 
-  return {
+  const result = {
     range: { from: fromD, to: toD },
     totals: { ...totals, costPerLead: overallCPL },
     campaigns,
+    aiAnalysis: null,
   };
+
+  // ── AI analysis + improvement suggestions ───────────────────────────────────
+  // Only analyse campaigns that actually returned data; skip if none configured.
+  const configured = campaigns.filter((c) => c.configured && c.metrics && (c.metrics.spend > 0 || c.metrics.impressions > 0));
+  if (withAI && configured.length > 0) {
+    try {
+      result.aiAnalysis = await runMetaAIAnalysis(configured, result.totals);
+    } catch (e) {
+      result.aiAnalysisError = e.code === "GROK_PAYLOAD_TOO_LARGE"
+        ? "Too much data to analyse at once — narrow the date range."
+        : (e.message || "AI analysis unavailable right now.");
+    }
+  }
+
+  return result;
+}
+
+// Build an AI performance review + improvement suggestions from the ad metrics.
+async function runMetaAIAnalysis(campaigns, totals) {
+  const systemPrompt =
+    "You are a paid-media (Meta Ads) performance analyst. You are given ad metrics " +
+    "per campaign (spend, impressions, reach, clicks, CPM, CPC, CTR, frequency), the " +
+    "CRM leads captured, and the cost per lead. Analyse performance and respond in " +
+    "STRICT JSON only (no markdown), shape:\n" +
+    "{\n" +
+    '  "summary": "2-3 sentence overview of overall ad performance & efficiency",\n' +
+    '  "topPerformers": [{"campaign":"...","why":"what is working"}],\n' +
+    '  "underperformers": [{"campaign":"...","issue":"what is wrong (high CPL, low CTR, no leads, fatigue, etc.)"}],\n' +
+    '  "suggestions": ["specific, actionable improvements tied to the data"]\n' +
+    "}\n" +
+    "Judge CTR (<0.5% weak, >1.5% strong), cost per lead (flag the most expensive), " +
+    "frequency (>4 = fatigue), and spend-with-no-leads. Be specific and practical, " +
+    "referencing campaign names. Keep it concise.";
+
+  const lines = [
+    `Overall: spend ₹${totals.spend}, leads ${totals.leads}, cost/lead ${totals.costPerLead ?? "n/a"}, impressions ${totals.impressions}, clicks ${totals.clicks}`,
+    "",
+    "Per campaign:",
+  ];
+  for (const c of campaigns) {
+    const m = c.metrics || {};
+    lines.push(
+      `- "${c.campaignName}${c.adSetName ? " / " + c.adSetName : ""}": spend ₹${m.spend}, impressions ${m.impressions}, reach ${m.reach}, clicks ${m.clicks}, CPM ₹${m.cpm}, CPC ₹${m.cpc}, CTR ${m.ctr}%, frequency ${m.frequency}, leads ${c.leads}, cost/lead ${c.costPerLead ?? "n/a"}`
+    );
+  }
+
+  const raw = await callGrok(systemPrompt, lines.join("\n"), 900);
+  const cleaned = (raw || "").replace(/```json|```/g, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    return { summary: cleaned, topPerformers: [], underperformers: [], suggestions: [] };
+  }
 }
 
 module.exports = { getMetaInsightsReport };
