@@ -500,4 +500,4 @@ async function sendInterestedBlast(lead, companyId) {
   }
 }
 
-module.exports = { autoSendTemplates, sendInterestedBlast };
+module.exports = { autoSendTemplates, sendInterestedBlast, sendSmartEmail };

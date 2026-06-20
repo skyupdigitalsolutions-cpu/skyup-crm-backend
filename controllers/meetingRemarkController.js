@@ -21,6 +21,7 @@ const WhatsAppMessage = require('../models/WhatsAppMessage');
 const Company        = require('../models/Company');
 const crypto         = require('crypto');
 const { normalizePhone: _sharedNormalizePhone } = require('../utils/normalizePhone');
+const { sendSmartEmail } = require('../services/autoTemplateService');
 
 // ── Cloudinary config ─────────────────────────────────────────────────────────
 cloudinary.config({
@@ -94,6 +95,152 @@ function fmtTime(iso) {
   return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Reusable core: send the `client_meeting_reminder` WhatsApp template.
+// Used by BOTH the manual endpoint (sendMeetingWhatsApp) and the automatic
+// blast fired when a meeting is scheduled (addMeetingRemark).
+// Returns { success, waMessageId?, message? } and never throws.
+// ─────────────────────────────────────────────────────────────────────────────
+async function _sendClientMeetingWhatsApp({ lead, companyId, meetingDate, meetingTime, meetingMode, agentName, sentByUserId }) {
+  try {
+    const rawPhone    = lead.mobile || lead.primaryPhone || lead.phone;
+    const clientPhone = waPhone(rawPhone);
+    if (!clientPhone || clientPhone.length < 10) {
+      return { success: false, message: 'Lead has no valid phone number.' };
+    }
+
+    let config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
+    if (!config) config = await WhatsAppConfig.findOne({ company: companyId });
+
+    const authKey      = config?.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
+    const senderNumber = config?.msg91IntegratedNumber || process.env.MSG91_INTEGRATED_NUMBER;
+    if (!authKey || !senderNumber) {
+      return { success: false, message: 'MSG91 WhatsApp credentials are not configured.' };
+    }
+
+    const company     = await Company.findById(companyId).select('name').lean();
+    const companyName = company?.name || 'SkyUp Digital Solutions';
+
+    const clientName = lead.name || 'there';
+    const dateStr    = meetingDate ? fmtDate(meetingDate) : fmtDate(new Date());
+    const timeStr    = meetingTime ? fmtTime(meetingTime) : fmtTime(new Date());
+    const modeStr    = meetingMode || 'In-Person';
+    const agentStr   = agentName   || 'Our Team';
+
+    const components = {
+      body_1: { type: 'text', value: clientName  },
+      body_2: { type: 'text', value: companyName },
+      body_3: { type: 'text', value: dateStr     },
+      body_4: { type: 'text', value: timeStr     },
+      body_5: { type: 'text', value: modeStr     },
+      body_6: { type: 'text', value: agentStr    },
+    };
+
+    let waMessageId;
+    const payload = {
+      integrated_number: senderNumber,
+      content_type: 'template',
+      payload: {
+        messaging_product: 'whatsapp',
+        type: 'template',
+        template: {
+          name: 'client_meeting_reminder',
+          language: { code: 'en', policy: 'deterministic' },
+          to_and_components: [{ to: [clientPhone], components }],
+        },
+      },
+    };
+    const resp = await axios.post(
+      'https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/',
+      payload,
+      { headers: { authkey: authKey, 'Content-Type': 'application/json' } },
+    );
+    waMessageId =
+      resp.data?.data?.[0]?.id || resp.data?.requestId || `mtg_${Date.now()}_${crypto.randomUUID()}`;
+
+    // Log to the WhatsApp conversation (non-fatal)
+    try {
+      let conversation = await WhatsAppConversation.findOne({ waPhone: clientPhone, company: companyId });
+      if (!conversation) {
+        conversation = await WhatsAppConversation.create({
+          waPhone: clientPhone, contactName: lead.name || '', company: companyId,
+          lead: lead._id, status: 'waiting',
+          lastMessage: '[Template: client_meeting_reminder]', lastMessageAt: new Date(),
+        });
+      } else {
+        await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
+          lastMessage: '[Template: client_meeting_reminder]', lastMessageAt: new Date(), status: 'waiting',
+        });
+      }
+      await WhatsAppMessage.create({
+        conversation: conversation._id, direction: 'outbound',
+        body: '[Template: client_meeting_reminder]', messageType: 'template',
+        waMessageId, sentBy: sentByUserId || null, status: 'sent',
+        waTimestamp: new Date(), isTemplate: true, templateName: 'client_meeting_reminder',
+      });
+    } catch (logErr) {
+      console.error('[meetingWhatsApp] conversation log error:', logErr.message);
+    }
+
+    return { success: true, waMessageId };
+  } catch (apiErr) {
+    const errBody = apiErr?.response?.data;
+    const errMsg  = errBody?.message || errBody?.error?.message || apiErr?.message || 'MSG91 API error';
+    console.error('[meetingWhatsApp] send error:', JSON.stringify(errBody || apiErr?.message));
+    return { success: false, message: errMsg };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reusable core: send the meeting-confirmation EMAIL (MSG91 → Brevo fallback).
+// Returns { success, provider?, message? } and never throws.
+// ─────────────────────────────────────────────────────────────────────────────
+async function _sendClientMeetingEmail({ lead, companyId, meetingDate, meetingTime, meetingMode, agentName }) {
+  try {
+    if (!lead.email || !String(lead.email).trim()) {
+      return { success: false, message: 'Lead has no email address.' };
+    }
+
+    const company     = await Company.findById(companyId).select('name').lean();
+    const companyName = company?.name || 'SkyUp Digital Solutions';
+
+    const clientName = lead.name || 'there';
+    const dateStr    = meetingDate ? fmtDate(meetingDate) : fmtDate(new Date());
+    const timeStr    = meetingTime ? fmtTime(meetingTime) : fmtTime(new Date());
+    const modeStr    = meetingMode || 'In-Person';
+    const agentStr   = agentName   || 'Our Team';
+
+    const subject = `Meeting confirmed with ${companyName} — ${dateStr}, ${timeStr}`;
+    const html = `
+      <div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a">
+        <h2 style="color:#2563EB;margin-bottom:4px">Your meeting is scheduled ✅</h2>
+        <p>Hi ${clientName},</p>
+        <p>Thank you for scheduling a meeting with <strong>${companyName}</strong>. Here are the details:</p>
+        <table style="border-collapse:collapse;margin:16px 0;width:100%">
+          <tr><td style="padding:8px 12px;background:#f3f6ff;font-weight:bold;width:140px">📅 Date</td><td style="padding:8px 12px;border-bottom:1px solid #eee">${dateStr}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f6ff;font-weight:bold">⏰ Time</td><td style="padding:8px 12px;border-bottom:1px solid #eee">${timeStr}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f6ff;font-weight:bold">📍 Mode</td><td style="padding:8px 12px;border-bottom:1px solid #eee">${modeStr}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f6ff;font-weight:bold">👤 Meeting with</td><td style="padding:8px 12px;border-bottom:1px solid #eee">${agentStr}</td></tr>
+        </table>
+        <p>We look forward to speaking with you. If you need to reschedule, simply reply to this email or the WhatsApp message we sent you.</p>
+        <p style="margin-top:24px;color:#666;font-size:13px">Regards,<br/>${agentStr}<br/>${companyName}</p>
+      </div>`;
+
+    const provider = await sendSmartEmail({
+      to:        String(lead.email).trim(),
+      toName:    clientName,
+      subject,
+      html,
+      fromName:  companyName,
+      companyId,
+    });
+    return { success: true, provider };
+  } catch (err) {
+    console.error('[meetingEmail] send error:', err.message);
+    return { success: false, message: err.message };
+  }
+}
+
 // ── POST /lead/:id/meeting-remark ─────────────────────────────────────────────
 const addMeetingRemark = (req, res) => {
   meetingUpload(req, res, async (multerErr) => {
@@ -146,7 +293,39 @@ const addMeetingRemark = (req, res) => {
       );
 
       const saved = updated.meetingRemarks[updated.meetingRemarks.length - 1];
-      return res.status(201).json({ message: 'Meeting remark saved.', meetingRemark: saved });
+
+      // ── Auto-blast: when a meeting is SCHEDULED (a meeting date/time was set),
+      //    automatically send the lead the WhatsApp reminder + a confirmation
+      //    email. Fire-and-forget so the API responds immediately; failures are
+      //    logged but never block saving the remark.
+      const meetingWhen = entry.followUpDate;
+      if (meetingWhen) {
+        const blastArgs = {
+          lead,
+          companyId,
+          meetingDate: meetingWhen,
+          meetingTime: meetingWhen,
+          meetingMode: entry.meetingType,
+          agentName:   entry.userName || getUserName(req) || 'Our Team',
+          sentByUserId: getUserId(req),
+        };
+        setImmediate(async () => {
+          try {
+            const wa = await _sendClientMeetingWhatsApp(blastArgs);
+            console.log(`[meetingBlast] WhatsApp → lead ${lead._id}:`, wa.success ? `sent (${wa.waMessageId})` : `skipped (${wa.message})`);
+          } catch (e) { console.error('[meetingBlast] WhatsApp error:', e.message); }
+          try {
+            const em = await _sendClientMeetingEmail(blastArgs);
+            console.log(`[meetingBlast] Email → lead ${lead._id}:`, em.success ? `sent via ${em.provider}` : `skipped (${em.message})`);
+          } catch (e) { console.error('[meetingBlast] Email error:', e.message); }
+        });
+      }
+
+      return res.status(201).json({
+        message: 'Meeting remark saved.',
+        meetingRemark: saved,
+        blastTriggered: !!meetingWhen,
+      });
 
     } catch (err) {
       console.error('[meetingRemarkController] addMeetingRemark error:', err);
@@ -186,156 +365,33 @@ const sendMeetingWhatsApp = async (req, res) => {
   try {
     const { id }    = req.params;
     const companyId = getCompanyId(req);
-
-    console.log('[meetingWhatsApp] companyId resolved:', companyId);
-    console.log('[meetingWhatsApp] req.user:', JSON.stringify(req.user));
-
     if (!companyId) {
       return res.status(400).json({ success: false, message: 'Could not resolve company. Please re-login.' });
     }
 
-    // ── 1. Load lead ──────────────────────────────────────────────────────────
     const lead = await Lead.findOne({ _id: id, company: companyId }).lean();
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found.' });
 
-    // Lead model uses `mobile` as the primary phone field (not `phone`)
-    const rawPhone    = lead.mobile || lead.primaryPhone || lead.phone;
-    const clientPhone = waPhone(rawPhone);
-    console.log('[meetingWhatsApp] clientPhone:', clientPhone, '| raw:', rawPhone);
-
-    if (!clientPhone || clientPhone.length < 10) {
-      return res.status(400).json({ success: false, message: 'Lead has no valid phone number.' });
-    }
-
-    // ── 2. Load WhatsApp config ───────────────────────────────────────────────
-    // Try isActive:true first; fall back to any config for this company
-    let config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
-    if (!config) {
-      config = await WhatsAppConfig.findOne({ company: companyId });
-    }
-
-    console.log('[meetingWhatsApp] config found:', !!config, config?._id);
-
-    const authKey      = config?.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
-    const senderNumber = config?.msg91IntegratedNumber || process.env.MSG91_INTEGRATED_NUMBER;
-
-    console.log('[meetingWhatsApp] authKey present:', !!authKey, '| senderNumber:', senderNumber);
-
-    if (!authKey || !senderNumber) {
-      return res.status(500).json({
-        success: false,
-        message: 'MSG91 WhatsApp credentials are not configured. Please set them in Settings → WhatsApp.',
-      });
-    }
-
-    // ── 3. Load company name ──────────────────────────────────────────────────
-    const company     = await Company.findById(companyId).select('name').lean();
-    const companyName = company?.name || 'SkyUp Digital Solutions';
-
-    // ── 4. Build template variables ───────────────────────────────────────────
     const { meetingDate, meetingTime, meetingMode, agentName } = req.body;
 
-    const clientName = lead.name  || 'there';
-    const dateStr    = meetingDate ? fmtDate(meetingDate) : fmtDate(new Date());
-    const timeStr    = meetingTime ? fmtTime(meetingTime) : fmtTime(new Date());
-    const modeStr    = meetingMode || 'In-Person';
-    const agentStr   = agentName   || getUserName(req) || 'Our Team';
-
-    console.log('[meetingWhatsApp] variables:', { clientName, companyName, dateStr, timeStr, modeStr, agentStr });
-
-    // ── 5. Send via MSG91 ─────────────────────────────────────────────────────
-    // Template: client_meeting_reminder
-    // {{1}}=client name, {{2}}=company name, {{3}}=date,
-    // {{4}}=time,        {{5}}=mode,         {{6}}=agent name
-    const components = {
-      body_1: { type: 'text', value: clientName  },
-      body_2: { type: 'text', value: companyName },
-      body_3: { type: 'text', value: dateStr     },
-      body_4: { type: 'text', value: timeStr     },
-      body_5: { type: 'text', value: modeStr     },
-      body_6: { type: 'text', value: agentStr    },
-    };
-
-    let waMessageId;
-    try {
-      const payload = {
-        integrated_number: senderNumber,
-        content_type: 'template',
-        payload: {
-          messaging_product: 'whatsapp',
-          type: 'template',
-          template: {
-            name: 'client_meeting_reminder',
-            language: { code: 'en', policy: 'deterministic' },
-            to_and_components: [
-              { to: [clientPhone], components },
-            ],
-          },
-        },
-      };
-      console.log('[meetingWhatsApp] MSG91 payload:', JSON.stringify(payload));
-
-      const resp = await axios.post(
-        'https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/',
-        payload,
-        { headers: { authkey: authKey, 'Content-Type': 'application/json' } },
-      );
-
-      console.log('[meetingWhatsApp] MSG91 response:', JSON.stringify(resp.data));
-
-      waMessageId =
-        resp.data?.data?.[0]?.id ||
-        resp.data?.requestId     ||
-        `mtg_${Date.now()}_${crypto.randomUUID()}`;
-    } catch (apiErr) {
-      const errBody = apiErr?.response?.data;
-      const errMsg  = errBody?.message || errBody?.error?.message || apiErr?.message || 'MSG91 API error';
-      console.error('[meetingWhatsApp] MSG91 error:', JSON.stringify(errBody || apiErr?.message));
-      return res.status(502).json({ success: false, message: errMsg });
-    }
-
-    // ── 6. Save to WhatsApp conversation log (non-fatal) ─────────────────────
-    try {
-      let conversation = await WhatsAppConversation.findOne({ waPhone: clientPhone, company: companyId });
-      if (!conversation) {
-        conversation = await WhatsAppConversation.create({
-          waPhone:       clientPhone,
-          contactName:   lead.name || '',
-          company:       companyId,
-          lead:          lead._id,
-          status:        'waiting',
-          lastMessage:   '[Template: client_meeting_reminder]',
-          lastMessageAt: new Date(),
-        });
-      } else {
-        await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
-          lastMessage:   '[Template: client_meeting_reminder]',
-          lastMessageAt: new Date(),
-          status:        'waiting',
-        });
-      }
-      await WhatsAppMessage.create({
-        conversation:  conversation._id,
-        direction:     'outbound',
-        body:          '[Template: client_meeting_reminder]',
-        messageType:   'template',
-        waMessageId,
-        sentBy:        getUserId(req),
-        status:        'sent',
-        waTimestamp:   new Date(),
-        isTemplate:    true,
-        templateName:  'client_meeting_reminder',
-      });
-    } catch (logErr) {
-      console.error('[meetingWhatsApp] conversation log error:', logErr.message);
-    }
-
-    return res.json({
-      success:    true,
-      message:    `Meeting confirmation WhatsApp sent to ${lead.name || clientPhone}.`,
-      waMessageId,
+    const result = await _sendClientMeetingWhatsApp({
+      lead,
+      companyId,
+      meetingDate,
+      meetingTime,
+      meetingMode,
+      agentName:    agentName || getUserName(req),
+      sentByUserId: getUserId(req),
     });
 
+    if (!result.success) {
+      return res.status(502).json({ success: false, message: result.message || 'Failed to send WhatsApp.' });
+    }
+    return res.json({
+      success:     true,
+      message:     `Meeting confirmation WhatsApp sent to ${lead.name || lead.mobile}.`,
+      waMessageId: result.waMessageId,
+    });
   } catch (err) {
     console.error('[meetingRemarkController] sendMeetingWhatsApp error:', err);
     return res.status(500).json({ success: false, message: err.message || 'Internal server error.' });
