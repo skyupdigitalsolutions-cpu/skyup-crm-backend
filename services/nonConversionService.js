@@ -46,11 +46,15 @@ const REASON_RULES = [
 const startOfDay = (d) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
 const endOfDay   = (d) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 
-function isLostStatus(status = "", isClosed = false) {
-  const s = String(status).toLowerCase();
-  if (/^(converted|won|customer|closed won)$/.test(s)) return false;
-  if (isClosed) return true;
-  return LOST_STATUS_HINTS.some((h) => s.includes(h));
+// "Did not convert" = any lead whose status is NOT a converted/won state.
+// This intentionally includes New / In Progress / Verification / Not Interested
+// / Invalid / Lost etc. — everything that hasn't been won yet — so the report
+// covers ALL non-converted leads, not just explicitly "lost" ones.
+function isNonConverted(status = "", isClosed = false) {
+  const s = String(status).toLowerCase().trim();
+  // Converted / won states are the ONLY thing excluded.
+  if (/^(converted|won|customer|closed won|closed-won|complete[d]?)$/.test(s)) return false;
+  return true;
 }
 
 // Pick the most informative text for a lead: latest call remark → lead.remark →
@@ -84,20 +88,22 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
   const toDate   = to   ? endOfDay(new Date(to))   : endOfDay(new Date());
   const fromDate = from ? startOfDay(new Date(from)) : startOfDay(new Date(Date.now() - 30 * 86400000));
 
-  // Lost leads in range (by close time or last update).
+  // Candidate leads in range (created, last-updated, or closed within range).
   const leads = await Lead.find({
     company,
     mergedInto: null,
     $or: [
-      { closedAt: { $gte: fromDate, $lte: toDate } },
+      { createdAt: { $gte: fromDate, $lte: toDate } },
+      { closedAt:  { $gte: fromDate, $lte: toDate } },
       { updatedAt: { $gte: fromDate, $lte: toDate } },
     ],
   })
-    .select("name status isClosed remark callHistory meetingRemarks source campaign user primaryPhone mobile phone value closedAt updatedAt")
+    .select("name status isClosed remark callHistory meetingRemarks source campaign user primaryPhone mobile phone value closedAt updatedAt createdAt")
     .populate("user", "name")
     .lean();
 
-  const lost = leads.filter((l) => isLostStatus(l.status, l.isClosed));
+  // All NON-CONVERTED leads (everything except Converted/Won).
+  const lost = leads.filter((l) => isNonConverted(l.status, l.isClosed));
 
   // Pull AI call summaries for these leads (joined by normalizedPhone).
   const phones = lost
@@ -119,11 +125,12 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
     }
   }
 
-  // Categorise each lost lead.
+  // Categorise each non-converted lead + build a per-lead detail list.
   const byReason = {};
   const bySource = {};
   const byAgent  = {};
   const samples  = {};   // a few example remarks per reason for the AI
+  const leadDetails = []; // per-lead: name, status, reason, source, agent, remark
 
   for (const l of lost) {
     const phoneKey = (l.primaryPhone || l.mobile || l.phone || "").replace(/\D/g, "").slice(-10);
@@ -142,7 +149,22 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
 
     if (!samples[reason]) samples[reason] = [];
     if (samples[reason].length < 5 && text) samples[reason].push(text.slice(0, 200));
+
+    leadDetails.push({
+      leadId:  l._id,
+      name:    l.name || "Unknown",
+      status:  l.status || "—",
+      reason,
+      source:  src,
+      agent,
+      // Short reason detail = the most informative text we found (remark/summary).
+      detail:  text ? text.slice(0, 240) : "",
+      updatedAt: l.updatedAt || l.closedAt || l.createdAt || null,
+    });
   }
+
+  // Most-recently-touched first.
+  leadDetails.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
 
   const total = lost.length;
   const reasonBreakdown = Object.entries(byReason)
@@ -155,6 +177,7 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
     reasonBreakdown,
     bySource,
     byAgent: Object.entries(byAgent).map(([agent, count]) => ({ agent, count })).sort((a, b) => b.count - a.count),
+    leadDetails,
     aiAnalysis: null,
   };
 
