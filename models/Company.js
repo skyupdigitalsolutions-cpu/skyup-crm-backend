@@ -310,6 +310,19 @@ const companySchema = mongoose.Schema(
         senderId:   { type: String,  default: "" },
       },
     },
+
+    // ── Per-company Cloudinary (media storage isolation) ──────────────────────
+    // When enabled + filled, this company's media (call recordings, meeting
+    // attachments) uploads to ITS OWN Cloudinary account instead of the shared
+    // global one. Leave disabled/empty to use the platform's global Cloudinary
+    // (CLOUDINARY_* env vars). apiSecret is sensitive — never return it to the
+    // client (the controller selects it out).
+    cloudinaryConfig: {
+      enabled:   { type: Boolean, default: false },
+      cloudName: { type: String,  default: "", trim: true },
+      apiKey:    { type: String,  default: "", trim: true },
+      apiSecret: { type: String,  default: "", trim: true },
+    },
   },
   { timestamps: true }
 );

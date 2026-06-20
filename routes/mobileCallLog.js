@@ -12,12 +12,22 @@ const {
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
   summarizeUnmatchedCall,
 } = require('../controllers/mobileCallLogController');
+const { makeCompanyUploadMiddleware } = require('../services/cloudinaryService');
+
+// Per-company recording upload — routes the file to the company's own Cloudinary
+// account when configured, else the global account. Replaces the module-level
+// global `upload.single('recording')`.
+const recordingUpload = makeCompanyUploadMiddleware({
+  field: 'recording',
+  folderBase: 'skyup-crm/recordings',
+  allowedFormats: ['mp3', 'm4a', 'aac', 'wav', 'amr', '3gp', 'ogg', 'opus', 'mp4', '3g2'],
+});
 
 router.get('/match',        protect,    matchPhone);
 router.get('/today',        protectAny, getTodayCallLogs);   // protectAny: agents see own, admins see all company
 router.get('/',             protect,    getCallLogs);        // supports ?date=YYYY-MM-DD
 router.post('/sync',        protect,    syncCallLogs);
-router.post('/recording',   protect,    upload.single('recording'), uploadRecording);
+router.post('/recording',   protect,    recordingUpload, uploadRecording);
 router.post('/remark',      protect,    saveRemark);
 router.post('/summarize-unmatched', protectAny, summarizeUnmatchedCall); // AI summary for non-lead calls
 router.get('/recordings',   protectAny, getCompanyRecordings);

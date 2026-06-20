@@ -149,6 +149,11 @@ const addConfig = async (req, res) => {
       graphApiVersion: graphApiVersion || (_meta?.META_GRAPH_API_VERSION) || "v25.0",
       appSecret:       _meta?.META_APP_SECRET  || "",
       verifyToken:     _meta?.META_VERIFY_TOKEN || "",
+      // Ad performance (Insights API) — optional, paste from Meta Business Mgr.
+      adAccountId:     req.body.adAccountId?.trim()    || "",
+      adsToken:        req.body.adsToken?.trim()       || "",
+      metaAdsetId:     req.body.metaAdsetId?.trim()    || "",
+      metaCampaignId:  req.body.metaCampaignId?.trim() || "",
     });
 
     res.status(201).json({ success: true, data: config });
@@ -206,6 +211,26 @@ const deleteConfig = async (req, res) => {
   }
 };
 
+// GET /api/meta-config/insights?from=&to=
+// Ad performance report (spend, CPM, CPC, CTR, reach) + cost-per-lead + setup
+// issue detection, per campaign/ad set, for the admin's company.
+const getInsights = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    if (!companyId) return res.status(400).json({ message: "Company not resolved" });
+
+    const { getMetaInsightsReport } = require("../services/metaInsightsService");
+    const report = await getMetaInsightsReport({
+      company: companyId,
+      from: req.query.from || null,
+      to:   req.query.to   || null,
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getAllConfigs,
   getConfigById,
@@ -213,4 +238,5 @@ module.exports = {
   updateConfig,
   toggleConfig,
   deleteConfig,
+  getInsights,
 };

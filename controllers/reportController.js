@@ -12,6 +12,7 @@ const {
   getEmployeeReport,
   getCampaignReport,
 } = require('../services/reportService');
+const { getNonConversionReport } = require('../services/nonConversionService');
 
 // ── GET /api/reports/daily ────────────────────────────────────────────────────
 // Works for both admin (req.admin) and user (req.user) tokens.
@@ -114,4 +115,23 @@ function maskEmail(email) {
   return `${maskedLocal}@${maskedDomain}`;
 }
 
-module.exports = { dailyReport, employeeReport, campaignReport };
+// ── GET /api/reports/non-conversion ───────────────────────────────────────────
+// Admin-only. Analyses WHY leads didn't convert (derived from status + remarks
+// + call summaries) and returns reason breakdown + AI improvement suggestions.
+const nonConversionReport = async (req, res) => {
+  try {
+    const company = req.callerCompany || req.admin?.company?._id || req.user?.company;
+    if (!company) return res.status(400).json({ message: 'Company not resolved' });
+
+    const from   = req.query.from || null;
+    const to     = req.query.to   || null;
+    const withAI = req.query.ai !== 'false';   // ai=false → skip AI (fast, charts only)
+
+    const report = await getNonConversionReport({ company, from, to, withAI });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+module.exports = { dailyReport, employeeReport, campaignReport, nonConversionReport };

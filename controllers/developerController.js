@@ -423,6 +423,11 @@ const getCompanyDetails = async (req, res) => {
       company.devOverrides.limitMeta = Object.fromEntries(company.devOverrides.limitMeta);
     }
 
+    // Never expose the company's Cloudinary apiSecret to the client — mask it.
+    if (company.cloudinaryConfig && company.cloudinaryConfig.apiSecret) {
+      company.cloudinaryConfig = { ...company.cloudinaryConfig, apiSecret: "********" };
+    }
+
     res.json({
       success: true,
       company,
@@ -877,6 +882,56 @@ const getCompanyPayments = async (req, res) => {
   }
 };
 
+// ── Set / clear a company's own Cloudinary credentials ────────────────────────
+// PUT /developer/companies/:id/cloudinary
+// Body: { enabled, cloudName, apiKey, apiSecret }
+// When enabled + all three set, this company's media uploads go to its OWN
+// Cloudinary account; otherwise the platform's global account is used.
+const setCompanyCloudinary = async (req, res) => {
+  try {
+    const companyId = req.params.id;
+    const { enabled, cloudName, apiKey, apiSecret } = req.body;
+
+    const company = await Company.findById(companyId).select("name cloudinaryConfig");
+    if (!company) return res.status(404).json({ success: false, message: "Company not found" });
+
+    const wantEnabled = !!enabled;
+    if (wantEnabled && (!cloudName || !apiKey || !apiSecret)) {
+      return res.status(400).json({
+        success: false,
+        message: "cloudName, apiKey and apiSecret are all required to enable a company's own Cloudinary.",
+      });
+    }
+
+    company.cloudinaryConfig = {
+      enabled:   wantEnabled,
+      cloudName: (cloudName || "").trim(),
+      apiKey:    (apiKey || "").trim(),
+      // Keep existing secret if the client sends a masked/blank value while staying enabled.
+      apiSecret: (apiSecret && apiSecret !== "********")
+        ? apiSecret.trim()
+        : (company.cloudinaryConfig?.apiSecret || ""),
+    };
+    await company.save();
+
+    // Never echo the secret back.
+    res.json({
+      success: true,
+      message: wantEnabled
+        ? `"${company.name}" will now store media in its own Cloudinary.`
+        : `"${company.name}" reverted to the platform's global Cloudinary.`,
+      cloudinaryConfig: {
+        enabled:   company.cloudinaryConfig.enabled,
+        cloudName: company.cloudinaryConfig.cloudName,
+        apiKey:    company.cloudinaryConfig.apiKey,
+        apiSecret: company.cloudinaryConfig.apiSecret ? "********" : "",
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   // Existing
   developerLogin,
@@ -898,4 +953,5 @@ module.exports = {
   grantFreeAddon,
   grantBenefit,
   getCompanyPayments,
+  setCompanyCloudinary,
 };

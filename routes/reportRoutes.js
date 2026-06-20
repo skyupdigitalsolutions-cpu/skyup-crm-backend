@@ -13,6 +13,7 @@ const {
   dailyReport,
   employeeReport,
   campaignReport,
+  nonConversionReport,
 } = require('../controllers/reportController');
 
 // Works for both admin and user tokens — controller resolves caller identity
@@ -21,5 +22,6 @@ router.get('/daily',    protectAny,   dailyReport);
 // Admin-only routes
 router.get('/employee', protectAdmin, employeeReport);
 router.get('/campaign', protectAdmin, campaignReport);
+router.get('/non-conversion', protectAdmin, nonConversionReport);
 
 module.exports = router;

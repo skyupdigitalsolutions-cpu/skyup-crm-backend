@@ -31,6 +31,19 @@ const metaConfigSchema = new mongoose.Schema(
     defaultRemark:   { type: String, default: "Lead from Meta Campaign" },
     graphApiVersion: { type: String, default: "v21.0" }, // per-campaign API version
     appSecret:       { type: String, default: "" },       // per-campaign App Secret for signature verification
+
+    // ── Ad performance (Insights API) ─────────────────────────────────────────
+    // To pull spend / CPM / CPC / CTR / reach for this campaign or ad set, set:
+    //   adAccountId — the Meta ad account, formatted "act_1234567890"
+    //   adsToken    — a token with the `ads_read` permission on that ad account
+    //                 (a System User token is recommended; the leadgen
+    //                  pageAccessToken usually does NOT have ads_read).
+    // Optional adsetId/campaignId narrow insights to this exact ad set/campaign;
+    // leave blank to report the whole ad account.
+    adAccountId:     { type: String, default: "", trim: true },
+    adsToken:        { type: String, default: "", trim: true },
+    metaAdsetId:     { type: String, default: "", trim: true },
+    metaCampaignId:  { type: String, default: "", trim: true },
     verifyToken:     { type: String, default: "" },       // per-campaign verify token
 
     // ── Ad Set differentiation ────────────────────────────────────────────────

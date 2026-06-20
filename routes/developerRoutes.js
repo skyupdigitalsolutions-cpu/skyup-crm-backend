@@ -26,6 +26,7 @@ const {
   grantFreeAddon,
   grantBenefit,
   getCompanyPayments,
+  setCompanyCloudinary,
 } = require("../controllers/developerController");
 
 const {
@@ -70,6 +71,7 @@ router.get("/companies/:id/audit",          getAuditLogs);
 router.post("/companies/:id/grant-addon",   grantFreeAddon);
 router.post("/companies/:id/grant-benefit", grantBenefit);
 router.get("/companies/:id/payments",       getCompanyPayments);
+router.put("/companies/:id/cloudinary",     setCompanyCloudinary);
 
 // ── Subscriptions ─────────────────────────────────────────────────────────────
 router.get("/subscriptions",            getSubscriptions);

@@ -270,5 +270,6 @@ function computeSummarySignature(lead, includeTranscripts) {
 module.exports = {
   generateLeadActionSummary,
   computeSummarySignature,
+  callGrok,
   GROK_MODEL,
 };
