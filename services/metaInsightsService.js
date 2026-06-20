@@ -138,29 +138,11 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
 
   const configs = await Lead.db.model("MetaConfig").find({ company, isActive: true }).lean();
 
-  // Each ad set is its own MetaConfig document, so adAccountId/adsToken entered
-  // on one campaign/ad-set row do NOT automatically apply to its sibling ad sets.
-  // To avoid re-pasting the same Ad Account ID + ads_read token into every single
-  // ad set under a page, fall back to any sibling config that shares the same
-  // pageId and already has both fields set (e.g. the campaign-level config the
-  // credentials were originally added to).
-  const credentialsByPage = {};
-  for (const cfg of configs) {
-    if (cfg.pageId && cfg.adAccountId && cfg.adsToken && !credentialsByPage[cfg.pageId]) {
-      credentialsByPage[cfg.pageId] = { adAccountId: cfg.adAccountId, adsToken: cfg.adsToken };
-    }
-  }
-
   const campaigns = [];
   const totals = { spend: 0, impressions: 0, reach: 0, clicks: 0, leads: 0 };
 
   for (const cfg of configs) {
-    const inherited = credentialsByPage[cfg.pageId];
-    const effectiveCfg = (!cfg.adAccountId || !cfg.adsToken) && inherited
-      ? { ...cfg, adAccountId: cfg.adAccountId || inherited.adAccountId, adsToken: cfg.adsToken || inherited.adsToken }
-      : cfg;
-
-    const insights = await fetchInsightsForConfig(effectiveCfg, since, until);
+    const insights = await fetchInsightsForConfig(cfg, since, until);
     const leadCount = await leadCountForConfig(cfg, fromD, toD);
     const issues = detectIssues(insights, leadCount);
 
