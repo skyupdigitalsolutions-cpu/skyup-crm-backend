@@ -48,6 +48,16 @@ const meetingRemarkSchema = new mongoose.Schema(
     documentName: { type: String, default: null },
     recordingUrl: { type: String, default: null },
     recordingName:{ type: String, default: null },
+    // Tracks which of the 3 meeting reminders (WhatsApp + email) have already
+    // been sent for this meeting, so the cron never double-sends:
+    //   scheduledAt  — fired immediately when the meeting was scheduled
+    //   dayBeforeAt  — fired the morning of the day BEFORE the meeting
+    //   meetingDayAt — fired the morning OF the meeting day
+    reminders: {
+      scheduledAt:  { type: Date, default: null },
+      dayBeforeAt:  { type: Date, default: null },
+      meetingDayAt: { type: Date, default: null },
+    },
   },
   { _id: true },
 );

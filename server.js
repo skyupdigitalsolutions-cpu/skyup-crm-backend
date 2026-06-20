@@ -68,6 +68,7 @@ const { startLeadAlertsJob }         = require('./jobs/leadAlertsJob');
 const { startUsageResetJob }         = require('./jobs/usageResetJob');
 const { startLimitOverrideExpiryJob } = require('./jobs/limitOverrideExpiryJob');
 const { startAddonExpiryJob }         = require('./jobs/addonExpiryJob');
+const { startMeetingReminderJob }     = require('./jobs/meetingReminderJob');
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute         = require('./routes/smsCampaign');
@@ -317,6 +318,7 @@ connectDB().then(() => {
     startUsageResetJob();   // NEW
     startLimitOverrideExpiryJob();  // NEW — reverts expired priced limit overrides
     startAddonExpiryJob();          // NEW — marks expired add-ons (incl. 30-day credit packs) as expired
+    startMeetingReminderJob();      // NEW — day-before + meeting-day WhatsApp/email reminders
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();

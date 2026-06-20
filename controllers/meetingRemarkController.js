@@ -319,6 +319,15 @@ const addMeetingRemark = (req, res) => {
             console.log(`[meetingBlast] Email → lead ${lead._id}:`, em.success ? `sent via ${em.provider}` : `skipped (${em.message})`);
           } catch (e) { console.error('[meetingBlast] Email error:', e.message); }
         });
+
+        // Mark the immediate "scheduled" reminder as sent so the cron job
+        // (day-before + meeting-day reminders) doesn't re-send it today.
+        try {
+          await Lead.updateOne(
+            { _id: id, "meetingRemarks._id": saved._id },
+            { $set: { "meetingRemarks.$.reminders.scheduledAt": new Date() } },
+          );
+        } catch (e) { console.error('[meetingBlast] mark scheduledAt error:', e.message); }
       }
 
       return res.status(201).json({
@@ -398,4 +407,11 @@ const sendMeetingWhatsApp = async (req, res) => {
   }
 };
 
-module.exports = { addMeetingRemark, getMeetingRemarks, sendMeetingWhatsApp };
+module.exports = {
+  addMeetingRemark,
+  getMeetingRemarks,
+  sendMeetingWhatsApp,
+  // Exposed for the meeting-reminder cron job (jobs/meetingReminderJob.js)
+  _sendClientMeetingWhatsApp,
+  _sendClientMeetingEmail,
+};

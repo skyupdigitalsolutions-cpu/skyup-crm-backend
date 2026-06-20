@@ -98,7 +98,7 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
       { updatedAt: { $gte: fromDate, $lte: toDate } },
     ],
   })
-    .select("name status isClosed remark callHistory meetingRemarks source campaign user primaryPhone mobile phone value closedAt updatedAt createdAt")
+    .select("name status isClosed remark callHistory meetingRemarks source campaign user primaryPhone mobile phone value temperature closedAt updatedAt createdAt")
     .populate("user", "name")
     .lean();
 
@@ -130,37 +130,54 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
   const bySource = {};
   const byAgent  = {};
   const samples  = {};   // a few example remarks per reason for the AI
-  const leadDetails = []; // per-lead: name, status, reason, source, agent, remark
+  const leadDetails = []; // per-lead: name, status, reason, improvement, etc.
 
   for (const l of lost) {
     const phoneKey = (l.primaryPhone || l.mobile || l.phone || "").replace(/\D/g, "").slice(-10);
     const summaryText = summaryByPhone[phoneKey] || "";
     const text   = pickReasonText(l, summaryText);
+    // Keyword bucket is the FAST FALLBACK; the AI pass (below) overrides reason
+    // + adds an improvement for each lead when available.
     const reason = categorise(text, l.status);
 
-    byReason[reason] = (byReason[reason] || 0) + 1;
-
     const src = l.source || l.campaign || "Unknown";
-    bySource[src] = bySource[src] || {};
-    bySource[src][reason] = (bySource[src][reason] || 0) + 1;
-
     const agent = l.user?.name || "Unassigned";
-    byAgent[agent] = (byAgent[agent] || 0) + 1;
-
-    if (!samples[reason]) samples[reason] = [];
-    if (samples[reason].length < 5 && text) samples[reason].push(text.slice(0, 200));
 
     leadDetails.push({
       leadId:  l._id,
       name:    l.name || "Unknown",
       status:  l.status || "—",
-      reason,
+      temperature: l.temperature || null,
+      reason,                 // may be overridden by AI
+      improvement: "",        // filled by AI
       source:  src,
       agent,
-      // Short reason detail = the most informative text we found (remark/summary).
       detail:  text ? text.slice(0, 240) : "",
       updatedAt: l.updatedAt || l.closedAt || l.createdAt || null,
     });
+  }
+
+  // ── Per-lead AI reasoning ───────────────────────────────────────────────────
+  // Analyse each lead's remark + status + temperature + call summary to produce
+  // a SPECIFIC reason (what's blocking conversion / the mistake) and a concrete
+  // improvement action. Batched into chunks to stay within token limits.
+  if (withAI && leadDetails.length > 0) {
+    try {
+      await runPerLeadAnalysis(leadDetails);
+    } catch (e) {
+      // Non-fatal: keep keyword reasons, leave improvement blank.
+      console.error("[nonConversion] per-lead AI failed:", e.message);
+    }
+  }
+
+  // Recompute aggregates AFTER AI so the breakdown reflects the refined reasons.
+  for (const d of leadDetails) {
+    byReason[d.reason] = (byReason[d.reason] || 0) + 1;
+    bySource[d.source] = bySource[d.source] || {};
+    bySource[d.source][d.reason] = (bySource[d.source][d.reason] || 0) + 1;
+    byAgent[d.agent] = (byAgent[d.agent] || 0) + 1;
+    if (!samples[d.reason]) samples[d.reason] = [];
+    if (samples[d.reason].length < 5 && d.detail) samples[d.reason].push(d.detail.slice(0, 200));
   }
 
   // Most-recently-touched first.
@@ -232,6 +249,61 @@ async function runAIAnalysis(reasonBreakdown, samples, bySource, total) {
   } catch {
     // If the model didn't return clean JSON, hand back the text as the summary.
     return { summary: cleaned, topReasons: [], suggestions: [], dataQualityNote: "" };
+  }
+}
+
+// ── Per-lead AI: reason + improvement for each non-converted lead ─────────────
+// Batches leads to keep each request small. For each lead the model gets the
+// name, status, temperature and the remark/call-summary text, and returns a
+// concise reason (what's blocking conversion / the mistake) plus a concrete
+// improvement action. Writes results back onto the leadDetails objects in place.
+async function runPerLeadAnalysis(leadDetails) {
+  const BATCH = 25;
+
+  const systemPrompt =
+    "You are a sales coach reviewing CRM leads that have NOT converted yet. " +
+    "For EACH lead you get its name, status, temperature (Hot/Warm/Cold or null) " +
+    "and the latest agent remark / call-summary text. Infer, from that text and " +
+    "status, the most likely REASON the lead hasn't converted (what is blocking " +
+    "it or the mistake being made — e.g. 'Demo scheduled but not yet completed', " +
+    "'Awaiting callback — follow-up not done', 'Price concern not addressed', " +
+    "'Needs WhatsApp/email automation info', 'No follow-up after first call'), " +
+    "and a short, concrete IMPROVEMENT action the agent should take next. " +
+    "Base it ONLY on the given text; if there's genuinely no info, use reason " +
+    "'No remark logged' and improvement 'Log call notes and set a follow-up'. " +
+    "Respond with STRICT JSON only — an array, one object per lead, in the same " +
+    "order, shape: [{\"reason\":\"...\",\"improvement\":\"...\"}]. Keep each field " +
+    "under 90 characters.";
+
+  for (let i = 0; i < leadDetails.length; i += BATCH) {
+    const chunk = leadDetails.slice(i, i + BATCH);
+    const lines = chunk.map((d, idx) =>
+      `${idx + 1}. name="${d.name}" status="${d.status}" temp="${d.temperature || "n/a"}" notes="${(d.detail || "").replace(/"/g, "'").slice(0, 220) || "none"}"`
+    );
+
+    let raw;
+    try {
+      raw = await callGrok(systemPrompt, lines.join("\n"), 1200);
+    } catch (e) {
+      // Leave this chunk on keyword reasons; continue with the next.
+      continue;
+    }
+
+    const cleaned = (raw || "").replace(/```json|```/g, "").trim();
+    let arr;
+    try {
+      arr = JSON.parse(cleaned);
+    } catch {
+      continue; // keep fallbacks for this chunk
+    }
+    if (!Array.isArray(arr)) continue;
+
+    arr.forEach((item, idx) => {
+      const d = chunk[idx];
+      if (!d || !item) return;
+      if (item.reason)      d.reason = String(item.reason).slice(0, 120);
+      if (item.improvement) d.improvement = String(item.improvement).slice(0, 120);
+    });
   }
 }
 
