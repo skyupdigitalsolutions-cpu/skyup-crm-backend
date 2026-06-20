@@ -60,8 +60,12 @@ const companyAddonSchema = new mongoose.Schema(
     // Type of addon — determines how entitlementService applies it
     addonType: {
       type:     String,
-      enum:     ADDON_TYPES,
       required: true,
+      // Built-in types OR developer-created custom_ addons.
+      validate: {
+        validator: (v) => ADDON_TYPES.includes(v) || /^custom_[a-z0-9_]{2,40}$/.test(v),
+        message: (p) => `${p.value} is not a valid addon type`,
+      },
     },
 
     // Quantity — e.g. 2 × extra_users_5 = +10 users; 1 × storage_5gb = +5 GB

@@ -339,12 +339,43 @@ async function getCompanyEntitlements(companyId) {
   }
 
   // ── 3. Apply addon stack ──────────────────────────────────────────────────
+  // Pre-fetch grant specs for any CUSTOM addons present (custom_* types created
+  // by the developer). Built-in types use the hardcoded maps above; custom ones
+  // store their {field, delta} on the AddonCatalog record.
+  const customTypes = [
+    ...new Set([
+      ...addons.map((a) => a.addonType),
+      ...benefits.map((b) => b.benefitType),
+    ].filter((t) => typeof t === "string" && t.startsWith("custom_"))),
+  ];
+  const customGrants = {};
+  if (customTypes.length) {
+    try {
+      const AddonCatalog = require("../models/AddonCatalog");
+      const rows = await AddonCatalog.find({ addonType: { $in: customTypes } })
+        .select("addonType grant").lean();
+      for (const r of rows) {
+        if (r.grant && r.grant.field && r.grant.delta) {
+          customGrants[r.addonType] = { field: r.grant.field, delta: r.grant.delta };
+        }
+      }
+    } catch (e) {
+      console.error("[entitlements] custom addon grant lookup failed:", e.message);
+    }
+  }
+
   for (const addon of addons) {
     const qty = addon.quantity || 1;
 
     // Resource addon — add delta × quantity to the numeric limit
     if (RESOURCE_ADDON_DELTA[addon.addonType]) {
       const { field, delta } = RESOURCE_ADDON_DELTA[addon.addonType];
+      ent[field] = (ent[field] || 0) + delta * qty;
+    }
+
+    // Custom resource addon — grant comes from the catalog record.
+    if (customGrants[addon.addonType]) {
+      const { field, delta } = customGrants[addon.addonType];
       ent[field] = (ent[field] || 0) + delta * qty;
     }
 
@@ -368,6 +399,11 @@ async function getCompanyEntitlements(companyId) {
 
     if (RESOURCE_ADDON_DELTA[benefit.benefitType]) {
       const { field, delta } = RESOURCE_ADDON_DELTA[benefit.benefitType];
+      ent[field] = (ent[field] || 0) + delta * qty;
+    }
+
+    if (customGrants[benefit.benefitType]) {
+      const { field, delta } = customGrants[benefit.benefitType];
       ent[field] = (ent[field] || 0) + delta * qty;
     }
 

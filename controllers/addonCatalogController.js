@@ -233,11 +233,84 @@ const getPublicAddons = async (req, res) => {
   }
 };
 
+// ── POST /api/developer/addon-catalog/custom ──────────────────────────────────
+// Create a developer-defined CUSTOM resource addon.
+// Body: { name, description, price, currency, billingPeriod, isPublic,
+//         grantField, grantDelta, maxQuantity }
+// grantField ∈ users|leads|admins|websites|metaCampaigns|googleAccounts|
+//             storageMB|transcriptionsLimit|summariesLimit|voiceBotLimit
+const GRANT_FIELDS = ["admins", "users", "leads", "websites", "metaCampaigns",
+  "googleAccounts", "storageMB", "transcriptionsLimit", "summariesLimit", "voiceBotLimit"];
+
+const createCustomAddon = async (req, res) => {
+  try {
+    const {
+      name, description = "", price = 0, currency = "INR",
+      billingPeriod = "monthly", isPublic = false,
+      grantField, grantDelta, maxQuantity = 1,
+    } = req.body || {};
+
+    if (!name || !name.trim())
+      return res.status(400).json({ success: false, message: "Name is required." });
+    if (!GRANT_FIELDS.includes(grantField))
+      return res.status(400).json({ success: false, message: `grantField must be one of: ${GRANT_FIELDS.join(", ")}` });
+    const delta = Number(grantDelta);
+    if (!Number.isFinite(delta) || delta <= 0)
+      return res.status(400).json({ success: false, message: "grantDelta must be a positive number." });
+
+    // Build a stable custom_ key from the name (unique-ified if needed).
+    const base = "custom_" + name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 32);
+    let addonType = base || `custom_${Date.now()}`;
+    let n = 1;
+    while (await AddonCatalog.exists({ addonType })) {
+      addonType = `${base}_${n++}`;
+    }
+
+    const item = await AddonCatalog.create({
+      addonType,
+      name: name.trim(),
+      description: description.trim(),
+      category: "resource",
+      price: Number(price) || 0,
+      currency,
+      billingPeriod,
+      isPublic: !!isPublic,
+      maxQuantity: Math.max(1, Number(maxQuantity) || 1),
+      custom: true,
+      grant: { field: grantField, delta },
+    });
+
+    res.json({ success: true, item });
+  } catch (err) {
+    console.error("[createCustomAddon]", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── DELETE /api/developer/addon-catalog/custom/:addonType ─────────────────────
+// Removes a custom addon from the catalog (only custom_ types; built-ins are
+// protected). Existing purchases keep working via the entitlement lookup until
+// they expire — deletion just stops new sales/grants.
+const deleteCustomAddon = async (req, res) => {
+  try {
+    const { addonType } = req.params;
+    if (!/^custom_/.test(addonType))
+      return res.status(400).json({ success: false, message: "Only custom addons can be deleted here." });
+    const r = await AddonCatalog.findOneAndDelete({ addonType, custom: true });
+    if (!r) return res.status(404).json({ success: false, message: "Custom addon not found." });
+    res.json({ success: true, message: `Deleted "${r.name}".` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   getCatalog,
   upsertCatalogItem,
   saveCatalog,
   getPublicAddons,
   seedCatalogIfEmpty,
+  createCustomAddon,
+  deleteCustomAddon,
   DEFAULT_CATALOG,
 };

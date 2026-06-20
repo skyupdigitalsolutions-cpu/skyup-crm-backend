@@ -43,6 +43,8 @@ const {
   getCatalog,
   saveCatalog,
   upsertCatalogItem,
+  createCustomAddon,
+  deleteCustomAddon,
 } = require("../controllers/addonCatalogController");
 
 // ── Public ────────────────────────────────────────────────────────────────────
@@ -92,6 +94,8 @@ router.delete("/plans/:id",  deletePlan);
 // ── Add-on price catalogue (Plan Customization → Add-on Pricing) ──────────────
 router.get("/addon-catalog",            getCatalog);
 router.put("/addon-catalog",            saveCatalog);          // bulk upsert
+router.post("/addon-catalog/custom",    createCustomAddon);    // create custom addon
+router.delete("/addon-catalog/custom/:addonType", deleteCustomAddon);
 router.put("/addon-catalog/:addonType", upsertCatalogItem);    // single upsert
 
 module.exports = router;

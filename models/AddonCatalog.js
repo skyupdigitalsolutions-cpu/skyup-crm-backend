@@ -21,12 +21,41 @@ const { ADDON_TYPES } = require("./CompanyAddon");
 const addonCatalogSchema = new mongoose.Schema(
   {
     // Add-on identifier — matches CompanyAddon.addonType exactly.
+    // Built-in types come from ADDON_TYPES; custom developer-created addons use
+    // a "custom_" prefix (validated below) so they don't collide with built-ins.
     addonType: {
       type:     String,
-      enum:     ADDON_TYPES,
       required: true,
       unique:   true,
       index:    true,
+      validate: {
+        validator: function (v) {
+          return ADDON_TYPES.includes(v) || /^custom_[a-z0-9_]{2,40}$/.test(v);
+        },
+        message: (p) => `${p.value} is not a built-in addon type and is not a valid custom_ key`,
+      },
+    },
+
+    // ── Custom (developer-created) addon support ──────────────────────────────
+    // true = created by the developer in the panel (not a built-in type).
+    custom: {
+      type:    Boolean,
+      default: false,
+    },
+
+    // For custom RESOURCE addons: what entitlement limit it raises, and by how
+    // much per unit/quantity. e.g. { field: "users", delta: 10 } = +10 users per
+    // unit purchased. The entitlement engine reads this when the addonType isn't
+    // a built-in. Allowed fields mirror the numeric entitlement limits.
+    grant: {
+      field: {
+        type: String,
+        enum: ["admins", "users", "leads", "websites", "metaCampaigns",
+               "googleAccounts", "storageMB", "transcriptionsLimit",
+               "summariesLimit", "voiceBotLimit", ""],
+        default: "",
+      },
+      delta: { type: Number, default: 0 },
     },
 
     // Customer-facing display name (e.g. "5 Extra Users")
