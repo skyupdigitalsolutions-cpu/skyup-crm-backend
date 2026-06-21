@@ -33,6 +33,20 @@ function dateRange(from, to) {
 }
 
 // ── Fetch insights for one config ─────────────────────────────────────────────
+// Returns ONE of two shapes:
+//   • Single scope (explicit metaAdsetId, or metaCampaignId):
+//       { configured, hasData, level, metrics:{...} }
+//   • Account scope (only adAccountId set):
+//       { configured, hasData, level:"account", adsets:[ { adsetId, adsetName,
+//         campaignName, metrics:{...} }, ... ] }
+//
+// THE BUG THIS FIXES:
+//   Previously, account scope queried /{account}/insights with NO breakdown, so
+//   Meta returned a SINGLE aggregated row = the whole-account total. That one
+//   total was then shown identically on every ad set card. Now we pass
+//   level=adset (+ adset_id/adset_name in fields), so Meta returns ONE ROW PER
+//   AD SET with that ad set's real spend — and the caller expands them into
+//   individual cards.
 async function fetchInsightsForConfig(cfg, since, until) {
   const ver   = cfg.graphApiVersion || DEFAULT_VER;
   const token = cfg.adsToken;
@@ -42,41 +56,69 @@ async function fetchInsightsForConfig(cfg, since, until) {
     return { configured: false };
   }
 
-  // Scope: ad set > campaign > whole account.
-  let node = acct;
-  let level = "account";
-  if (cfg.metaAdsetId)        { node = cfg.metaAdsetId;    level = "adset"; }
-  else if (cfg.metaCampaignId){ node = cfg.metaCampaignId; level = "campaign"; }
+  // Scope: explicit ad set > explicit campaign > whole account (per-adset breakdown).
+  let node, level;
+  if (cfg.metaAdsetId)         { node = cfg.metaAdsetId;    level = "adset";    }
+  else if (cfg.metaCampaignId) { node = cfg.metaCampaignId; level = "campaign"; }
+  else                         { node = acct;               level = "account";  }
 
   const url = `https://graph.facebook.com/${ver}/${node}/insights`;
+
+  // For account (and campaign) scope we break the response down BY ad set so
+  // each ad set reports its own spend. For an explicit single ad set there is
+  // nothing to break down.
+  const breakdownByAdset = level === "account" || level === "campaign";
+
+  const baseFields = "spend,impressions,reach,clicks,cpm,cpc,ctr,frequency";
   const params = {
-    fields: "spend,impressions,reach,clicks,cpm,cpc,ctr,frequency",
+    fields: breakdownByAdset
+      ? `${baseFields},adset_id,adset_name,campaign_name`
+      : baseFields,
     time_range: JSON.stringify({ since, until }),
     access_token: token,
   };
+  if (breakdownByAdset) {
+    // level=adset makes Meta return one row PER AD SET instead of one aggregate.
+    params.level = "adset";
+    params.limit = 500;
+  }
+
+  const emptyMetrics = () => ({ spend: 0, impressions: 0, reach: 0, clicks: 0, cpm: 0, cpc: 0, ctr: 0, frequency: 0 });
+  const rowToMetrics = (row) => ({
+    spend:       num(row.spend),
+    impressions: num(row.impressions),
+    reach:       num(row.reach),
+    clicks:      num(row.clicks),
+    cpm:         num(row.cpm),
+    cpc:         num(row.cpc),
+    ctr:         num(row.ctr),
+    frequency:   num(row.frequency),
+  });
 
   try {
     const { data } = await axios.get(url, { params, timeout: 20000 });
-    const row = (data && data.data && data.data[0]) || null;
-    if (!row) {
-      return { configured: true, hasData: false, level,
-        metrics: { spend: 0, impressions: 0, reach: 0, clicks: 0, cpm: 0, cpc: 0, ctr: 0, frequency: 0 } };
+    const rows = (data && Array.isArray(data.data)) ? data.data : [];
+
+    // ── Account / campaign scope: return per-ad-set rows ──────────────────────
+    if (breakdownByAdset) {
+      if (rows.length === 0) {
+        return { configured: true, hasData: false, level, adsets: [] };
+      }
+      const adsets = rows.map((row) => ({
+        adsetId:      row.adset_id || "",
+        adsetName:    row.adset_name || "(unnamed ad set)",
+        campaignName: row.campaign_name || "",
+        metrics:      rowToMetrics(row),
+      }));
+      return { configured: true, hasData: true, level, adsets };
     }
-    return {
-      configured: true,
-      hasData: true,
-      level,
-      metrics: {
-        spend:       num(row.spend),
-        impressions: num(row.impressions),
-        reach:       num(row.reach),
-        clicks:      num(row.clicks),
-        cpm:         num(row.cpm),
-        cpc:         num(row.cpc),
-        ctr:         num(row.ctr),
-        frequency:   num(row.frequency),
-      },
-    };
+
+    // ── Explicit single ad set scope: one metrics object ──────────────────────
+    const row = rows[0] || null;
+    if (!row) {
+      return { configured: true, hasData: false, level, metrics: emptyMetrics() };
+    }
+    return { configured: true, hasData: true, level, metrics: rowToMetrics(row) };
   } catch (e) {
     const fb = e?.response?.data?.error;
     return {
@@ -144,8 +186,66 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
   for (const cfg of configs) {
     const insights = await fetchInsightsForConfig(cfg, since, until);
     const leadCount = await leadCountForConfig(cfg, fromD, toD);
-    const issues = detectIssues(insights, leadCount);
 
+    // ── Account/campaign scope: one card PER AD SET ───────────────────────────
+    // fetchInsightsForConfig returns an `adsets` array for these. We emit a
+    // separate card for each ad set so each shows its own real spend (this is
+    // the fix for "every ad set showed the same total cost").
+    if (insights.configured && Array.isArray(insights.adsets)) {
+      if (insights.adsets.length === 0) {
+        // Configured but no delivery in range — still surface the card + issues.
+        const issues = detectIssues(insights, leadCount);
+        campaigns.push({
+          configId:     cfg._id,
+          campaignName: cfg.parentCampaignName || cfg.campaignName,
+          adSetName:    "",
+          configured:   true,
+          metrics:      { spend: 0, impressions: 0, reach: 0, clicks: 0, cpm: 0, cpc: 0, ctr: 0, frequency: 0 },
+          leads:        leadCount,
+          costPerLead:  null,
+          issues,
+        });
+      } else {
+        // NOTE on leads: CRM leads are tagged by campaign/ad-set NAME, not by
+        // Meta adset_id, so we can only reliably attribute lead COUNT at the
+        // config (campaign) level. To avoid showing the same lead count on every
+        // ad set card, we attribute leads to the highest-spend ad set and leave
+        // the rest null. (A precise split needs per-adset lead tagging.)
+        const topSpendIdx = insights.adsets.reduce(
+          (best, a, i, arr) => (a.metrics.spend > arr[best].metrics.spend ? i : best), 0,
+        );
+        insights.adsets.forEach((a, i) => {
+          const m = a.metrics;
+          const adsetLeads = i === topSpendIdx ? leadCount : 0;
+          const costPerLead = adsetLeads > 0 ? Math.round((m.spend / adsetLeads) * 100) / 100 : null;
+
+          // Per-ad-set health check (reuse detectIssues with a single-row shape).
+          const issues = detectIssues({ configured: true, hasData: true, metrics: m }, adsetLeads);
+
+          totals.spend       += m.spend;
+          totals.impressions += m.impressions;
+          totals.reach       += m.reach;
+          totals.clicks      += m.clicks;
+
+          campaigns.push({
+            configId:     cfg._id,
+            adsetId:      a.adsetId,
+            campaignName: a.campaignName || cfg.parentCampaignName || cfg.campaignName,
+            adSetName:    a.adsetName,
+            configured:   true,
+            metrics:      m,
+            leads:        adsetLeads,
+            costPerLead,
+            issues,
+          });
+        });
+      }
+      totals.leads += leadCount;
+      continue;
+    }
+
+    // ── Explicit single ad set / campaign scope, or not-configured ────────────
+    const issues = detectIssues(insights, leadCount);
     const m = insights.metrics || { spend: 0, impressions: 0, reach: 0, clicks: 0, cpm: 0, cpc: 0, ctr: 0, frequency: 0 };
     const costPerLead = leadCount > 0 ? Math.round((m.spend / leadCount) * 100) / 100 : null;
 
