@@ -98,6 +98,7 @@ const login = async (req, res) => {
         companyId: user.company._id,  // include companyId for chat widget
         createdBy: user.createdBy,    // include createdBy for chat widget
         role:      user.role,
+        contactAccountEmail: user.contactAccountEmail || null, // Google acct for contacts auto-save
         token:     generateToken(user._id, user.role || "employee"),
       });
     } else {
