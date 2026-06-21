@@ -19,18 +19,18 @@
 const axios     = require("axios");
 const MetaConfig = require("../models/MetaConfig");
 const Lead       = require("../models/Leads");
-const { callGrok } = require("../utils/leadActionSummary");
+const { callGroq } = require("../utils/leadActionSummary");
 
 // Call the AI with automatic retry on transient rate limits (HTTP 429).
-// callGrok rethrows the underlying axios error, so we catch a 429 here, wait
+// callGroq rethrows the underlying axios error, so we catch a 429 here, wait
 // (honoring Retry-After when the provider sends it) and retry with exponential
 // backoff before giving up. Prevents the raw "Request failed with status code
 // 429" from reaching the AI Analysis panel.
-async function callGrokWithRetry(systemPrompt, userContent, maxTokens, maxRetries = 2) {
+async function callGroqWithRetry(systemPrompt, userContent, maxTokens, maxRetries = 2) {
   let attempt = 0;
   for (;;) {
     try {
-      return await callGrok(systemPrompt, userContent, maxTokens);
+      return await callGroq(systemPrompt, userContent, maxTokens);
     } catch (e) {
       const status = e?.response?.status;
       if (status === 429 && attempt < maxRetries) {
@@ -177,6 +177,29 @@ async function leadCountForConfig(cfg, fromD, toD) {
   }
 }
 
+// ── CRM CONVERTED count for this config in the period ─────────────────────────
+// Same attribution as leadCountForConfig (Meta-sourced leads matched by
+// campaign/ad-set name), but only those now marked converted in the CRM. This
+// is CRM outcome data shown against Meta spend — Meta itself doesn't know which
+// leads converted.
+const CONVERTED_RE = /^(converted|won|customer|closed won|closed-won|complete[d]?)$/i;
+async function convertedCountForConfig(cfg, fromD, toD) {
+  const q = {
+    company: cfg.company,
+    mergedInto: null,
+    createdAt: { $gte: fromD, $lte: toD },
+  };
+  if (cfg.parentCampaignName || cfg.campaignName) {
+    q.campaign = cfg.parentCampaignName || cfg.campaignName;
+  }
+  try {
+    const rows = await Lead.find(q).select("status").lean();
+    return rows.filter(l => CONVERTED_RE.test(String(l.status || "").trim())).length;
+  } catch {
+    return 0;
+  }
+}
+
 // ── Setup-issue detector ──────────────────────────────────────────────────────
 function detectIssues({ configured, hasData, metrics, error, needsAdsRead, tokenExpired }, leadCount) {
   const issues = [];
@@ -207,11 +230,12 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
   const configs = await Lead.db.model("MetaConfig").find({ company, isActive: true }).lean();
 
   const campaigns = [];
-  const totals = { spend: 0, impressions: 0, reach: 0, clicks: 0, leads: 0 };
+  const totals = { spend: 0, impressions: 0, reach: 0, clicks: 0, leads: 0, converted: 0 };
 
   for (const cfg of configs) {
     const insights = await fetchInsightsForConfig(cfg, since, until);
     const leadCount = await leadCountForConfig(cfg, fromD, toD);
+    const convertedCount = await convertedCountForConfig(cfg, fromD, toD);
 
     // ── Account/campaign scope: one card PER AD SET ───────────────────────────
     // fetchInsightsForConfig returns an `adsets` array for these. We emit a
@@ -228,7 +252,9 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
           configured:   true,
           metrics:      { spend: 0, impressions: 0, reach: 0, clicks: 0, cpm: 0, cpc: 0, ctr: 0, frequency: 0 },
           leads:        leadCount,
+          converted:    convertedCount,
           costPerLead:  null,
+          costPerConversion: null,
           issues,
         });
       } else {
@@ -243,7 +269,9 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
         insights.adsets.forEach((a, i) => {
           const m = a.metrics;
           const adsetLeads = i === topSpendIdx ? leadCount : 0;
+          const adsetConverted = i === topSpendIdx ? convertedCount : 0;
           const costPerLead = adsetLeads > 0 ? Math.round((m.spend / adsetLeads) * 100) / 100 : null;
+          const costPerConversion = adsetConverted > 0 ? Math.round((m.spend / adsetConverted) * 100) / 100 : null;
 
           // Per-ad-set health check (reuse detectIssues with a single-row shape).
           const issues = detectIssues({ configured: true, hasData: true, metrics: m }, adsetLeads);
@@ -261,12 +289,15 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
             configured:   true,
             metrics:      m,
             leads:        adsetLeads,
+            converted:    adsetConverted,
             costPerLead,
+            costPerConversion,
             issues,
           });
         });
       }
       totals.leads += leadCount;
+      totals.converted += convertedCount;
       continue;
     }
 
@@ -274,6 +305,7 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
     const issues = detectIssues(insights, leadCount);
     const m = insights.metrics || { spend: 0, impressions: 0, reach: 0, clicks: 0, cpm: 0, cpc: 0, ctr: 0, frequency: 0 };
     const costPerLead = leadCount > 0 ? Math.round((m.spend / leadCount) * 100) / 100 : null;
+    const costPerConversion = convertedCount > 0 ? Math.round((m.spend / convertedCount) * 100) / 100 : null;
 
     if (insights.configured && insights.hasData) {
       totals.spend       += m.spend;
@@ -282,6 +314,7 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
       totals.clicks      += m.clicks;
     }
     totals.leads += leadCount;
+    totals.converted += convertedCount;
 
     campaigns.push({
       configId:     cfg._id,
@@ -290,16 +323,20 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
       configured:   !!insights.configured,
       metrics:      m,
       leads:        leadCount,
+      converted:    convertedCount,
       costPerLead,
+      costPerConversion,
       issues,
     });
   }
 
   const overallCPL = totals.leads > 0 ? Math.round((totals.spend / totals.leads) * 100) / 100 : null;
+  const overallCPConv = totals.converted > 0 ? Math.round((totals.spend / totals.converted) * 100) / 100 : null;
+  const overallConvRate = totals.leads > 0 ? Math.round((totals.converted / totals.leads) * 10000) / 100 : null;
 
   const result = {
     range: { from: fromD, to: toD },
-    totals: { ...totals, costPerLead: overallCPL },
+    totals: { ...totals, costPerLead: overallCPL, costPerConversion: overallCPConv, conversionRatePct: overallConvRate },
     campaigns,
     aiAnalysis: null,
   };
@@ -308,21 +345,36 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
   // Only analyse campaigns that actually returned data; skip if none configured.
   const configured = campaigns.filter((c) => c.configured && c.metrics && (c.metrics.spend > 0 || c.metrics.impressions > 0));
   if (withAI && configured.length > 0) {
+    const AiCache = Lead.db.model("AiAnalysisCache");
+    const rangeKey = `${from || "all"}..${to || "all"}`;
     try {
-      const ai = await runMetaAIAnalysis(configured, result.totals);
+      // 1. Reuse a fresh cached analysis if present (avoids a provider call → no 429).
+      let ai = null;
+      const cached = await AiCache.findOne({ kind: "meta_insights", company, rangeKey }).lean();
+      if (cached?.payload) {
+        ai = cached.payload;
+        result.aiFromCache = true;
+      } else {
+        // 2. Otherwise call the AI and store the result for reuse.
+        ai = await runMetaAIAnalysis(configured, result.totals);
+        await AiCache.findOneAndUpdate(
+          { kind: "meta_insights", company, rangeKey },
+          { kind: "meta_insights", company, rangeKey, payload: ai, createdAt: new Date() },
+          { upsert: true },
+        );
+      }
       result.aiAnalysis = ai;
-      // Attach each per-adset suggestion back onto its campaign card by index.
       if (Array.isArray(ai.perAdset)) {
         ai.perAdset.forEach((p) => {
           const idx = Number(p.i);
           if (Number.isInteger(idx) && configured[idx]) {
             configured[idx].aiSuggestion = p.suggestion || "";
-            configured[idx].aiVerdict    = p.verdict || "";   // "Scale" | "Optimize" | "Pause" | "Watch"
+            configured[idx].aiVerdict    = p.verdict || "";
           }
         });
       }
     } catch (e) {
-      result.aiAnalysisError = e.code === "GROK_PAYLOAD_TOO_LARGE"
+      result.aiAnalysisError = e.code === "GROQ_PAYLOAD_TOO_LARGE"
         ? "Too much data to analyse at once — narrow the date range."
         : (e?.response?.status === 429
             ? "AI is busy right now (rate limited). Please try again in a moment."
@@ -365,7 +417,7 @@ async function runMetaAIAnalysis(campaigns, totals) {
     );
   });
 
-  const raw = await callGrokWithRetry(systemPrompt, lines.join("\n"), 1300);
+  const raw = await callGroqWithRetry(systemPrompt, lines.join("\n"), 1300);
   const cleaned = (raw || "").replace(/```json|```/g, "").trim();
   try {
     return JSON.parse(cleaned);
