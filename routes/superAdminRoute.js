@@ -38,6 +38,7 @@ const {
   updateCustomReport,
   deleteCustomReport,
   getCustomReportTrends,
+  getCustomReportLeadMetrics,
   analyzeCustomReport,
 } = require("../controllers/customReportController");
 
@@ -84,6 +85,7 @@ router.delete("/companies/:id", protectSuperAdmin, deleteCompany);
 router.post   ("/custom-reports",            protectSuperAdmin, createCustomReport);
 router.get    ("/custom-reports",            protectSuperAdmin, listCustomReports);
 router.get    ("/custom-reports/:id/trends", protectSuperAdmin, getCustomReportTrends);
+router.get    ("/custom-reports/:id/lead-metrics", protectSuperAdmin, getCustomReportLeadMetrics);
 router.post   ("/custom-reports/:id/analyze",protectSuperAdmin, analyzeCustomReport);
 router.get    ("/custom-reports/:id",        protectSuperAdmin, getCustomReport);
 router.put    ("/custom-reports/:id",        protectSuperAdmin, updateCustomReport);
