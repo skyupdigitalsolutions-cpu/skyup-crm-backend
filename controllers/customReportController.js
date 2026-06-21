@@ -14,11 +14,13 @@ const Company      = require("../models/Company");
 const { callGrok } = require("../utils/leadActionSummary");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+const FIELD_TYPES = ["revenue", "cost", "profit", "other"];
 const sanitizeFields = (fields) =>
   (Array.isArray(fields) ? fields : [])
     .map((f) => ({
       name:  String(f?.name ?? "").trim(),
       value: Number(f?.value) || 0,
+      type:  FIELD_TYPES.includes(f?.type) ? f.type : "other",
       note:  String(f?.note ?? "").trim(),
     }))
     .filter((f) => f.name.length > 0);
@@ -192,76 +194,102 @@ const getCustomReportTrends = async (req, res) => {
 };
 
 // ── AI analysis: suggestions + improvement notes ──────────────────────────────
+// Call the AI with automatic retry on transient rate limits (HTTP 429).
+// callGrok rethrows the axios error, so we catch status 429 here, wait
+// (honoring Retry-After when present), and try again with exponential backoff.
+async function callGrokWithRetry(systemPrompt, userContent, maxTokens, maxRetries = 2) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await callGrok(systemPrompt, userContent, maxTokens);
+    } catch (e) {
+      const status = e?.response?.status;
+      if (status === 429 && attempt < maxRetries) {
+        const retryAfter = Number(e?.response?.headers?.["retry-after"]);
+        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : 1500 * Math.pow(2, attempt); // 1.5s, 3s
+        await new Promise(r => setTimeout(r, waitMs));
+        attempt++;
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 const analyzeCustomReport = async (req, res) => {
   try {
     const report = await CustomReport.findById(req.params.id).lean();
     if (!report) return res.status(404).json({ message: "Report not found" });
 
-    // Build prior-period context (helps the AI comment on trend).
     const prior = await CustomReport.find({
       company:   report.company,
       periodEnd: { $lt: report.periodEnd },
-    })
-      .sort({ periodEnd: -1 })
-      .limit(1)
-      .lean();
+    }).sort({ periodEnd: -1 }).limit(1).lean();
     const previous = prior[0] || null;
 
     const cur = report.currency || "₹";
+    const a   = report.analytics || {};
     const fieldLines = (report.fields || [])
-      .map((f) => `- ${f.name}: ${cur}${f.value}${f.note ? ` (${f.note})` : ""}`)
+      .map((f) => `- ${f.name} [${f.type || "other"}]: ${cur}${f.value}${f.note ? ` (${f.note})` : ""}`)
       .join("\n");
     const prevLines = previous
-      ? (previous.fields || []).map((f) => `- ${f.name}: ${cur}${f.value}`).join("\n")
+      ? (previous.fields || []).map((f) => `- ${f.name} [${f.type || "other"}]: ${cur}${f.value}`).join("\n")
       : "(no prior report)";
 
+    // Computed metrics give the AI hard numbers instead of making it guess.
+    const metricLines =
+      `Computed: revenue=${cur}${a.totalRevenue ?? 0}, cost=${cur}${a.totalCost ?? 0}, ` +
+      `net=${cur}${a.netProfit ?? 0}, margin=${a.marginPct ?? "n/a"}%, roi=${a.roiPct ?? "n/a"}%, ` +
+      `verdict=${a.verdict ?? "insufficient"}`;
+
     const systemPrompt =
-      "You are a financial analyst reviewing a company's custom financial report. " +
-      "The fields are free-form (the user named them), so infer their financial meaning " +
-      "from the names. Identify whether the company appears profitable or loss-making, " +
-      "call out the biggest cost/risk areas, note any concerning trend vs the previous " +
-      "period, and give specific, practical improvement suggestions. Be concise and concrete. " +
-      "Respond ONLY with valid JSON, no markdown, in this exact shape: " +
-      '{"summary": "2-4 sentence assessment", "suggestions": ["actionable suggestion", "..."]}. ' +
+      "You are a financial analyst reviewing a company's financial report. Each field has a " +
+      "type tag [revenue|cost|profit|other]. Use the provided computed metrics as ground truth. " +
+      "Give a one-line verdict, a short assessment, the biggest cost/risk areas, any concerning " +
+      "trend vs the previous period, and specific practical improvement suggestions. Be concise. " +
+      "Respond ONLY with valid JSON, no markdown, exactly: " +
+      '{"verdict":"one line","summary":"2-4 sentences","suggestions":["...","..."]}. ' +
       "Provide 3 to 6 suggestions.";
 
     const userContent =
       `Report: ${report.title}\n` +
-      `Period: ${new Date(report.periodStart).toISOString().slice(0, 10)} to ${new Date(report.periodEnd).toISOString().slice(0, 10)}\n` +
-      `Total of all fields: ${cur}${report.analytics?.total ?? 0}\n\n` +
-      `Current fields:\n${fieldLines}\n\n` +
-      `Previous period fields:\n${prevLines}`;
+      `Period: ${new Date(report.periodStart).toISOString().slice(0,10)} to ${new Date(report.periodEnd).toISOString().slice(0,10)}\n` +
+      `${metricLines}\n\nCurrent fields:\n${fieldLines}\n\nPrevious period fields:\n${prevLines}`;
 
     let aiRaw;
     try {
-      aiRaw = await callGrok(systemPrompt, userContent, 700);
+      aiRaw = await callGrokWithRetry(systemPrompt, userContent, 800);
     } catch (e) {
       if (e.code === "GROK_NOT_CONFIGURED")
         return res.status(503).json({ message: "AI is not configured on the server (missing API key)." });
-      throw e;
+      if (e?.response?.status === 429)
+        return res.status(429).json({ message: "AI is busy right now (rate limited). Please try again in a moment." });
+      if (e.code === "GROK_PAYLOAD_TOO_LARGE")
+        return res.status(413).json({ message: "Report is too large for AI analysis." });
+      return res.status(502).json({ message: "AI analysis failed. Please try again." });
     }
 
-    // Parse the model's JSON defensively (strip code fences if present).
-    let parsed = { summary: "", suggestions: [] };
+    let parsed = { verdict: "", summary: "", suggestions: [] };
     try {
       const clean = String(aiRaw).replace(/```json|```/g, "").trim();
       const obj = JSON.parse(clean);
+      parsed.verdict     = String(obj.verdict || "").trim();
       parsed.summary     = String(obj.summary || "").trim();
       parsed.suggestions = Array.isArray(obj.suggestions)
         ? obj.suggestions.map((s) => String(s).trim()).filter(Boolean).slice(0, 6)
         : [];
     } catch {
-      // If the model didn't return clean JSON, fall back to the raw text as the
-      // summary so the feature still returns something useful.
       parsed.summary = String(aiRaw || "").trim();
     }
 
-    // Cache onto the report.
+    const generatedAt = new Date();
     await CustomReport.findByIdAndUpdate(report._id, {
-      ai: { summary: parsed.summary, suggestions: parsed.suggestions, generatedAt: new Date() },
+      ai: { verdict: parsed.verdict, summary: parsed.summary, suggestions: parsed.suggestions, generatedAt },
     });
 
-    res.json({ summary: parsed.summary, suggestions: parsed.suggestions, generatedAt: new Date() });
+    res.json({ ...parsed, generatedAt });
   } catch (e) {
     res.status(500).json({ message: e.message });
   }
