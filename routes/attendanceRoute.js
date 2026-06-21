@@ -17,6 +17,7 @@ const {
   locationPing,
   getLiveLocations,
   getMeetingTrackingConfig,
+  getGeofenceConfig,
   saveMeetingTrackingConfig,
 } = require("../controllers/attendanceController");
 
@@ -37,6 +38,7 @@ router.get("/my-today",     protect, requireFeature("attendance"), getMyToday);
 router.post("/request-meeting-permission", protect, requireFeature("attendance"), requestMeetingPermission);
 router.get("/meeting-permission-status",   protect, requireFeature("attendance"), getMeetingPermissionStatus);
 router.get("/meeting-tracking-config",     protect, requireFeature("attendance"), getMeetingTrackingConfig);
+router.get("/geofence-config",             protect, requireFeature("attendance"), getGeofenceConfig);
 
 // ── Live location ping (employee → server, requires meeting permission) ───────
 router.post("/location-ping", protect, requireFeature("attendance"), locationPing);
