@@ -126,12 +126,15 @@ async function notifySuperAdminEscalation(leads) {
 async function runNewLeadNoActionCheck() {
   const now = Date.now();
 
+  // NOTE: only UPPER bounds are used now. The lower bounds (…Plus) previously
+  // limited each tier to a ~15-minute slice of a lead's life, so a lead that
+  // missed its exact window (or that the 15-min cron tick skipped over) was
+  // never alerted. The `noActionAlert{1,2}hSentAt` / SuperAdmin guards already
+  // prevent duplicate alerts, so we can safely match ANY still-unactioned lead
+  // older than each threshold and let the guard dedup.
   const oneHourAgo      = new Date(now - 60  * 60 * 1000);
-  const oneHourPlus     = new Date(now - 75  * 60 * 1000);
   const twoHoursAgo     = new Date(now - 120 * 60 * 1000);
-  const twoHoursPlus    = new Date(now - 135 * 60 * 1000);
   const threeHoursAgo   = new Date(now - 180 * 60 * 1000);
-  const threeHoursPlus  = new Date(now - 195 * 60 * 1000);
 
   // Only fetch leads assigned to regular admins
   const adminIds = await Admin.find({ role: 'admin' })
@@ -151,7 +154,7 @@ async function runNewLeadNoActionCheck() {
     // ── 1-hour window — notify admin ─────────────────────────────────────────
     const leads1h = await Lead.find({
       ...baseQuery,
-      createdAt:             { $lte: oneHourAgo, $gte: oneHourPlus },
+      createdAt:             { $lte: oneHourAgo },
       noActionAlert1hSentAt: null,
     })
       .select('_id name mobile company assignedAdmin user status createdAt')
@@ -171,7 +174,7 @@ async function runNewLeadNoActionCheck() {
     // ── 2-hour window — notify admin ─────────────────────────────────────────
     const leads2h = await Lead.find({
       ...baseQuery,
-      createdAt:             { $lte: twoHoursAgo, $gte: twoHoursPlus },
+      createdAt:             { $lte: twoHoursAgo },
       noActionAlert2hSentAt: null,
     })
       .select('_id name mobile company assignedAdmin user status createdAt')
@@ -196,7 +199,7 @@ async function runNewLeadNoActionCheck() {
     //   • noActionAlertSuperAdminSentAt is null (super_admin not yet notified)
     const leads3h = await Lead.find({
       ...baseQuery,                           // callHistory: {$size:0} still applies
-      createdAt:                    { $lte: threeHoursAgo, $gte: threeHoursPlus },
+      createdAt:                    { $lte: threeHoursAgo },
       noActionAlert2hSentAt:        { $ne: null },   // admin was warned at 2h
       noActionAlertSuperAdminSentAt: null,            // super_admin not yet escalated
     })
