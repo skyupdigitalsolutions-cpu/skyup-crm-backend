@@ -29,6 +29,26 @@ function calcBreakMinutes(breaks) {
   }, 0);
 }
 
+// Idle time = the automatic "Auto Idle" gaps only (NOT manual breaks).
+// The app records inactivity as a break with reason "Auto Idle"; manual breaks
+// use any other reason. We total only the auto-idle ones for the Idle column.
+function calcIdleMinutes(breaks) {
+  return (breaks || []).reduce((sum, b) => {
+    if (b.reason === "Auto Idle" && b.startTime && b.endTime)
+      return sum + Math.round((new Date(b.endTime) - new Date(b.startTime)) / 60000);
+    return sum;
+  }, 0);
+}
+
+// Manual break minutes = all breaks EXCEPT the auto-idle ones.
+function calcManualBreakMinutes(breaks) {
+  return (breaks || []).reduce((sum, b) => {
+    if (b.reason !== "Auto Idle" && b.startTime && b.endTime)
+      return sum + Math.round((new Date(b.endTime) - new Date(b.startTime)) / 60000);
+    return sum;
+  }, 0);
+}
+
 /** Determine CRM attendance status from a raw record.*  Present / Late / Half-day / Absent / Leave  */
 function deriveCrmStatus(rec) {
   if (!rec || !rec.loginTime) return "absent";
@@ -95,7 +115,7 @@ const clockIn = async (req, res) => {
 
       if (!hasMeetingPermission) {
         // Require device location from request body
-        const { latitude, longitude } = req.body;
+        const { latitude, longitude, accuracy } = req.body;
         if (latitude == null || longitude == null) {
           return res.status(400).json({
             message: 'Location required. Please enable location and try again.',
@@ -108,12 +128,21 @@ const clockIn = async (req, res) => {
           company.clockInLatitude, company.clockInLongitude,
         );
 
-        if (dist > (company.clockInRadiusMeters || 100)) {
+        // Allow the device's reported GPS accuracy as extra tolerance (capped),
+        // so a user who is genuinely at the office but only has a coarse fix
+        // isn't rejected over and over ("too far"/many attempts). A precise fix
+        // (small accuracy) adds little slack; a coarse one adds more, up to a
+        // sensible cap so it can't be abused.
+        const radius    = company.clockInRadiusMeters || 100;
+        const accSlack  = Math.min(Number(accuracy) || 0, 150); // cap tolerance at 150m
+        const allowed   = radius + accSlack;
+
+        if (dist > allowed) {
           return res.status(403).json({
-            message: `You are ${Math.round(dist)}m from the office. Clock-in is only allowed within ${company.clockInRadiusMeters || 100}m. If you are at a client meeting, request remote clock-in permission from your admin.`,
+            message: `You are ${Math.round(dist)}m from the office. Clock-in is only allowed within ${radius}m. If you are at a client meeting, request remote clock-in permission from your admin.`,
             code:          'outside_radius',
             distanceMetres: Math.round(dist),
-            radiusMetres:   company.clockInRadiusMeters || 100,
+            radiusMetres:   radius,
           });
         }
       }
@@ -135,17 +164,34 @@ const clockIn = async (req, res) => {
     if (record && record.loginTime && !record.logoutTime)
       return res.status(400).json({ message: "Already clocked in." });
 
-    if (record) {
-      record.loginTime        = new Date();
+    if (record && record.loginTime) {
+      // ── RESUME an existing session (second clock-in same day) ───────────────
+      // The earlier bug RESET loginTime to now and zeroed the day's work, which
+      // is why a 10:09am–8:07pm day showed "0h 23m" and got mislabelled
+      // half-day. Instead we keep the ORIGINAL loginTime and accumulated work,
+      // simply reopening the session: clear the logout and any open break, and
+      // do NOT touch totalWorkMinutes here (it's recomputed at clock-out from
+      // original login → logout minus breaks).
       record.logoutTime       = null;
       record.status           = "active";
-      record.breaks           = [];
-      record.totalBreakMinutes = 0;
-      record.totalWorkMinutes  = 0;
       record.lastActivity     = new Date();
       record.activeBreakIndex = null;
-      record.crmStatus        = null; // reset manual override
-      // Refresh device fields on re-clock-in
+      record.crmStatus        = null; // let status auto-derive again
+      // Refresh device fields on re-clock-in (keep breaks + original login).
+      Object.assign(record, deviceFields);
+      await record.save();
+    } else if (record) {
+      // Record exists for today but never had a login (e.g. a pre-seeded
+      // absent/leave stub) — treat as a fresh clock-in.
+      record.loginTime         = new Date();
+      record.logoutTime        = null;
+      record.status            = "active";
+      record.breaks            = [];
+      record.totalBreakMinutes = 0;
+      record.totalWorkMinutes  = 0;
+      record.lastActivity      = new Date();
+      record.activeBreakIndex  = null;
+      record.crmStatus         = null;
       Object.assign(record, deviceFields);
       await record.save();
     } else {
@@ -435,6 +481,12 @@ const getAttendanceReport = async (req, res) => {
       ...rec,
       derivedCrmStatus : deriveCrmStatus(rec),
       workingHours     : formatWorkHours(rec.totalWorkMinutes),
+      idleMinutes      : calcIdleMinutes(rec.breaks),
+      idleTime         : (() => {
+        const idle = calcIdleMinutes(rec.breaks);
+        return idle > 0 ? formatWorkHours(idle) : (rec.idealTime || "—");
+      })(),
+      manualBreakMinutes : calcManualBreakMinutes(rec.breaks),
     }));
 
     // Filter by crmStatus after derivation (can't do in DB query for derived field)
@@ -604,7 +656,15 @@ const exportAttendance = async (req, res) => {
       checkIn      : rec.loginTime  ? new Date(rec.loginTime).toLocaleTimeString("en-IN",  { hour: "2-digit", minute: "2-digit" }) : "—",
       checkOut     : rec.logoutTime ? new Date(rec.logoutTime).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—",
       workingHours : formatWorkHours(rec.totalWorkMinutes),
-      breakMinutes : rec.totalBreakMinutes || 0,
+      breakMinutes : calcManualBreakMinutes(rec.breaks),
+      // Auto-computed idle time (Auto Idle gaps, excluding manual breaks),
+      // shown in the "Ideal/Idle Time" column. Falls back to the manual
+      // idealTime text only if no auto-idle was recorded.
+      idleMinutes  : calcIdleMinutes(rec.breaks),
+      idleTime     : (() => {
+        const idle = calcIdleMinutes(rec.breaks);
+        return idle > 0 ? formatWorkHours(idle) : (rec.idealTime || "—");
+      })(),
       status       : deriveCrmStatus(rec),
       remarks      : rec.remarks || "",
       idealTime    : rec.idealTime || "",
