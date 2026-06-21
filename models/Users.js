@@ -47,6 +47,15 @@ const userSchema = mongoose.Schema(
     // Get your chat ID: message @userinfobot on Telegram.
     telegramChatId: { type: String, default: null, trim: true },
 
+    // ── Contacts auto-save target account (admin-configured) ──────────────────
+    // The Google account email that leads should be auto-saved into on this
+    // employee's phone. Set by admin/super-admin when creating or editing the
+    // employee. The mobile app reads this at login and, when this exact Google
+    // account is signed in on the device, saves leads into it (so they sync to
+    // that Gmail). If it's empty, or the account isn't on the device, the app
+    // shows the agent an alert instead of saving silently to the wrong place.
+    contactAccountEmail: { type: String, default: null, trim: true, lowercase: true },
+
     // ── Device Call Log Sync Permission (per-employee) ────────────────────────
     // Super admin can allow/deny THIS employee's phone from syncing call logs.
     // Effective gate is AND-ed with company.callLogSyncEnabled: the user can sync
