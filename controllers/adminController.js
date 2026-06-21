@@ -154,7 +154,7 @@ const updateAdmin = async (req, res) => {
 
 const createCompanyUser = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, contactAccountEmail } = req.body;
     const companyId = req.admin.company._id;
 
     const company = await Company.findById(companyId);
@@ -178,12 +178,18 @@ const createCompanyUser = async (req, res) => {
       company: companyId,
       role: "user",
       createdBy: req.admin._id,
+      // Optional: Google account email leads are auto-saved into on the
+      // employee's phone. Stored normalized (trim/lowercase via the schema).
+      contactAccountEmail: contactAccountEmail
+        ? String(contactAccountEmail).trim()
+        : null,
     });
 
     res.status(201).json({
       _id: user._id, name: user.name, email: user.email,
       company: user.company, role: user.role,
       plainPassword: user.plainPassword,
+      contactAccountEmail: user.contactAccountEmail,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
