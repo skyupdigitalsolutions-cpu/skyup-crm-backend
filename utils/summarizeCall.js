@@ -1,22 +1,36 @@
 // utils/summarizeCall.js
-// Summarization via OpenAI GPT
-// Docs: https://platform.openai.com/docs/api-reference/chat
+// Summarization via Groq (OpenAI-compatible chat completions API)
+// Docs: https://console.groq.com/docs/api-reference#chat-create
+//
+// Switched from OpenAI gpt-4o-mini → Groq. Groq's endpoint mirrors OpenAI's
+// request/response shape, so only the URL, key, and model changed.
+// Free within Groq's free-tier rate limits; paid beyond them.
 
 const axios = require('axios');
-const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
-const OPENAI_MODEL   = 'gpt-4o-mini'; // Fast + cheap. Swap to 'gpt-4o' for higher quality.
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
-// Internal helper: call OpenAI
+// llama-3.3-70b-versatile → best balance of quality + reliable JSON output.
+// For lower cost / higher speed (but messier JSON) use 'llama-3.1-8b-instant'.
+// NOTE: Groq's model list changes over time — confirm the name is still live
+// at https://console.groq.com/docs/models if you get a "model not found" error.
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
+
+// Internal helper: call the LLM
 async function callLLM(systemPrompt, userContent, maxTokens = 600) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error('OPENAI_API_KEY is not set. Add it to your environment variables.');
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error('GROQ_API_KEY is not set. Add it to your environment variables.');
   }
 
   const { data } = await axios.post(
-    OPENAI_API_URL,
+    GROQ_API_URL,
     {
-      model:      OPENAI_MODEL,
-      max_tokens: maxTokens,
+      model:       GROQ_MODEL,
+      max_tokens:  maxTokens,
+      temperature: 0,
+      // Force valid JSON. Requires the word "JSON" to appear in the prompt
+      // (it does, in both prompts below). Remove this line if you switch to a
+      // model that doesn't support JSON mode.
+      response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user',   content: userContent  },
@@ -24,13 +38,13 @@ async function callLLM(systemPrompt, userContent, maxTokens = 600) {
     },
     {
       headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
         'Content-Type':  'application/json',
       },
     }
   );
 
-  // OpenAI returns: { choices: [{ message: { content: '...' } }] }
+  // Groq returns the same shape as OpenAI: { choices: [{ message: { content } }] }
   return (data.choices?.[0]?.message?.content || '').trim();
 }
 
