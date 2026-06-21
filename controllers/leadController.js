@@ -2066,7 +2066,110 @@ const getFollowUpAlerts = async (req, res) => {
   }
 };
 
-// ── PUT /lead/:id/secondary-phone ─────────────────────────────────────────────
+// ── GET /lead/admin/pending-notifications ─────────────────────────────────────
+// Powers the notification bell on LOAD, so it shows currently-pending issues
+// even if the admin was offline when the 15-min job emitted its socket events
+// (those live emits are lost if no socket is in the room). Returns the same
+// shape the bell already renders for `no_action_alert` and `follow_up_alert`,
+// as a list of ready-to-display notification objects.
+//
+// Scope: super_admin → whole company; admin → only leads they are responsible
+// for (assignedAdmin). Mirrors the job's no-action criteria (assigned, open,
+// not converted/closed, no call activity) and the follow-up overdue/today logic.
+const getPendingNotifications = async (req, res) => {
+  try {
+    const role    = req.admin?.role || req.user?.role;
+    const company = req.admin?.company?._id || req.admin?.company || req.user?.company;
+    const adminId = req.admin?._id || req.user?._id;
+    if (!company) return res.status(400).json({ message: "Company not found." });
+
+    const isSuperAdmin = role === "super_admin" || role === "superadmin";
+
+    const now          = Date.now();
+    const oneHourAgo   = new Date(now - 60  * 60 * 1000);
+    const twoHoursAgo  = new Date(now - 120 * 60 * 1000);
+    const todayStart   = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const todayEnd     = new Date(); todayEnd.setHours(23, 59, 59, 999);
+
+    // Scope filter: admins see only their own assigned leads.
+    const scope = { company };
+    if (!isSuperAdmin && adminId) scope.assignedAdmin = adminId;
+
+    // ── No-action leads (assigned, untouched, past 1h / 2h) ───────────────────
+    const noActionBase = {
+      ...scope,
+      user:        { $ne: null },
+      isClosed:    { $ne: true },
+      status:      { $nin: ["Not Interested", "Converted"] },
+      callHistory: { $size: 0 },
+    };
+
+    const noAction2h = await Lead.find({ ...noActionBase, createdAt: { $lte: twoHoursAgo } })
+      .select("_id name user").populate("user", "name").lean();
+    const twoHourIds = new Set(noAction2h.map(l => String(l._id)));
+    const noAction1h = (await Lead.find({ ...noActionBase, createdAt: { $lte: oneHourAgo } })
+      .select("_id name user").populate("user", "name").lean())
+      .filter(l => !twoHourIds.has(String(l._id))); // 1h list excludes those already 2h+
+
+    // ── Follow-up leads (scheduled call not done, overdue or due today) ───────
+    const fuLeads = await Lead.find({
+      ...scope,
+      scheduledCalls: { $elemMatch: { done: false, scheduledAt: { $lte: todayEnd } } },
+    }).select("_id name scheduledCalls").lean();
+
+    const overdue = [], dueToday = [];
+    for (const lead of fuLeads) {
+      const earliest = lead.scheduledCalls
+        .filter(sc => !sc.done)
+        .map(sc => new Date(sc.scheduledAt))
+        .sort((a, b) => a - b)[0];
+      if (!earliest) continue;
+      if (earliest < todayStart) overdue.push(lead);
+      else if (earliest <= todayEnd) dueToday.push(lead);
+    }
+
+    // ── Assemble bell-ready notification objects ──────────────────────────────
+    const notifications = [];
+    const mkLeads = (arr) => arr.map(l => ({ leadId: String(l._id), leadName: l.name, assignedTo: l.user?.name || "" }));
+
+    if (noAction2h.length) notifications.push({
+      id: "noa-2h", type: "no_action",
+      title: `${noAction2h.length} Lead${noAction2h.length > 1 ? "s" : ""} — No Action`,
+      body: noAction2h.length === 1
+        ? `"${noAction2h[0].name}" has had no activity for 2 hours.`
+        : `${noAction2h.length} leads have had no activity for 2 hours.`,
+      leads: mkLeads(noAction2h), threshold: "2h",
+      timestamp: new Date().toISOString(), urgent: true,
+    });
+    if (noAction1h.length) notifications.push({
+      id: "noa-1h", type: "no_action",
+      title: `${noAction1h.length} Lead${noAction1h.length > 1 ? "s" : ""} — No Action`,
+      body: noAction1h.length === 1
+        ? `"${noAction1h[0].name}" has had no activity for 1 hour.`
+        : `${noAction1h.length} leads have had no activity for 1 hour.`,
+      leads: mkLeads(noAction1h), threshold: "1h",
+      timestamp: new Date().toISOString(), urgent: false,
+    });
+    if (overdue.length) notifications.push({
+      id: "fu-overdue", type: "follow_up",
+      title: `${overdue.length} Overdue Follow-Up${overdue.length > 1 ? "s" : ""}`,
+      body: overdue.length === 1 ? `"${overdue[0].name}" — overdue.` : `${overdue.length} leads are overdue.`,
+      leads: mkLeads(overdue), threshold: "overdue",
+      timestamp: new Date().toISOString(), urgent: true,
+    });
+    if (dueToday.length) notifications.push({
+      id: "fu-due", type: "follow_up",
+      title: `${dueToday.length} Follow-Up${dueToday.length > 1 ? "s" : ""} Due Today`,
+      body: dueToday.length === 1 ? `"${dueToday[0].name}" — due today.` : `${dueToday.length} leads need follow-up today.`,
+      leads: mkLeads(dueToday), threshold: "today",
+      timestamp: new Date().toISOString(), urgent: false,
+    });
+
+    return res.status(200).json({ notifications, count: notifications.length });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
 // Add or replace the secondary (additional) phone on a lead.
 // Enforces: max one additional number, uniqueness across all leads in company.
 const addSecondaryPhone = async (req, res) => {
@@ -2558,6 +2661,7 @@ module.exports = {
   logPhoneReveal,
   logEmailReveal,
   getFollowUpAlerts,
+  getPendingNotifications,
   addSecondaryPhone,
   removeSecondaryPhone,
   swapPhones,
