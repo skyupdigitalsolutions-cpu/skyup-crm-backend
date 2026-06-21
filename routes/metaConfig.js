@@ -11,6 +11,7 @@ const {
 } = require("../controllers/metaConfigController");
 const { syncFromMeta } = require("../controllers/metaSyncController");
 const { getFormQuestions } = require("../controllers/metaQualificationController");
+const { testConnection, discover, connectionStatus, pageLeads } = require("../controllers/metaConnectionController");
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 const { checkLimit, requireFeature } = require("../middlewares/entitlementMiddleware");
 const MetaConfig = require("../models/MetaConfig");
@@ -25,7 +26,12 @@ const countCompanyMetaConfigs = async (req) => {
 // All routes protected — company is derived from req.admin inside the controller
 router.get("/", protectAdmin, getAllConfigs);
 router.get("/insights", protectAdmin, getInsights); // ← ad performance report (before /:id)
+// Connection helpers — specific paths BEFORE /:id so they aren't captured as an id.
+router.get("/connection-status", protectAdmin, connectionStatus);  // per-config status badges
+router.get("/page-leads", protectAdmin, pageLeads);                // page-level leads grouped by ad set
+router.post("/test-connection", protectAdmin, testConnection);     // verify creds live
 router.get("/:adSetId/form-questions", protectAdmin, getFormQuestions); // ← Qualification: fetch Meta form questions
+router.get("/:id/discover", protectAdmin, discover);               // live ad sets + forms for a config
 router.get("/:id", protectAdmin, getConfigById);
 router.post("/sync", protectAdmin, syncFromMeta);   // ← FIX: Auto-Sync from Meta
 router.post(
