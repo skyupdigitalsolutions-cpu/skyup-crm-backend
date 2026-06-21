@@ -30,6 +30,17 @@ const { protectSuperAdmin }              = require("../middlewares/superAdminMid
 const companyIsolation                   = require("../middlewares/companyIsolation");
 const { authLimiter }                    = require("../middlewares/rateLimiter");
 
+// Custom financial reports (per company, free-form fields, AI analysis).
+const {
+  createCustomReport,
+  listCustomReports,
+  getCustomReport,
+  updateCustomReport,
+  deleteCustomReport,
+  getCustomReportTrends,
+  analyzeCustomReport,
+} = require("../controllers/customReportController");
+
 // ── Auth (public) ─────────────────────────────────────────────────────────────
 router.post("/register",   authLimiter, registerSuperAdmin);
 router.post("/login",      authLimiter, loginSuperAdmin);
@@ -65,5 +76,17 @@ router.get("/companies/:id",    protectSuperAdmin, getCompany);
 router.put("/companies/:id",    protectSuperAdmin, toggleCompany);
 router.put("/companies/:id/call-log-sync", protectSuperAdmin, toggleCallLogSync);
 router.delete("/companies/:id", protectSuperAdmin, deleteCompany);
+
+// ── Custom financial reports ──────────────────────────────────────────────────
+// Per-company, free-form fields, generic analytics + AI suggestions.
+// NOTE: specific paths (/trends, /analyze) are declared with their :id segment;
+// list/create on the collection root.
+router.post   ("/custom-reports",            protectSuperAdmin, createCustomReport);
+router.get    ("/custom-reports",            protectSuperAdmin, listCustomReports);
+router.get    ("/custom-reports/:id/trends", protectSuperAdmin, getCustomReportTrends);
+router.post   ("/custom-reports/:id/analyze",protectSuperAdmin, analyzeCustomReport);
+router.get    ("/custom-reports/:id",        protectSuperAdmin, getCustomReport);
+router.put    ("/custom-reports/:id",        protectSuperAdmin, updateCustomReport);
+router.delete ("/custom-reports/:id",        protectSuperAdmin, deleteCustomReport);
 
 module.exports = router;
