@@ -25,6 +25,30 @@ const Lead           = require("../models/Leads");
 const MobileCallLog  = require("../models/MobileCallLog");
 const { callGrok }   = require("../utils/leadActionSummary");
 
+// Retry the AI call on transient rate limits (HTTP 429), honoring Retry-After
+// and backing off, so a 429 doesn't surface as a raw error in the
+// Non-Conversion Analysis panel.
+async function callGrokWithRetry(systemPrompt, userContent, maxTokens, maxRetries = 2) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await callGrok(systemPrompt, userContent, maxTokens);
+    } catch (e) {
+      const status = e?.response?.status;
+      if (status === 429 && attempt < maxRetries) {
+        const retryAfter = Number(e?.response?.headers?.["retry-after"]);
+        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : 1500 * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, waitMs));
+        attempt++;
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 // Statuses that count as "did not convert". Matched case-insensitively; also
 // includes isClosed leads. "Converted"/"Won" are explicitly excluded.
 const LOST_STATUS_HINTS = [
@@ -264,7 +288,9 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
     } catch (e) {
       result.aiAnalysisError = e.code === "GROK_PAYLOAD_TOO_LARGE"
         ? "Too much data to analyse at once — narrow the date range."
-        : (e.message || "AI analysis unavailable right now.");
+        : (e?.response?.status === 429
+            ? "AI is busy right now (rate limited). Please try again in a moment."
+            : (e.message || "AI analysis unavailable right now."));
     }
   }
 
@@ -299,7 +325,7 @@ async function runAIAnalysis(reasonBreakdown, samples, bySource, total) {
     lines.push(`- ${src}: ${parts}`);
   }
 
-  const raw = await callGrok(systemPrompt, lines.join("\n"), 900);
+  const raw = await callGrokWithRetry(systemPrompt, lines.join("\n"), 900);
 
   // Tolerate code fences / stray text around the JSON.
   const cleaned = raw.replace(/```json|```/g, "").trim();
@@ -352,7 +378,7 @@ async function runPerLeadAnalysis(leadDetails) {
 
     let raw;
     try {
-      raw = await callGrok(systemPrompt, lines.join("\n"), 1200);
+      raw = await callGrokWithRetry(systemPrompt, lines.join("\n"), 1200);
     } catch (e) {
       // Leave this chunk on keyword reasons; continue with the next.
       continue;
