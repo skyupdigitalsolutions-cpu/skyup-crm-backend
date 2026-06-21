@@ -868,6 +868,29 @@ const getLiveLocations = async (req, res) => {
 
 // ── GET /attendance/meeting-tracking-config ────────────────────────────────────
 // Employee fetches current tracking settings (enabled + interval) on clock-in
+// ── GET /attendance/geofence-config ───────────────────────────────────────────
+// Returns the company's office geofence so the mobile app can detect when a
+// clocked-in employee LEAVES the premises and auto-start field-work location
+// tracking. Also returns the tracking interval so breadcrumb frequency matches
+// the meeting-tracking setting. Safe to expose to employees (no secrets).
+const getGeofenceConfig = async (req, res) => {
+  try {
+    const Company = require('../models/Company');
+    const company = await Company.findById(req.user.company)
+      .select('clockInLocationEnabled clockInLatitude clockInLongitude clockInRadiusMeters meetingLocationIntervalMinutes')
+      .lean();
+    res.json({
+      enabled:         !!(company?.clockInLocationEnabled && company?.clockInLatitude && company?.clockInLongitude),
+      latitude:        company?.clockInLatitude ?? null,
+      longitude:       company?.clockInLongitude ?? null,
+      radiusMeters:    company?.clockInRadiusMeters || 100,
+      intervalMinutes: company?.meetingLocationIntervalMinutes || 15,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 const getMeetingTrackingConfig = async (req, res) => {
   try {
     const Company = require('../models/Company');
@@ -915,5 +938,6 @@ module.exports = {
   locationPing,
   getLiveLocations,
   getMeetingTrackingConfig,
+  getGeofenceConfig,
   saveMeetingTrackingConfig,
 };
