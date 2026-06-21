@@ -53,37 +53,57 @@ async function callGrok(systemPrompt, userContent, maxTokens = 700) {
   }
 
   let data;
-  try {
-    ({ data } = await axios.post(
-      GROK_API_URL,
-      {
-        model:       GROK_MODEL,
-        max_tokens:  maxTokens,
-        temperature: 0.3,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userContent  },
-        ],
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${AI_SUMMARY_API_KEY}`,
-          'Content-Type': 'application/json',
+  // Retry on transient rate limits (HTTP 429). The provider occasionally
+  // returns 429 under load or tight per-minute limits; a short backoff (honoring
+  // Retry-After) recovers most of these so they never surface as "AI is busy".
+  // Centralized here so EVERY AI feature (mobile call summary, Meta analysis,
+  // non-conversion, custom reports) gets the same resilience.
+  const MAX_RETRIES = 2;
+  let attempt = 0;
+  for (;;) {
+    try {
+      ({ data } = await axios.post(
+        GROK_API_URL,
+        {
+          model:       GROK_MODEL,
+          max_tokens:  maxTokens,
+          temperature: 0.3,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user',   content: userContent  },
+          ],
         },
-        timeout: 45000,
-      },
-    ));
-  } catch (e) {
-    const status = e?.response?.status;
-    // A 413 means the prompt was too large for the provider. buildContext now
-    // bounds the size so this should not happen, but if it still does we tag it
-    // clearly instead of masking it as a generic "busy" error.
-    if (status === 413) {
-      const err = new Error('AI summary input was too large to process.');
-      err.code = 'GROK_PAYLOAD_TOO_LARGE';
-      throw err;
+        {
+          headers: {
+            Authorization: `Bearer ${AI_SUMMARY_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 45000,
+        },
+      ));
+      break; // success
+    } catch (e) {
+      const status = e?.response?.status;
+      // A 413 means the prompt was too large for the provider. buildContext now
+      // bounds the size so this should not happen, but if it still does we tag it
+      // clearly instead of masking it as a generic "busy" error.
+      if (status === 413) {
+        const err = new Error('AI summary input was too large to process.');
+        err.code = 'GROK_PAYLOAD_TOO_LARGE';
+        throw err;
+      }
+      // Transient rate limit → wait and retry.
+      if (status === 429 && attempt < MAX_RETRIES) {
+        const retryAfter = Number(e?.response?.headers?.['retry-after']);
+        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : 1500 * Math.pow(2, attempt); // 1.5s, then 3s
+        await new Promise((r) => setTimeout(r, waitMs));
+        attempt++;
+        continue;
+      }
+      throw e;
     }
-    throw e;
   }
 
   // OpenAI-compatible response shape
