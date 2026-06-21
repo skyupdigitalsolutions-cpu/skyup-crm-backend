@@ -21,6 +21,32 @@ const MetaConfig = require("../models/MetaConfig");
 const Lead       = require("../models/Leads");
 const { callGrok } = require("../utils/leadActionSummary");
 
+// Call the AI with automatic retry on transient rate limits (HTTP 429).
+// callGrok rethrows the underlying axios error, so we catch a 429 here, wait
+// (honoring Retry-After when the provider sends it) and retry with exponential
+// backoff before giving up. Prevents the raw "Request failed with status code
+// 429" from reaching the AI Analysis panel.
+async function callGrokWithRetry(systemPrompt, userContent, maxTokens, maxRetries = 2) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await callGrok(systemPrompt, userContent, maxTokens);
+    } catch (e) {
+      const status = e?.response?.status;
+      if (status === 429 && attempt < maxRetries) {
+        const retryAfter = Number(e?.response?.headers?.["retry-after"]);
+        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : 1500 * Math.pow(2, attempt); // 1.5s, then 3s
+        await new Promise((r) => setTimeout(r, waitMs));
+        attempt++;
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 const DEFAULT_VER = process.env.META_GRAPH_API_VERSION || "v21.0";
 
 const num = (v) => (v == null || v === "" ? 0 : Number(v));
@@ -298,7 +324,9 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
     } catch (e) {
       result.aiAnalysisError = e.code === "GROK_PAYLOAD_TOO_LARGE"
         ? "Too much data to analyse at once — narrow the date range."
-        : (e.message || "AI analysis unavailable right now.");
+        : (e?.response?.status === 429
+            ? "AI is busy right now (rate limited). Please try again in a moment."
+            : (e.message || "AI analysis unavailable right now."));
     }
   }
 
@@ -337,7 +365,7 @@ async function runMetaAIAnalysis(campaigns, totals) {
     );
   });
 
-  const raw = await callGrok(systemPrompt, lines.join("\n"), 1300);
+  const raw = await callGrokWithRetry(systemPrompt, lines.join("\n"), 1300);
   const cleaned = (raw || "").replace(/```json|```/g, "").trim();
   try {
     return JSON.parse(cleaned);
