@@ -11,7 +11,8 @@
 //   POST   /custom-reports/:id/analyze       generate AI suggestions + improvement notes
 const CustomReport = require("../models/CustomReport");
 const Company      = require("../models/Company");
-const { callGrok } = require("../utils/leadActionSummary");
+const Lead         = require("../models/Leads");
+const { callGroq } = require("../utils/leadActionSummary");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const FIELD_TYPES = ["revenue", "cost", "profit", "other"];
@@ -193,15 +194,75 @@ const getCustomReportTrends = async (req, res) => {
   }
 };
 
-// ── AI analysis: suggestions + improvement notes ──────────────────────────────
-// Call the AI with automatic retry on transient rate limits (HTTP 429).
-// callGrok rethrows the axios error, so we catch status 429 here, wait
+// ── GET /custom-reports/:id/lead-metrics ──────────────────────────────────────
+// Auto-pulls REAL lead generation + conversion from the CRM for this report's
+// company over its date range, and computes spend-vs-results ratios. "Total
+// spent" = the report's total of all fields (analytics.total). Counts are not
+// entered by the user — they come straight from the leads collection, so the
+// ratios reflect actual performance.
+const CONVERTED_RE = /^(converted|won|customer|closed won|closed-won|complete[d]?)$/i;
+
+const getCustomReportLeadMetrics = async (req, res) => {
+  try {
+    const report = await CustomReport.findById(req.params.id).lean();
+    if (!report) return res.status(404).json({ message: "Report not found" });
+
+    const start = new Date(report.periodStart);
+    const end   = new Date(report.periodEnd);
+    end.setHours(23, 59, 59, 999); // include the whole end day
+
+    // Leads GENERATED in the period (created within the range, for this company).
+    const generated = await Lead.countDocuments({
+      company:   report.company,
+      createdAt: { $gte: start, $lte: end },
+    });
+
+    // Leads CONVERTED in the period. We match a converted-type status; since
+    // there isn't a dedicated convertedAt field, we attribute by createdAt in
+    // range (same basis as generated) so the ratio is consistent.
+    const convertedStatuses = await Lead.find({
+      company:   report.company,
+      createdAt: { $gte: start, $lte: end },
+    }).select("status").lean();
+    const converted = convertedStatuses.filter(l => CONVERTED_RE.test(String(l.status || "").trim())).length;
+
+    const spend = Number(report.analytics?.total) || 0;
+    const cur   = report.currency || "₹";
+    const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+    // All computable ratios (null when the denominator is zero).
+    const a = report.analytics || {};
+    const metrics = {
+      currency:            cur,
+      totalSpent:          r2(spend),
+      leadsGenerated:      generated,
+      leadsConverted:      converted,
+      // conversion rate %
+      conversionRatePct:   generated > 0 ? r2((converted / generated) * 100) : null,
+      // cost efficiency
+      costPerLead:         generated > 0 ? r2(spend / generated) : null,
+      costPerConversion:   converted > 0 ? r2(spend / converted) : null,
+      // revenue-side (uses tagged revenue if present)
+      revenue:             r2(a.totalRevenue || 0),
+      revenuePerLead:      generated > 0 && a.totalRevenue ? r2(a.totalRevenue / generated) : null,
+      revenuePerConversion:converted > 0 && a.totalRevenue ? r2(a.totalRevenue / converted) : null,
+      // ROI on total spend
+      roiPct:              spend > 0 && a.totalRevenue ? r2(((a.totalRevenue - spend) / spend) * 100) : null,
+      netProfit:           a.totalRevenue ? r2(a.totalRevenue - spend) : null,
+    };
+
+    res.json(metrics);
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+};
+// callGroq rethrows the axios error, so we catch status 429 here, wait
 // (honoring Retry-After when present), and try again with exponential backoff.
 async function callGrokWithRetry(systemPrompt, userContent, maxTokens, maxRetries = 2) {
   let attempt = 0;
   for (;;) {
     try {
-      return await callGrok(systemPrompt, userContent, maxTokens);
+      return await callGroq(systemPrompt, userContent, maxTokens);
     } catch (e) {
       const status = e?.response?.status;
       if (status === 429 && attempt < maxRetries) {
@@ -302,5 +363,6 @@ module.exports = {
   updateCustomReport,
   deleteCustomReport,
   getCustomReportTrends,
+  getCustomReportLeadMetrics,
   analyzeCustomReport,
 };
