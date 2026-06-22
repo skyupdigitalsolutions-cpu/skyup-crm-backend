@@ -162,7 +162,7 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
       { updatedAt: { $gte: fromDate, $lte: toDate } },
     ],
   })
-    .select("name status isClosed remark callHistory meetingRemarks source campaign user primaryPhone mobile phone value temperature closedAt updatedAt createdAt")
+    .select("name status isClosed remark callHistory meetingRemarks source campaign user primaryPhone mobile phone value temperature closedAt updatedAt createdAt leadScore maxScore qualificationPercentage leadCategory qualificationBreakdown")
     .populate("user", "name")
     .lean();
 
@@ -217,19 +217,35 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
     const src = l.source || l.campaign || "Unknown";
     const agent = l.user?.name || "Unassigned";
 
+    // Use qualification score to improve accountability classification.
+    // A Cold-qualified lead (low score) is likely a lead-quality issue, not
+    // an agent follow-up gap — override the default accountability accordingly.
+    let accountability = defaultAccountability(reason);
+    if (l.leadCategory === "Cold" && l.qualificationPercentage != null) {
+      // Clearly unqualified leads shouldn't be classified as agent failures
+      if (accountability === "Agent follow-up gap") {
+        accountability = "Lead not interested";
+      }
+    }
+
     leadDetails.push({
       leadId:  l._id,
       name:    l.name || "Unknown",
       status:  l.status || "—",
-      temperature: l.temperature || null,
+      temperature: l.leadCategory || l.temperature || null,
       reason,                               // may be overridden by AI
-      accountability: defaultAccountability(reason), // may be overridden by AI
+      accountability,                       // may be overridden by AI
       improvement: "",                      // filled by AI
       source:  src,
       agent,
       detail:  text ? text.slice(0, 240) : "",        // short text for the table
       _aiText: text ? text.slice(0, 700) : "",        // fuller context for the AI (not sent to client)
       updatedAt: l.updatedAt || l.closedAt || l.createdAt || null,
+      // Qualification fields — used in the AI prompt and returned in lead details
+      leadScore:               l.leadScore               ?? null,
+      maxScore:                l.maxScore                ?? null,
+      qualificationPercentage: l.qualificationPercentage ?? null,
+      leadCategory:            l.leadCategory            ?? null,
     });
   }
 
@@ -348,7 +364,8 @@ async function runPerLeadAnalysis(leadDetails) {
 
   const systemPrompt =
     "You are a sales coach reviewing CRM leads that have NOT converted yet. " +
-    "For EACH lead you get its name, status, temperature (Hot/Warm/Cold or null) " +
+    "For EACH lead you get its name, status, temperature (Hot/Warm/Cold or null), " +
+    "qualification score (score/maxScore, percentage — if available), " +
     "and the latest agent remark / call-summary text. Infer, from that text and " +
     "status, the most likely REASON the lead hasn't converted (what is blocking " +
     "it or the mistake being made — e.g. 'Demo scheduled but not yet completed', " +
@@ -363,6 +380,10 @@ async function runPerLeadAnalysis(leadDetails) {
     "'Bad lead data' (wrong number, duplicate, invalid, unreachable), or " +
     "'Product/fit' (the offering didn't match their need) — and a short, " +
     "concrete IMPROVEMENT action the agent should take next. " +
+    "IMPORTANT: If the qualification score is Cold (low %), it is more likely a " +
+    "lead-quality issue than an agent failure — prefer 'Lead not interested' or " +
+    "'Product/fit' over 'Agent follow-up gap' in those cases unless notes " +
+    "clearly show the agent missed a follow-up on a genuinely interested lead. " +
     "Base it ONLY on the given text; if there's genuinely no info, use reason " +
     "'No remark logged', accountability 'No data', and improvement 'Log call " +
     "notes and set a follow-up'. " +
@@ -372,9 +393,12 @@ async function runPerLeadAnalysis(leadDetails) {
 
   for (let i = 0; i < leadDetails.length; i += BATCH) {
     const chunk = leadDetails.slice(i, i + BATCH);
-    const lines = chunk.map((d, idx) =>
-      `${idx + 1}. name="${d.name}" status="${d.status}" temp="${d.temperature || "n/a"}" notes="${(d._aiText || d.detail || "").replace(/"/g, "'").slice(0, 650) || "none"}"`
-    );
+    const lines = chunk.map((d, idx) => {
+      const scoreStr = d.qualificationPercentage != null
+        ? ` score=${d.leadScore}/${d.maxScore}(${d.qualificationPercentage}%,${d.leadCategory || "?"})`
+        : "";
+      return `${idx + 1}. name="${d.name}" status="${d.status}" temp="${d.temperature || "n/a"}"${scoreStr} notes="${(d._aiText || d.detail || "").replace(/"/g, "'").slice(0, 600) || "none"}"`;
+    });
 
     let raw;
     try {
