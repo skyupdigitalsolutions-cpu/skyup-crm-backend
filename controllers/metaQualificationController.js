@@ -1,7 +1,9 @@
 // controllers/metaQualificationController.js
-const axios             = require("axios");
-const MetaQualification = require("../models/MetaQualification");
-const MetaConfig        = require("../models/MetaConfig");
+const axios                  = require("axios");
+const MetaQualification      = require("../models/MetaQualification");
+const MetaConfig             = require("../models/MetaConfig");
+const Lead                   = require("../models/Leads");
+const { scoreQualification } = require("../utils/qualificationScorer");
 
 /**
  * GET /api/meta-qualification/:adSetId
@@ -17,8 +19,6 @@ const getRules = async (req, res) => {
 
     if (!doc) return res.status(404).json({ success: false, message: "No rules yet" });
 
-    // Re-validate on read so the UI can surface a warning even for rule-sets
-    // saved before the 100-point rule existed (auto-migration of campaigns).
     const validation = MetaQualification.validateRules(doc.rules || []);
 
     res.json({
@@ -39,6 +39,10 @@ const getRules = async (req, res) => {
  * POST /api/meta-qualification/:adSetId
  * Upsert qualification rules for an ad set.
  * Body: { rules, thresholds, adSetName, formId }
+ *
+ * After saving, re-scores ALL leads for this ad set that have stored
+ * field_data (qualificationBreakdown) so scores reflect the new rules
+ * without waiting for new webhooks.
  */
 const saveRules = async (req, res) => {
   try {
@@ -52,10 +56,7 @@ const saveRules = async (req, res) => {
       return res.status(404).json({ message: "Ad set not found for this company" });
     }
 
-    // ── Validation: every question's options must sum to EXACTLY 100 ──────────
-    // A rule-set is not allowed to be saved (and therefore not activated) unless
-    // each question totals 100 points. This keeps Maximum Score = questions × 100
-    // consistent across the whole system.
+    // Validation: every question's options must sum to EXACTLY 100
     const validation = MetaQualification.validateRules(rules || []);
     if (!validation.valid) {
       return res.status(422).json({
@@ -67,26 +68,96 @@ const saveRules = async (req, res) => {
       });
     }
 
+    const resolvedAdSetName = adSetName || config.adSetName || config.campaignName;
+
     const doc = await MetaQualification.findOneAndUpdate(
       { adSetId, company: companyId },
       {
         adSetId,
-        company:    companyId,
-        adSetName:  adSetName  || config.adSetName  || config.campaignName,
-        formId:     formId     || config.formId     || "",
-        rules:      rules      || [],
-        thresholds: thresholds || { hot: 80, warm: 50 },
+        company:      companyId,
+        adSetName:    resolvedAdSetName,
+        formId:       formId     || config.formId || "",
+        rules:        rules      || [],
+        thresholds:   thresholds || { hot: 80, warm: 50 },
         maxScore:     validation.maxScore,
         optionsValid: true,
       },
       { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
     );
 
+    // ── Re-score existing leads for this ad set (non-blocking) ───────────────
+    // When rules or thresholds change, previously scored leads become stale.
+    // We rebuild scores from the stored qualificationBreakdown answers so the
+    // admin sees accurate scores immediately without waiting for new webhooks.
+    setImmediate(async () => {
+      try {
+        await rescoreLeadsForAdSet(doc, resolvedAdSetName, companyId);
+      } catch (e) {
+        console.warn("[saveRules] Background re-score failed:", e.message);
+      }
+    });
+
     res.json({ success: true, data: doc });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
+
+/**
+ * Re-score all leads for a given ad set using the latest qualification rules.
+ * Reconstructs field_data from qualificationBreakdown (stored at webhook time)
+ * so we can run the scorer without calling the Meta API again.
+ *
+ * @param {Object} qualDoc          – saved MetaQualification document
+ * @param {string} adSetName        – used to find leads by adSetName field
+ * @param {string|ObjectId} companyId
+ */
+async function rescoreLeadsForAdSet(qualDoc, adSetName, companyId) {
+  // Find leads from this ad set that have a stored breakdown
+  const leads = await Lead.find({
+    company: companyId,
+    adSetName,
+    qualificationBreakdown: { $exists: true, $not: { $size: 0 } },
+  }).select(
+    "qualificationBreakdown leadScore maxScore qualificationPercentage leadCategory temperature"
+  ).lean();
+
+  if (!leads.length) return;
+
+  console.log(`[rescoreLeads] Re-scoring ${leads.length} leads for ad set "${adSetName}"…`);
+
+  let updated = 0;
+  for (const lead of leads) {
+    // Reconstruct field_data from the stored breakdown
+    const fieldData = (lead.qualificationBreakdown || []).map((b) => ({
+      name:   b.question,     // scorer normalises the key anyway
+      values: [b.answer],
+    }));
+
+    const {
+      leadScore,
+      maxScore,
+      qualificationPercentage,
+      leadCategory,
+      qualificationBreakdown,
+    } = scoreQualification(fieldData, qualDoc);
+
+    // Also sync temperature to stay consistent with leadCategory
+    const update = {
+      leadScore,
+      maxScore,
+      qualificationPercentage,
+      leadCategory,
+      qualificationBreakdown,
+    };
+    if (leadCategory) update.temperature = leadCategory;
+
+    await Lead.findByIdAndUpdate(lead._id, { $set: update });
+    updated++;
+  }
+
+  console.log(`[rescoreLeads] Updated ${updated} lead(s) for "${adSetName}".`);
+}
 
 /**
  * GET /api/meta-config/:adSetId/form-questions
