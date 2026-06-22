@@ -45,6 +45,7 @@ const {
   upsertCatalogItem,
   createCustomAddon,
   deleteCustomAddon,
+  wipeCatalog,
 } = require("../controllers/addonCatalogController");
 
 // ── Public ────────────────────────────────────────────────────────────────────
@@ -92,8 +93,11 @@ router.put("/plans/:id",     updatePlan);
 router.delete("/plans/:id",  deletePlan);
 
 // ── Add-on price catalogue (Plan Customization → Add-on Pricing) ──────────────
+// IMPORTANT: /addon-catalog (bulk GET/PUT/DELETE) must stay registered as-is
+// (not under /:addonType) so Express doesn't swallow these into the param route.
 router.get("/addon-catalog",            getCatalog);
 router.put("/addon-catalog",            saveCatalog);          // bulk upsert
+router.delete("/addon-catalog",         wipeCatalog);          // delete ALL rows, then re-seed clean
 router.post("/addon-catalog/custom",    createCustomAddon);    // create custom addon
 router.delete("/addon-catalog/custom/:addonType", deleteCustomAddon);
 router.put("/addon-catalog/:addonType", upsertCatalogItem);    // single upsert
