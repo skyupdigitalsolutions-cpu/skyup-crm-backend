@@ -8,22 +8,44 @@
 //   • Maximum possible score = (number of questions) × 100.
 //   • Percentage = (leadScore / maxScore) × 100.
 //   • Category is decided by admin-configured percentage thresholds.
+//
+// Improvements over v1:
+//   • Answer matching is whitespace-trimmed + normalised (handles Meta trailing
+//     spaces and inconsistent capitalisation in form responses).
+//   • Multi-value answers (Meta checkboxes) are tried individually — the first
+//     that matches a scored option wins, so checkbox questions score correctly.
+//   • Partial/fuzzy fallback: if no exact match, the best-scoring answer whose
+//     text is contained in the submitted value (or vice-versa) is used. This
+//     handles truncated option text from the Meta API without scoring 0.
+//   • Unanswered questions are tracked explicitly so the breakdown shows
+//     "(not answered)" rather than silently scoring 0 with no explanation.
 
 const POINTS_PER_QUESTION = 100;
+
+// Normalise a raw answer string: trim whitespace, collapse internal spaces,
+// lower-case. Consistent normalisation on BOTH sides prevents mismatches from
+// accidental trailing spaces in Meta form responses or admin-entered options.
+function norm(s) {
+  return String(s ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
 
 /**
  * Accepts Meta's raw field_data array in EITHER format:
  *   • Leadgen webhook format: [{name: string, values: string[]}]
  *   • Legacy expected format: [{field_key: string, field_value: string}]
  *
- * @param {Array} fieldData   – raw Meta answers (either shape)
+ * @param {Array}  fieldData  – raw Meta answers (either shape)
  * @param {Object} qualDoc    – MetaQualification document (plain JS object)
  * @returns {{
  *   leadScore:number,
  *   maxScore:number,
  *   qualificationPercentage:number,
  *   leadCategory:string,
- *   qualificationBreakdown:Array
+ *   qualificationBreakdown:Array,
+ *   unansweredCount:number
  * }}
  */
 function scoreQualification(fieldData, qualDoc) {
@@ -34,6 +56,7 @@ function scoreQualification(fieldData, qualDoc) {
       qualificationPercentage: 0,
       leadCategory:            null,
       qualificationBreakdown:  [],
+      unansweredCount:         0,
     };
   }
 
@@ -41,62 +64,97 @@ function scoreQualification(fieldData, qualDoc) {
   const hot  = thresholds?.hot  ?? 80;
   const warm = thresholds?.warm ?? 50;
 
-  // Build a quick lookup: questionKey → submitted answer.
-  // Meta's leadgen webhook returns field_data as [{name, values}].
-  // Normalise both shapes so scoring works regardless of which arrives.
-  const answerMap = {};
+  // Build answer lookup: normalised questionKey → array of normalised values.
+  // Multi-value (checkbox) fields produce multiple entries in the array.
+  const answerMap = {};   // key → string[]
+
   (fieldData || []).forEach((item) => {
     // Shape 1 — Meta leadgen webhook: { name: "budget", values: ["10 Lakhs"] }
     if (item.name !== undefined) {
-      const key = String(item.name).toLowerCase();
-      const val = Array.isArray(item.values)
-        ? String(item.values[0] ?? "").toLowerCase()
-        : String(item.values ?? "").toLowerCase();
-      answerMap[key] = val;
+      const key = norm(item.name);
+      const vals = Array.isArray(item.values)
+        ? item.values.map(norm).filter(Boolean)
+        : [norm(item.values)].filter(Boolean);
+      if (!answerMap[key]) answerMap[key] = [];
+      answerMap[key].push(...vals);
     }
-    // Shape 2 — legacy / test format: { field_key: "budget", field_value: "10 Lakhs" }
+    // Shape 2 — legacy format: { field_key: "budget", field_value: "10 Lakhs" }
     if (item.field_key !== undefined) {
-      const key = String(item.field_key).toLowerCase();
-      answerMap[key] = String(item.field_value ?? "").toLowerCase();
+      const key = norm(item.field_key);
+      const val = norm(item.field_value);
+      if (!answerMap[key]) answerMap[key] = [];
+      if (val) answerMap[key].push(val);
     }
   });
 
-  let totalScore  = 0;
-  const breakdown = [];
+  let totalScore    = 0;
+  let unansweredCount = 0;
+  const breakdown   = [];
 
-  // Maximum possible score is fixed at 100 points per question, regardless of
-  // which answer the lead picked. (Options are validated to sum to 100.)
   const maxScore = rules.length * POINTS_PER_QUESTION;
 
   for (const rule of rules) {
-    const key       = (rule.questionKey || "").toLowerCase();
-    const submitted = answerMap[key] ?? null;
+    const key       = norm(rule.questionKey || "");
+    const submitted = answerMap[key] ?? null;     // string[] | null
 
     let earned        = 0;
     let matchedAnswer = null;
+    let matchMethod   = null;
 
-    if (submitted !== null) {
-      const match = (rule.answers || []).find(
-        (a) => (a.value || "").toLowerCase() === submitted
-      );
-      if (match) {
-        earned        = Number(match.score) || 0;
-        matchedAnswer = match.value;
+    if (submitted !== null && submitted.length > 0) {
+      const scoredOptions = rule.answers || [];
+
+      // ── Pass 1: exact normalised match across all submitted values ──────────
+      for (const sv of submitted) {
+        const exact = scoredOptions.find((a) => norm(a.value) === sv);
+        if (exact) {
+          earned        = Number(exact.score) || 0;
+          matchedAnswer = exact.value;
+          matchMethod   = "exact";
+          break;
+        }
       }
+
+      // ── Pass 2: substring containment fallback ──────────────────────────────
+      // Handles truncated option text from Meta (e.g. "10 Lakh" vs "10 Lakhs")
+      // or minor punctuation differences. Pick the highest-scoring option that
+      // satisfies the containment check to avoid arbitrarily low matches.
+      if (!matchedAnswer) {
+        let bestScore  = -1;
+        let bestOption = null;
+        for (const a of scoredOptions) {
+          const normA = norm(a.value);
+          const score = Number(a.score) || 0;
+          const contained = submitted.some(
+            (sv) => sv.includes(normA) || normA.includes(sv)
+          );
+          if (contained && score > bestScore) {
+            bestScore  = score;
+            bestOption = a;
+          }
+        }
+        if (bestOption) {
+          earned        = bestScore;
+          matchedAnswer = bestOption.value;
+          matchMethod   = "fuzzy";
+        }
+      }
+    } else {
+      // Question was not answered at all
+      unansweredCount++;
     }
 
     totalScore += earned;
     breakdown.push({
-      question: rule.questionLabel || rule.questionKey,
-      answer:   matchedAnswer ?? submitted ?? "(not answered)",
-      score:    earned,
-      maxScore: POINTS_PER_QUESTION,
+      question:    rule.questionLabel || rule.questionKey,
+      answer:      matchedAnswer ?? (submitted ? submitted.join(", ") : "(not answered)"),
+      score:       earned,
+      maxScore:    POINTS_PER_QUESTION,
+      matchMethod: matchMethod ?? (submitted ? "no_match" : "unanswered"),
     });
   }
 
-  // Percentage of maximum possible score (avoid divide-by-zero)
   const pctRaw = maxScore > 0 ? (totalScore / maxScore) * 100 : 0;
-  // Round to 2 decimals for clean display while keeping precision.
   const qualificationPercentage = Math.round(pctRaw * 100) / 100;
 
   let leadCategory;
@@ -110,6 +168,7 @@ function scoreQualification(fieldData, qualDoc) {
     qualificationPercentage,
     leadCategory,
     qualificationBreakdown:  breakdown,
+    unansweredCount,
   };
 }
 
