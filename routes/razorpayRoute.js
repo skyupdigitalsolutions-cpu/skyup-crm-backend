@@ -1,36 +1,27 @@
 const express = require("express");
-const router = express.Router();
+const router  = express.Router();
 
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
-const {
-  createOrder,
-  verifyPayment,
-  getInvoices,
-  getSubscription,
-} = require("../controllers/razorpayController");
+const { createOrder, verifyPayment, getInvoices, getSubscription } = require("../controllers/razorpayController");
+const { createAddonOrder, verifyAddonPayment } = require("../controllers/addonPaymentController");
+const { createCartOrder, verifyCartPayment }   = require("../controllers/cartController");
 
-const {
-  createAddonOrder,
-  verifyAddonPayment,
-} = require("../controllers/addonPaymentController");
-
-// All routes require a logged-in admin
 router.use(protectAdmin);
 
-// Create a Razorpay order (called before showing the payment modal)
-router.post("/create-order", createOrder);
-
-// Verify payment after Razorpay callback + upgrade plan
+// ── Plan-only checkout (legacy — kept for backward compat) ────────────────────
+router.post("/create-order",   createOrder);
 router.post("/verify-payment", verifyPayment);
 
-// Get invoice history for the company
-router.get("/invoices", getInvoices);
-
-// Get current subscription summary
+// ── Billing history ───────────────────────────────────────────────────────────
+router.get("/invoices",     getInvoices);
 router.get("/subscription", getSubscription);
 
-// ── Add-on self-serve purchase (price resolved server-side from AddonCatalog) ──
+// ── Addon-only self-serve (legacy — kept for direct addon buys) ───────────────
 router.post("/addon/create-order",   createAddonOrder);
 router.post("/addon/verify-payment", verifyAddonPayment);
+
+// ── Cart checkout: plan + addons in ONE payment ───────────────────────────────
+router.post("/cart/create-order",   createCartOrder);
+router.post("/cart/verify-payment", verifyCartPayment);
 
 module.exports = router;
