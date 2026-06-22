@@ -309,6 +309,24 @@ const deleteCustomAddon = async (req, res) => {
   }
 };
 
+// ── DELETE /api/developer/addon-catalog (wipe ALL) ────────────────────────────
+// Deletes every row in the AddonCatalog collection — built-in AND custom.
+// Use this to clear out drift/duplicate/junk rows (e.g. leftover ₹0 custom
+// addons, stale legacy rows) and start clean. Does NOT touch CompanyAddon
+// records, so companies that already purchased/were granted an addon keep
+// their entitlements — this only clears what's offered for NEW purchases.
+// The next GET /developer/addon-catalog call will re-seed DEFAULT_CATALOG
+// since seedCatalogIfEmpty() only seeds when the collection is empty.
+const wipeCatalog = async (req, res) => {
+  try {
+    const result = await AddonCatalog.deleteMany({});
+    res.json({ success: true, deleted: result.deletedCount });
+  } catch (err) {
+    console.error("[wipeCatalog]", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   getCatalog,
   upsertCatalogItem,
@@ -317,5 +335,6 @@ module.exports = {
   seedCatalogIfEmpty,
   createCustomAddon,
   deleteCustomAddon,
+  wipeCatalog,
   DEFAULT_CATALOG,
 };
