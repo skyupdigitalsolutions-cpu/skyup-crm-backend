@@ -30,7 +30,7 @@ const DEFAULT_CATALOG = [
   { addonType: "call_transcription",   name: "Call Transcription",     category: "feature",  price: 699,  billingPeriod: "monthly", description: "Speech-to-text on calls" },
   { addonType: "ai_summary",           name: "AI Summary",             category: "feature",  price: 699,  billingPeriod: "monthly", description: "AI call summaries" },
   { addonType: "whatsapp_automation",  name: "WhatsApp Automation",    category: "feature",  price: 599,  billingPeriod: "monthly", description: "Auto WhatsApp on new lead" },
-  // ── AI credit pack (one-time) — the ONLY credit pack sold ───────────────────
+  // ── AI credit pack (one-time) — the ONLY combined credit pack sold ─────────
   // A single combined pack: tops up BOTH the transcription AND summary minute
   // pools by 100 minutes each. Larger needs are met by upgrading the plan
   // (Pro 6000 / Advance 15000 min). Buy quantity ×N for N×100 minutes.
@@ -44,6 +44,11 @@ const DEFAULT_CATALOG = [
     billingPeriod: "one_time",
     description: "+100 minutes of call transcription + AI summary (both pools topped up)",
   },
+  // ── Single-pool minute packs (one-time) ─────────────────────────────────────
+  { addonType: "transcriptions_5000mins",  name: "5,000 Min Transcription",  category: "credit", price: 1999, billingPeriod: "one_time", description: "+5,000 transcription minutes" },
+  { addonType: "transcriptions_20000mins", name: "20,000 Min Transcription", category: "credit", price: 6999, billingPeriod: "one_time", description: "+20,000 transcription minutes" },
+  { addonType: "summaries_5000mins",       name: "5,000 Min AI Summary",     category: "credit", price: 1999, billingPeriod: "one_time", description: "+5,000 summary minutes" },
+  { addonType: "summaries_20000mins",      name: "20,000 Min AI Summary",    category: "credit", price: 6999, billingPeriod: "one_time", description: "+20,000 summary minutes" },
 ];
 
 async function seedCatalogIfEmpty() {
