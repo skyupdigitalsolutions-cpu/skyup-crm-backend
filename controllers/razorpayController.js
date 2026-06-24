@@ -7,6 +7,7 @@ const Admin      = require("../models/Admin");
 const Developer  = require("../models/Developer");
 const { sendEmail }          = require("../utils/brevoMailer");
 const { planInvoiceEmail }   = require("../utils/emailTemplates");
+const { nextInvoiceNumber, fallbackInvoiceNumber } = require("../utils/invoiceNumber");
 
 // ─── Helper: collect SuperAdmin + Developer emails and send invoice ───────────
 // Called after every successful payment (renewal or upgrade).
@@ -190,9 +191,15 @@ const verifyPayment = async (req, res) => {
 
     const companyId = req.admin.company._id;
 
-    // ── Generate invoice ID ──────────────────────────────────────────────────
+    // ── Generate invoice ID (sequential SDS-001, SDS-002, …) ─────────────────
     const now = new Date();
-    const invoiceId = `INV-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${Date.now().toString().slice(-4)}`;
+    let invoiceId;
+    try {
+      invoiceId = await nextInvoiceNumber();
+    } catch (e) {
+      console.error("[Razorpay] invoice numbering failed:", e.message);
+      invoiceId = fallbackInvoiceNumber();
+    }
 
     // ── Save payment record ──────────────────────────────────────────────────
     const payment = await Payment.create({
