@@ -94,33 +94,11 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// ─── Plan definitions (source of truth on backend) ────────────────────────────
-const PLANS = {
-  starter: {
-    id: "starter",
-    name: "Starter",
-    monthlyPrice: 999,
-    yearlyPrice: 799,
-    admins: 1,
-    agents: 10,
-  },
-  growth: {
-    id: "growth",
-    name: "Growth",
-    monthlyPrice: 2499,
-    yearlyPrice: 1999,
-    admins: 3,
-    agents: 30,
-  },
-  advance: {
-    id: "advance",
-    name: "Advance",
-    monthlyPrice: 5999,
-    yearlyPrice: 4799,
-    admins: 5,
-    agents: 50,
-  },
-};
+// ─── Plan pricing ─────────────────────────────────────────────────────────────
+// Prices are resolved from PlanConfig (the same source the upgrade page renders)
+// via resolvePlanPricing(), so the amount charged always matches the amount the
+// customer was shown. No hardcoded price map here any more.
+const { resolvePlanPricing } = require("../utils/planPricing");
 
 // ─── POST /api/razorpay/create-order ─────────────────────────────────────────
 // Creates a Razorpay order and returns the order_id + key to the frontend
@@ -132,17 +110,20 @@ const createOrder = async (req, res) => {
       return res.status(400).json({ message: "planId and billing are required" });
     }
 
-    if (planId === "enterprise") {
+    if (String(planId).toLowerCase() === "enterprise") {
       return res.status(400).json({ message: "Enterprise is a custom plan. Please contact sales." });
     }
 
-    const plan = PLANS[planId];
-    if (!plan) {
+    const plan = await resolvePlanPricing(planId, billing);
+    if (!plan || plan.custom) {
       return res.status(400).json({ message: "Invalid plan selected" });
     }
 
-    const amountInPaise =
-      (billing === "yearly" ? plan.yearlyPrice : plan.monthlyPrice) * 100;
+    const amount = plan.price;
+    if (amount <= 0) {
+      return res.status(400).json({ message: "This plan has no purchasable price configured." });
+    }
+    const amountInPaise = amount * 100;
 
     const order = await razorpay.orders.create({
       amount: amountInPaise,
@@ -150,7 +131,7 @@ const createOrder = async (req, res) => {
       receipt: `rcpt_${Date.now()}`,
       notes: {
         planId,
-        billing,
+        billing: plan.billing,
         companyId: req.admin.company._id.toString(),
       },
     });
@@ -200,13 +181,12 @@ const verifyPayment = async (req, res) => {
       return res.status(400).json({ message: "Payment verification failed: invalid signature" });
     }
 
-    const plan = PLANS[planId];
-    if (!plan) {
+    const plan = await resolvePlanPricing(planId, billing);
+    if (!plan || plan.custom) {
       return res.status(400).json({ message: "Invalid plan" });
     }
 
-    const amountPaid =
-      billing === "yearly" ? plan.yearlyPrice : plan.monthlyPrice;
+    const amountPaid = plan.price;
 
     const companyId = req.admin.company._id;
 
@@ -220,7 +200,7 @@ const verifyPayment = async (req, res) => {
       invoiceId,
       planId,
       planName: plan.name,
-      billing,
+      billing: plan.billing,
       amount: amountPaid,
       razorpayOrderId: razorpay_order_id,
       razorpayPaymentId: razorpay_payment_id,
@@ -228,13 +208,6 @@ const verifyPayment = async (req, res) => {
     });
 
     // ── Upgrade / Renew company plan + extend expiry ─────────────────────────
-    // Map plan IDs to Company model enum values
-    const planEnumMap = {
-      starter: "basic",
-      growth: "pro",
-      advance: "advance",
-    };
-
     // Determine new expiry:
     // If company still has a future expiry, extend FROM that date (not today).
     // This ensures early renewals don't lose any remaining days.
@@ -243,14 +216,14 @@ const verifyPayment = async (req, res) => {
     const baseDate = (currentExpiry && currentExpiry > now) ? currentExpiry : now;
 
     const newExpiry = new Date(baseDate);
-    if (billing === 'yearly') {
+    if (plan.billing === 'yearly') {
       newExpiry.setFullYear(newExpiry.getFullYear() + 1);
     } else {
       newExpiry.setMonth(newExpiry.getMonth() + 1);
     }
 
     const updatedCompany = await Company.findByIdAndUpdate(companyId, {
-      plan: planEnumMap[planId] || 'basic',
+      plan: plan.dbPlan,
       subscriptionStatus: 'active',
       subscriptionExpiry: newExpiry,
       isActive: true,
@@ -261,7 +234,7 @@ const verifyPayment = async (req, res) => {
       companyName:   updatedCompany?.name  || "Company",
       companyEmail:  updatedCompany?.email || "",
       planName:      plan.name,
-      billing,
+      billing:       plan.billing,
       newExpiry,
       invoiceId:     payment.invoiceId,
       amount:        amountPaid,
@@ -277,7 +250,7 @@ const verifyPayment = async (req, res) => {
       transactionId: razorpay_payment_id,
       planName: plan.name,
       amount: amountPaid,
-      billing,
+      billing: plan.billing,
       newExpiry: newExpiry,
     });
   } catch (err) {
@@ -309,6 +282,9 @@ const getInvoices = async (req, res) => {
       planName: p.planName,
       billingCycle: p.billing,
       transactionId: p.razorpayPaymentId,
+      paymentMethod: "Razorpay",
+      // Per-line detail for the invoice receipt (empty for legacy single-line rows).
+      lineItems: Array.isArray(p.lineItems) ? p.lineItems : [],
     }));
 
     return res.status(200).json(invoices);
