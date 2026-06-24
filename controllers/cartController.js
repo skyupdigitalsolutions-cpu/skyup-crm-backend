@@ -24,18 +24,16 @@ const CompanyAddon  = require("../models/CompanyAddon");
 const { computeAddonExpiry } = require("../models/CompanyAddon");
 const { logAudit }  = require("../services/entitlementService");
 const { sendAddonReceipt } = require("../services/addonReceiptService");
+const { resolvePlanPricing } = require("../utils/planPricing");
 
 const razorpay = new Razorpay({
   key_id:     process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// Plan pricing — mirrors razorpayController.js PLANS
-const PLANS = {
-  starter: { id: "starter", name: "Starter",  monthlyPrice: 999,  yearlyPrice: 799,  dbPlan: "basic"   },
-  growth:  { id: "growth",  name: "Growth",   monthlyPrice: 2499, yearlyPrice: 1999, dbPlan: "pro"     },
-  advance: { id: "advance", name: "Advance",  monthlyPrice: 5999, yearlyPrice: 4799, dbPlan: "advance" },
-};
+// Plan pricing is resolved from PlanConfig (the same source the upgrade page
+// renders) via resolvePlanPricing() — no hardcoded prices here, so the amount
+// charged always matches the amount the customer was shown.
 
 // Resolve a buyable catalogue row (same guard as addonPaymentController)
 async function resolveBuyableAddon(addonType, planKey) {
@@ -70,16 +68,19 @@ const createCartOrder = async (req, res) => {
 
     // ── Plan line item ────────────────────────────────────────────────────────
     if (plan) {
-      if (plan === "enterprise") {
+      if (String(plan).toLowerCase() === "enterprise") {
         return res.status(400).json({ success: false, message: "Enterprise is a custom plan. Please contact sales." });
       }
-      const planDef = PLANS[plan];
-      if (!planDef) {
+      const planDef = await resolvePlanPricing(plan, billing);
+      if (!planDef || planDef.custom) {
         return res.status(400).json({ success: false, message: `Unknown plan: ${plan}` });
       }
-      const planPrice = billing === "yearly" ? planDef.yearlyPrice : planDef.monthlyPrice;
+      const planPrice = planDef.price;
+      if (planPrice <= 0) {
+        return res.status(400).json({ success: false, message: "This plan has no purchasable price configured." });
+      }
       totalAmount += planPrice;
-      lineItems.push({ type: "plan", planId: plan, planName: planDef.name, billing, price: planPrice });
+      lineItems.push({ type: "plan", planId: plan, planName: planDef.name, billing: planDef.billing, price: planPrice });
     }
 
     // ── Addon line items ──────────────────────────────────────────────────────
@@ -180,19 +181,19 @@ const verifyCartPayment = async (req, res) => {
 
     // ── Activate plan upgrade ─────────────────────────────────────────────────
     if (plan) {
-      const planDef = PLANS[plan];
-      if (!planDef) {
+      const planDef = await resolvePlanPricing(plan, billing);
+      if (!planDef || planDef.custom) {
         return res.status(400).json({ success: false, message: `Unknown plan: ${plan}` });
       }
-      const planPrice = billing === "yearly" ? planDef.yearlyPrice : planDef.monthlyPrice;
+      const planPrice = planDef.price;
       totalAmount += planPrice;
 
       const existingCompany = await Company.findById(companyId).select("subscriptionExpiry subscriptionStatus");
       const currentExpiry   = existingCompany?.subscriptionExpiry ? new Date(existingCompany.subscriptionExpiry) : null;
       const baseDate        = currentExpiry && currentExpiry > now ? currentExpiry : now;
       const newExpiry       = new Date(baseDate);
-      if (billing === "yearly") newExpiry.setFullYear(newExpiry.getFullYear() + 1);
-      else                       newExpiry.setMonth(newExpiry.getMonth() + 1);
+      if (planDef.billing === "yearly") newExpiry.setFullYear(newExpiry.getFullYear() + 1);
+      else                              newExpiry.setMonth(newExpiry.getMonth() + 1);
 
       await Company.findByIdAndUpdate(companyId, {
         plan:               planDef.dbPlan,
@@ -201,7 +202,7 @@ const verifyCartPayment = async (req, res) => {
         isActive:           true,
       });
 
-      activatedItems.push({ type: "plan", name: planDef.name, billing, price: planPrice, newExpiry });
+      activatedItems.push({ type: "plan", name: planDef.name, billing: planDef.billing, price: planPrice, newExpiry });
 
       logAudit({
         companyId,
@@ -209,8 +210,8 @@ const verifyCartPayment = async (req, res) => {
         actorRole: "super_admin",
         action:    "plan_changed",
         field:     "plan",
-        newValue:  { plan: planDef.dbPlan, billing, expiresAt: newExpiry },
-        reason:    `Cart checkout: upgraded to ${planDef.name} (${billing})`,
+        newValue:  { plan: planDef.dbPlan, billing: planDef.billing, expiresAt: newExpiry },
+        reason:    `Cart checkout: upgraded to ${planDef.name} (${planDef.billing})`,
       }).catch(() => {});
     }
 
@@ -265,13 +266,42 @@ const verifyCartPayment = async (req, res) => {
     const planLabel = planItem ? planItem.name : "Add-ons only";
     const addonLabel = activatedAddonNames.length ? ` + ${activatedAddonNames.join(", ")}` : "";
 
+    // Build per-line detail so the invoice receipt renders each row with its own
+    // GST split (amounts are GST-inclusive).
+    const paymentLineItems = activatedItems.map(it => {
+      if (it.type === "plan") {
+        return {
+          type: "plan",
+          name: it.name,
+          sub: it.billing === "yearly" ? "Annual subscription (12 months)" : "Monthly subscription (1 month)",
+          quantity: 1,
+          billingPeriod: it.billing,
+          amount: it.price,
+        };
+      }
+      return {
+        type: "addon",
+        name: it.name,
+        sub: it.autoRenew ? "Auto-renews monthly" : (it.expiryDate ? "One-time / limited validity" : ""),
+        quantity: it.quantity || 1,
+        autoRenew: !!it.autoRenew,
+        amount: it.price,
+      };
+    });
+
+    // Normalize planId to the model enum (resolver returns dbPlan basic/pro/advance).
+    const resolvedPlanId = planItem
+      ? (await resolvePlanPricing(plan, billing))?.dbPlan || "addon"
+      : "addon";
+
     await Payment.create({
       company:           companyId,
       invoiceId,
-      planId:            plan || "addon",
+      planId:            resolvedPlanId,
       planName:          `${planLabel}${addonLabel}`,
       billing:           billing || "one_time",
       amount:            totalAmount,
+      lineItems:         paymentLineItems,
       razorpayOrderId:   razorpay_order_id,
       razorpayPaymentId: razorpay_payment_id,
       status:            "paid",
