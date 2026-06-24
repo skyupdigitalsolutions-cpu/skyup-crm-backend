@@ -30,6 +30,8 @@ const Company  = require("../models/Company");
 const Payment  = require("../models/Payment");
 const { sendEmail }        = require("../utils/brevoMailer");
 const { trialStartedEmail } = require("../utils/trialEmailTemplates");
+const { resolvePlanPricing, normalizePlanKey } = require("../utils/planPricing");
+const { nextInvoiceNumber, fallbackInvoiceNumber } = require("../utils/invoiceNumber");
 
 const razorpay = new Razorpay({
   key_id:     process.env.RAZORPAY_KEY_ID,
@@ -44,13 +46,12 @@ const TRIAL_DAYS         = Number(process.env.TRIAL_DAYS || 7);
 const AUTH_AMOUNT_PAISE  = Number(process.env.TRIAL_MANDATE_AUTH_AMOUNT || 500);      // ₹5
 const MAX_AMOUNT_PAISE   = Number(process.env.TRIAL_MANDATE_MAX_AMOUNT  || 1000000);  // ₹10,000
 
-// Plan source-of-truth (mirrors razorpayController.PLANS).
-const PLANS = {
-  starter: { id: "starter", name: "Starter", monthlyPrice: 999,  yearlyPrice: 799  },
-  growth:  { id: "growth",  name: "Pro",     monthlyPrice: 2499, yearlyPrice: 1999 },
-  advance: { id: "advance", name: "Advance", monthlyPrice: 5999, yearlyPrice: 4799 },
-};
-const PLAN_ENUM_MAP = { starter: "basic", growth: "pro", advance: "advance" };
+// Plan pricing + names are resolved from PlanConfig via resolvePlanPricing()
+// (utils/planPricing.js) — the same source the upgrade page renders — so the
+// trial/checkout amount always matches what the customer was shown. No
+// hardcoded prices here. isKnownPlan() validates the incoming plan id (accepts
+// both canonical basic/pro/advance and legacy starter/growth).
+const isKnownPlan = (planId) => !!normalizePlanKey(planId);
 
 const _companyId = (req) => req.admin?.company?._id ?? req.admin?.company;
 
@@ -68,17 +69,24 @@ const mandateContact   = (raw) => sanitizeContact(raw) || FALLBACK_CONTACT;
 
 // Shared helper — activate a plan + extend expiry + record the invoice.
 async function activatePlan(company, planId, billing, paymentId, orderId) {
-  const plan        = PLANS[planId];
-  const amountRupee  = billing === "yearly" ? plan.yearlyPrice : plan.monthlyPrice;
+  const plan = await resolvePlanPricing(planId, billing);
+  if (!plan || plan.custom) throw new Error(`Unknown or non-purchasable plan: ${planId}`);
+  const amountRupee = plan.price;
 
-  const now       = new Date();
-  const invoiceId = `INV-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${Date.now().toString().slice(-4)}`;
+  const now = new Date();
+  let invoiceId;
+  try {
+    invoiceId = await nextInvoiceNumber();
+  } catch (e) {
+    console.error("[trial.activatePlan] invoice numbering failed:", e.message);
+    invoiceId = fallbackInvoiceNumber();
+  }
   await Payment.create({
     company:           company._id,
     invoiceId,
-    planId,
+    planId:            plan.dbPlan,
     planName:          plan.name,
-    billing,
+    billing:           plan.billing,
     amount:            amountRupee,
     razorpayOrderId:   orderId   || null,
     razorpayPaymentId: paymentId || null,
@@ -88,10 +96,10 @@ async function activatePlan(company, planId, billing, paymentId, orderId) {
   const currentExpiry = company.subscriptionExpiry ? new Date(company.subscriptionExpiry) : null;
   const baseDate      = currentExpiry && currentExpiry > now ? currentExpiry : now;
   const newExpiry     = new Date(baseDate);
-  if (billing === "yearly") newExpiry.setFullYear(newExpiry.getFullYear() + 1);
-  else                      newExpiry.setMonth(newExpiry.getMonth() + 1);
+  if (plan.billing === "yearly") newExpiry.setFullYear(newExpiry.getFullYear() + 1);
+  else                           newExpiry.setMonth(newExpiry.getMonth() + 1);
 
-  company.plan                  = PLAN_ENUM_MAP[planId] || "basic";
+  company.plan                  = plan.dbPlan;
   company.subscriptionStatus    = "active";
   company.subscriptionExpiry    = newExpiry;
   company.isActive              = true;
@@ -213,14 +221,16 @@ const startTrial = async (req, res) => {
 const createPlanOrder = async (req, res) => {
   try {
     const { planId, billing = "monthly" } = req.body;
-    if (!planId || !PLANS[planId]) return res.status(400).json({ success: false, message: "Invalid plan selected" });
+    if (!planId || !isKnownPlan(planId)) return res.status(400).json({ success: false, message: "Invalid plan selected" });
     if (!["monthly", "yearly"].includes(billing)) return res.status(400).json({ success: false, message: "Invalid billing cycle" });
 
     const company = await Company.findById(_companyId(req)).select("name email phone");
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
 
-    const plan        = PLANS[planId];
-    const amountRupee  = billing === "yearly" ? plan.yearlyPrice : plan.monthlyPrice;
+    const plan = await resolvePlanPricing(planId, billing);
+    if (!plan || plan.custom) return res.status(400).json({ success: false, message: "Invalid plan selected" });
+    const amountRupee  = plan.price;
+    if (amountRupee <= 0) return res.status(400).json({ success: false, message: "This plan has no purchasable price configured." });
     const amountPaise  = amountRupee * 100;
 
     const order = await razorpay.orders.create({
@@ -254,7 +264,7 @@ const createPlanOrder = async (req, res) => {
 const verifyPlanPayment = async (req, res) => {
   try {
     const { planId, billing = "monthly", razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
-    if (!planId || !PLANS[planId]) return res.status(400).json({ success: false, message: "Invalid plan" });
+    if (!planId || !isKnownPlan(planId)) return res.status(400).json({ success: false, message: "Invalid plan" });
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
       return res.status(400).json({ success: false, message: "Missing payment verification fields" });
     }
@@ -412,7 +422,7 @@ const verifyMandate = async (req, res) => {
 const selectPlanAndCharge = async (req, res) => {
   try {
     const { planId, billing = "monthly" } = req.body;
-    if (!planId || !PLANS[planId]) return res.status(400).json({ success: false, message: "Invalid plan selected" });
+    if (!planId || !isKnownPlan(planId)) return res.status(400).json({ success: false, message: "Invalid plan selected" });
     if (!["monthly", "yearly"].includes(billing)) return res.status(400).json({ success: false, message: "Invalid billing cycle" });
 
     const company = await Company.findById(_companyId(req))
@@ -423,8 +433,10 @@ const selectPlanAndCharge = async (req, res) => {
       return res.status(400).json({ success: false, code: "NO_PAYMENT_METHOD", message: "No saved payment method. Please add a payment method first." });
     }
 
-    const plan        = PLANS[planId];
-    const amountRupee  = billing === "yearly" ? plan.yearlyPrice : plan.monthlyPrice;
+    const plan        = await resolvePlanPricing(planId, billing);
+    if (!plan || plan.custom) return res.status(400).json({ success: false, message: "Invalid plan selected" });
+    const amountRupee  = plan.price;
+    if (amountRupee <= 0) return res.status(400).json({ success: false, message: "This plan has no purchasable price configured." });
     const amountPaise  = amountRupee * 100;
 
     const order = await razorpay.orders.create({
