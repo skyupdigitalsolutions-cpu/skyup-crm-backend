@@ -25,6 +25,7 @@ const { computeAddonExpiry } = require("../models/CompanyAddon");
 const { logAudit }  = require("../services/entitlementService");
 const { sendAddonReceipt } = require("../services/addonReceiptService");
 const { resolvePlanPricing } = require("../utils/planPricing");
+const { nextInvoiceNumber, fallbackInvoiceNumber } = require("../utils/invoiceNumber");
 
 const razorpay = new Razorpay({
   key_id:     process.env.RAZORPAY_KEY_ID,
@@ -43,10 +44,8 @@ async function resolveBuyableAddon(addonType, planKey) {
   return item;
 }
 
-function makeInvoiceId(prefix = "CART") {
-  const now = new Date();
-  return `${prefix}-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${Date.now().toString().slice(-5)}`;
-}
+// Invoice numbers are issued sequentially as SDS-001, SDS-002, … via
+// nextInvoiceNumber() (atomic counter). See utils/invoiceNumber.js.
 
 // ── POST /api/razorpay/cart/create-order ──────────────────────────────────────
 const createCartOrder = async (req, res) => {
@@ -261,7 +260,13 @@ const verifyCartPayment = async (req, res) => {
     }
 
     // ── Single combined payment record ────────────────────────────────────────
-    const invoiceId = makeInvoiceId("CART");
+    let invoiceId;
+    try {
+      invoiceId = await nextInvoiceNumber();
+    } catch (e) {
+      console.error("[verifyCartPayment] invoice numbering failed:", e.message);
+      invoiceId = fallbackInvoiceNumber();
+    }
     const planItem  = activatedItems.find(i => i.type === "plan");
     const planLabel = planItem ? planItem.name : "Add-ons only";
     const addonLabel = activatedAddonNames.length ? ` + ${activatedAddonNames.join(", ")}` : "";
