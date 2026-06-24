@@ -22,6 +22,7 @@ const { sendAddonReceipt }   = require("../services/addonReceiptService");
 const Company      = require("../models/Company");
 const Payment      = require("../models/Payment");
 const { logAudit } = require("../services/entitlementService");
+const { nextInvoiceNumber, fallbackInvoiceNumber } = require("../utils/invoiceNumber");
 
 const razorpay = new Razorpay({
   key_id:     process.env.RAZORPAY_KEY_ID,
@@ -172,7 +173,13 @@ const verifyAddonPayment = async (req, res) => {
 
     // ── Invoice record (mirrors plan payments) ───────────────────────────────
     const now = new Date();
-    const invoiceId = `ADN-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${Date.now().toString().slice(-4)}`;
+    let invoiceId;
+    try {
+      invoiceId = await nextInvoiceNumber();
+    } catch (e) {
+      console.error("[addonPayment] invoice numbering failed:", e.message);
+      invoiceId = fallbackInvoiceNumber();
+    }
 
     try {
       await Payment.create({
