@@ -26,6 +26,62 @@ const CompanyAddon   = require("../models/CompanyAddon");
 const CompanyBenefit = require("../models/CompanyBenefit");
 const CompanyUsage   = require("../models/CompanyUsage");
 const EntitlementAuditLog = require("../models/EntitlementAuditLog");
+const { redisClient } = require("../middlewares/rateLimiter");
+
+// ── Entitlement cache (Redis) ─────────────────────────────────────────────────
+// getCompanyEntitlements() is called on practically every authenticated
+// request (via attachEntitlements / requireFeature / requireNotReadOnly), and
+// recomputes by hitting Company + CompanyAddon + CompanyBenefit + PlanConfig
+// (4 DB round-trips) every single time. A short TTL cache removes that cost
+// for the overwhelming majority of requests, since entitlements rarely change
+// request-to-request.
+//
+// TTL is intentionally short (60s) so a plan/addon/benefit change becomes
+// visible quickly even if invalidateEntitlementCache() is missed somewhere.
+const ENTITLEMENT_CACHE_TTL_SECONDS = 60;
+const entitlementCacheKey = (companyId) => `ent:${companyId}`;
+
+async function getCachedEntitlements(companyId) {
+  try {
+    if (!redisClient.isReady) return null; // Redis down — fall through to DB
+    const cached = await redisClient.get(entitlementCacheKey(companyId));
+    return cached ? JSON.parse(cached) : null;
+  } catch (err) {
+    console.error("[entitlements] cache read failed:", err.message);
+    return null;
+  }
+}
+
+async function setCachedEntitlements(companyId, ent) {
+  try {
+    if (!redisClient.isReady) return; // Redis down — skip silently
+    await redisClient.set(
+      entitlementCacheKey(companyId),
+      JSON.stringify(ent),
+      { EX: ENTITLEMENT_CACHE_TTL_SECONDS }
+    );
+  } catch (err) {
+    console.error("[entitlements] cache write failed:", err.message);
+  }
+}
+
+/**
+ * Invalidates the cached entitlements for a company. Call this anywhere a
+ * company's plan, addons, benefits, planFeatures, or devOverrides change —
+ * e.g. after subscription upgrade/downgrade, addon purchase/cancel, benefit
+ * grant/revoke, or a developer devOverride edit — so the next request
+ * recomputes fresh instead of serving stale data for up to the TTL window.
+ *
+ * @param {string|ObjectId} companyId
+ */
+async function invalidateEntitlementCache(companyId) {
+  try {
+    if (!redisClient.isReady) return;
+    await redisClient.del(entitlementCacheKey(companyId));
+  } catch (err) {
+    console.error("[entitlements] cache invalidate failed:", err.message);
+  }
+}
 
 // ── Addon / Benefit → entitlement delta maps ──────────────────────────────────
 // Resource addons — each unit added to the numeric limit
@@ -251,6 +307,12 @@ function currentMonth() {
  * @returns {Promise<Object>} entitlements
  */
 async function getCompanyEntitlements(companyId) {
+  const idStr = String(companyId);
+
+  // ── 0. Serve from cache if present ─────────────────────────────────────────
+  const cached = await getCachedEntitlements(idStr);
+  if (cached) return cached;
+
   // ── 1. Load company + active addons + active benefits in parallel ──────────
   const now = new Date();
 
@@ -450,6 +512,9 @@ async function getCompanyEntitlements(companyId) {
   // Re-derive readOnly after all overrides (devOverride cannot change subscriptionStatus directly)
   ent.readOnly = !["active", "trial"].includes(ent.subscriptionStatus);
 
+  // ── 6. Write through to cache for subsequent requests ──────────────────────
+  await setCachedEntitlements(idStr, ent);
+
   return ent;
 }
 
@@ -550,6 +615,7 @@ async function logAudit(payload) {
 
 module.exports = {
   getCompanyEntitlements,
+  invalidateEntitlementCache,
   consumeUsage,
   getRemainingUsage,
   logAudit,

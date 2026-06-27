@@ -1,5 +1,7 @@
-const Attendance = require("../models/Attendance");
-const User       = require("../models/Users");
+const Attendance    = require("../models/Attendance");
+const User          = require("../models/Users");
+const Company       = require("../models/Company");
+const LiveLocation   = require("../models/LiveLocation");
 
 // ── Socket helper — emits attendance:updated to the user's private room ───────
 // The room name is `att:<userId>`. Both web and mobile join this room on mount.
@@ -87,10 +89,19 @@ const clockIn = async (req, res) => {
     const date      = todayStr();
 
     // ── Location enforcement ─────────────────────────────────────────────────
-    const Company = require('../models/Company');
-    const company = await Company.findById(companyId)
-      .select('clockInLocationEnabled clockInLatitude clockInLongitude clockInRadiusMeters')
-      .lean();
+    // Fetch company settings and user meeting-permission in parallel instead
+    // of sequentially — the user doc was previously only fetched AFTER
+    // company.findById resolved, and only if location enforcement was on.
+    // Fetching both up front costs nothing extra when enforcement is off
+    // (the userDoc is simply unused) and saves one full round-trip when it's on.
+    const [company, userDoc] = await Promise.all([
+      Company.findById(companyId)
+        .select('clockInLocationEnabled clockInLatitude clockInLongitude clockInRadiusMeters')
+        .lean(),
+      User.findById(userId)
+        .select('clientMeetingPermission clientMeetingPermissionGrantedAt')
+        .lean(),
+    ]);
 
     // Tracks whether this clock-in relied on a remote meeting permission, so we
     // can consume (reset) that permission afterwards — a granted permission is
@@ -99,9 +110,6 @@ const clockIn = async (req, res) => {
 
     if (company?.clockInLocationEnabled && company.clockInLatitude && company.clockInLongitude) {
       // Check if employee has client-meeting permission (bypasses location check)
-      const userDoc = await User.findById(userId)
-        .select('clientMeetingPermission clientMeetingPermissionGrantedAt')
-        .lean();
 
       const hasMeetingPermission = (() => {
         if (!userDoc?.clientMeetingPermission) return false;
@@ -787,7 +795,6 @@ const locationPing = async (req, res) => {
     }
 
     // Check company tracking toggle
-    const Company = require('../models/Company');
     const company = await Company.findById(companyId)
       .select('meetingLocationTrackingEnabled')
       .lean();
@@ -808,7 +815,6 @@ const locationPing = async (req, res) => {
       return res.json({ stored: false, reason: 'no_meeting_permission' });
     }
 
-    const LiveLocation = require('../models/LiveLocation');
     const ping = await LiveLocation.create({
       user:      userId,
       company:   companyId,
@@ -850,7 +856,6 @@ const getLiveLocations = async (req, res) => {
     const limit     = Math.min(200, parseInt(req.query.limit || '50', 10));
     const userId    = req.query.userId || null; // optional filter by employee
 
-    const LiveLocation = require('../models/LiveLocation');
     const query = { company: companyId, date };
     if (userId) query.user = userId;
 
@@ -875,7 +880,6 @@ const getLiveLocations = async (req, res) => {
 // the meeting-tracking setting. Safe to expose to employees (no secrets).
 const getGeofenceConfig = async (req, res) => {
   try {
-    const Company = require('../models/Company');
     const company = await Company.findById(req.user.company)
       .select('clockInLocationEnabled clockInLatitude clockInLongitude clockInRadiusMeters meetingLocationIntervalMinutes')
       .lean();
@@ -893,7 +897,6 @@ const getGeofenceConfig = async (req, res) => {
 
 const getMeetingTrackingConfig = async (req, res) => {
   try {
-    const Company = require('../models/Company');
     const company = await Company.findById(req.user.company)
       .select('meetingLocationTrackingEnabled meetingLocationIntervalMinutes')
       .lean();
@@ -912,7 +915,6 @@ const saveMeetingTrackingConfig = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { enabled, intervalMinutes } = req.body;
-    const Company = require('../models/Company');
     const update = {};
     if (enabled !== undefined) update.meetingLocationTrackingEnabled = Boolean(enabled);
     if (intervalMinutes != null) {

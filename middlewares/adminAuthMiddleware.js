@@ -3,7 +3,42 @@ const jwt        = require("jsonwebtoken");
 const Admin      = require("../models/Admin");
 const SuperAdmin = require("../models/SuperAdmin");
 const Company    = require("../models/Company");
-const { isTokenBlacklisted } = require("./rateLimiter");
+const { isTokenBlacklisted, redisClient } = require("./rateLimiter");
+
+// ── Legacy SuperAdmin → Company cache ─────────────────────────────────────────
+// The legacy SuperAdmin path resolves "which company is the superadmin
+// currently managing" on every single request via 1-2 extra DB round-trips
+// (header lookup, or a full collection scan via Company.findOne({isActive})).
+// That target rarely changes within a session, so cache it per superadmin id
+// with a short TTL — switching companies (header-driven) still works because
+// the header value is part of the cache key.
+const SUPERADMIN_COMPANY_CACHE_TTL_SECONDS = 60;
+const superAdminCompanyCacheKey = (superAdminId, headerCompanyId) =>
+  `sacomp:${superAdminId}:${headerCompanyId || "default"}`;
+
+async function getCachedSuperAdminCompany(superAdminId, headerCompanyId) {
+  try {
+    if (!redisClient.isReady) return null;
+    const cached = await redisClient.get(superAdminCompanyCacheKey(superAdminId, headerCompanyId));
+    return cached ? JSON.parse(cached) : null;
+  } catch (err) {
+    console.error("[adminAuth] superadmin company cache read failed:", err.message);
+    return null;
+  }
+}
+
+async function setCachedSuperAdminCompany(superAdminId, headerCompanyId, company) {
+  try {
+    if (!redisClient.isReady) return;
+    await redisClient.set(
+      superAdminCompanyCacheKey(superAdminId, headerCompanyId),
+      JSON.stringify(company),
+      { EX: SUPERADMIN_COMPANY_CACHE_TTL_SECONDS }
+    );
+  } catch (err) {
+    console.error("[adminAuth] superadmin company cache write failed:", err.message);
+  }
+}
 
 const protectAdmin = async (req, res, next) => {
   let token;
@@ -43,16 +78,24 @@ const protectAdmin = async (req, res, next) => {
         }
 
         const headerCompanyId = req.headers["x-company-id"];
-        let company = null;
-        if (headerCompanyId) {
-          company = await Company.findById(headerCompanyId).catch(() => null);
-        }
+
+        let company = await getCachedSuperAdminCompany(superAdmin._id, headerCompanyId);
+
         if (!company) {
-          company = await Company.findOne({ isActive: true }).sort({ createdAt: 1 });
+          if (headerCompanyId) {
+            company = await Company.findById(headerCompanyId).lean().catch(() => null);
+          }
+          if (!company) {
+            company = await Company.findOne({ isActive: true }).sort({ createdAt: 1 }).lean();
+          }
+          if (!company) {
+            company = await Company.findOne().sort({ createdAt: 1 }).lean();
+          }
+          if (company) {
+            await setCachedSuperAdminCompany(superAdmin._id, headerCompanyId, company);
+          }
         }
-        if (!company) {
-          company = await Company.findOne().sort({ createdAt: 1 });
-        }
+
         if (!company) {
           return res.status(404).json({ message: "No company found for super_admin to manage" });
         }
