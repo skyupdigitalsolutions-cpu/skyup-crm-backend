@@ -55,7 +55,14 @@ const protect = async (req, res, next) => {
           }
 
           const isReadRequest = req.method === "GET" || req.method === "HEAD";
-          if (!company.isActive && !isReadRequest) {
+          // Device registration (FCM token / device info) must ALWAYS be allowed,
+          // even when the subscription is inactive. Otherwise the mobile app's
+          // PATCH /auth/update-device is blocked with 403, the fcmToken never
+          // saves, and push notifications silently stop for that user.
+          const isDeviceUpdate =
+            req.method === "PATCH" &&
+            (req.path === "/update-device" || req.originalUrl.endsWith("/auth/update-device"));
+          if (!company.isActive && !isReadRequest && !isDeviceUpdate) {
             return res.status(403).json({
               message: "Your company's subscription is inactive. Please contact your administrator to renew.",
               code: "SUBSCRIPTION_EXPIRED",

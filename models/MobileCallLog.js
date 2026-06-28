@@ -77,14 +77,13 @@ mobileCallLogSchema.index({ user: 1, phoneNumber: 1, timestamp: 1, callType: 1 }
 mobileCallLogSchema.index({ company: 1, normalizedPhone: 1 }, { sparse: true });
 
 // Auto-compute normalizedPhone before save
-mobileCallLogSchema.pre('validate', function (next) {
+mobileCallLogSchema.pre('validate', function () {
   if (this.phoneNumber) {
     try {
       const { normalizePhone } = require('../utils/normalizePhone');
       this.normalizedPhone = normalizePhone(this.phoneNumber) || null;
     } catch { /* ignore if util not yet available */ }
   }
-  next();
 });
 
 module.exports = mongoose.model('MobileCallLog', mobileCallLogSchema);
