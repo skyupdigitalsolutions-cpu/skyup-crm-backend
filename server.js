@@ -214,6 +214,7 @@ app.use('/api/superadmin',          superAdminRoute);
 app.use('/api/developer',           developerRoutes);
 app.use('/api/admin',               adminRoute);
 app.use('/api/auth',                authRoute);
+app.use('/api/terms',               require('./routes/termsRoute'));
 app.use('/api/lead',                leadRoute);
 app.use('/api/project',             projectRoute);
 app.use('/api/attendance',          attendanceRoute);
@@ -355,3 +356,21 @@ async function gracefulShutdown(signal) {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+
+// ── Process-level safety net ──────────────────────────────────────────────────
+// Previously there was no handler for unhandled promise rejections or uncaught
+// exceptions. A single stray rejection (e.g. a background job or fire-and-forget
+// .catch() that was missed) could crash the entire Render process and take down
+// the whole API. These handlers log the error with a full stack so it's visible
+// in Render logs, without killing the server for a recoverable rejection.
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ UNHANDLED PROMISE REJECTION:', reason);
+  // Intentionally NOT exiting — log and keep serving. Investigate via the stack.
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ UNCAUGHT EXCEPTION:', err?.stack || err);
+  // An uncaught synchronous exception can leave the process in an undefined
+  // state. Log it; let Render's own restart policy handle a hard crash if the
+  // process actually becomes unstable. Do not silently swallow.
+});
