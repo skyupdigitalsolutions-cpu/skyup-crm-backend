@@ -19,8 +19,22 @@ function emitAttendanceUpdate(req, record) {
 }
 
 // Helpers
+//
+// FIX (clock/timezone bug): the whole app runs on IST, but this used to do
+// `new Date().toISOString().slice(0, 10)`, which is always the UTC date.
+// Between 12:00 AM and 5:30 AM IST, the UTC date is still "yesterday", so any
+// clock-in in that window was silently filed under the wrong day — and the
+// mobile app / website would each show a different "today" record depending
+// on what the device thought the date was. All "today" helpers below now
+// compute the date using the IST wall-clock instead of UTC.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // +05:30 in ms
+
+function toIST(date) {
+  return new Date(new Date(date).getTime() + IST_OFFSET_MS);
+}
+
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  return toIST(new Date()).toISOString().slice(0, 10);
 }
 
 function calcBreakMinutes(breaks) {
@@ -54,8 +68,15 @@ function calcManualBreakMinutes(breaks) {
 /** Determine CRM attendance status from a raw record.*  Present / Late / Half-day / Absent / Leave  */
 function deriveCrmStatus(rec) {
   if (!rec || !rec.loginTime) return "absent";
-  const loginHour   = new Date(rec.loginTime).getHours();
-  const loginMin    = new Date(rec.loginTime).getMinutes();
+  // FIX (clock/timezone bug): .getHours()/.getMinutes() read the SERVER
+  // PROCESS's local timezone (often UTC on cloud hosts like Render), not
+  // IST. That made the 9:30 AM "late" cutoff below fire at the wrong wall-
+  // clock time whenever the server's TZ wasn't Asia/Kolkata. Use the IST-
+  // shifted timestamp and its UTC getters instead, so this is correct
+  // regardless of the host machine's configured timezone.
+  const istLogin      = toIST(rec.loginTime);
+  const loginHour     = istLogin.getUTCHours();
+  const loginMin      = istLogin.getUTCMinutes();
   const totalMinutes = loginHour * 60 + loginMin;
   const workMins    = rec.totalWorkMinutes || 0;
 
@@ -661,8 +682,12 @@ const exportAttendance = async (req, res) => {
       employeeName : rec.user?.name || "Unknown",
       email        : rec.user?.email || "",
       date         : rec.date,
-      checkIn      : rec.loginTime  ? new Date(rec.loginTime).toLocaleTimeString("en-IN",  { hour: "2-digit", minute: "2-digit" }) : "—",
-      checkOut     : rec.logoutTime ? new Date(rec.logoutTime).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—",
+      // FIX (clock/timezone bug): the "en-IN" locale only controls the
+      // 12-hour/AM-PM *format* — it does NOT force IST. Without an explicit
+      // timeZone, this rendered in the server process's local timezone,
+      // which can silently disagree with what the live app screens show.
+      checkIn      : rec.loginTime  ? new Date(rec.loginTime).toLocaleTimeString("en-IN",  { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }) : "—",
+      checkOut     : rec.logoutTime ? new Date(rec.logoutTime).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }) : "—",
       workingHours : formatWorkHours(rec.totalWorkMinutes),
       breakMinutes : calcManualBreakMinutes(rec.breaks),
       // Auto-computed idle time (Auto Idle gaps, excluding manual breaks),
