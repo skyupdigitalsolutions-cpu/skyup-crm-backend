@@ -9,6 +9,7 @@ const {
   mapGoogleLeadToSchema,
 } = require("../utils/googleAdsHelper");
 const { notifyCampaignLead } = require("../services/telegramService");
+const { sendNewLeadNotification } = require("../services/fcmService");
 
 /**
  * POST /google-webhook
@@ -167,6 +168,25 @@ const receiveGoogleWebhook = async (req, res) => {
     notifyCampaignLead(newLead, newLead.company).catch(e =>
       console.error("[Telegram] Google Ads lead notify error:", e.message)
     );
+
+    // FIX: notify the ASSIGNED employee specifically. Google Ads leads
+    // previously fired no `new_lead_assigned` socket event and no FCM push, so
+    // the employee's web bell/badge and the mobile in-app handler stayed silent.
+    // Both listen on the agent:<userId> room; the mobile push is sendNewLeadNotification.
+    // Mirrors leadController.adminCreateLead so every source behaves the same.
+    if (assignedUserId) {
+      if (global._io) {
+        global._io.to(`agent:${assignedUserId}`).emit("new_lead_assigned", {
+          leadId:    String(newLead._id),
+          leadName:  newLead.name,
+          source:    newLead.source || "Google Ads",
+          eventType: "new",
+        });
+      }
+      sendNewLeadNotification(assignedUserId, newLead).catch(e =>
+        console.error("[FCM] Google Ads lead push error:", e.message)
+      );
+    }
 
   } catch (err) {
     console.error("❌ GOOGLE WEBHOOK PROCESSING ERROR:", err.message);

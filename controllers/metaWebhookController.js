@@ -312,6 +312,23 @@ const receiveWebhook = async (req, res) => {
           sendNewLeadNotification(assignedUserId, newLead).catch(e =>
             console.error("[FCM] Meta lead push error:", e.message)
           );
+
+          // FIX: emit the real-time `new_lead_assigned` socket event too.
+          // The Meta webhook previously sent ONLY the FCM push and never this
+          // event — but the employee's WEB dashboard bell/badge AND the mobile
+          // app's in-app "new lead" handler both listen for `new_lead_assigned`
+          // on the agent:<userId> room. Without it, Meta leads produced no
+          // dashboard/in-app alert (background push only), which is exactly why
+          // "Meta ads leads also not getting notification". Mirrors the emit in
+          // leadController.adminCreateLead so all lead sources behave the same.
+          if (global._io) {
+            global._io.to(`agent:${assignedUserId}`).emit("new_lead_assigned", {
+              leadId:    String(newLead._id),
+              leadName:  newLead.name,
+              source:    newLead.source || "Meta Ads",
+              eventType: "new",
+            });
+          }
         }
       }
     }

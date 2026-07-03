@@ -5,6 +5,7 @@ const User               = require("../models/Users");
 const { normalizePhone } = require("../utils/normalizePhone");
 const { autoSendTemplates } = require("../services/autoTemplateService");
 const { notifyCampaignLead } = require("../services/telegramService");
+const { sendNewLeadNotification } = require("../services/fcmService");
 
 async function getNextAssignedUser(config) {
   const users = await User.find({
@@ -112,6 +113,27 @@ const receiveWebsiteWebhook = async (req, res) => {
       }
     } catch (socketErr) {
       console.warn("⚠️  Socket emit failed (non-fatal):", socketErr.message);
+    }
+
+    // FIX: notify the ASSIGNED employee specifically. The block above emits a
+    // company-wide "new_website_lead" (dashboard refresh), but the employee's
+    // bell/badge on web AND the mobile app's in-app handler both listen for
+    // `new_lead_assigned` on the agent:<userId> room, and the mobile push comes
+    // from sendNewLeadNotification. Neither fired for website leads before, so an
+    // employee whose leads arrive via the website form got no notification.
+    // Mirrors leadController.adminCreateLead so every source behaves the same.
+    if (assignedUserId) {
+      if (global._io) {
+        global._io.to(`agent:${assignedUserId}`).emit("new_lead_assigned", {
+          leadId:    String(newLead._id),
+          leadName:  newLead.name,
+          source:    newLead.source || "Website",
+          eventType: "new",
+        });
+      }
+      sendNewLeadNotification(assignedUserId, newLead).catch(e =>
+        console.error("[FCM] Website lead push error:", e.message)
+      );
     }
   } catch (err) {
     console.error("❌ WEBSITE WEBHOOK ERROR:", err.message);

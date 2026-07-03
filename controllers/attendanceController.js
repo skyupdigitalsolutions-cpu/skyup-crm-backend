@@ -236,6 +236,16 @@ const clockIn = async (req, res) => {
       await User.findByIdAndUpdate(userId, { $set: deviceFields });
     }
 
+    // Persist whether THIS is a remote (meeting/field) clock-in for today.
+    // locationPing authorizes GPS pings off this per-day flag instead of the
+    // ephemeral clientMeetingPermission, which is consumed just below. Without
+    // it, every location ping after a remote clock-in was rejected with
+    // 'no_meeting_permission' and no lat/long was ever stored or displayed.
+    if (record.remoteClockIn !== usedMeetingPermission) {
+      record.remoteClockIn = usedMeetingPermission;
+      await record.save();
+    }
+
     // Consume the remote permission: a granted approval is good for ONE clock-in.
     // After using it, reset so the next clock-in requires a fresh request +
     // fresh admin approval (no standing 24h pass that auto-shows "approved").
@@ -827,16 +837,26 @@ const locationPing = async (req, res) => {
       return res.json({ stored: false, reason: 'tracking_disabled' });
     }
 
-    // Check employee has active meeting permission (< 24h)
+    // Authorize the ping. clockIn consumes clientMeetingPermission the instant
+    // it's used, so a remote session's later pings can't rely on it — we check
+    // the per-day remoteClockIn flag on today's Attendance instead. The user
+    // permission check is kept as a fallback (e.g. permission granted mid-session
+    // before the next clock-in).
+    const attToday = await Attendance.findOne({ user: userId, date: todayStr() })
+      .select('remoteClockIn loginTime logoutTime')
+      .lean();
+    const inRemoteSession = !!(attToday && attToday.remoteClockIn && attToday.loginTime && !attToday.logoutTime);
+
     const userDoc = await User.findById(userId)
       .select('clientMeetingPermission clientMeetingPermissionGrantedAt')
       .lean();
-    const hasPermission = (() => {
+    const hasActivePermission = (() => {
       if (!userDoc?.clientMeetingPermission) return false;
       if (!userDoc.clientMeetingPermissionGrantedAt) return false;
       return (Date.now() - new Date(userDoc.clientMeetingPermissionGrantedAt).getTime()) < 24 * 60 * 60 * 1000;
     })();
-    if (!hasPermission) {
+
+    if (!inRemoteSession && !hasActivePermission) {
       return res.json({ stored: false, reason: 'no_meeting_permission' });
     }
 

@@ -53,6 +53,12 @@ const attendanceSchema = new mongoose.Schema({
   clockInLatitude:  { type: Number, default: null },
   clockInLongitude: { type: Number, default: null },
 
+  // True when today's clock-in used a granted remote/meeting permission (i.e. a
+  // field / off-site session). Persisted per-day because the one-time
+  // clientMeetingPermission on the User is consumed at clock-in; locationPing
+  // authorizes GPS pings off THIS flag for the whole session.
+  remoteClockIn: { type: Boolean, default: false },
+
   // ── Ideal working time + reason (set by the employee from the mobile app) ──
   // Free-text planned working window (e.g. "11:00 AM - 7:00 PM") and the reason
   // for it. Displayed on the admin / super-admin attendance pages.
