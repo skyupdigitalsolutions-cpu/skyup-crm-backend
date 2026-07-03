@@ -311,6 +311,41 @@ const companySchema = mongoose.Schema(
       },
     },
 
+    // ── Follow-up reminder settings (WhatsApp + Email to the LEAD) ────────────
+    // Powers jobs/followUpReminderJob.js — sends a nudge to the lead twice a
+    // day (9:30 AM & 8:30 PM IST) whenever they have a pending, not-yet-done
+    // scheduledCalls entry of type "follow-up" that is due today or overdue.
+    // No SMS channel here by design (WhatsApp + Email only).
+    // Enabled by default so the automation works immediately company-wide;
+    // an admin can still disable/customize it later via the same settings
+    // endpoints used for autoTemplate / interestedBlast.
+    //
+    // IMPORTANT: templateName defaults to "crm_followup_reminder" — a NEW
+    // WhatsApp template that must be created and approved in the MSG91 panel
+    // before this automation can send WhatsApp messages. It is intentionally
+    // NOT the same as "crm_followup_leads" (the new-lead welcome template) —
+    // reusing that one would send a "thanks for your interest, we'll be in
+    // touch" message to a lead who has already been contacted, which reads
+    // wrong. See the template spec provided separately for the exact body
+    // text / variables to submit for approval.
+    followUpReminder: {
+      whatsapp: {
+        enabled:      { type: Boolean, default: true },
+        templateName: { type: String,  default: "crm_followup_reminder" },
+        languageCode: { type: String,  default: "en" },
+      },
+      email: {
+        enabled:      { type: Boolean, default: true },
+        subject:      { type: String,  default: "Following up on your enquiry, {{name}}" },
+        fromName:     { type: String,  default: "" },
+        bodyTemplate: {
+          type:    String,
+          default: "<p>Hi {{name}},</p><p>Just following up on your enquiry — our team hasn't been able to connect with you yet.</p><p>We'll try reaching out again shortly. Feel free to reply to this email or message us on WhatsApp anytime.</p><p>Regards,<br/>The Team</p>",
+        },
+      },
+    },
+
+
     // ── Per-company Cloudinary (media storage isolation) ──────────────────────
     // When enabled + filled, this company's media (call recordings, meeting
     // attachments) uploads to ITS OWN Cloudinary account instead of the shared

@@ -302,6 +302,16 @@ const leadSchema = mongoose.Schema(
     noActionAlert1hSentAt: { type: Date, default: null },
     noActionAlert2hSentAt: { type: Date, default: null },
 
+    // ── Follow-up reminder tracking (WhatsApp + Email to the LEAD) ────────────
+    // followUpReminderJob.js sends a WhatsApp + Email nudge to the lead twice a
+    // day (9:30 AM & 8:30 PM IST) whenever this lead has a pending (not done)
+    // scheduledCalls entry of type "follow-up" that is due today or overdue.
+    // These two fields dedupe sends so the same slot never fires twice in one
+    // calendar day (IST) — reset naturally once the day rolls over, since the
+    // job compares against "today's" IST date key each run.
+    followUpReminderLastSentDate: { type: String, default: null }, // "YYYY-M-D" (IST)
+    followUpReminderLastSentSlot: { type: String, default: null }, // "morning" | "evening"
+
     // ── No-action 3h escalation guard (super_admin dedup) ────────────────────
     // BUG 2 FIX — without this field the 3h escalation guard in leadAlertsJob
     // never sticks: the query finds the same leads every 15-min tick and the

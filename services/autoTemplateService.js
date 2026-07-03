@@ -500,4 +500,15 @@ async function sendInterestedBlast(lead, companyId) {
   }
 }
 
-module.exports = { autoSendTemplates, sendInterestedBlast, sendSmartEmail };
+// sendAutoWhatsApp / sendAutoEmail are exported (in addition to the two
+// higher-level blast functions above) so other automations — e.g.
+// jobs/followUpReminderJob.js — can send a WhatsApp/Email message to a lead
+// using a company's saved WhatsApp/Brevo/MSG91 config without duplicating
+// the provider-selection and payload-building logic here.
+module.exports = {
+  autoSendTemplates,
+  sendInterestedBlast,
+  sendSmartEmail,
+  sendAutoWhatsApp,
+  sendAutoEmail,
+};
