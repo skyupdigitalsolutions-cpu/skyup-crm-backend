@@ -48,6 +48,10 @@ const {
   wipeCatalog,
 } = require("../controllers/addonCatalogController");
 
+// ── TEMPORARY — dev test route for followUpReminderJob (see file header for
+//    removal instructions once testing is done) ───────────────────────────────
+const { testFollowUpReminder } = require("../controllers/devTestFollowUpReminderController");
+
 // ── Public ────────────────────────────────────────────────────────────────────
 router.post("/login", developerLogin);
 
@@ -101,5 +105,11 @@ router.delete("/addon-catalog",         wipeCatalog);          // delete ALL row
 router.post("/addon-catalog/custom",    createCustomAddon);    // create custom addon
 router.delete("/addon-catalog/custom/:addonType", deleteCustomAddon);
 router.put("/addon-catalog/:addonType", upsertCatalogItem);    // single upsert
+
+// ── TEMPORARY — manual trigger for follow-up reminder job testing ─────────────
+// GET /api/developer/test-followup-reminder?slot=morning|evening
+// DELETE this route + controllers/devTestFollowUpReminderController.js once
+// you've confirmed the automation works end-to-end.
+router.get("/test-followup-reminder", testFollowUpReminder);
 
 module.exports = router;
