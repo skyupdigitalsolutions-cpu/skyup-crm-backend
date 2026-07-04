@@ -345,6 +345,125 @@ const companySchema = mongoose.Schema(
       },
     },
 
+    // ── Per-call-outcome automation (WhatsApp + Email to the LEAD) ─────────────
+    // Powers services/outcomeAutomationService.js, triggered from patchLead
+    // whenever an agent logs a call outcome from the mobile "Call Remark" modal
+    // (or the web equivalent). One config entry per outcome.
+    //
+    // IMPORTANT — outcomes intentionally NOT handled here (to avoid double-send):
+    //   • "Interested"     → handled by the existing interestedBlast flow.
+    //   • "Client Meeting" → handled by the existing meeting-reminder flow
+    //                        (client_meeting_reminder template + email).
+    //   • "Invalid"        → NO automation (usually a wrong/junk number).
+    //
+    // Dedupe: each lead receives at most ONE message per outcome per calendar
+    // day (IST), tracked via Lead.outcomeAutomationSent — so an agent picking
+    // e.g. "Not Answered" three times in a day only triggers one send.
+    //
+    // WhatsApp templateName values point to templates that must be created and
+    // approved in MSG91 before WhatsApp will send (Email works immediately).
+    // Not Answered / Busy / Switch Off deliberately SHARE one "crm_call_missed"
+    // template since the lead-facing message is identical ("we tried to reach
+    // you"). Each entry can still be individually enabled/disabled/customized.
+    outcomeAutomation: {
+      answered: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_call_answered" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "Thanks for speaking with us, {{name}}" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>Thank you for taking our call today — it was great speaking with you. If you have any questions, just reply to this email or message us on WhatsApp anytime.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
+      notAnswered: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_call_missed" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "We tried reaching you, {{name}}" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>We tried reaching you over a call but couldn't connect. We'll try again soon — or feel free to reply with a convenient time to talk.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
+      busy: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_call_missed" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "We tried reaching you, {{name}}" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>We tried reaching you over a call but couldn't connect. We'll try again soon — or feel free to reply with a convenient time to talk.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
+      switchOff: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_call_missed" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "We tried reaching you, {{name}}" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>We tried reaching you over a call but couldn't connect. We'll try again soon — or feel free to reply with a convenient time to talk.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
+      callBackLater: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_call_back_later" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "We'll call you back, {{name}}" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>As discussed, we'll call you back shortly. If your availability changes, just reply and let us know a better time.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
+      notInterested: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_not_interested" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "Thank you for your time, {{name}}" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>Thank you for your time. If your needs change in the future, we'd be glad to help — feel free to reach out anytime.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
+    },
+
 
     // ── Per-company Cloudinary (media storage isolation) ──────────────────────
     // When enabled + filled, this company's media (call recordings, meeting

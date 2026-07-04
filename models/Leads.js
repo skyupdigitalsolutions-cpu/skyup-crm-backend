@@ -312,6 +312,15 @@ const leadSchema = mongoose.Schema(
     followUpReminderLastSentDate: { type: String, default: null }, // "YYYY-M-D" (IST)
     followUpReminderLastSentSlot: { type: String, default: null }, // "morning" | "evening"
 
+    // ── Per-outcome automation dedupe (WhatsApp + Email to the LEAD) ──────────
+    // Maps an outcome key (e.g. "answered", "notAnswered", "busy", "switchOff",
+    // "callBackLater", "notInterested") → the IST calendar-day key ("YYYY-M-D")
+    // on which that outcome's automation last fired for THIS lead. Powers the
+    // "at most once per lead, per outcome, per day" guard in
+    // services/outcomeAutomationService.js, so an agent picking the same
+    // outcome multiple times in one day only triggers one message.
+    outcomeAutomationSent: { type: Map, of: String, default: () => ({}) },
+
     // ── No-action 3h escalation guard (super_admin dedup) ────────────────────
     // BUG 2 FIX — without this field the 3h escalation guard in leadAlertsJob
     // never sticks: the query finds the same leads every 15-min tick and the

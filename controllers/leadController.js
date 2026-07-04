@@ -22,6 +22,7 @@ const getCompanyId = (req) =>
 
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
 const { autoSendTemplates, sendInterestedBlast } = require("../services/autoTemplateService");
+const { sendOutcomeAutomation } = require("../services/outcomeAutomationService");
 const { notifyCampaignLead, notifyEmployeeLead } = require("../services/telegramService");
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
@@ -1138,6 +1139,23 @@ const patchLead = async (req, res) => {
           .catch((err) =>
             console.error("[interestedBlast] patchLead trigger error:", err.message)
           );
+      }
+    }
+
+    // ── Per-outcome automation (WhatsApp + Email to the lead) ─────────────────
+    // Fires a lead-facing message based on the call outcome the agent logged
+    // (Answered / Not Answered / Busy / Switch Off / Call Back Later / Not
+    // Interested). "Interested" is intentionally left to the interestedBlast
+    // above; "Client Meeting" and "Invalid" are ignored by the service, so
+    // they never double-send. Fire-and-forget — never blocks the response, and
+    // the service self-guards against sending the same outcome to the same lead
+    // more than once per day.
+    if (updatedLead && typeof outcome === "string" && outcome.trim()) {
+      const autoCompanyId = lead.company?._id || lead.company || getCompanyId(req);
+      if (autoCompanyId) {
+        sendOutcomeAutomation(updatedLead, autoCompanyId, outcome).catch((err) =>
+          console.error("[outcomeAutomation] patchLead trigger error:", err.message)
+        );
       }
     }
 
