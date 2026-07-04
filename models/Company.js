@@ -449,7 +449,7 @@ const companySchema = mongoose.Schema(
       notInterested: {
         whatsapp: {
           enabled:      { type: Boolean, default: true },
-          templateName: { type: String,  default: "crm_not_interested" },
+          templateName: { type: String,  default: "crm_lead_not_interested" },
           languageCode: { type: String,  default: "en" },
         },
         email: {
