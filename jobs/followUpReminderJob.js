@@ -132,7 +132,12 @@ async function runFollowUpReminderCheck(slot) {
   for (const [companyId, companyLeads] of byCompany) {
     let company;
     try {
-      company = await Company.findById(companyId).select("followUpReminder name").lean();
+      // NOT using .lean(): Mongoose skips schema defaults on lean results, and
+      // there's no admin UI that saves `followUpReminder` to the DB. Hydrating
+      // the doc + .toObject() applies the schema defaults even for company docs
+      // that predate this field, so the reminder works with no DB migration.
+      const companyDoc = await Company.findById(companyId).select("followUpReminder name");
+      company = companyDoc ? companyDoc.toObject() : null;
     } catch (err) {
       console.error(`[followUpReminder:${slot}] company lookup error (${companyId}):`, err.message);
       continue;

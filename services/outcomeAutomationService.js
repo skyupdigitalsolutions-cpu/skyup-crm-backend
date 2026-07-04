@@ -80,10 +80,16 @@ async function sendOutcomeAutomation(lead, companyId, outcome) {
       return { skipped: `outcome "${outcome}" is not handled by outcomeAutomation` };
     }
 
-    const company = await Company.findById(companyId)
-      .select("outcomeAutomation name")
-      .lean();
-    if (!company) return { skipped: "company not found" };
+    // NOTE: intentionally NOT using .lean() here. Mongoose does not apply
+    // schema defaults to lean() results, and there is no admin UI that saves
+    // `outcomeAutomation` to the DB (this automation is backend-only). Fetching
+    // a hydrated document makes Mongoose materialise the schema defaults even
+    // for company docs that predate this field, and .toObject() then gives us
+    // plain values (with defaults applied) to read and pass downstream — so the
+    // automation works out of the box with no DB migration or "Save" step.
+    const companyDoc = await Company.findById(companyId).select("outcomeAutomation name");
+    if (!companyDoc) return { skipped: "company not found" };
+    const company = companyDoc.toObject();
 
     const cfg = company.outcomeAutomation && company.outcomeAutomation[key];
     if (!cfg) return { skipped: `no outcomeAutomation config for "${key}"` };
