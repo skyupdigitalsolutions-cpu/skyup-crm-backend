@@ -189,6 +189,10 @@ const toggleConfig = async (req, res) => {
     const config = await MetaConfig.findById(req.params.id);
     if (!config) return res.status(404).json({ message: "Config not found" });
     config.isActive = !config.isActive;
+    // This is an explicit admin action — clear the Meta-driven pause flag so the
+    // auto-sync job treats the new state as the admin's intent and won't override
+    // it. (If the ad set is still paused on Meta, the next sync will re-pause it.)
+    config.pausedByMeta = false;
     await config.save();
     res.json({
       success: true,

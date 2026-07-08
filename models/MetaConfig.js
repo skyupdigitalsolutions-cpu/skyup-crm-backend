@@ -61,6 +61,23 @@ const metaConfigSchema = new mongoose.Schema(
       trim: true,
       // e.g. "Summer Sale 2025" — used to group ad sets under the same campaign header
     },
+
+    // ── Meta-side live status (auto-synced) ───────────────────────────────────
+    // Mirrors the real ACTIVE/PAUSED/ARCHIVED state of the ad set + lead form on
+    // Meta. The auto-sync job updates these so the CRM shows a config as inactive
+    // the moment its ad set / form is paused or archived on Meta.
+    //   metaFormStatus   raw lead-form status  (ACTIVE / ARCHIVED / DELETED / DRAFT / PAUSED)
+    //   metaAdsetStatus  raw ad-set effective_status (ACTIVE / PAUSED / ADSET_PAUSED / …)
+    //   metaActive       derived: true only when BOTH form and ad set are active on Meta
+    //   pausedByMeta      true when the CRM auto-paused this config to match Meta
+    //                     (lets sync auto-reactivate it if Meta turns it back on,
+    //                      without ever overriding an admin's own manual pause)
+    //   metaStatusSyncedAt  last time the status was read from Meta
+    metaFormStatus:     { type: String, default: "" },
+    metaAdsetStatus:    { type: String, default: "" },
+    metaActive:         { type: Boolean, default: true },
+    pausedByMeta:       { type: Boolean, default: false },
+    metaStatusSyncedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
