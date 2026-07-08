@@ -93,12 +93,22 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
   const provider     = config.provider || "msg91";
   const authKey      = config.msg91AuthKey      || "";
   const senderNumber = config.msg91IntegratedNumber || "";
-  const cleanPhone   = normalizePhone(lead.mobile);
 
-  if (!cleanPhone || cleanPhone.length < 10) {
-    console.warn(`[autoTemplate] ❌ WA skipped — invalid phone: "${cleanPhone}"`);
+  // ── Phone number MUST include the country code for WhatsApp delivery ────────
+  // normalizePhone() returns a BARE 10-digit local number (e.g. "9591327778").
+  // MSG91 / Meta WhatsApp accept that (so the request shows up in the MSG91
+  // logs) but then silently FAIL TO DELIVER it, because a WhatsApp recipient
+  // must be a full international number (e.g. "919591327778"). This is exactly
+  // why template blasts were "sent" per the logs yet never reached the lead.
+  // We prefix the India country code here — matching the proven-working
+  // meeting-reminder sender (waPhone → "91" + ten) and the SMS sender
+  // (which already does `if (len===10) phone = "91" + phone`).
+  const tenDigit   = normalizePhone(lead.mobile);
+  if (!tenDigit || tenDigit.length < 10) {
+    console.warn(`[autoTemplate] ❌ WA skipped — invalid phone: "${lead.mobile || ""}"`);
     return { channel: "whatsapp", status: "skipped", detail: `Lead has an invalid phone number ("${lead.mobile || ""}")` };
   }
+  const cleanPhone = "91" + tenDigit;
 
   if (provider === "msg91") {
     if (!authKey || !senderNumber) {
