@@ -32,6 +32,17 @@ function normalizePhone(raw) {
   return digits;
 }
 
+// ─── Templates that carry a MEDIA (document) header ──────────────────────────
+// A document header is attached ONLY for these template names. Every other
+// template (crm_call_*, crm_followup_reminder, crm_lead_not_interested, etc.)
+// is header-less, and attaching a document to a header-less template makes
+// Meta/MSG91 reject the send. Add a name here only if you created that MSG91
+// template WITH a document header.
+const TEMPLATES_WITH_DOC_HEADER = new Set([
+  "crm_followup_leads",
+]);
+
+
 // ─── Shared: Smart Email — MSG91 first → Brevo fallback ─────────────────────
 // Returns the provider used: "msg91" | "brevo"
 async function sendSmartEmail({ to, toName, subject, html, fromName, companyId }) {
@@ -94,21 +105,17 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
   const authKey      = config.msg91AuthKey      || "";
   const senderNumber = config.msg91IntegratedNumber || "";
 
-  // ── Phone number MUST include the country code for WhatsApp delivery ────────
-  // normalizePhone() returns a BARE 10-digit local number (e.g. "9591327778").
-  // MSG91 / Meta WhatsApp accept that (so the request shows up in the MSG91
-  // logs) but then silently FAIL TO DELIVER it, because a WhatsApp recipient
-  // must be a full international number (e.g. "919591327778"). This is exactly
-  // why template blasts were "sent" per the logs yet never reached the lead.
-  // We prefix the India country code here — matching the proven-working
-  // meeting-reminder sender (waPhone → "91" + ten) and the SMS sender
-  // (which already does `if (len===10) phone = "91" + phone`).
-  const tenDigit   = normalizePhone(lead.mobile);
-  if (!tenDigit || tenDigit.length < 10) {
+  // ── Phone number for WhatsApp delivery ──────────────────────────────────────
+  // normalizePhone() (defined at top of this file) already returns the full
+  // international number WITH the 91 country code for a 10-digit input
+  // (see: `if (digits.length === 10) digits = "91" + digits`). So we use its
+  // result directly — prefixing "91" again would produce a broken
+  // double-country-code number like 9191XXXXXXXXXX.
+  const cleanPhone = normalizePhone(lead.mobile);
+  if (!cleanPhone || cleanPhone.length < 10) {
     console.warn(`[autoTemplate] ❌ WA skipped — invalid phone: "${lead.mobile || ""}"`);
     return { channel: "whatsapp", status: "skipped", detail: `Lead has an invalid phone number ("${lead.mobile || ""}")` };
   }
-  const cleanPhone = "91" + tenDigit;
 
   if (provider === "msg91") {
     if (!authKey || !senderNumber) {
@@ -116,16 +123,46 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
       return { channel: "whatsapp", status: "skipped", detail: "MSG91 WhatsApp authkey / integrated number missing in WhatsApp settings." };
     }
 
-    const namespace   = config.msg91Namespace   || "";
-    const brochureUrl = config.msg91BrochureUrl || "";
+    const namespace = config.msg91Namespace || "";
 
-    // EXACT same component format as the proven-working chat/bulk sender
-    // (_sendTemplateToPhone in whatsappChatController.js):
+    // ── Document header — ONLY for templates that actually have one ────────────
+    // WhatsApp rejects a send in TWO opposite ways:
+    //   (a) a template WITH a document header, sent WITHOUT the document → 404;
+    //   (b) a template WITHOUT a header, sent WITH a document component  → 400.
+    // A single company-wide brochure URL was previously attached to EVERY
+    // template, which meant enabling it (to fix crm_followup_leads) would break
+    // the no-header templates (crm_call_*, crm_followup_reminder, etc.).
+    // We now attach the document header ONLY to templates listed in
+    // TEMPLATES_WITH_DOC_HEADER, and read the URL from the per-company config
+    // with a DEFAULT_BROCHURE_URL env fallback (set it once in Render to cover
+    // all companies without editing Mongo).
+    const tmplName    = (templateName || "").trim();
+    const needsDocHdr = TEMPLATES_WITH_DOC_HEADER.has(tmplName);
+    const brochureUrl = needsDocHdr
+      ? (config.msg91BrochureUrl || process.env.DEFAULT_BROCHURE_URL || "")
+      : "";
+
+    if (needsDocHdr && !brochureUrl) {
+      console.warn(
+        `[autoTemplate] ❌ WA skipped — template "${tmplName}" needs a document header ` +
+        `but no brochure URL is set (WhatsAppConfig.msg91BrochureUrl / DEFAULT_BROCHURE_URL). ` +
+        `MSG91 would reject this send with a 404. Set a public PDF URL, or switch this ` +
+        `automation to a template without a document header.`
+      );
+      return {
+        channel: "whatsapp",
+        status:  "skipped",
+        detail:  `Template "${tmplName}" requires a document header but no brochure URL is configured. ` +
+                 `Set WhatsAppConfig.msg91BrochureUrl (or the DEFAULT_BROCHURE_URL env var) to a public PDF, ` +
+                 `or use a template without a document header.`,
+      };
+    }
+
+    // EXACT same component format as the proven-working chat/bulk sender:
     //   • body_1   → positional {{1}} body variable (the lead's name)
-    //   • header_1 → document header (brochure) when configured — templates
-    //                with a document header REJECT sends that omit it.
+    //   • header_1 → document header, included ONLY when the template needs it
     const components = {
-      ...(brochureUrl
+      ...(needsDocHdr && brochureUrl
         ? {
             header_1: {
               type:     "document",
