@@ -15,6 +15,7 @@ const {
   updateConfig,
   toggleConfig,
   deleteConfig,
+  getInsights,
 } = require("../controllers/websiteConfigController");
 
 // Count existing website configs for the caller's company.
@@ -26,6 +27,7 @@ const countCompanyWebsiteConfigs = async (req) => {
 
 // All routes require websiteTracking feature
 router.get("/",    protectAdmin, requireFeature("websiteTracking"), getConfigs);
+router.get("/insights", protectAdmin, requireFeature("websiteTracking"), getInsights); // ← Website performance report
 router.post(
   "/",
   protectAdmin,

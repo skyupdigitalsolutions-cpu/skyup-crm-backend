@@ -4,7 +4,7 @@ const { protectAdmin } = require("../middlewares/adminAuthMiddleware"); // ✅ c
 const { checkLimit, requireFeature } = require("../middlewares/entitlementMiddleware");
 const GoogleAdsConfig = require("../models/GoogleAdsConfig");
 const {
-  getConfigs, createConfig, toggleConfig, deleteConfig,
+  getConfigs, createConfig, toggleConfig, deleteConfig, getInsights,
 } = require("../controllers/googleAdsConfigController");
 
 // Count existing Google Ads configs for the caller's company.
@@ -15,6 +15,7 @@ const countCompanyGoogleConfigs = async (req) => {
 };
 
 router.get("/",             protectAdmin, getConfigs);
+router.get("/insights",     protectAdmin, getInsights); // ← Google Ads performance report
 router.post(
   "/",
   protectAdmin,

@@ -54,4 +54,25 @@ const deleteConfig = async (req, res) => {
   }
 };
 
-module.exports = { getConfigs, createConfig, toggleConfig, deleteConfig };
+// GET /api/google-ads-config/insights?from=&to=&ai=
+// Google Ads performance report — built from CRM lead data (source "Google Ads")
+// grouped per campaign, joined with the manual cost field for cost-per-lead.
+const getInsights = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    if (!companyId) return res.status(400).json({ message: "Company not resolved" });
+
+    const { getGoogleAdsPerformanceReport } = require("../services/sourcePerformanceService");
+    const report = await getGoogleAdsPerformanceReport({
+      company: companyId,
+      from: req.query.from || null,
+      to:   req.query.to   || null,
+      withAI: req.query.ai !== "false",
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+module.exports = { getConfigs, createConfig, toggleConfig, deleteConfig, getInsights };

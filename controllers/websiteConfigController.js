@@ -56,4 +56,23 @@ const deleteConfig = async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
-module.exports = { getConfigs, createConfig, updateConfig, toggleConfig, deleteConfig };
+// GET /api/website-config/insights?from=&to=&ai=
+// Website performance report — built from CRM lead data (source "Website")
+// grouped per configured source. No ad spend, so this is lead/conversion analytics.
+const getInsights = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    if (!companyId) return res.status(400).json({ message: "Company not resolved" });
+
+    const { getWebsitePerformanceReport } = require("../services/sourcePerformanceService");
+    const report = await getWebsitePerformanceReport({
+      company: companyId,
+      from: req.query.from || null,
+      to:   req.query.to   || null,
+      withAI: req.query.ai !== "false",
+    });
+    res.json(report);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
+module.exports = { getConfigs, createConfig, updateConfig, toggleConfig, deleteConfig, getInsights };
