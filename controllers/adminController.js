@@ -1001,7 +1001,7 @@ const getClockInLocation = async (req, res) => {
       enabled:   company.clockInLocationEnabled || false,
       latitude:  company.clockInLatitude  || null,
       longitude: company.clockInLongitude || null,
-      radius:    company.clockInRadiusMeters || 100,
+      radius:    100, // office geofence radius is fixed at 100m
     });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
@@ -1014,7 +1014,7 @@ const saveClockInLocation = async (req, res) => {
     if (enabled   !== undefined) update.clockInLocationEnabled = Boolean(enabled);
     if (latitude  != null)       update.clockInLatitude        = Number(latitude);
     if (longitude != null)       update.clockInLongitude       = Number(longitude);
-    if (radius    != null)       update.clockInRadiusMeters    = Math.max(50, Number(radius));
+    update.clockInRadiusMeters = 100; // office geofence radius is fixed at 100m
     await Company.findByIdAndUpdate(companyId, { $set: update });
     res.json({ message: 'Clock-in location settings saved.' });
   } catch (err) { res.status(500).json({ message: err.message }); }

@@ -162,7 +162,7 @@ const clockIn = async (req, res) => {
         // isn't rejected over and over ("too far"/many attempts). A precise fix
         // (small accuracy) adds little slack; a coarse one adds more, up to a
         // sensible cap so it can't be abused.
-        const radius    = company.clockInRadiusMeters || 100;
+        const radius    = 100; // office geofence radius is fixed at 100m
         const accSlack  = Math.min(Number(accuracy) || 0, 150); // cap tolerance at 150m
         const allowed   = radius + accSlack;
 
@@ -932,7 +932,7 @@ const getGeofenceConfig = async (req, res) => {
       enabled:         !!(company?.clockInLocationEnabled && company?.clockInLatitude && company?.clockInLongitude),
       latitude:        company?.clockInLatitude ?? null,
       longitude:       company?.clockInLongitude ?? null,
-      radiusMeters:    company?.clockInRadiusMeters || 100,
+      radiusMeters:    100, // office geofence radius is fixed at 100m
       intervalMinutes: company?.meetingLocationIntervalMinutes || 15,
     });
   } catch (err) {
