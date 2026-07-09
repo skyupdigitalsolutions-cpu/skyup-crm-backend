@@ -13,7 +13,7 @@ const getConfigs = async (req, res) => {
 // POST — create new config
 const createConfig = async (req, res) => {
   try {
-    const { campaignName, googleKey, campaignId, formId, defaultStatus, defaultRemark, cost, impressions, clicks } = req.body;
+    const { campaignName, googleKey, campaignId, formId, defaultStatus, defaultRemark, cost, impressions, clicks, avgDealValue } = req.body;
     const config = await GoogleAdsConfig.create({
       campaignName,
       googleKey,
@@ -21,9 +21,10 @@ const createConfig = async (req, res) => {
       formId:        formId        || "",
       defaultStatus: defaultStatus || "New",
       defaultRemark: defaultRemark || "Lead from Google Ads",
-      cost:          Number(cost)        || 0,
-      impressions:   Number(impressions) || 0,
-      clicks:        Number(clicks)      || 0,
+      cost:          Number(cost)         || 0,
+      impressions:   Number(impressions)  || 0,
+      clicks:        Number(clicks)       || 0,
+      avgDealValue:  Number(avgDealValue) || 0,
       company:       req.admin.company,
     });
     res.status(201).json({ data: config });
@@ -37,7 +38,7 @@ const createConfig = async (req, res) => {
 const updateConfig = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    const { campaignName, campaignId, formId, defaultStatus, defaultRemark, googleKey, cost, impressions, clicks } = req.body;
+    const { campaignName, campaignId, formId, defaultStatus, defaultRemark, googleKey, cost, impressions, clicks, avgDealValue } = req.body;
 
     const update = {};
     if (campaignName  !== undefined) update.campaignName  = campaignName;
@@ -46,9 +47,10 @@ const updateConfig = async (req, res) => {
     if (defaultStatus !== undefined) update.defaultStatus = defaultStatus;
     if (defaultRemark !== undefined) update.defaultRemark = defaultRemark;
     if (googleKey)                   update.googleKey     = googleKey; // only rotate when provided
-    if (cost        !== undefined && cost        !== "") update.cost        = Number(cost)        || 0;
-    if (impressions !== undefined && impressions !== "") update.impressions = Number(impressions) || 0;
-    if (clicks      !== undefined && clicks      !== "") update.clicks      = Number(clicks)      || 0;
+    if (cost         !== undefined && cost         !== "") update.cost         = Number(cost)         || 0;
+    if (impressions  !== undefined && impressions  !== "") update.impressions  = Number(impressions)  || 0;
+    if (clicks       !== undefined && clicks       !== "") update.clicks       = Number(clicks)       || 0;
+    if (avgDealValue !== undefined && avgDealValue !== "") update.avgDealValue = Number(avgDealValue) || 0;
 
     const config = await GoogleAdsConfig.findOneAndUpdate(
       { _id: req.params.id, company: companyId },
@@ -108,4 +110,28 @@ const getInsights = async (req, res) => {
   }
 };
 
-module.exports = { getConfigs, createConfig, updateConfig, toggleConfig, deleteConfig, getInsights };
+// GET /api/google-ads-config/dashboard?from=&to=&campaign=&salesperson=&status=&ai=
+// Full business-performance dashboard (KPIs, campaigns, funnel, CRM sales,
+// sales team, AI) built from CRM lead data + manually-entered ad metrics.
+const getDashboard = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    if (!companyId) return res.status(400).json({ message: "Company not resolved" });
+
+    const { getGoogleAdsDashboard } = require("../services/googleAdsDashboardService");
+    const report = await getGoogleAdsDashboard({
+      company:     companyId,
+      from:        req.query.from        || null,
+      to:          req.query.to          || null,
+      campaign:    req.query.campaign    || null,
+      salesperson: req.query.salesperson || null,
+      status:      req.query.status      || null,
+      withAI:      req.query.ai === "true",
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+module.exports = { getConfigs, createConfig, updateConfig, toggleConfig, deleteConfig, getInsights, getDashboard };

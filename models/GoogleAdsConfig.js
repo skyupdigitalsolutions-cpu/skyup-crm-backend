@@ -25,6 +25,11 @@ const googleAdsConfigSchema = new mongoose.Schema(
     impressions: { type: Number, default: 0 },
     clicks:      { type: Number, default: 0 },
 
+    // Average revenue per won customer for this campaign. Revenue is derived as
+    // (customers won) × avgDealValue — the CRM has no per-lead deal value, so
+    // this per-campaign average is how ROAS / ROI / CPA / revenue are computed.
+    avgDealValue: { type: Number, default: 0 },
+
     company: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Company",
