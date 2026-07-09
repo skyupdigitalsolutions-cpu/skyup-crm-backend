@@ -2,6 +2,7 @@ const Attendance    = require("../models/Attendance");
 const User          = require("../models/Users");
 const Company       = require("../models/Company");
 const LiveLocation   = require("../models/LiveLocation");
+const ClockLocationLog = require("../models/ClockLocationLog");
 
 // ── Socket helper — emits attendance:updated to the user's private room ───────
 // The room name is `att:<userId>`. Both web and mobile join this room on mount.
@@ -15,6 +16,61 @@ function emitAttendanceUpdate(req, record) {
   } catch (e) {
     // Never let a socket error crash the HTTP response
     console.error("[socket] emitAttendanceUpdate error:", e.message);
+  }
+}
+
+// ── Permanently record a clock-in/out location (append-only, never deleted) ──
+// Writes to ClockLocationLog so the location survives even if the daily
+// Attendance record is later edited or deleted. Fire-and-forget: a logging
+// failure must never block the clock-in/out itself.
+async function logClockLocation({ record, type, latitude, longitude, accuracy, address }) {
+  try {
+    if (latitude == null || longitude == null) return;
+    await ClockLocationLog.create({
+      user:      record.user,
+      company:   record.company,
+      type,                                // 'clock_in' | 'clock_out'
+      date:      record.date,
+      latitude:  Number(latitude),
+      longitude: Number(longitude),
+      accuracy:  accuracy != null ? Number(accuracy) : null,
+      address:   address || null,
+    });
+  } catch (e) {
+    console.error("[attendance] logClockLocation error:", e.message);
+  }
+}
+
+// ── Push clock-in / clock-out location to admins + super admins ──────────────
+// Both admins and super admins in a company join the `company_admin:<company>`
+// room, so a single emit reaches everyone who should see it. Fired on clock-in
+// and clock-out with the employee's captured GPS coordinates. The coordinates
+// are also persisted on the Attendance record (clockIn*/clockOut*), so admins
+// can see them later in the attendance report as well as live here.
+async function emitClockLocationToAdmins(req, { record, type, latitude, longitude, accuracy }) {
+  try {
+    if (latitude == null || longitude == null) return; // nothing to send
+    const io = req.app.get("io") || global._io;
+    if (!io) return;
+
+    let name = req.user?.name;
+    if (!name) {
+      const u = await User.findById(record.user).select("name").lean();
+      name = u?.name || "Employee";
+    }
+
+    io.to(`company_admin:${String(record.company)}`).emit("attendance_location", {
+      userId:    String(record.user),
+      name,
+      type,                                   // 'clock_in' | 'clock_out'
+      latitude:  Number(latitude),
+      longitude: Number(longitude),
+      accuracy:  accuracy != null ? Number(accuracy) : null,
+      date:      record.date,
+      at:        new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error("[socket] emitClockLocationToAdmins error:", e.message);
   }
 }
 
@@ -262,6 +318,21 @@ const clockIn = async (req, res) => {
     }
 
     emitAttendanceUpdate(req, record);
+    emitClockLocationToAdmins(req, {
+      record,
+      type: "clock_in",
+      latitude:  record.clockInLatitude,
+      longitude: record.clockInLongitude,
+      accuracy:  req.body?.accuracy,
+    });
+    logClockLocation({
+      record,
+      type: "clock_in",
+      latitude:  record.clockInLatitude,
+      longitude: record.clockInLongitude,
+      accuracy:  req.body?.accuracy,
+      address:   req.body?.address,
+    });
     res.status(200).json(record);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
@@ -289,9 +360,32 @@ const clockOut = async (req, res) => {
     const elapsed             = Math.round((record.logoutTime - record.loginTime) / 60000);
     record.totalWorkMinutes   = Math.max(0, elapsed - record.totalBreakMinutes);
     record.activeBreakIndex   = null;
+
+    // Capture clock-out GPS (sent by the app), so it's saved and pushed to admins.
+    const { latitude, longitude, accuracy } = req.body || {};
+    if (latitude != null && longitude != null) {
+      record.clockOutLatitude  = Number(latitude);
+      record.clockOutLongitude = Number(longitude);
+    }
+
     await record.save();
 
     emitAttendanceUpdate(req, record);
+    emitClockLocationToAdmins(req, {
+      record,
+      type: "clock_out",
+      latitude:  record.clockOutLatitude,
+      longitude: record.clockOutLongitude,
+      accuracy,
+    });
+    logClockLocation({
+      record,
+      type: "clock_out",
+      latitude:  record.clockOutLatitude,
+      longitude: record.clockOutLongitude,
+      accuracy,
+      address:   req.body?.address,
+    });
     res.status(200).json(record);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
@@ -973,6 +1067,55 @@ const saveMeetingTrackingConfig = async (req, res) => {
   }
 };
 
+// ── ADMIN: permanent clock-in/out location history ───────────────────────────
+// GET /attendance/location-history?userId=&from=&to=&type=&page=&limit=
+// Reads the append-only ClockLocationLog (never expires), scoped like the
+// attendance report: super_admin sees all users; a regular admin sees only the
+// users they created.
+const getClockLocationHistory = async (req, res) => {
+  try {
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const { userId, from, to, type, page = 1, limit = 100 } = req.query;
+
+    const query = { company: companyId };
+    if (from || to) {
+      query.date = {};
+      if (from) query.date.$gte = from;
+      if (to)   query.date.$lte = to;
+    }
+    if (type === "clock_in" || type === "clock_out") query.type = type;
+
+    // Scope non-super-admins to their own users.
+    if (req.admin.role !== "super_admin") {
+      const scoped = await User.find({ company: companyId, createdBy: req.admin._id }).select("_id").lean();
+      const allowed = scoped.map((u) => String(u._id));
+      if (userId) {
+        if (!allowed.includes(String(userId))) return res.json({ records: [], total: 0, page: 1, pages: 1 });
+        query.user = userId;
+      } else {
+        query.user = { $in: scoped.map((u) => u._id) };
+      }
+    } else if (userId) {
+      query.user = userId;
+    }
+
+    const lim = Math.min(Number(limit) || 100, 500);
+    const [records, total] = await Promise.all([
+      ClockLocationLog.find(query)
+        .populate("user", "name email")
+        .sort({ capturedAt: -1 })
+        .skip((Number(page) - 1) * lim)
+        .limit(lim)
+        .lean(),
+      ClockLocationLog.countDocuments(query),
+    ]);
+
+    res.json({ records, total, page: Number(page), pages: Math.ceil(total / lim) || 1 });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   clockIn, clockOut, startBreak, endBreak, pingActivity, getMyToday,
   saveIdealTime,
@@ -987,4 +1130,5 @@ module.exports = {
   getMeetingTrackingConfig,
   getGeofenceConfig,
   saveMeetingTrackingConfig,
+  getClockLocationHistory,
 };

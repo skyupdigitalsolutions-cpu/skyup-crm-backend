@@ -53,6 +53,10 @@ const attendanceSchema = new mongoose.Schema({
   clockInLatitude:  { type: Number, default: null },
   clockInLongitude: { type: Number, default: null },
 
+  // ── Clock-out location (captured from device GPS at clock-out) ────────────
+  clockOutLatitude:  { type: Number, default: null },
+  clockOutLongitude: { type: Number, default: null },
+
   // True when today's clock-in used a granted remote/meeting permission (i.e. a
   // field / off-site session). Persisted per-day because the one-time
   // clientMeetingPermission on the User is consumed at clock-in; locationPing
