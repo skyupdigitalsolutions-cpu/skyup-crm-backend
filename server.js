@@ -7,6 +7,19 @@
 // All existing code is UNCHANGED except the static path fix.
 // ENV: staticAllowedOrigins now loaded from ALLOWED_ORIGINS env variable
 
+// ── Silence ONLY Mongoose's deprecated `new`-option warning ──────────────────
+// We intentionally still pass { new: true } to findOneAndUpdate in ~60 places
+// (it works fine in Mongoose 7). This warning is harmless log noise and is
+// tagged as a MONGOOSE-type warning (not a DeprecationWarning), so
+// process.noDeprecation won't catch it. We surgically drop just this one
+// message and leave every other warning fully intact.
+const _emitWarning = process.emitWarning.bind(process);
+process.emitWarning = (warning, ...args) => {
+  const msg = typeof warning === 'string' ? warning : (warning && warning.message) || '';
+  if (msg.includes('`new` option for')) return; // only this Mongoose message
+  return _emitWarning(warning, ...args);
+};
+
 require('dotenv').config();
 const express      = require('express');
 const http         = require('http');
