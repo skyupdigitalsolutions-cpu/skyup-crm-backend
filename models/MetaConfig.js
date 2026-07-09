@@ -75,6 +75,7 @@ const metaConfigSchema = new mongoose.Schema(
     //   metaStatusSyncedAt  last time the status was read from Meta
     metaFormStatus:     { type: String, default: "" },
     metaAdsetStatus:    { type: String, default: "" },
+    metaCampaignStatus: { type: String, default: "" },
     metaActive:         { type: Boolean, default: true },
     pausedByMeta:       { type: Boolean, default: false },
     metaStatusSyncedAt: { type: Date, default: null },

@@ -146,6 +146,7 @@ function scoreQualification(fieldData, qualDoc) {
 
     totalScore += earned;
     breakdown.push({
+      questionKey: rule.questionKey || "",
       question:    rule.questionLabel || rule.questionKey,
       answer:      matchedAnswer ?? (submitted ? submitted.join(", ") : "(not answered)"),
       score:       earned,

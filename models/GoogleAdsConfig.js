@@ -17,6 +17,14 @@ const googleAdsConfigSchema = new mongoose.Schema(
     sent:     { type: Number, default: 0 },
     cost:     { type: Number, default: 0 },
 
+    // ── Ad performance metrics (manually entered) ─────────────────────────────
+    // Google Ads has no lead-webhook-accessible metrics API here, so spend /
+    // impressions / clicks are entered per campaign (copy them from the Google
+    // Ads dashboard). CPC, CTR and CPM are DERIVED from these in the Google Ads
+    // Performance report — do not store the derived values.
+    impressions: { type: Number, default: 0 },
+    clicks:      { type: Number, default: 0 },
+
     company: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Company",

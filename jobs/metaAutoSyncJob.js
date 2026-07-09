@@ -20,7 +20,7 @@
 
 const cron        = require("node-cron");
 const MetaConfig  = require("../models/MetaConfig");
-const { syncPageForms } = require("../services/metaSyncService");
+const { syncPageForms, reconcileMetaStatusesForCompany } = require("../services/metaSyncService");
 
 let isRunning = false; // guard against overlapping sweeps
 
@@ -74,7 +74,27 @@ const runMetaAutoSync = async () => {
   if (totalCreated > 0) {
     console.log(`[MetaAutoSyncJob] ✅ Synced ${pagesSynced} page(s), created ${totalCreated} new config(s).`);
   }
-  return { pages: pagesSynced, created: totalCreated };
+
+  // ── Status reconcile: mirror Meta's paused/archived ad sets & campaigns ─────
+  // Runs once per distinct company (status lookup is per ad account, not per page).
+  const companyIds = [...new Set([...pages.values()].map((p) => String(p.companyId)))];
+  let totalPaused = 0, totalReactivated = 0;
+  for (const companyId of companyIds) {
+    try {
+      const r = await reconcileMetaStatusesForCompany(companyId);
+      totalPaused += r.paused || 0;
+      totalReactivated += r.reactivated || 0;
+      if (!r.credentialed) {
+        console.log(`[MetaAutoSyncJob] ℹ️  company ${companyId}: status not synced — ${r.reason}`);
+      } else if ((r.paused || 0) + (r.reactivated || 0) > 0) {
+        console.log(`[MetaAutoSyncJob] 🔁 company ${companyId}: paused ${r.paused}, reactivated ${r.reactivated} (checked ${r.checked})`);
+      }
+    } catch (err) {
+      console.warn(`[MetaAutoSyncJob] ⚠️  status reconcile failed for company ${companyId}: ${err.message}`);
+    }
+  }
+
+  return { pages: pagesSynced, created: totalCreated, paused: totalPaused, reactivated: totalReactivated };
 };
 
 // ── Register cron — every 30 minutes ──────────────────────────────────────────

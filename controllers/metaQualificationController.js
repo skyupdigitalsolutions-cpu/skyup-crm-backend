@@ -128,11 +128,26 @@ async function rescoreLeadsForAdSet(qualDoc, adSetName, companyId) {
 
   let updated = 0;
   for (const lead of leads) {
-    // Reconstruct field_data from the stored breakdown
-    const fieldData = (lead.qualificationBreakdown || []).map((b) => ({
-      name:   b.question,     // scorer normalises the key anyway
-      values: [b.answer],
-    }));
+    // Reconstruct field_data from the stored breakdown. CRITICAL: the scorer
+    // matches rules by questionKey, so the reconstructed `name` MUST be the
+    // question KEY — not the human label. Older breakdowns saved before this fix
+    // only stored the label, so fall back to mapping the label back to a rule's
+    // questionKey via the qualification doc. (Using the label as `name` was the
+    // bug that silently re-scored every existing lead to 0% / Cold.)
+    const ruleByLabel = new Map(
+      (qualDoc.rules || []).map((r) => [
+        String(r.questionLabel || r.questionKey || "").trim().toLowerCase(),
+        r.questionKey,
+      ])
+    );
+
+    const fieldData = (lead.qualificationBreakdown || []).map((b) => {
+      const key =
+        b.questionKey ||
+        ruleByLabel.get(String(b.question || "").trim().toLowerCase()) ||
+        b.question; // last-resort fallback
+      return { name: key, values: [b.answer] };
+    });
 
     const {
       leadScore,

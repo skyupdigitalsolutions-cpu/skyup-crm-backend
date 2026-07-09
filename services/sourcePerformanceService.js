@@ -179,7 +179,7 @@ async function getSourcePerformanceReport({
   }
 
   // 4. Build per-campaign cards + totals.
-  const totals = { leads: 0, converted: 0, cost: 0, campaigns: 0 };
+  const totals = { leads: 0, converted: 0, cost: 0, impressions: 0, clicks: 0, campaigns: 0 };
   const campaigns = [];
 
   for (const [label, agg] of byCampaign.entries()) {
@@ -187,6 +187,13 @@ async function getSourcePerformanceReport({
     const active  = cfg ? cfg.isActive !== false : true;
     const hasCost = withCost && cfg && num(cfg.cost) > 0;
     const cost    = hasCost ? num(cfg.cost) : 0;
+
+    // Ad metrics (manually entered on the config) — Google Ads only.
+    const impressions = withCost && cfg ? num(cfg.impressions) : 0;
+    const clicks      = withCost && cfg ? num(cfg.clicks)      : 0;
+    const cpc = withCost && clicks > 0 && cost > 0        ? round2(cost / clicks)                : null; // ₹ per click
+    const ctr = withCost && impressions > 0 && clicks > 0 ? round2((clicks / impressions) * 100) : null; // %
+    const cpm = withCost && impressions > 0 && cost > 0   ? round2((cost / impressions) * 1000)  : null; // ₹ per 1000 impressions
 
     const convRate          = agg.leads > 0 ? round2((agg.converted / agg.leads) * 100) : null;
     const costPerLead       = hasCost && agg.leads > 0     ? round2(cost / agg.leads)     : null;
@@ -201,10 +208,12 @@ async function getSourcePerformanceReport({
       isWebsite: !withCost,
     });
 
-    totals.leads     += agg.leads;
-    totals.converted += agg.converted;
-    totals.cost      += cost;
-    totals.campaigns += 1;
+    totals.leads       += agg.leads;
+    totals.converted   += agg.converted;
+    totals.cost        += cost;
+    totals.impressions += impressions;
+    totals.clicks      += clicks;
+    totals.campaigns   += 1;
 
     campaigns.push({
       configId:          cfg ? String(cfg._id) : label,
@@ -213,6 +222,11 @@ async function getSourcePerformanceReport({
       active,
       cost:              withCost ? cost : null,
       hasCost,
+      impressions:       withCost ? impressions : null,
+      clicks:            withCost ? clicks : null,
+      cpc,
+      ctr,
+      cpm,
       leads:             agg.leads,
       converted:         agg.converted,
       conversionRatePct: convRate,
@@ -229,6 +243,9 @@ async function getSourcePerformanceReport({
   const overallConvRate = totals.leads > 0 ? round2((totals.converted / totals.leads) * 100) : null;
   const overallCPL      = withCost && totals.cost > 0 && totals.leads > 0     ? round2(totals.cost / totals.leads)     : null;
   const overallCPConv   = withCost && totals.cost > 0 && totals.converted > 0 ? round2(totals.cost / totals.converted) : null;
+  const overallCPC      = withCost && totals.clicks > 0 && totals.cost > 0        ? round2(totals.cost / totals.clicks)                 : null;
+  const overallCTR      = withCost && totals.impressions > 0 && totals.clicks > 0 ? round2((totals.clicks / totals.impressions) * 100)  : null;
+  const overallCPM      = withCost && totals.impressions > 0 && totals.cost > 0   ? round2((totals.cost / totals.impressions) * 1000)   : null;
 
   const result = {
     range: { from: fromD, to: toD },
@@ -240,6 +257,11 @@ async function getSourcePerformanceReport({
       conversionRatePct: overallConvRate,
       campaigns:         totals.campaigns,
       cost:              withCost ? round2(totals.cost) : null,
+      impressions:       withCost ? totals.impressions : null,
+      clicks:            withCost ? totals.clicks : null,
+      cpc:               overallCPC,
+      ctr:               overallCTR,
+      cpm:               overallCPM,
       costPerLead:       overallCPL,
       costPerConversion: overallCPConv,
     },
@@ -290,7 +312,7 @@ async function getSourcePerformanceReport({
 // ── AI review builder ─────────────────────────────────────────────────────────
 async function runSourceAIAnalysis({ source, withCost, campaigns, totals }) {
   const costLine = withCost
-    ? "You are also given the ad spend (cost) and the cost per lead / cost per conversion where a spend was entered. Some campaigns may have no spend entered — do not invent cost figures for those."
+    ? "You are also given, where entered, the ad spend (cost), impressions, clicks, CPC, CTR and the cost per lead / cost per conversion. Use CPC/CTR to judge ad efficiency (high CPC or low CTR = the ad creative/targeting needs work) and cost-per-lead to judge value. Some campaigns may have no spend/metrics entered — do not invent figures for those."
     : "This is a WEBSITE / organic contact-form source, so there is NO ad spend — judge purely on lead volume and conversion quality, and never mention cost or budget.";
 
   const systemPrompt =
@@ -312,7 +334,7 @@ async function runSourceAIAnalysis({ source, withCost, campaigns, totals }) {
 
   const lines = [];
   if (withCost) {
-    lines.push(`Overall: leads ${totals.leads}, converted ${totals.converted}, conv rate ${totals.conversionRatePct ?? "n/a"}%, spend ₹${totals.cost ?? 0}, cost/lead ${totals.costPerLead ?? "n/a"}`);
+    lines.push(`Overall: leads ${totals.leads}, converted ${totals.converted}, conv rate ${totals.conversionRatePct ?? "n/a"}%, spend ₹${totals.cost ?? 0}, impressions ${totals.impressions ?? 0}, clicks ${totals.clicks ?? 0}, CPC ${totals.cpc ?? "n/a"}, CTR ${totals.ctr ?? "n/a"}%, cost/lead ${totals.costPerLead ?? "n/a"}`);
   } else {
     lines.push(`Overall: leads ${totals.leads}, converted ${totals.converted}, conv rate ${totals.conversionRatePct ?? "n/a"}%`);
   }
@@ -320,7 +342,7 @@ async function runSourceAIAnalysis({ source, withCost, campaigns, totals }) {
   campaigns.forEach((c, i) => {
     const base = `[${i}] "${c.campaignName}"${c.active ? "" : " (paused)"}: leads ${c.leads}, converted ${c.converted}, conv rate ${c.conversionRatePct ?? "n/a"}%`;
     lines.push(withCost
-      ? `${base}, spend ${c.hasCost ? "₹" + c.cost : "not set"}, cost/lead ${c.costPerLead ?? "n/a"}`
+      ? `${base}, spend ${c.hasCost ? "₹" + c.cost : "not set"}, impressions ${c.impressions ?? 0}, clicks ${c.clicks ?? 0}, CPC ${c.cpc ?? "n/a"}, CTR ${c.ctr ?? "n/a"}%, cost/lead ${c.costPerLead ?? "n/a"}`
       : base);
   });
 
