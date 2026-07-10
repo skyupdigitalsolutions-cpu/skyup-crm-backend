@@ -157,7 +157,13 @@ async function reconcileMetaStatusesForCompany(companyId) {
 
     const adsetPaused    = adsetRec    ? isPausedStatus(adsetRec.status)    : false;
     const campaignPaused = campaignRec ? isPausedStatus(campaignRec.status) : false;
-    const metaActive = !(adsetPaused || campaignPaused);
+    // Also honour the FORM status captured by syncPageForms (page token can read
+    // it; this reconcile can't). Any non-blank, non-ACTIVE form status = off.
+    // Without this, an active ad set would wrongly REACTIVATE a config whose
+    // lead form is archived/paused/draft.
+    const formStr    = String(cfg.metaFormStatus || "").trim().toUpperCase();
+    const formPaused = formStr !== "" && formStr !== "ACTIVE";
+    const metaActive = !(adsetPaused || campaignPaused || formPaused);
 
     const update = {
       metaAdsetStatus:    adsetRec ? adsetRec.status : cfg.metaAdsetStatus || "",
@@ -173,7 +179,7 @@ async function reconcileMetaStatusesForCompany(companyId) {
       update.isActive = false;
       update.pausedByMeta = true;
       paused++;
-      console.log(`[MetaStatusSync] ⏸  Auto-paused "${cfg.campaignName}" — adset=${adsetRec?.status || "n/a"} campaign=${campaignRec?.status || "n/a"}`);
+      console.log(`[MetaStatusSync] ⏸  Auto-paused "${cfg.campaignName}" — form=${cfg.metaFormStatus || "n/a"} adset=${adsetRec?.status || "n/a"} campaign=${campaignRec?.status || "n/a"}`);
     } else if (metaActive && cfg.pausedByMeta && !cfg.isActive) {
       update.isActive = true;
       update.pausedByMeta = false;
