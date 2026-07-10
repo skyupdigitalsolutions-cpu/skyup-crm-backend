@@ -61,6 +61,7 @@ const trialRoute = require('./routes/trialRoute');
 
 // ── Google Ads Routes ─────────────────────────────────────────────────────────
 const googleAdsConfigRoute = require('./routes/googleAdsConfig');
+const googleAnalyticsRoute = require('./routes/googleAnalytics');
 const googleWebhookRoute   = require('./routes/googleWebhook');
 
 // ── Website Contact Form Routes ───────────────────────────────────────────────
@@ -236,6 +237,7 @@ app.use('/api/attendance',          attendanceRoute);
 app.use('/api/razorpay',            razorpayRoute);
 app.use('/api/trial',               trialRoute);
 app.use('/api/google-ads-config',   googleAdsConfigRoute);
+app.use('/api/google-analytics',    googleAnalyticsRoute);
 app.use('/',                        googleWebhookRoute);
 app.use('/api/website-config',      websiteConfigRoute);
 app.use('/api/chat',                chatRoutes);
