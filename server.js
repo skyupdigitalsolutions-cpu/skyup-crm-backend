@@ -160,6 +160,30 @@ const io = new Server(server, {
   pingInterval: 25000,
 });
 
+// ── Public website-lead webhook — accepts leads from ANY landing-page origin ──
+// MUST be registered BEFORE the global allowlisted CORS below. Landing pages
+// live on arbitrary customer domains, so this endpoint sets permissive CORS
+// headers and answers its own preflight. If it were registered after the
+// global `app.options()` catch-all, that allowlist would reject the preflight
+// first (No 'Access-Control-Allow-Origin' header) and the lead POST would be
+// blocked by the browser. Body is parsed inline because the global JSON parser
+// is registered further down. Secret verification inside the controller is the
+// real security gate — CORS here is intentionally open.
+app.use(
+  '/website-webhook',
+  (req, res, next) => {
+    const origin = req.headers.origin || '';
+    res.header('Access-Control-Allow-Origin',  origin || '*');
+    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    res.header('Vary', 'Origin');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    next();
+  },
+  express.json(),
+  websiteWebhookRoute
+);
+
 // ── CORS must be first ────────────────────────────────────────────────────────
 app.use(cors(corsOptions));
 app.options(/(.*)/, cors(corsOptions));
@@ -202,26 +226,9 @@ app.use('/meta',          metaWebhookRoute);
 app.use('/msg91-webhook', msg91WebhookRoute);
 app.use('/wa-webhook',    whatsappRoutes);
 
-app.use('/website-webhook', (req, res, next) => {
-  const origin = req.headers.origin || '';
-  res.header('Access-Control-Allow-Origin',  origin || '*');
-  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  res.header('Vary', 'Origin');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  if (origin) {
-    (async () => {
-      try {
-        const WebsiteConfig = require('./models/WebsiteConfig');
-        const hostname = origin.replace(/^https?:\/\//, '').replace(/\/$/, '');
-        const config = await WebsiteConfig.findOne({ pageUrl: { $regex: hostname, $options: 'i' }, isActive: true });
-        if (config) console.log(`🌐 Website webhook from registered site: "${config.sourceName}" (${origin})`);
-        else console.log(`⚠️  Website webhook from unregistered origin: ${origin} — secret will verify`);
-      } catch (e) { console.error('Website webhook DB log error:', e.message); }
-    })();
-  }
-  next();
-}, websiteWebhookRoute);
+// NOTE: /website-webhook is registered EARLIER (before the global CORS) so its
+// permissive cross-origin headers and preflight response are not overridden or
+// rejected by the origin allowlist. See the block above `app.use(cors(...))`.
 
 // ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/meta-config',         metaConfigRoute);
