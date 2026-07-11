@@ -665,6 +665,7 @@ const getMsg91Config = async (req, res) => {
       connected:        hasAuthKey && hasWaNumber,
       integratedNumber: waConfig?.msg91IntegratedNumber || "",
       namespace:        waConfig?.msg91Namespace        || "",
+      brochureUrl:      waConfig?.msg91BrochureUrl      || "",
       authKeySet:       hasAuthKey,
     });
   } catch (err) {
@@ -675,7 +676,7 @@ const getMsg91Config = async (req, res) => {
 const saveMsg91Config = async (req, res) => {
   try {
     const companyId      = req.admin?.company?._id || req.admin?.company;
-    const { authKey, integratedNumber, namespace } = req.body;
+    const { authKey, integratedNumber, namespace, brochureUrl } = req.body;
     if (!authKey || !authKey.trim()) return res.status(400).json({ message: "MSG91 Auth Key is required" });
     if (!integratedNumber || !integratedNumber.trim()) return res.status(400).json({ message: "Integrated WhatsApp number is required" });
     const WhatsAppConfig = require("../models/WhatsAppConfig");
@@ -683,7 +684,8 @@ const saveMsg91Config = async (req, res) => {
     await WhatsAppConfig.findOneAndUpdate(
       { company: companyId },
       { company: companyId, provider: "msg91", msg91AuthKey: authKey.trim(),
-        msg91IntegratedNumber: integratedNumber.trim(), msg91Namespace: (namespace || "").trim(), isActive: true },
+        msg91IntegratedNumber: integratedNumber.trim(), msg91Namespace: (namespace || "").trim(),
+        msg91BrochureUrl: (brochureUrl || "").trim(), isActive: true },
       { upsert: true, new: true }
     );
     await SmsConfig.findOneAndUpdate(
@@ -691,7 +693,7 @@ const saveMsg91Config = async (req, res) => {
       { company: companyId, msg91AuthKey: authKey.trim(), isActive: true },
       { upsert: true, new: true }
     );
-    res.json({ success: true, connected: true, integratedNumber: integratedNumber.trim(), authKeySet: true });
+    res.json({ success: true, connected: true, integratedNumber: integratedNumber.trim(), brochureUrl: (brochureUrl || "").trim(), authKeySet: true });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

@@ -405,6 +405,18 @@ const sendTemplate = async (req, res) => {
         const resolvedLangCode = languageCode || "en";
         const namespace = config.msg91Namespace || "";
         const brochureUrl = config.msg91BrochureUrl || "";
+
+        const needsDocHdr = TEMPLATES_WITH_DOC_HEADER.has((templateName || "").trim());
+        if (needsDocHdr && !brochureUrl) {
+          return res.status(400).json({
+            error:
+              `Template "${templateName}" requires a document header, but no Brochure URL is configured ` +
+              `for this company. Go to Communications → Integrations → WhatsApp and set the Brochure URL ` +
+              `(a public PDF link), or remove "${templateName}" from TEMPLATES_WITH_DOC_HEADER if the ` +
+              `approved template doesn't actually have a document header.`,
+          });
+        }
+
         let msg91Components = buildMsg91Components({
           templateName,
           brochureUrl,
@@ -709,6 +721,18 @@ const startConversation = async (req, res) => {
         const resolvedLangCode = languageCode || "en";
         const namespace = config.msg91Namespace || "";
         const brochureUrl = config.msg91BrochureUrl || "";
+
+        const needsDocHdr = TEMPLATES_WITH_DOC_HEADER.has((templateName || "").trim());
+        if (needsDocHdr && !brochureUrl) {
+          return res.status(400).json({
+            error:
+              `Template "${templateName}" requires a document header, but no Brochure URL is configured ` +
+              `for this company. Go to Communications → Integrations → WhatsApp and set the Brochure URL ` +
+              `(a public PDF link), or remove "${templateName}" from TEMPLATES_WITH_DOC_HEADER if the ` +
+              `approved template doesn't actually have a document header.`,
+          });
+        }
+
         let msg91Components = buildMsg91Components({
           templateName,
           brochureUrl,
