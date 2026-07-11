@@ -462,6 +462,92 @@ const companySchema = mongoose.Schema(
           },
         },
       },
+
+      // ── Web "Update Lead" panel outcomes ──────────────────────────────────
+      // Call Back / Not Reachable reuse the existing approved templates
+      // (crm_call_back_later / crm_call_missed) since the lead-facing message
+      // is identical. Meeting Scheduled / Demo Done / Converted use their own
+      // NEW templates that must be created + approved in MSG91.
+      callBack: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_call_back_later" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "We'll call you back, {{name}}" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>As discussed, we'll call you back shortly. If your availability changes, just reply and let us know a better time.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
+      notReachable: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_call_missed" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "We tried reaching you, {{name}}" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>We tried reaching you over a call but couldn't connect. We'll try again soon — or feel free to reply with a convenient time to talk.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
+      meetingScheduled: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_meeting_scheduled" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "Your meeting is scheduled, {{name}}" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>Your meeting with our team has been scheduled. We're looking forward to speaking with you — we'll share the details shortly.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
+      demoDone: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_demo_done" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "Thanks for attending the demo, {{name}}" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>Thank you for taking the time to see our demo. If you have any questions, just reply here — we're happy to help you take the next step.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
+      converted: {
+        whatsapp: {
+          enabled:      { type: Boolean, default: true },
+          templateName: { type: String,  default: "crm_converted" },
+          languageCode: { type: String,  default: "en" },
+        },
+        email: {
+          enabled:      { type: Boolean, default: true },
+          subject:      { type: String,  default: "Welcome aboard, {{name}}!" },
+          fromName:     { type: String,  default: "" },
+          bodyTemplate: {
+            type:    String,
+            default: "<p>Hi {{name}},</p><p>Welcome aboard, and thank you for choosing us! Our team will be in touch with the next steps. We're excited to work with you.</p><p>Regards,<br/>The Team</p>",
+          },
+        },
+      },
     },
 
 

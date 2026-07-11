@@ -42,12 +42,26 @@ const IST_TIMEZONE = "Asia/Kolkata";
 // Only these outcomes are handled; every other outcome returns undefined and
 // is silently ignored (Interested / Client Meeting / Invalid / etc.).
 const OUTCOME_KEY = {
+  // ── Mobile app "Call Remark" modal outcomes ──────────────────────────────
   "answered":        "answered",
   "not answered":    "notAnswered",
   "busy":            "busy",
   "switch off":      "switchOff",
   "call back later": "callBackLater",
   "not interested":  "notInterested",
+  // ── Web "Update Lead" panel outcomes (UserDashboard / UserLeadsPage) ──────
+  // These come from a different dropdown than the mobile app, so they need
+  // their own entries. "Call Back" and "Not Reachable" reuse the existing
+  // crm_call_back_later / crm_call_missed templates (same lead-facing intent);
+  // the rest use their own templates (see Company.outcomeAutomation).
+  // NOTE: web "Interested" is handled by the existing Interested blast, and
+  // web "Not Interested" uses the separate /not-interested reassign flow —
+  // so neither is mapped here (avoids double-send).
+  "call back":         "callBack",
+  "not reachable":     "notReachable",
+  "meeting scheduled": "meetingScheduled",
+  "demo done":         "demoDone",
+  "converted":         "converted",
 };
 
 // ── IST calendar-day key, e.g. "2026-7-3" — for once-per-day dedupe ─────────
