@@ -113,7 +113,7 @@ async function _sendClientMeetingWhatsApp({ lead, companyId, meetingDate, meetin
     if (!config) config = await WhatsAppConfig.findOne({ company: companyId });
 
     const authKey      = config?.msg91AuthKey          || process.env.MSG91_AUTH_KEY;
-    const senderNumber = config?.msg91IntegratedNumber || process.env.MSG91_INTEGRATED_NUMBER;
+    const senderNumber = waPhone(config?.msg91IntegratedNumber || process.env.MSG91_INTEGRATED_NUMBER);
     if (!authKey || !senderNumber) {
       return { success: false, message: 'MSG91 WhatsApp credentials are not configured.' };
     }

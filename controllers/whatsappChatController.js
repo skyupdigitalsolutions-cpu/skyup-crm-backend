@@ -251,7 +251,7 @@ const sendMessage = async (req, res) => {
 
     const provider = config.provider || "msg91";
     const authKey = config.msg91AuthKey;
-    const senderNumber = config.msg91IntegratedNumber;
+    const senderNumber = normalizePhone(config.msg91IntegratedNumber);
 
     if (provider === "msg91" && (!authKey || !senderNumber)) {
       return res
@@ -392,7 +392,7 @@ const sendTemplate = async (req, res) => {
 
     const provider = config.provider || "msg91";
     const authKey = config.msg91AuthKey;
-    const senderNumber = config.msg91IntegratedNumber;
+    const senderNumber = normalizePhone(config.msg91IntegratedNumber);
     const recipientPhone = safeWaPhone(conversation.waPhone);
 
     let waMessageId;
@@ -707,7 +707,7 @@ const startConversation = async (req, res) => {
 
     const provider = config.provider || "msg91";
     const authKey = config.msg91AuthKey;
-    const senderNumber = config.msg91IntegratedNumber;
+    const senderNumber = normalizePhone(config.msg91IntegratedNumber);
     if (provider === "msg91" && (!authKey || !senderNumber)) {
       return res.status(500).json({ error: "MSG91 credentials missing" });
     }
@@ -1042,7 +1042,7 @@ const bulkSendToLeads = async (req, res) => {
         .json({ error: "WhatsApp is not configured for this company" });
 
     const authKey = config.msg91AuthKey;
-    const senderNumber = config.msg91IntegratedNumber;
+    const senderNumber = normalizePhone(config.msg91IntegratedNumber);
     if (!authKey || !senderNumber)
       return res.status(500).json({ error: "MSG91 credentials missing" });
 
@@ -1160,7 +1160,7 @@ const bulkSendCSV = async (req, res) => {
       return res.status(400).json({ error: "WhatsApp is not configured" });
 
     const authKey = config.msg91AuthKey;
-    const senderNumber = config.msg91IntegratedNumber;
+    const senderNumber = normalizePhone(config.msg91IntegratedNumber);
     if (!authKey || !senderNumber)
       return res.status(500).json({ error: "MSG91 credentials missing" });
 
@@ -1401,7 +1401,7 @@ const employeeBulkSend = async (req, res) => {
         });
 
     const authKey = config.msg91AuthKey;
-    const senderNumber = config.msg91IntegratedNumber;
+    const senderNumber = normalizePhone(config.msg91IntegratedNumber);
     if (!authKey || !senderNumber)
       return res
         .status(500)

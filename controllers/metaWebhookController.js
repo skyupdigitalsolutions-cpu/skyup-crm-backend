@@ -4,7 +4,7 @@ const MetaConfig         = require("../models/MetaConfig");
 const MetaQualification  = require("../models/MetaQualification");
 const Lead               = require("../models/Leads");
 const { normalizePhone } = require("../utils/normalizePhone");
-const { autoSendTemplates } = require("./leadController");
+const { autoSendTemplates } = require("../services/autoTemplateService");
 const { scoreQualification } = require("../utils/qualificationScorer");
 const {
   fetchLeadData,

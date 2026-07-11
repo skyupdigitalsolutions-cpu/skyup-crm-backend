@@ -14,23 +14,16 @@
 
 // ════════════════════════ EDIT ME ════════════════════════════════
 const CONFIG = {
-  provider: "msg91",                  // "msg91" or "meta"
-
-  // recipient + template (both providers)
-  to:           "91XXXXXXXXXX",       // <-- the number you tried to re-engage, digits only, with country code
-  templateName: "crm_followup_leads",
-  lang:         "en",                 // MUST match the approved template exactly (e.g. "en" vs "en_US")
-
-  // ── MSG91 fields (fill these if provider is "msg91") ──
-  msg91AuthKey:          "PASTE_YOUR_AUTH_KEY",
-  msg91IntegratedNumber: "919876543210",   // your WhatsApp sender number
-  msg91Namespace:        "",                // optional — leave blank if you don't have one
-
-  // ── Meta fields (fill these only if provider is "meta") ──
-  metaPhoneNumberId: "",
-  metaAccessToken:   "",
-  metaGraphVersion:  "v21.0",
-};
+     provider: "msg91",
+     to:           "919591327778",   // ← put a real WhatsApp number here, digits only, with 91 prefix
+     templateName: "crm_followup_leads",
+     lang:         "en",
+     msg91AuthKey:          "5O1070AFyaL52KmH6a01c263P1",  // ← your real key from the screenshot
+     msg91IntegratedNumber: "919591327778",                 // ← your integrated number, WITH 91 prefix
+     msg91Namespace:        "68bcef67_e185_4e55_94df_52c26cb0bc37",    // ← the value you got from MSG91 → Templates → Code JSON
+     brochureUrl: "https://res.cloudinary.com/dirndjtve/image/upload/v1783764394/Brochure_fde1vx.pdf",
+     bodyName:    "Test",
+   };
 // ══════════════════════════════════════════════════════════════════
 
 const provider = (CONFIG.provider || "msg91").toLowerCase();
@@ -89,7 +82,13 @@ async function runMsg91() {
   const namespace = CONFIG.msg91Namespace || "";
   if (!authKey || authKey.includes("PASTE") || !senderNumber) die("Fill CONFIG.msg91AuthKey and CONFIG.msg91IntegratedNumber.");
 
-  const url = "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/";
+  const brochureUrl = CONFIG.brochureUrl || "";
+  const components = {
+    ...(brochureUrl
+      ? { header_1: { type: "document", value: brochureUrl, filename: "Brochure.pdf" } }
+      : {}),
+    body_1: { type: "text", value: CONFIG.bodyName || "there" },
+  };
   const payload = {
     integrated_number: senderNumber,
     content_type: "template",
@@ -100,15 +99,26 @@ async function runMsg91() {
         name: templateName,
         language: { code: lang, policy: "deterministic" },
         ...(namespace ? { namespace } : {}),
-        to_and_components: [{ to: [to], components: {} }],
+        to_and_components: [{ to: [to], components }],
       },
     },
   };
-  console.log("Provider  : MSG91");
-  console.log("Endpoint  :", url);
   console.log("Namespace :", namespace || "(none)");
+  console.log("Header    :", brochureUrl ? brochureUrl : "(none sent)");
   console.log("Payload   :", JSON.stringify(payload, null, 2));
-  report(url, await post(url, { authkey: authKey, accept: "application/json" }, payload));
+
+  // Try BOTH known MSG91 hosts — the codebase uses control.msg91.com, but
+  // MSG91's current public docs show api.msg91.com for this exact route.
+  // Running both in one pass tells us definitively which one is correct
+  // for this account, instead of guessing.
+  const hosts = [
+    "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+    "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+  ];
+  for (const url of hosts) {
+    console.log(`\n=== Trying host: ${url} ===`);
+    report(url, await post(url, { authkey: authKey, accept: "application/json" }, payload));
+  }
 }
 
 async function runMeta() {

@@ -103,7 +103,12 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
 
   const provider     = config.provider || "msg91";
   const authKey      = config.msg91AuthKey      || "";
-  const senderNumber = config.msg91IntegratedNumber || "";
+  // integrated_number (the SENDER) must be the full international number that
+  // is registered on MSG91 (e.g. "919591327778"). If the saved config value is
+  // a bare 10-digit number, MSG91 rejects the send with 404 "WhatsApp not
+  // integrated: 9591327778". normalizePhone() prepends 91 for 10-digit input
+  // and is idempotent for already-prefixed numbers, so this is always correct.
+  const senderNumber = normalizePhone(config.msg91IntegratedNumber || "");
 
   // ── Phone number for WhatsApp delivery ──────────────────────────────────────
   // normalizePhone() (defined at top of this file) already returns the full
