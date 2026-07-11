@@ -36,6 +36,40 @@ function safeWaPhone(stored) {
 const DEFAULT_TEMPLATE_BODY_PARAM = "there";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TEMPLATES_WITH_DOC_HEADER — templates that carry a MEDIA (document) header.
+// Mirrors services/autoTemplateService.js. A document header must be attached
+// ONLY for templates that were actually APPROVED on MSG91/Meta with a document
+// header. Attaching one to a header-less template (or omitting it on a
+// template that requires one) makes the provider reject the send — this is
+// the root cause of the "404 — template/language combination not found"
+// error seen from the manual "Send Template & Start Chat" flow. Keep this
+// list in sync with services/autoTemplateService.js. Add a name here only if
+// that MSG91 template was created WITH a document header.
+const TEMPLATES_WITH_DOC_HEADER = new Set(["crm_followup_leads"]);
+
+// Build the msg91Components object for a template send, attaching the
+// document header ONLY when the template actually needs one.
+function buildMsg91Components({ templateName, brochureUrl, bodyParam }) {
+  const needsDocHdr = TEMPLATES_WITH_DOC_HEADER.has((templateName || "").trim());
+  return {
+    ...(needsDocHdr && brochureUrl
+      ? {
+          header_1: {
+            type: "document",
+            value: brochureUrl,
+            filename: "Brochure.pdf",
+          },
+        }
+      : {}),
+    // Always include the {{1}} body param — the template requires it.
+    body_1: {
+      type: "text",
+      value: bodyParam?.trim() || DEFAULT_TEMPLATE_BODY_PARAM,
+    },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // describeWaApiError — turn an axios error from the WA provider into a useful,
 // user-facing message AND log the full upstream context so 404s stop being a
 // mystery. The old code returned axios's generic "Request failed with status
@@ -73,7 +107,9 @@ function describeWaApiError(apiErr, context = "WA send") {
   if (status === 404 && !body?.message && !body?.error?.message) {
     hint =
       " (404 from provider — the endpoint or the template/language combination was not found. " +
-      "Verify the template name and that its approved language code matches exactly.)";
+      "Verify the template name, that its approved language code matches exactly, and that a " +
+      "document header is only attached for templates in TEMPLATES_WITH_DOC_HEADER at the top " +
+      "of this file — a mismatched header on a header-less template also causes this exact 404.)";
   }
 
   return {
@@ -369,22 +405,11 @@ const sendTemplate = async (req, res) => {
         const resolvedLangCode = languageCode || "en";
         const namespace = config.msg91Namespace || "";
         const brochureUrl = config.msg91BrochureUrl || "";
-        let msg91Components = {
-          ...(brochureUrl
-            ? {
-                header_1: {
-                  type: "document",
-                  value: brochureUrl,
-                  filename: "Brochure.pdf",
-                },
-              }
-            : {}),
-          // Always include the {{1}} body param — the template requires it.
-          body_1: {
-            type: "text",
-            value: conversation.contactName?.trim() || DEFAULT_TEMPLATE_BODY_PARAM,
-          },
-        };
+        let msg91Components = buildMsg91Components({
+          templateName,
+          brochureUrl,
+          bodyParam: conversation.contactName,
+        });
         if (
           reqComponents &&
           Array.isArray(reqComponents) &&
@@ -684,22 +709,11 @@ const startConversation = async (req, res) => {
         const resolvedLangCode = languageCode || "en";
         const namespace = config.msg91Namespace || "";
         const brochureUrl = config.msg91BrochureUrl || "";
-        let msg91Components = {
-          ...(brochureUrl
-            ? {
-                header_1: {
-                  type: "document",
-                  value: brochureUrl,
-                  filename: "Brochure.pdf",
-                },
-              }
-            : {}),
-          // Always include the {{1}} body param — the template requires it.
-          body_1: {
-            type: "text",
-            value: contactName?.trim() || lead?.name?.trim() || DEFAULT_TEMPLATE_BODY_PARAM,
-          },
-        };
+        let msg91Components = buildMsg91Components({
+          templateName,
+          brochureUrl,
+          bodyParam: contactName?.trim() ? contactName : lead?.name,
+        });
         if (components && Array.isArray(components) && components.length > 0)
           msg91Components = components;
 
@@ -875,22 +889,11 @@ const _sendTemplateToPhone = async ({
   if (provider === "msg91") {
     const namespace = config.msg91Namespace || "";
     const brochureUrl = config.msg91BrochureUrl || "";
-    const msg91Components = {
-      ...(brochureUrl
-        ? {
-            header_1: {
-              type: "document",
-              value: brochureUrl,
-              filename: "Brochure.pdf",
-            },
-          }
-        : {}),
-      // Always include the {{1}} body param — the template requires it.
-      body_1: {
-        type: "text",
-        value: contactName?.trim() || DEFAULT_TEMPLATE_BODY_PARAM,
-      },
-    };
+    const msg91Components = buildMsg91Components({
+      templateName,
+      brochureUrl,
+      bodyParam: contactName,
+    });
     const resp = await axios.post(
       "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
       {
