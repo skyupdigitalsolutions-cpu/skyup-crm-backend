@@ -159,7 +159,11 @@ const initSocket = (io) => {
 
     // ── WhatsApp rooms (unchanged) ───────────────────────────────────────────
     socket.on('wa_admin_join',        ()           => socket.join('wa_admin'));
-    socket.on('wa_agent_join',        ({ agentId }) => agentId && socket.join(`wa_agent_${agentId}`));
+    socket.on('wa_agent_join',        ({ agentId }) => {
+      if (!agentId) { console.warn('[Socket] wa_agent_join called with NO agentId — skipped'); return; }
+      socket.join(`wa_agent_${agentId}`);
+      console.log(`[Socket] joined room wa_agent_${agentId}`);
+    });
 
     // ── Agent personal room — for new_lead_assigned push ─────────────────────
     // Mobile app emits 'agent_join' with { userId } on connect/reconnect.
@@ -177,7 +181,11 @@ const initSocket = (io) => {
     // by which leads belong to the logged-in user. This mirrors the admin's
     // wa_admin firehose so employees don't depend on conversation.assignedAgent
     // being perfectly in sync with lead ownership.
-    socket.on('wa_company_join',      ({ companyId }) => companyId && socket.join(`wa_company_${companyId}`));
+    socket.on('wa_company_join',      ({ companyId }) => {
+      if (!companyId) { console.warn('[Socket] wa_company_join called with NO companyId — skipped'); return; }
+      socket.join(`wa_company_${companyId}`);
+      console.log(`[Socket] joined room wa_company_${companyId}`);
+    });
 
     // ════════════════════════════════════════════════════════════════════════
     // EMPLOYEE joins

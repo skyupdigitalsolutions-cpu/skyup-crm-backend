@@ -509,7 +509,12 @@ async function processMSG91Payload(rawBody, opts = {}) {
         io.to(`wa_company_${cid}`).emit("wa_message", socketPayload);
       });
 
-      console.log(`✅ Socket emitted wa_message → wa_admin + ${agentRooms.size} agent room(s) + ${companyRooms.size} company room(s) for conv ${conversation._id}`);
+      console.log(
+        `✅ Socket emitted wa_message → wa_admin` +
+        ` + agent room(s): [${[...agentRooms].map((id) => `wa_agent_${id}`).join(", ") || "none"}]` +
+        ` + company room(s): [${[...companyRooms].map((id) => `wa_company_${id}`).join(", ") || "none"}]` +
+        ` for conv ${conversation._id} (assignedAgentId=${assignedAgentId || "null"}, leadOwnerIds=[${leadOwnerIds.join(", ") || "none"}])`
+      );
     } else {
       console.warn("⚠️  global._io not set — socket not emitted");
     }
