@@ -474,6 +474,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
       const socketPayload = {
         type:             "wa_new_message",
         conversationId:   conversation._id.toString(),
+        leadId:           (lead?._id || freshConv?.lead || conversation.lead)?.toString() || null,
         sessionExpiresAt: sessionExpiry.toISOString(),
         message: {
           _id:         savedMsg._id.toString(),
