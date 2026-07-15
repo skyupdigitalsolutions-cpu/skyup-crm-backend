@@ -337,23 +337,53 @@ async function processMSG91Payload(rawBody, opts = {}) {
     }
 
     // ── Find company config ───────────────────────────────────────────────────
+    // IMPORTANT: this used to fall back to "any active msg91 config in the
+    // whole database" whenever the exact-string match on msg91IntegratedNumber
+    // failed (e.g. a formatting difference like a stray "+" or space in how it
+    // was saved). On a multi-tenant CRM that silently misrouted the message to
+    // a DIFFERENT COMPANY — the lead's reply would get saved and socket-emitted
+    // to some other company's agent/room, so the actual assigned employee
+    // would never see it, with no error and no trace except this being the
+    // wrong company entirely. That is exactly what was happening here.
+    //
+    // Fix: match by normalized digits (last 10) so formatting differences
+    // can't cause a miss, and if that STILL fails, resolve the company via
+    // the lead who actually owns this phone number — never default to an
+    // arbitrary other tenant's config.
     let config = null;
-    if (toNumber) {
-      config = await WhatsAppConfig.findOne({
-        provider: "msg91",
-        $or: [
-          { msg91IntegratedNumber: toNumber },
-          { msg91IntegratedNumber: "+" + toNumber },
-          { msg91IntegratedNumber: toNumber.replace(/^\+/, "") },
-        ],
-        isActive: true,
-      });
+    const toLastTen = toNumber ? toNumber.slice(-10) : "";
+
+    if (toLastTen) {
+      const activeConfigs = await WhatsAppConfig.find({ provider: "msg91", isActive: true }).lean();
+      config = activeConfigs.find((c) => normalizePhone(c.msg91IntegratedNumber).slice(-10) === toLastTen) || null;
+      if (config) config = await WhatsAppConfig.findById(config._id); // re-fetch as a full doc
     }
-    if (!config) config = await WhatsAppConfig.findOne({ provider: "msg91", isActive: true });
-    if (!config) config = await WhatsAppConfig.findOne({ isActive: true });
 
     if (!config) {
-      console.error("❌ MSG91 inbound: no active WhatsApp config found");
+      // Fall back to resolving via the lead itself (searched across ALL
+      // companies — a lead's phone number is only meaningful scoped to a
+      // company, but we don't know which one yet, which is exactly what
+      // we're trying to find).
+      const lastTenSender = waPhone.slice(-10);
+      const anyCompanyLeads = await Lead.find({
+        $or: [
+          { mobile: waPhone }, { mobile: lastTenSender }, { mobile: `+${waPhone}` },
+        ],
+      }).select("company").lean();
+      const candidateCompanyIds = [...new Set(anyCompanyLeads.map((l) => l.company?.toString()).filter(Boolean))];
+      if (candidateCompanyIds.length === 1) {
+        config = await WhatsAppConfig.findOne({ company: candidateCompanyIds[0], provider: "msg91", isActive: true });
+        if (config) {
+          console.warn(`⚠️  MSG91 inbound: integrated number "${toNumber}" didn't match any config directly — resolved company via lead lookup instead (company=${candidateCompanyIds[0]}). Check that WhatsAppConfig.msg91IntegratedNumber is saved correctly for this company.`);
+        }
+      } else if (candidateCompanyIds.length > 1) {
+        console.error(`❌ MSG91 inbound: phone ${waPhone} matches leads in ${candidateCompanyIds.length} different companies and the integrated number didn't resolve one directly — refusing to guess. Fix WhatsAppConfig.msg91IntegratedNumber for the correct company.`);
+        return;
+      }
+    }
+
+    if (!config) {
+      console.error(`❌ MSG91 inbound: could not resolve a company for integrated number "${toNumber}" (sender ${waPhone}) — message dropped rather than risk sending it to the wrong company. Check WhatsAppConfig.msg91IntegratedNumber matches exactly what MSG91 sends as "integrated_number".`);
       return;
     }
 
