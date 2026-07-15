@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const WhatsAppMessage = require("../models/WhatsAppMessage");
 const Lead = require("../models/Leads");
 const { normalizePhone: _sharedNormalizePhone } = require("../utils/normalizePhone");
+const { resolveCanonicalConversation } = require("../utils/conversationMerge");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // normalizePhone — WA-safe wrapper around the shared normaliser.
@@ -794,9 +795,14 @@ const startConversation = async (req, res) => {
       return res.status(502).json({ error: message, providerStatus: status });
     }
 
-    let conversation = await WhatsAppConversation.findOne({
-      waPhone: cleanPhone,
-      company: companyId,
+    // resolveCanonicalConversation() matches by lead ref AND phone, and merges
+    // any duplicates it finds — so starting a template chat here always lands
+    // on the same conversation record the inbound webhook uses, instead of
+    // risking a second, near-empty record for this lead.
+    let conversation = await resolveCanonicalConversation({
+      leadId: lead?._id || null,
+      phoneVariants: [cleanPhone],
+      companyId,
     });
 
     if (!conversation) {
@@ -980,9 +986,10 @@ const _saveConversationAndMessage = async ({
   waMessageId,
 }) => {
   const templatePreview = `[Template: ${templateName}]`;
-  let conversation = await WhatsAppConversation.findOne({
-    waPhone: cleanPhone,
-    company: companyId,
+  let conversation = await resolveCanonicalConversation({
+    leadId: leadId || null,
+    phoneVariants: [cleanPhone],
+    companyId,
   });
   if (!conversation) {
     conversation = await WhatsAppConversation.create({
@@ -1325,41 +1332,24 @@ const getConversationByLead = async (req, res) => {
         : []),
     ].filter(Boolean);
 
-    const candidatesByLead = await WhatsAppConversation.find({
-      lead: leadId,
-      company: companyId,
-    })
-      .sort({ lastMessageAt: -1, createdAt: -1 })
-      .lean();
-
-    const candidatesByPhone = phoneVariants.length
-      ? await WhatsAppConversation.find({
-          company: companyId,
-          waPhone: { $in: phoneVariants },
-        })
-          .sort({ lastMessageAt: -1, createdAt: -1 })
-          .lean()
-      : [];
-
-    const seen = new Set();
-    const allCandidates = [...candidatesByLead, ...candidatesByPhone]
-      .filter((c) => {
-        const id = String(c._id);
-        if (seen.has(id)) return false;
-        seen.add(id);
-        return true;
-      })
-      .sort((a, b) => {
-        const ta = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
-        const tb = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
-        return tb - ta;
-      });
-
-    let conversation = allCandidates[0] || null;
+    // ── Resolve to a SINGLE canonical conversation ────────────────────────────
+    // Previously this endpoint just picked whichever matching record had the
+    // most recent lastMessageAt, which meant a near-empty duplicate (created by
+    // a manual template send) could "win" over the real conversation holding
+    // the lead's actual WhatsApp history — showing the employee an empty chat
+    // with a stale "session expired" banner even though the lead had just
+    // replied on the OTHER record. resolveCanonicalConversation() finds every
+    // matching record (by lead ref OR phone) and merges them into one, keeping
+    // every message and the freshest sessionExpiresAt — so this self-heals any
+    // duplicates that already exist instead of just papering over them.
+    let conversation = await resolveCanonicalConversation({
+      leadId,
+      phoneVariants,
+      companyId,
+    });
     if (!conversation) return res.json({ success: true, conversation: null });
 
     const patch = {};
-    if (!conversation.lead) patch.lead = leadId;
     const leadOwnerId = lead.user ? lead.user.toString() : null;
     const currentAgent = conversation.assignedAgent?.toString() || null;
     if (leadOwnerId && currentAgent !== leadOwnerId) {
@@ -1370,7 +1360,7 @@ const getConversationByLead = async (req, res) => {
 
     if (Object.keys(patch).length) {
       await WhatsAppConversation.findByIdAndUpdate(conversation._id, patch);
-      conversation = { ...conversation, ...patch };
+      conversation = { ...conversation.toObject(), ...patch };
     }
 
     res.json({ success: true, conversation });

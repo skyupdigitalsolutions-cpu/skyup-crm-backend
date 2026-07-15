@@ -21,6 +21,7 @@ const WhatsAppMessage = require('../models/WhatsAppMessage');
 const Company        = require('../models/Company');
 const crypto         = require('crypto');
 const { normalizePhone: _sharedNormalizePhone } = require('../utils/normalizePhone');
+const { resolveCanonicalConversation } = require('../utils/conversationMerge');
 const { sendSmartEmail } = require('../services/autoTemplateService');
 
 // ── Cloudinary config ─────────────────────────────────────────────────────────
@@ -160,7 +161,11 @@ async function _sendClientMeetingWhatsApp({ lead, companyId, meetingDate, meetin
 
     // Log to the WhatsApp conversation (non-fatal)
     try {
-      let conversation = await WhatsAppConversation.findOne({ waPhone: clientPhone, company: companyId });
+      let conversation = await resolveCanonicalConversation({
+        leadId: lead._id || null,
+        phoneVariants: [clientPhone],
+        companyId,
+      });
       if (!conversation) {
         conversation = await WhatsAppConversation.create({
           waPhone: clientPhone, contactName: lead.name || '', company: companyId,

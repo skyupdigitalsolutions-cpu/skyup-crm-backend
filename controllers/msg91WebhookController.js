@@ -23,6 +23,7 @@ const WhatsAppConversation = require("../models/WhatsAppConversation");
 const WhatsAppMessage      = require("../models/WhatsAppMessage");
 const Lead                 = require("../models/Leads");
 const User                 = require("../models/Users");
+const { resolveCanonicalConversation } = require("../utils/conversationMerge");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -356,32 +357,29 @@ async function processMSG91Payload(rawBody, opts = {}) {
       return;
     }
 
-    // ── Find or create conversation ───────────────────────────────────────────
-    // If duplicates exist, keep the most recently active one and delete empty ones
-    const allConversations = await WhatsAppConversation.find({
-      waPhone,
-      company: config.company,
-    }).sort({ lastMessageAt: -1, createdAt: -1 });
-
-    let conversation = allConversations[0] || null;
-
-    if (allConversations.length > 1) {
-      console.warn(`⚠️  ${allConversations.length} duplicate conversations for ${waPhone} — using most recent`);
-      for (const stale of allConversations.slice(1)) {
-        const msgCount = await WhatsAppMessage.countDocuments({ conversation: stale._id });
-        if (msgCount === 0) {
-          await WhatsAppConversation.findByIdAndDelete(stale._id);
-          console.log(`🗑  Deleted empty duplicate conversation ${stale._id}`);
-        }
-      }
-    }
-
-    // Resolve leads for this phone
+    // Resolve leads for this phone (done BEFORE conversation lookup so the
+    // merge helper can match by lead ref too, not just waPhone — this is what
+    // catches the case where a manual template send created a conversation
+    // under a slightly different phone value than the one WhatsApp used for
+    // the inbound webhook).
     const matchingLeads = await findLeadsByPhone(waPhone, config.company);
     const leadOwnerIds  = [...new Set(matchingLeads.map((l) => l.user?.toString()).filter(Boolean))];
     const lead          = matchingLeads
       .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))[0] || null;
     const leadOwnerId   = lead?.user?.toString() || null;
+
+    // ── Find or create conversation ───────────────────────────────────────────
+    // resolveCanonicalConversation() matches by BOTH waPhone and lead ref, and
+    // merges any duplicates it finds into a single record (keeping all
+    // messages) instead of just picking the most recent one. This is what
+    // makes inbound replies always land on the SAME conversation the employee
+    // panel is looking at, even if an earlier manual template send created a
+    // separate record for this lead.
+    let conversation = await resolveCanonicalConversation({
+      leadId: lead?._id || null,
+      phoneVariants: [waPhone],
+      companyId: config.company,
+    });
 
     if (!conversation) {
       const assignedAgentId = leadOwnerId || (await getAvailableAgent(config.company))?._id?.toString() || null;
