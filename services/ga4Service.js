@@ -1,19 +1,19 @@
 // services/ga4Service.js
 // ─────────────────────────────────────────────────────────────────────────────
 // Google Analytics 4 integration — OAuth 2.0 + Analytics Data API (v1beta).
-// Uses axios (no googleapis SDK needed). One shared OAuth app (env creds);
-// each company connects their own GA account and selects a GA4 property.
+// Uses axios (no googleapis SDK needed).
 //
-// Required env:
-//   GOOGLE_OAUTH_CLIENT_ID
-//   GOOGLE_OAUTH_CLIENT_SECRET
-//   GOOGLE_OAUTH_REDIRECT_URI     e.g. https://<your-api-host>/api/google-analytics/callback
+// OAuth app credentials can come from TWO places (DB wins over env):
+//   1) Per-company, stored on GoogleAnalyticsConfig (set from the CRM UI).
+//   2) Server-wide env vars: GOOGLE_OAUTH_CLIENT_ID / _SECRET / _REDIRECT_URI.
+//
+// Other env:
 //   GA_TOKEN_ENCRYPTION_KEY       strong secret for encrypting refresh tokens
 //   GA_POST_CONNECT_REDIRECT      (optional) frontend URL to return to after connect
 //
-// Google Cloud setup (once): enable "Google Analytics Data API" + "Analytics
-// Admin API"; OAuth consent screen with scope analytics.readonly; Web OAuth
-// client with the redirect URI above.
+// Google Cloud setup (once per OAuth app): enable "Google Analytics Data API" +
+// "Analytics Admin API"; OAuth consent screen with scope analytics.readonly;
+// Web OAuth client whose Authorized redirect URI matches the redirect uri used.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const axios = require("axios");
@@ -26,12 +26,59 @@ const OAUTH_TOKEN = "https://oauth2.googleapis.com/token";
 const ADMIN_API   = "https://analyticsadmin.googleapis.com/v1beta";
 const DATA_API    = "https://analyticsdata.googleapis.com/v1beta";
 
-const clientId     = () => process.env.GOOGLE_OAUTH_CLIENT_ID;
-const clientSecret = () => process.env.GOOGLE_OAUTH_CLIENT_SECRET;
-const redirectUri  = () => process.env.GOOGLE_OAUTH_REDIRECT_URI;
+// ── Credential resolution ─────────────────────────────────────────────────────
+// Returns { clientId, clientSecret, redirectUri, source } using the per-company
+// config first (if all three present) and falling back to env vars.
+function envCreds() {
+  return {
+    clientId:     process.env.GOOGLE_OAUTH_CLIENT_ID || "",
+    clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || "",
+    redirectUri:  process.env.GOOGLE_OAUTH_REDIRECT_URI || "",
+  };
+}
 
+function envConfigured() {
+  const e = envCreds();
+  return !!(e.clientId && e.clientSecret && e.redirectUri);
+}
+
+// config may be a Mongoose doc, a lean object, or null.
+function configHasCreds(config) {
+  return !!(config && config.oauthClientId && config.oauthClientSecret && config.oauthRedirectUri);
+}
+
+// Resolve the OAuth app credentials to use for a given company config.
+function resolveCreds(config) {
+  if (configHasCreds(config)) {
+    const secret = decryptToken(config.oauthClientSecret);
+    return {
+      clientId:     config.oauthClientId,
+      clientSecret: secret || "",
+      redirectUri:  config.oauthRedirectUri,
+      source:       "db",
+    };
+  }
+  const e = envCreds();
+  return { clientId: e.clientId, clientSecret: e.clientSecret, redirectUri: e.redirectUri, source: "env" };
+}
+
+// True if EITHER the env vars OR the company config provide full credentials.
+function isConfigured(config) {
+  if (configHasCreds(config)) return true;
+  return envConfigured();
+}
+
+function assertCreds(creds) {
+  if (!creds || !creds.clientId || !creds.clientSecret || !creds.redirectUri) {
+    const e = new Error("Google OAuth is not configured (missing Client ID / Client Secret / Redirect URI).");
+    e.code = "OAUTH_NOT_CONFIGURED";
+    throw e;
+  }
+}
+
+// Back-compat shim: assert the server-wide env creds are present.
 function assertConfigured() {
-  if (!clientId() || !clientSecret() || !redirectUri()) {
+  if (!envConfigured()) {
     const e = new Error("Google OAuth is not configured on the server (missing GOOGLE_OAUTH_CLIENT_ID / SECRET / REDIRECT_URI).");
     e.code = "OAUTH_NOT_CONFIGURED";
     throw e;
@@ -39,11 +86,12 @@ function assertConfigured() {
 }
 
 // ── OAuth ─────────────────────────────────────────────────────────────────────
-function buildAuthUrl(state) {
-  assertConfigured();
+function buildAuthUrl(state, creds) {
+  const c = creds || resolveCreds(null);
+  assertCreds(c);
   const params = new URLSearchParams({
-    client_id:     clientId(),
-    redirect_uri:  redirectUri(),
+    client_id:     c.clientId,
+    redirect_uri:  c.redirectUri,
     response_type: "code",
     scope:         SCOPE,
     access_type:   "offline",     // get a refresh token
@@ -54,24 +102,26 @@ function buildAuthUrl(state) {
   return `${OAUTH_AUTH}?${params.toString()}`;
 }
 
-async function exchangeCodeForTokens(code) {
-  assertConfigured();
+async function exchangeCodeForTokens(code, creds) {
+  const c = creds || resolveCreds(null);
+  assertCreds(c);
   const { data } = await axios.post(OAUTH_TOKEN, new URLSearchParams({
     code,
-    client_id:     clientId(),
-    client_secret: clientSecret(),
-    redirect_uri:  redirectUri(),
+    client_id:     c.clientId,
+    client_secret: c.clientSecret,
+    redirect_uri:  c.redirectUri,
     grant_type:    "authorization_code",
   }).toString(), { headers: { "Content-Type": "application/x-www-form-urlencoded" } });
   return data; // { access_token, refresh_token, expires_in, scope, token_type, id_token? }
 }
 
-async function refreshAccessToken(refreshToken) {
-  assertConfigured();
+async function refreshAccessToken(refreshToken, creds) {
+  const c = creds || resolveCreds(null);
+  assertCreds(c);
   const { data } = await axios.post(OAUTH_TOKEN, new URLSearchParams({
     refresh_token: refreshToken,
-    client_id:     clientId(),
-    client_secret: clientSecret(),
+    client_id:     c.clientId,
+    client_secret: c.clientSecret,
     grant_type:    "refresh_token",
   }).toString(), { headers: { "Content-Type": "application/x-www-form-urlencoded" } });
   return data; // { access_token, expires_in, scope, token_type }
@@ -90,7 +140,8 @@ async function getValidAccessToken(config) {
     e.code = "NOT_CONNECTED";
     throw e;
   }
-  const tok = await refreshAccessToken(refresh);
+  const creds = resolveCreds(config);
+  const tok = await refreshAccessToken(refresh, creds);
   config.accessToken       = encryptToken(tok.access_token);
   config.accessTokenExpiry = new Date(now + (tok.expires_in || 3600) * 1000);
   await config.save();
@@ -103,8 +154,8 @@ async function fetchUserEmail(accessToken) {
     const { data } = await axios.get("https://www.googleapis.com/oauth2/v2/userinfo", {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    return data?.email || null;
-  } catch { return null; }
+    return (data && data.email) ? data.email : null;
+  } catch (e) { return null; }
 }
 
 // ── GA4 property discovery (Admin API) ────────────────────────────────────────
@@ -114,8 +165,10 @@ async function listProperties(accessToken) {
     params:  { pageSize: 200 },
   });
   const out = [];
-  for (const acct of data.accountSummaries || []) {
-    for (const p of acct.propertySummaries || []) {
+  const summaries = data.accountSummaries || [];
+  for (const acct of summaries) {
+    const props = acct.propertySummaries || [];
+    for (const p of props) {
       out.push({
         propertyId:   String(p.property || "").replace("properties/", ""),
         propertyName: p.displayName || p.property,
@@ -136,9 +189,15 @@ async function runReport(propertyId, accessToken, body) {
   return data;
 }
 
-// Helpers to read GA4 report rows.
-const metricVal = (row, i) => Number(row.metricValues?.[i]?.value || 0);
-const dimVal    = (row, i) => row.dimensionValues?.[i]?.value || "";
+// Helpers to read GA4 report rows (no optional chaining — Beautify-safe).
+const metricVal = (row, i) => {
+  const mv = row && row.metricValues ? row.metricValues[i] : null;
+  return Number(mv && mv.value ? mv.value : 0);
+};
+const dimVal = (row, i) => {
+  const dv = row && row.dimensionValues ? row.dimensionValues[i] : null;
+  return dv && dv.value ? dv.value : "";
+};
 const round2    = (v) => Math.round((Number(v) || 0) * 100) / 100;
 const pctChange = (cur, prev) => (prev > 0 ? round2(((cur - prev) / prev) * 100) : (cur > 0 ? 100 : 0));
 
@@ -163,7 +222,12 @@ async function buildOverview(propertyId, token, from, to, prevFrom, prevTo) {
   // With multiple dateRanges and no dimensions, GA4 returns one row per range,
   // tagged by a "dateRange" dimension it adds automatically.
   const rows = data.rows || [];
-  const pick = (rangeName) => rows.find((r) => (r.dimensionValues?.[0]?.value || "").includes(rangeName)) || rows[rangeName === "current" ? 0 : 1] || { metricValues: [] };
+  const pick = (rangeName) => {
+    const found = rows.find((r) => dimVal(r, 0).includes(rangeName));
+    if (found) return found;
+    const idx = rangeName === "current" ? 0 : 1;
+    return rows[idx] || { metricValues: [] };
+  };
   const cur = pick("current"), prev = pick("previous");
 
   const labels = [
@@ -323,7 +387,13 @@ async function buildDashboard(config, { from, to }) {
   const { prevFrom, prevTo } = prevRange(from, to);
 
   // Run in parallel; if one section fails, keep the rest.
-  const settle = async (fn) => { try { return await fn(); } catch (e) { return { __error: e?.response?.data?.error?.message || e.message }; } };
+  const settle = async (fn) => {
+    try { return await fn(); }
+    catch (e) {
+      const apiMsg = e && e.response && e.response.data && e.response.data.error ? e.response.data.error.message : null;
+      return { __error: apiMsg || e.message };
+    }
+  };
 
   const [overview, trafficSources, landingPages, events, devices, geo, browserOs, timeseries] = await Promise.all([
     settle(() => buildOverview(propertyId, token, from, to, prevFrom, prevTo)),
@@ -379,16 +449,20 @@ async function runWebsiteAI(dash) {
   for (;;) {
     try { raw = await callGrok(systemPrompt, L.join("\n"), 1300); break; }
     catch (e) {
-      if (e?.response?.status === 429 && attempt < 2) { await new Promise((r) => setTimeout(r, 1500 * 2 ** attempt)); attempt++; continue; }
+      const status = e && e.response ? e.response.status : null;
+      if (status === 429 && attempt < 2) { await new Promise((r) => setTimeout(r, 1500 * 2 ** attempt)); attempt++; continue; }
       throw e;
     }
   }
   const cleaned = (raw || "").replace(/```json|```/g, "").trim();
   try { return JSON.parse(cleaned); }
-  catch { return { summary: cleaned, problems: [], recommendations: [], expectedImpact: "", priority: "Medium" }; }
+  catch (e) { return { summary: cleaned, problems: [], recommendations: [], expectedImpact: "", priority: "Medium" }; }
 }
 
 module.exports = {
+  // credential helpers
+  envCreds, envConfigured, configHasCreds, resolveCreds, isConfigured, assertConfigured,
+  // oauth
   buildAuthUrl, exchangeCodeForTokens, refreshAccessToken, getValidAccessToken,
-  fetchUserEmail, listProperties, buildDashboard, runWebsiteAI, assertConfigured,
+  fetchUserEmail, listProperties, buildDashboard, runWebsiteAI,
 };

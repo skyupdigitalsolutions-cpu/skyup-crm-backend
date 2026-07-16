@@ -84,6 +84,11 @@ const leadSchema = mongoose.Schema(
     status:    { type: String, required: true, trim: true },
     date:      { type: Date, required: true },
     remark:    { type: String, required: true, trim: true },
+    // The ORIGINAL remark captured when the lead was first created (campaign /
+    // ad-form / manual / import). Unlike `remark` — which is overwritten with the
+    // latest call/meeting remark — this is written once at creation and never
+    // changed, so the app can always show the lead's initial campaign remark.
+    initialRemark: { type: String, default: "" },
     temperature: {
       type: String,
       enum: ["Hot", "Warm", "Cold", null],
@@ -468,6 +473,14 @@ leadSchema.index({ normalizedSecondaryPhone: 1 }, { sparse: true });
 // ── Pre-validate hook: compute normalizedPhone automatically ─────────────────
 // ── Pre-validate hook: normalize phones + enforce schema-level rules ──────────
 leadSchema.pre('validate', async function () {
+  // ── Capture the initial (campaign / source) remark ONCE, at creation ────────
+  // `remark` is later overwritten with the latest call/meeting remark, so we
+  // snapshot the original here the first time the document is saved. Never
+  // touched again afterwards.
+  if (this.isNew && (!this.initialRemark || !this.initialRemark.trim())) {
+    this.initialRemark = (this.remark || '').trim();
+  }
+
   // ── Primary phone ──────────────────────────────────────────────────────────
   if (this.mobile) {
     const n = normalizePhone(this.mobile);
@@ -541,6 +554,24 @@ async function syncNormalizedPhoneOnUpdate() {
 leadSchema.pre('findOneAndUpdate', syncNormalizedPhoneOnUpdate);
 leadSchema.pre('updateOne',        syncNormalizedPhoneOnUpdate);
 leadSchema.pre('updateMany',       syncNormalizedPhoneOnUpdate);
+
+// ── Pre-insertMany hook: capture initialRemark for bulk (Excel) imports ───────
+// insertMany does NOT trigger per-document pre('save')/pre('validate') hooks,
+// so we snapshot the initial remark here for every inserted row.
+leadSchema.pre('insertMany', function (next, docs) {
+  try {
+    if (Array.isArray(docs)) {
+      for (const d of docs) {
+        if (d && (!d.initialRemark || !String(d.initialRemark).trim())) {
+          d.initialRemark = (d.remark || '').toString().trim();
+        }
+      }
+    }
+  } catch (err) {
+    console.error('leadSchema pre-insertMany initialRemark error:', err);
+  }
+  next();
+});
 
 const Lead = mongoose.model("Lead", leadSchema);
 module.exports = Lead;
