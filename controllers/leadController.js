@@ -23,7 +23,7 @@ const getCompanyId = (req) =>
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
 const { autoSendTemplates, sendInterestedBlast } = require("../services/autoTemplateService");
 const { sendOutcomeAutomation } = require("../services/outcomeAutomationService");
-const { notifyCampaignLead, notifyEmployeeLead } = require("../services/telegramService");
+const { notifyCampaignLead, notifyEmployeeLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
 async function getNextUser(companyId, excludeIds = []) {
@@ -356,6 +356,15 @@ const adminCreateLead = async (req, res) => {
     // Telegram — campaign filter inside notifyCampaignLead; manual leads are silently skipped
     notifyCampaignLead(lead, companyId).catch(e =>
       console.error("[Telegram] adminCreateLead notify error:", e.message)
+    );
+    // FIX (telegram notifications): notifyAllAdminsCampaignLead existed in
+    // telegramService.js — with its own message builder, entitlement gate,
+    // and a full settings UI (TelegramSettings.jsx) letting a super-admin
+    // configure each admin's personal chat ID + opt-in toggle — but was
+    // never actually called anywhere. Admins who set this up never received
+    // a single notification. Wired in here, next to the company-level call.
+    notifyAllAdminsCampaignLead(lead, companyId).catch(e =>
+      console.error("[Telegram] adminCreateLead admin-notify error:", e.message)
     );
     // Telegram — notify assigned employee personally for ANY lead source
     if (assignedUser) {

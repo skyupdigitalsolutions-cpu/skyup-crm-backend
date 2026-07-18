@@ -8,7 +8,7 @@ const {
   getNextAssignedUserGoogle,
   mapGoogleLeadToSchema,
 } = require("../utils/googleAdsHelper");
-const { notifyCampaignLead } = require("../services/telegramService");
+const { notifyCampaignLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
 const { sendNewLeadNotification } = require("../services/fcmService");
 
 /**
@@ -167,6 +167,12 @@ const receiveGoogleWebhook = async (req, res) => {
     // Campaign-only Telegram notification
     notifyCampaignLead(newLead, newLead.company).catch(e =>
       console.error("[Telegram] Google Ads lead notify error:", e.message)
+    );
+    // FIX (telegram notifications): wire up the previously-dead
+    // notifyAllAdminsCampaignLead so admins who configured a personal
+    // chat ID actually get notified for Google Ads leads too.
+    notifyAllAdminsCampaignLead(newLead, newLead.company).catch(e =>
+      console.error("[Telegram] Google Ads lead admin-notify error:", e.message)
     );
 
     // FIX: notify the ASSIGNED employee specifically. Google Ads leads

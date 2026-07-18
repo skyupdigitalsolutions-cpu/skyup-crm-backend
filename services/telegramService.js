@@ -379,7 +379,14 @@ async function notifyAllAdminsCampaignLead(lead, companyId) {
     const Admin = require('../models/Admin');
     const admins = await Admin.find({
       company: companyId,
-      telegramChatId: { $ne: null, $ne: '' },
+      // FIX: the previous filter was `{ $ne: null, $ne: '' }` — a JS object
+      // literal with a duplicate key, which silently collapses to just
+      // `{ $ne: '' }` (the `$ne: null` half is discarded, it never reaches
+      // Mongo at all). That let admins with no telegramChatId configured
+      // (null/undefined) pass the filter and get queued for a send that
+      // was guaranteed to fail against the Telegram API. $nin correctly
+      // excludes both null and empty string in one condition.
+      telegramChatId: { $nin: [null, ''] },
       telegramNotificationsEnabled: { $ne: false },
     }).select('name telegramChatId').lean();
 

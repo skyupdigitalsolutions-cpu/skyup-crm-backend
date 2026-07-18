@@ -12,7 +12,7 @@ const {
   mapToLeadSchema,
   getNextAssignedUser,
 } = require("../utils/metaHelper");
-const { notifyCampaignLead } = require("../services/telegramService");
+const { notifyCampaignLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
 const { sendNewLeadNotification } = require("../services/fcmService");
 
 // GET - Meta webhook verification handshake
@@ -302,6 +302,12 @@ const receiveWebhook = async (req, res) => {
         // Campaign-only Telegram notification (filters by source internally)
         notifyCampaignLead(newLead, newLead.company).catch(e =>
           console.error("[Telegram] Meta lead notify error:", e.message)
+        );
+        // FIX (telegram notifications): wire up the previously-dead
+        // notifyAllAdminsCampaignLead so admins who configured a personal
+        // chat ID actually get notified for Meta ad leads too.
+        notifyAllAdminsCampaignLead(newLead, newLead.company).catch(e =>
+          console.error("[Telegram] Meta lead admin-notify error:", e.message)
         );
 
         // FIX: push a mobile notification to the assigned agent for Meta ad

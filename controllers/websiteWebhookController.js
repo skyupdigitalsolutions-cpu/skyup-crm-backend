@@ -4,7 +4,7 @@ const Lead               = require("../models/Leads");
 const User               = require("../models/Users");
 const { normalizePhone } = require("../utils/normalizePhone");
 const { autoSendTemplates } = require("../services/autoTemplateService");
-const { notifyCampaignLead } = require("../services/telegramService");
+const { notifyCampaignLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
 const { sendNewLeadNotification } = require("../services/fcmService");
 
 async function getNextAssignedUser(config) {
@@ -98,6 +98,12 @@ const receiveWebsiteWebhook = async (req, res) => {
     // Campaign-only Telegram notification
     notifyCampaignLead(newLead, config.company).catch(e =>
       console.error("[Telegram] Website lead notify error:", e.message)
+    );
+    // FIX (telegram notifications): wire up the previously-dead
+    // notifyAllAdminsCampaignLead so admins who configured a personal
+    // chat ID actually get notified for website leads too.
+    notifyAllAdminsCampaignLead(newLead, config.company).catch(e =>
+      console.error("[Telegram] Website lead admin-notify error:", e.message)
     );
 
     try {
