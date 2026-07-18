@@ -7,6 +7,10 @@ const userSchema = mongoose.Schema(
     email:    { type: String, required: true, trim: true },
     password: { type: String, required: true },
     role:     { type: String, default: "user" },
+
+    // Languages this employee can communicate in (e.g. ["English","Hindi"]).
+    // Used to filter / assign leads by matching language. Optional.
+    languages: { type: [String], default: [] },
    company:  {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Company",
