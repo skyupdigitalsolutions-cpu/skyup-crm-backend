@@ -81,19 +81,25 @@ function waPhone(raw) {
 }
 
 // ── Format date for WhatsApp e.g. "20 Jun 2026" ──────────────────────────────
+// Always format in IST (Asia/Kolkata). The Render server runs in UTC, so
+// without an explicit timeZone toLocaleDateString would render the server's
+// UTC date, which can be a day behind for late-night IST meetings.
 function fmtDate(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d)) return String(iso);
-  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
 }
 
 // ── Format time for WhatsApp e.g. "11:00 AM" ─────────────────────────────────
+// Always format in IST (Asia/Kolkata). Without an explicit timeZone this
+// rendered in the server's UTC zone, so a 2:00 PM IST meeting showed as a
+// morning time (IST − 5:30). This is the meeting-time bug.
 function fmtTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d)) return String(iso);
-  return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+  return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
