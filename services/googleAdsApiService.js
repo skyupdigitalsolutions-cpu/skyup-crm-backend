@@ -230,7 +230,7 @@ async function buildReport(config, opts) {
   const campQ =
     "SELECT campaign.id, campaign.name, campaign.status, " +
     "metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, " +
-    "metrics.conversions_value, metrics.ctr, metrics.average_cpc, metrics.video_views " +
+    "metrics.conversions_value, metrics.ctr, metrics.average_cpc " +
     "FROM campaign" + dateWhere + " ORDER BY metrics.cost_micros DESC";
 
   // Device breakdown
@@ -240,7 +240,7 @@ async function buildReport(config, opts) {
 
   // Daily time-series
   const dayQ =
-    "SELECT segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.video_views " +
+    "SELECT segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions " +
     "FROM campaign" + dateWhere + " ORDER BY segments.date";
 
   // Ad-group breakdown
@@ -250,17 +250,32 @@ async function buildReport(config, opts) {
     "metrics.conversions_value, metrics.ctr, metrics.average_cpc " +
     "FROM ad_group" + dateWhere + " ORDER BY metrics.cost_micros DESC";
 
+  // Video views — isolated so if the field is unsupported it can't break the report
+  const viewsQ =
+    "SELECT campaign.id, metrics.video_views " +
+    "FROM campaign" + dateWhere;
+
   const settle = async (fn) => { try { return await fn(); } catch (e) {
     const m = e && e.response && e.response.data && e.response.data.error ? e.response.data.error.message : e.message;
     return { __error: m };
   } };
 
-  const [campRes, devRes, dayRes, agRes] = await Promise.all([
+  const [campRes, devRes, dayRes, agRes, viewsRes] = await Promise.all([
     settle(function () { return gaqlSearch(config, token, campQ); }),
     settle(function () { return gaqlSearch(config, token, devQ); }),
     settle(function () { return gaqlSearch(config, token, dayQ); }),
     settle(function () { return gaqlSearch(config, token, agQ); }),
+    settle(function () { return gaqlSearch(config, token, viewsQ); }),
   ]);
+
+  // Video views come from the isolated viewsQ (keyed by campaign id). If that
+  // query was rejected/unsupported, the map is empty and views default to 0.
+  const viewsByCampaign = {};
+  const viewsRows = (viewsRes && viewsRes.results) ? viewsRes.results : [];
+  for (let i = 0; i < viewsRows.length; i++) {
+    const r = viewsRows[i]; const c = r.campaign || {}, m = r.metrics || {};
+    if (c.id) viewsByCampaign[String(c.id)] = numOf(m.videoViews);
+  }
 
   const totals = { impressions: 0, clicks: 0, cost: 0, conversions: 0, conversionsValue: 0, videoViews: 0 };
   const campaigns = [];
@@ -270,12 +285,13 @@ async function buildReport(config, opts) {
     const c = r.campaign || {}, m = r.metrics || {};
     const impressions = numOf(m.impressions), clicks = numOf(m.clicks);
     const cost = microsToCur(m.costMicros), conv = round2(numOf(m.conversions));
-    const views = numOf(m.videoViews);
+    const cid = c.id ? String(c.id) : "";
+    const views = (cid && viewsByCampaign[cid] != null) ? viewsByCampaign[cid] : 0;
     const convValue = round2(numOf(m.conversionsValue)); // conversions_value is a plain double, not micros
     totals.impressions += impressions; totals.clicks += clicks; totals.cost += cost;
     totals.conversions += conv; totals.conversionsValue += convValue; totals.videoViews += views;
     campaigns.push({
-      campaignId: c.id ? String(c.id) : "", campaignName: c.name || "", status: c.status || "",
+      campaignId: cid, campaignName: c.name || "", status: c.status || "",
       impressions: impressions, clicks: clicks, cost: round2(cost), conversions: conv,
       conversionsValue: convValue, videoViews: views,
       ctr: impressions > 0 ? round2((clicks / impressions) * 100) : 0,
@@ -363,6 +379,7 @@ async function buildReport(config, opts) {
       adGroups: agRes && agRes.__error ? agRes.__error : null,
       devices: devRes && devRes.__error ? devRes.__error : null,
       timeseries: dayRes && dayRes.__error ? dayRes.__error : null,
+      views: viewsRes && viewsRes.__error ? viewsRes.__error : null,
     },
   };
 }
