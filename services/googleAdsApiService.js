@@ -5,7 +5,7 @@
 // App-level env:
 //   GOOGLE_ADS_DEVELOPER_TOKEN     required — from your Manager (MCC) API Center
 //   GOOGLE_ADS_LOGIN_CUSTOMER_ID   optional — manager id (digits only) if using MCC
-//   GOOGLE_ADS_API_VERSION         optional — defaults to v18; bump if deprecated
+//   GOOGLE_ADS_API_VERSION         optional — defaults to v23; bump if deprecated
 //
 // OAuth creds resolve per-company (GoogleAdsApiConfig) first, else env:
 //   GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET
@@ -24,7 +24,7 @@ const OAUTH_TOKEN = "https://oauth2.googleapis.com/token";
 
 function apiVersion() {
   const v = process.env.GOOGLE_ADS_API_VERSION;
-  return v && v.length ? v : "v18";
+  return v && v.length ? v : "v23";
 }
 function apiBase() { return "https://googleads.googleapis.com/" + apiVersion(); }
 
@@ -405,7 +405,7 @@ async function syncToConfigs(company, config, opts) {
 
   config.lastSyncedAt = new Date();
   await config.save();
-  return { updated: updated, created: created, campaigns: campaigns.length, range: report.range };
+  return { updated: updated, created: created, campaigns: campaigns.length, range: report.range, partialErrors: report.partialErrors };
 }
 
 module.exports = {
