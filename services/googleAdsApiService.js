@@ -28,11 +28,26 @@ function apiVersion() {
 }
 function apiBase() { return "https://googleads.googleapis.com/" + apiVersion(); }
 
-function developerToken() {
+// Developer token: per-company config first (encrypted), else server env.
+function envDeveloperToken() {
   const t = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
   return t && t.length ? t : "";
 }
-function hasDeveloperToken() { return developerToken().length > 0; }
+function resolveDeveloperToken(config) {
+  if (config && config.developerToken) {
+    const t = decryptToken(config.developerToken);
+    if (t && t.length) return t;
+  }
+  return envDeveloperToken();
+}
+function hasDeveloperToken(config) {
+  return resolveDeveloperToken(config).length > 0;
+}
+// Login-customer-id: per-company config first, else env.
+function resolveLoginCustomerId(config) {
+  if (config && config.loginCustomerId) return onlyDigits(config.loginCustomerId);
+  return onlyDigits(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "");
+}
 
 function onlyDigits(s) { return String(s == null ? "" : s).replace(/[^0-9]/g, ""); }
 
@@ -126,30 +141,31 @@ async function fetchUserEmail(accessToken) {
 }
 
 // ── Google Ads REST helpers ───────────────────────────────────────────────────
-function adsHeaders(accessToken, loginCustomerId) {
+function adsHeaders(accessToken, loginCustomerId, devToken) {
   const h = {
     "Authorization": "Bearer " + accessToken,
-    "developer-token": developerToken(),
+    "developer-token": devToken || "",
     "Content-Type": "application/json",
   };
-  const envLogin = process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "";
-  const login = onlyDigits(loginCustomerId || envLogin);
+  const login = onlyDigits(loginCustomerId || "");
   if (login) h["login-customer-id"] = login;
   return h;
 }
 
-function assertDevToken() {
-  if (!hasDeveloperToken()) {
-    const e = new Error("Google Ads developer token is not configured on the server (GOOGLE_ADS_DEVELOPER_TOKEN).");
+function assertDevToken(config) {
+  if (!hasDeveloperToken(config)) {
+    const e = new Error("Google Ads developer token is not configured. Add it in the CRM (Edit API credentials).");
     e.code = "NO_DEV_TOKEN"; throw e;
   }
 }
 
 // List the Google Ads accounts the connected login can access.
-async function listAccessibleCustomers(accessToken) {
-  assertDevToken();
+async function listAccessibleCustomers(accessToken, config) {
+  assertDevToken(config);
+  const devToken = resolveDeveloperToken(config);
+  const login = resolveLoginCustomerId(config);
   const url = apiBase() + "/customers:listAccessibleCustomers";
-  const { data } = await axios.get(url, { headers: adsHeaders(accessToken, null) });
+  const { data } = await axios.get(url, { headers: adsHeaders(accessToken, login, devToken) });
   const names = (data && data.resourceNames) ? data.resourceNames : [];
   const ids = names.map(function (n) { return String(n).replace("customers/", ""); });
 
@@ -160,7 +176,8 @@ async function listAccessibleCustomers(accessToken) {
     let label = id;
     try {
       const q = "SELECT customer.id, customer.descriptive_name FROM customer LIMIT 1";
-      const res = await gaqlSearchRaw(accessToken, id, id, q);
+      const loginForId = login || id;
+      const res = await gaqlSearchRaw(accessToken, id, loginForId, q, devToken);
       const rows = (res && res.results) ? res.results : [];
       if (rows.length && rows[0].customer && rows[0].customer.descriptiveName) label = rows[0].customer.descriptiveName;
     } catch (e) { /* keep id as label */ }
@@ -170,7 +187,7 @@ async function listAccessibleCustomers(accessToken) {
 }
 
 // Low-level GAQL search against a specific customer id.
-async function gaqlSearchRaw(accessToken, customerId, loginCustomerId, query) {
+async function gaqlSearchRaw(accessToken, customerId, loginCustomerId, query, devToken) {
   const cid = onlyDigits(customerId);
   const url = apiBase() + "/customers/" + cid + "/googleAds:search";
   const results = [];
@@ -178,7 +195,7 @@ async function gaqlSearchRaw(accessToken, customerId, loginCustomerId, query) {
   for (;;) {
     const body = { query: query };
     if (pageToken) body.pageToken = pageToken;
-    const resp = await axios.post(url, body, { headers: adsHeaders(accessToken, loginCustomerId), timeout: 30000 });
+    const resp = await axios.post(url, body, { headers: adsHeaders(accessToken, loginCustomerId, devToken), timeout: 30000 });
     const data = resp.data || {};
     const rows = data.results ? data.results : [];
     for (let i = 0; i < rows.length; i++) results.push(rows[i]);
@@ -188,7 +205,10 @@ async function gaqlSearchRaw(accessToken, customerId, loginCustomerId, query) {
 }
 
 async function gaqlSearch(config, accessToken, query) {
-  return gaqlSearchRaw(accessToken, config.customerId, config.loginCustomerId, query);
+  assertDevToken(config);
+  const devToken = resolveDeveloperToken(config);
+  const login = resolveLoginCustomerId(config);
+  return gaqlSearchRaw(accessToken, config.customerId, login, query, devToken);
 }
 
 // ── Metric helpers ────────────────────────────────────────────────────────────
@@ -391,7 +411,7 @@ async function syncToConfigs(company, config, opts) {
 module.exports = {
   // config helpers
   envCreds, envConfigured, configHasCreds, resolveCreds, isConfigured,
-  hasDeveloperToken, developerToken, apiVersion,
+  hasDeveloperToken, resolveDeveloperToken, envDeveloperToken, resolveLoginCustomerId, apiVersion,
   // oauth
   buildAuthUrl, exchangeCodeForTokens, refreshAccessToken, getValidAccessToken, fetchUserEmail,
   // ads api

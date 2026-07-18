@@ -20,6 +20,10 @@ const googleAdsApiConfigSchema = new mongoose.Schema(
     oauthClientSecret: { type: String, default: null }, // encrypted at rest
     oauthRedirectUri:  { type: String, default: null },
 
+    // Google Ads API developer token (per company, encrypted). Falls back to the
+    // server env GOOGLE_ADS_DEVELOPER_TOKEN only if this is not set.
+    developerToken:    { type: String, default: null }, // encrypted at rest
+
     // OAuth tokens
     refreshToken:      { type: String, default: null }, // encrypted at rest
     accessToken:       { type: String, default: null }, // encrypted at rest (cache)

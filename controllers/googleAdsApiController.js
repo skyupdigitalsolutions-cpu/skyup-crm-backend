@@ -32,7 +32,9 @@ const getStatus = async (req, res) => {
       lastSyncedAt: cfg && cfg.lastSyncedAt ? cfg.lastSyncedAt : null,
       oauthConfigured: ads.isConfigured(cfg),
       oauthSource: ads.configHasCreds(cfg) ? "db" : (ads.envConfigured() ? "env" : null),
-      developerToken: ads.hasDeveloperToken(),
+      developerToken: ads.hasDeveloperToken(cfg),
+      developerTokenSource: (cfg && cfg.developerToken) ? "db" : (ads.envDeveloperToken().length ? "env" : null),
+      loginCustomerId: cfg && cfg.loginCustomerId ? cfg.loginCustomerId : null,
       apiVersion: ads.apiVersion(),
     });
   } catch (err) { res.status(500).json({ message: err.message }); }
@@ -50,7 +52,9 @@ const getOAuthConfig = async (req, res) => {
       clientId: fromDb ? cfg.oauthClientId : env.clientId,
       redirectUri: fromDb ? cfg.oauthRedirectUri : env.redirectUri,
       hasSecret: fromDb ? !!cfg.oauthClientSecret : !!env.clientSecret,
-      developerToken: ads.hasDeveloperToken(),
+      developerToken: ads.hasDeveloperToken(cfg),
+      hasDeveloperToken: !!(cfg && cfg.developerToken),
+      loginCustomerId: cfg && cfg.loginCustomerId ? cfg.loginCustomerId : "",
       editable: true,
     });
   } catch (err) { res.status(500).json({ message: err.message }); }
@@ -74,12 +78,30 @@ const saveOAuthConfig = async (req, res) => {
     else if (existing && existing.oauthClientSecret) secretToStore = existing.oauthClientSecret;
     else return res.status(400).json({ message: "Client Secret is required." });
 
+    // Developer token (per company). Blank on edit keeps the saved one.
+    const devTokenRaw = typeof body.developerToken === "string" ? body.developerToken.trim() : "";
+    let devTokenToStore;
+    if (devTokenRaw) devTokenToStore = encryptToken(devTokenRaw);
+    else if (existing && existing.developerToken) devTokenToStore = existing.developerToken;
+    else devTokenToStore = null;
+
+    // Login customer id (manager id) — optional, digits only.
+    const loginRaw = typeof body.loginCustomerId === "string" ? body.loginCustomerId.replace(/[^0-9]/g, "") : "";
+    const loginToStore = loginRaw ? loginRaw : (existing && existing.loginCustomerId ? existing.loginCustomerId : null);
+
     const cfg = await GoogleAdsApiConfig.findOneAndUpdate(
       { company: companyId },
-      { company: companyId, oauthClientId: clientId, oauthClientSecret: secretToStore, oauthRedirectUri: redirectUri },
+      {
+        company: companyId, oauthClientId: clientId, oauthClientSecret: secretToStore, oauthRedirectUri: redirectUri,
+        developerToken: devTokenToStore, loginCustomerId: loginToStore,
+      },
       { upsert: true, returnDocument: "after", new: true }
     );
-    res.json({ configured: true, source: "db", clientId: cfg.oauthClientId, redirectUri: cfg.oauthRedirectUri, hasSecret: !!cfg.oauthClientSecret, editable: true });
+    res.json({
+      configured: true, source: "db", clientId: cfg.oauthClientId, redirectUri: cfg.oauthRedirectUri,
+      hasSecret: !!cfg.oauthClientSecret, hasDeveloperToken: !!cfg.developerToken,
+      loginCustomerId: cfg.loginCustomerId || "", editable: true,
+    });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
@@ -87,7 +109,7 @@ const saveOAuthConfig = async (req, res) => {
 const clearOAuthConfig = async (req, res) => {
   try {
     const companyId = companyOf(req);
-    await GoogleAdsApiConfig.findOneAndUpdate({ company: companyId }, { oauthClientId: null, oauthClientSecret: null, oauthRedirectUri: null });
+    await GoogleAdsApiConfig.findOneAndUpdate({ company: companyId }, { oauthClientId: null, oauthClientSecret: null, oauthRedirectUri: null, developerToken: null, loginCustomerId: null });
     const cfg = await loadConfig(companyId).lean();
     res.json({ configured: ads.isConfigured(cfg), source: ads.envConfigured() ? "env" : null });
   } catch (err) { res.status(500).json({ message: err.message }); }
@@ -149,7 +171,7 @@ const listAccounts = async (req, res) => {
     const cfg = await loadConfig(companyOf(req));
     if (!cfg || !cfg.refreshToken) return res.status(400).json({ message: "Not connected" });
     const token = await ads.getValidAccessToken(cfg);
-    const accounts = await ads.listAccessibleCustomers(token);
+    const accounts = await ads.listAccessibleCustomers(token, cfg);
     res.json({ accounts: accounts });
   } catch (err) {
     if (err.code === "NO_DEV_TOKEN") return res.status(503).json({ message: err.message, code: "NO_DEV_TOKEN" });
