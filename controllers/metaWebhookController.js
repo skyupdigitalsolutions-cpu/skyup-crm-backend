@@ -230,6 +230,12 @@ const receiveWebhook = async (req, res) => {
         // catch-all config. Prefer the webhook's form_id; fall back to the
         // config's own formId when the payload omitted it.
         leadPayload.formId = form_id || config.formId || "";
+        // Optional: auto-detect preferred language from the lead form fields.
+        try {
+          const detectLang = require("../utils/detectLanguage");
+          const lang = detectLang.fromMetaFieldData(leadData.field_data) || detectLang.fromParsedFields(parsedFields);
+          if (lang) leadPayload.language = lang;
+        } catch (e) { /* language is optional — ignore detection errors */ }
 
         // ── Qualification scoring ─────────────────────────────────────────────
         // Look up saved rules for this ad set (config._id) and score the lead.
