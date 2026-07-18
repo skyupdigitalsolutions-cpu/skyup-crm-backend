@@ -179,11 +179,27 @@ const listAccounts = async (req, res) => {
     if (!cfg || !cfg.refreshToken) return res.status(400).json({ message: "Not connected" });
     const token = await ads.getValidAccessToken(cfg);
     const accounts = await ads.listAccessibleCustomers(token, cfg);
-    res.json({ accounts: accounts });
+    let hint = null;
+    if (!accounts.length) {
+      hint = "Google returned no accounts for this login. Most common cause: the developer token still has Test access — it must have Basic access (approved in your Manager account API Center) to list live accounts. Also confirm this Google login can access the Ads account, and that Login Customer ID is blank (for a directly-owned account) or a manager the account is actually linked to.";
+    }
+    res.json({ accounts: accounts, hint: hint });
   } catch (err) {
     if (err.code === "NO_DEV_TOKEN") return res.status(503).json({ message: err.message, code: "NO_DEV_TOKEN" });
-    const apiMsg = err && err.response && err.response.data && err.response.data.error ? err.response.data.error.message : null;
-    res.status(500).json({ message: apiMsg || err.message });
+    // Surface Google's real reason (e.g. DEVELOPER_TOKEN_NOT_APPROVED, USER_PERMISSION_DENIED, NOT_FOUND)
+    const gErr = err && err.response && err.response.data && err.response.data.error ? err.response.data.error : null;
+    const apiMsg = gErr && gErr.message ? gErr.message : null;
+    let gStatus = null;
+    try {
+      if (gErr && gErr.details && gErr.details.length) {
+        const d = gErr.details[0];
+        if (d && d.errors && d.errors.length && d.errors[0].errorCode) {
+          const ec = d.errors[0].errorCode;
+          gStatus = Object.keys(ec).map(function (k) { return k + ":" + ec[k]; }).join(", ");
+        }
+      }
+    } catch (e) { /* ignore */ }
+    res.status(500).json({ message: apiMsg || err.message, googleError: gStatus, code: "ACCOUNTS_FAILED" });
   }
 };
 
