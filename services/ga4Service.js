@@ -370,6 +370,35 @@ async function buildTimeseries(propertyId, token, from, to) {
   });
 }
 
+// Google Ads ad-group breakdown (requires the GA4 property to be LINKED to
+// Google Ads: GA4 Admin → Product Links → Google Ads Links). Without the link
+// GA4 returns only "(not set)" rows, which we drop.
+async function buildAdGroups(propertyId, token, from, to) {
+  const data = await runReport(propertyId, token, {
+    dateRanges: [{ startDate: from, endDate: to }],
+    dimensions: [{ name: "sessionGoogleAdsAdGroupName" }, { name: "sessionGoogleAdsCampaignName" }],
+    metrics: [
+      { name: "sessions" }, { name: "totalUsers" }, { name: "conversions" }, { name: "engagementRate" },
+      { name: "advertiserAdCost" }, { name: "advertiserAdClicks" }, { name: "advertiserAdImpressions" },
+    ],
+    orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+    limit: 100,
+  });
+  const rows = (data.rows || []).map((r) => {
+    const clicks = metricVal(r, 5), impressions = metricVal(r, 6), cost = round2(metricVal(r, 4)), sessions = metricVal(r, 0), conv = metricVal(r, 2);
+    return {
+      adGroup: dimVal(r, 0), campaign: dimVal(r, 1),
+      sessions: sessions, users: metricVal(r, 1), conversions: conv,
+      engagementRate: round2(metricVal(r, 3) * 100),
+      cost: cost, clicks: clicks, impressions: impressions,
+      ctr: impressions > 0 ? round2((clicks / impressions) * 100) : 0,
+      costPerConversion: conv > 0 ? round2(cost / conv) : null,
+    };
+  });
+  // Drop non-Google-Ads / unlinked rows
+  return rows.filter((r) => r.adGroup && r.adGroup !== "(not set)" && r.adGroup !== "(organic)");
+}
+
 // ── Assemble the full dashboard ───────────────────────────────────────────────
 function prevRange(from, to) {
   const f = new Date(from), t = new Date(to);
@@ -395,7 +424,7 @@ async function buildDashboard(config, { from, to }) {
     }
   };
 
-  const [overview, trafficSources, landingPages, events, devices, geo, browserOs, timeseries] = await Promise.all([
+  const [overview, trafficSources, landingPages, events, devices, geo, browserOs, timeseries, adGroups] = await Promise.all([
     settle(() => buildOverview(propertyId, token, from, to, prevFrom, prevTo)),
     settle(() => buildTrafficSources(propertyId, token, from, to)),
     settle(() => buildLandingPages(propertyId, token, from, to)),
@@ -404,12 +433,13 @@ async function buildDashboard(config, { from, to }) {
     settle(() => buildGeo(propertyId, token, from, to)),
     settle(() => buildBrowserOs(propertyId, token, from, to)),
     settle(() => buildTimeseries(propertyId, token, from, to)),
+    settle(() => buildAdGroups(propertyId, token, from, to)),
   ]);
 
   return {
     range: { from, to }, prevRange: { from: prevFrom, to: prevTo },
     property: { id: propertyId, name: config.propertyName },
-    overview, trafficSources, landingPages, events, devices, geo, browserOs, timeseries,
+    overview, trafficSources, landingPages, events, devices, geo, browserOs, timeseries, adGroups,
     aiAnalysis: null,
   };
 }

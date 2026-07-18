@@ -223,15 +223,23 @@ async function buildReport(config, opts) {
     "SELECT segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.video_views " +
     "FROM campaign" + dateWhere + " ORDER BY segments.date";
 
+  // Ad-group breakdown
+  const agQ =
+    "SELECT campaign.name, ad_group.id, ad_group.name, ad_group.status, " +
+    "metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, " +
+    "metrics.conversions_value, metrics.ctr, metrics.average_cpc " +
+    "FROM ad_group" + dateWhere + " ORDER BY metrics.cost_micros DESC";
+
   const settle = async (fn) => { try { return await fn(); } catch (e) {
     const m = e && e.response && e.response.data && e.response.data.error ? e.response.data.error.message : e.message;
     return { __error: m };
   } };
 
-  const [campRes, devRes, dayRes] = await Promise.all([
+  const [campRes, devRes, dayRes, agRes] = await Promise.all([
     settle(function () { return gaqlSearch(config, token, campQ); }),
     settle(function () { return gaqlSearch(config, token, devQ); }),
     settle(function () { return gaqlSearch(config, token, dayQ); }),
+    settle(function () { return gaqlSearch(config, token, agQ); }),
   ]);
 
   const totals = { impressions: 0, clicks: 0, cost: 0, conversions: 0, conversionsValue: 0, videoViews: 0 };
@@ -306,12 +314,33 @@ async function buildReport(config, opts) {
     roas: totals.cost > 0 ? round2(totals.conversionsValue / totals.cost) : null,
   };
 
+  const adGroups = [];
+  const agRows = (agRes && agRes.results) ? agRes.results : [];
+  for (let i = 0; i < agRows.length; i++) {
+    const r = agRows[i];
+    const c = r.campaign || {}, ag = r.adGroup || {}, m = r.metrics || {};
+    const impressions = numOf(m.impressions), clicks = numOf(m.clicks);
+    const cost = microsToCur(m.costMicros), conv = round2(numOf(m.conversions));
+    adGroups.push({
+      adGroupId: ag.id ? String(ag.id) : "",
+      adGroupName: ag.name || "",
+      campaignName: c.name || "",
+      status: ag.status || "",
+      impressions: impressions, clicks: clicks, cost: round2(cost), conversions: conv,
+      conversionsValue: round2(numOf(m.conversionsValue)),
+      ctr: impressions > 0 ? round2((clicks / impressions) * 100) : 0,
+      avgCpc: clicks > 0 ? round2(cost / clicks) : 0,
+      costPerConversion: conv > 0 ? round2(cost / conv) : null,
+    });
+  }
+
   return {
     range: { from: from, to: to },
     account: { customerId: config.customerId, customerName: config.customerName },
-    overall: overall, campaigns: campaigns, devices: devices, timeseries: timeseries,
+    overall: overall, campaigns: campaigns, adGroups: adGroups, devices: devices, timeseries: timeseries,
     partialErrors: {
       campaigns: campRes && campRes.__error ? campRes.__error : null,
+      adGroups: agRes && agRes.__error ? agRes.__error : null,
       devices: devRes && devRes.__error ? devRes.__error : null,
       timeseries: dayRes && dayRes.__error ? dayRes.__error : null,
     },
