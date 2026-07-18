@@ -155,7 +155,7 @@ const updateAdmin = async (req, res) => {
 
 const createCompanyUser = async (req, res) => {
   try {
-    const { name, email, password, contactAccountEmail } = req.body;
+    const { name, email, password, contactAccountEmail, languages } = req.body;
     const companyId = req.admin.company._id;
 
     const company = await Company.findById(companyId);
@@ -184,6 +184,9 @@ const createCompanyUser = async (req, res) => {
       contactAccountEmail: contactAccountEmail
         ? String(contactAccountEmail).trim()
         : null,
+      languages: Array.isArray(languages)
+        ? languages.map(function (l) { return String(l).trim(); }).filter(Boolean)
+        : [],
     });
 
     res.status(201).json({
@@ -229,6 +232,13 @@ const getCompanyLeads = async (req, res) => {
     if (!isAdminRole) {
       filter.isClosed = { $ne: true };
     }
+    // Optional language filter. "none" matches leads with no language set.
+    const langQ = req.query.language;
+    if (typeof langQ === "string" && langQ.trim()) {
+      const l = langQ.trim();
+      if (l.toLowerCase() === "none") filter.$or = [{ language: "" }, { language: null }, { language: { $exists: false } }];
+      else filter.language = l;
+    }
 
     const [leads, total] = await Promise.all([
       Lead.find(filter)
@@ -241,6 +251,63 @@ const getCompanyLeads = async (req, res) => {
     ]);
 
     res.status(200).json({ leads, total, page, pages: Math.ceil(total / limit) });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── GET /api/admin/leads/languages ───────────────────────────────────────────
+// Distinct languages present on this company's leads (for the filter dropdown).
+const getDistinctLeadLanguages = async (req, res) => {
+  try {
+    const companyId = req.admin.company._id;
+    const langs = await Lead.distinct("language", {
+      company: companyId,
+      language: { $nin: [null, ""] },
+    });
+    res.status(200).json({ languages: (langs || []).filter(Boolean).sort() });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── PATCH /api/admin/leads/:id/language  { language } ─────────────────────────
+// Manual override of a lead's language ("" clears it).
+const updateLeadLanguage = async (req, res) => {
+  try {
+    const companyId = req.admin.company._id;
+    const language = typeof req.body.language === "string" ? req.body.language.trim() : "";
+    const lead = await Lead.findOneAndUpdate(
+      { _id: req.params.id, company: companyId },
+      { language: language },
+      { new: true }
+    ).populate("user", "name email").lean();
+    if (!lead) return res.status(404).json({ message: "Lead not found" });
+    res.status(200).json({ _id: lead._id, language: lead.language });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── PUT /api/admin/users/:id/languages  { languages: [..] } ───────────────────
+// Set the languages an employee can handle.
+const updateUserLanguages = async (req, res) => {
+  try {
+    const companyId = req.admin.company._id;
+    let langs = req.body.languages;
+    if (!Array.isArray(langs)) langs = [];
+    // clean: strings, trimmed, non-empty, de-duped
+    const seen = {};
+    const clean = [];
+    for (let i = 0; i < langs.length; i++) {
+      const v = typeof langs[i] === "string" ? langs[i].trim() : "";
+      if (v && !seen[v.toLowerCase()]) { seen[v.toLowerCase()] = true; clean.push(v); }
+    }
+    const query = { _id: req.params.id, company: companyId };
+    if (req.admin.role !== "super_admin") query.createdBy = req.admin._id;
+    const user = await User.findOneAndUpdate(query, { languages: clean }, { new: true }).select("-password -plainPassword");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.status(200).json({ _id: user._id, name: user.name, languages: user.languages });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1108,6 +1175,9 @@ module.exports = {
   updateAdmin,
   getCompanyUsers,
   getCompanyLeads,
+  getDistinctLeadLanguages,
+  updateLeadLanguage,
+  updateUserLanguages,
   createCompanyUser,
   deleteCompanyUser,
   getDashboardStats,
