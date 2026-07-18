@@ -129,6 +129,13 @@ const receiveGoogleWebhook = async (req, res) => {
     const assignedUserId = await getNextAssignedUserGoogle(config);
     const leadPayload    = mapGoogleLeadToSchema(parsedFields, config, googleLeadId, assignedUserId);
 
+    // Optional: auto-detect preferred language from the lead form columns.
+    try {
+      const detectLang = require("../utils/detectLanguage");
+      const lang = detectLang.fromGoogleColumns(userColumnData) || detectLang.fromParsedFields(parsedFields);
+      if (lang) leadPayload.language = lang;
+    } catch (e) { /* language is optional — ignore detection errors */ }
+
     // Phone-based dedup
     const normPhone = normalizePhone(leadPayload.mobile);
     if (normPhone) {
