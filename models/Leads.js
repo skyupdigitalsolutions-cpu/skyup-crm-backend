@@ -81,6 +81,10 @@ const leadSchema = mongoose.Schema(
     // so leads can be re-attributed to the correct ad-set config if they were
     // routed to a catch-all config at ingestion time.
     formId: { type: String, default: "", trim: true, index: true },
+    // Optional lead language (auto-detected from the ad form when present, or set
+    // manually). Empty string = unknown. Used to route/filter leads to employees
+    // who can communicate in that language.
+    language:  { type: String, default: "", trim: true, index: true },
     status:    { type: String, required: true, trim: true },
     date:      { type: Date, required: true },
     remark:    { type: String, required: true, trim: true },
