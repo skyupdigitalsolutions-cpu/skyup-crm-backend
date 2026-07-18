@@ -390,6 +390,11 @@ const clockOut = async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
+// Same cutoff used by markIdleJob.js and the admin live-status view — kept
+// here too so startBreak's cross-device guard (below) stays consistent with
+// how the rest of the system decides what counts as "still active".
+const IDLE_CUTOFF_MS = 5 * 60 * 1000;
+
 // ── USER: Start Break ─────────────────────────────────────────────────────────
 const startBreak = async (req, res) => {
   try {
@@ -400,6 +405,24 @@ const startBreak = async (req, res) => {
       return res.status(400).json({ message: "Not clocked in." });
     if (record.activeBreakIndex !== null)
       return res.status(400).json({ message: "Already on break." });
+
+    // FIX (mobile/web not in sync): an employee working from ONE device
+    // (say, the mobile app, pinging /attendance/ping every 60s while they
+    // take calls) could get force-marked "Idle" by the OTHER device (the
+    // web dashboard's client-side inactivity timer, which fires this
+    // endpoint with reason "Auto Idle" purely based on that browser tab's
+    // own mouse/keyboard silence). Both devices share the same attendance
+    // record, so before honoring an Auto-Idle request we check
+    // `lastActivity` — the single cross-device freshness signal both apps
+    // update on every ping/heartbeat. If it was touched within the idle
+    // cutoff (meaning the employee is demonstrably active somewhere), we
+    // skip marking idle and just return the record as-is, still "active",
+    // instead of letting one idle browser tab override real activity
+    // happening on the other platform.
+    if (reason === "Auto Idle" && record.lastActivity &&
+        (Date.now() - new Date(record.lastActivity).getTime()) < IDLE_CUTOFF_MS) {
+      return res.status(200).json(record);
+    }
 
     record.breaks.push({ startTime: new Date(), reason });
     record.activeBreakIndex = record.breaks.length - 1;
@@ -615,9 +638,19 @@ const getAttendanceReport = async (req, res) => {
       derivedCrmStatus : deriveCrmStatus(rec),
       workingHours     : formatWorkHours(rec.totalWorkMinutes),
       idleMinutes      : calcIdleMinutes(rec.breaks),
+      // FIX: idleTime must NEVER fall back to rec.idealTime. "Idle Time" is
+      // the auto-computed duration of inactivity (Auto Idle gaps); "Ideal
+      // Time" is the employee's self-declared planned shift window (e.g.
+      // "10:00 AM - 6:00 PM") — two unrelated fields that happen to have
+      // similar names. The old fallback showed the employee's planned shift
+      // text in the "Idle Time" column (styled as auto-idle data) whenever
+      // they hadn't actually gone idle that day, which is the common case —
+      // making it look like their stated hours were flagged as idle/slacking
+      // time. idealTime is already returned as its own field for the
+      // separate "Ideal Time" column.
       idleTime         : (() => {
         const idle = calcIdleMinutes(rec.breaks);
-        return idle > 0 ? formatWorkHours(idle) : (rec.idealTime || "—");
+        return idle > 0 ? formatWorkHours(idle) : "—";
       })(),
       manualBreakMinutes : calcManualBreakMinutes(rec.breaks),
     }));
@@ -794,13 +827,15 @@ const exportAttendance = async (req, res) => {
       checkOut     : rec.logoutTime ? new Date(rec.logoutTime).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }) : "—",
       workingHours : formatWorkHours(rec.totalWorkMinutes),
       breakMinutes : calcManualBreakMinutes(rec.breaks),
-      // Auto-computed idle time (Auto Idle gaps, excluding manual breaks),
-      // shown in the "Ideal/Idle Time" column. Falls back to the manual
-      // idealTime text only if no auto-idle was recorded.
+      // FIX: "Idle Time" (auto-computed Auto-Idle gaps) must not fall back to
+      // idealTime (the employee's self-declared planned shift text) — these
+      // are unrelated fields. idealTime/idealRemark are already exported as
+      // their own columns below, so this export was duplicating the same
+      // text into "Idle Time" too whenever there was no real idle gap.
       idleMinutes  : calcIdleMinutes(rec.breaks),
       idleTime     : (() => {
         const idle = calcIdleMinutes(rec.breaks);
-        return idle > 0 ? formatWorkHours(idle) : (rec.idealTime || "—");
+        return idle > 0 ? formatWorkHours(idle) : "—";
       })(),
       status       : deriveCrmStatus(rec),
       remarks      : rec.remarks || "",
