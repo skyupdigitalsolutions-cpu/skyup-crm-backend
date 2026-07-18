@@ -11,6 +11,9 @@ const {
   updateAdmin,
   getCompanyUsers,
   getCompanyLeads,
+  getDistinctLeadLanguages,
+  updateLeadLanguage,
+  updateUserLanguages,
   createCompanyUser,
   deleteCompanyUser,
   getDashboardStats,
@@ -118,6 +121,9 @@ router.put(
 );
 
 router.get("/company/leads",     protectAdmin, getCompanyLeads);
+router.get("/leads/languages",   protectAdmin, getDistinctLeadLanguages);
+router.patch("/leads/:id/language", protectAdmin, updateLeadLanguage);
+router.put("/users/:id/languages",  protectAdmin, updateUserLanguages);
 router.get("/dashboard-stats",   protectAdmin, getDashboardStats);
 router.get("/company/auto-template", protectAdmin, getAutoTemplateSettings);
 router.put("/company/auto-template", protectAdmin, updateAutoTemplateSettings);
