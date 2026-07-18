@@ -132,14 +132,18 @@ const getConnectUrl = async (req, res) => {
 // GET /api/google-ads-api/callback
 const oauthCallback = async (req, res) => {
   const frontend = process.env.GA_POST_CONNECT_REDIRECT || process.env.FRONTEND_URL || "/";
-  const bounce = (status) => res.redirect(frontend + (frontend.includes("?") ? "&" : "?") + "gads=" + status);
+  const bounce = (status, reason) => {
+    let url = frontend + (frontend.includes("?") ? "&" : "?") + "gads=" + status;
+    if (reason) url += "&gads_reason=" + encodeURIComponent(String(reason).slice(0, 300));
+    return res.redirect(url);
+  };
   try {
     const { code, state, error } = req.query;
-    if (error) return bounce("denied");
-    if (!code || !state) return bounce("error");
+    if (error) return bounce("denied", error);
+    if (!code || !state) return bounce("error", "Missing code or state from Google.");
     let payload;
-    try { payload = jwt.verify(state, JWT_SECRET); } catch (e) { return bounce("expired"); }
-    if (payload.t !== "gads_oauth" || !payload.company) return bounce("error");
+    try { payload = jwt.verify(state, JWT_SECRET); } catch (e) { return bounce("expired", "OAuth state expired — please try connecting again."); }
+    if (payload.t !== "gads_oauth" || !payload.company) return bounce("error", "Invalid OAuth state.");
 
     const existing = await loadConfig(payload.company);
     const creds = ads.resolveCreds(existing);
@@ -159,9 +163,12 @@ const oauthCallback = async (req, res) => {
     await GoogleAdsApiConfig.findOneAndUpdate({ company: payload.company }, setFields, { upsert: true, returnDocument: "after" });
     return bounce("connected");
   } catch (err) {
-    const detail = err && err.response && err.response.data ? err.response.data : err.message;
+    const apiErr = err && err.response && err.response.data && err.response.data.error;
+    const detail = apiErr
+      ? (apiErr.error_description || apiErr.message || JSON.stringify(apiErr))
+      : (err && err.response && err.response.data ? JSON.stringify(err.response.data) : err.message);
     console.error("[GAds] callback error:", detail);
-    return bounce("error");
+    return bounce("error", detail);
   }
 };
 
