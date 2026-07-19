@@ -8,6 +8,7 @@ const {
   toggleConfig,
   deleteConfig,
   getInsights,
+  getAdLevelInsights,
 } = require("../controllers/metaConfigController");
 const { syncFromMeta } = require("../controllers/metaSyncController");
 const { getFormQuestions } = require("../controllers/metaQualificationController");
@@ -25,7 +26,8 @@ const countCompanyMetaConfigs = async (req) => {
 
 // All routes protected — company is derived from req.admin inside the controller
 router.get("/", protectAdmin, getAllConfigs);
-router.get("/insights", protectAdmin, getInsights); // ← ad performance report (before /:id)
+router.get("/insights",   protectAdmin, getInsights);       // ← campaign/adset performance report
+router.get("/ad-level",   protectAdmin, getAdLevelInsights); // ← individual ad performance + creatives
 // Connection helpers — specific paths BEFORE /:id so they aren't captured as an id.
 router.get("/connection-status", protectAdmin, connectionStatus);  // per-config status badges
 router.get("/page-leads", protectAdmin, pageLeads);                // page-level leads grouped by ad set
