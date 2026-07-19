@@ -232,6 +232,7 @@ app.use('/wa-webhook',    whatsappRoutes);
 // rejected by the origin allowlist. See the block above `app.use(cors(...))`.
 
 // ── API Routes ────────────────────────────────────────────────────────────────
+app.use('/api/marketing-panel',     require('./routes/marketingPanel'));
 app.use('/api/meta-config',         metaConfigRoute);
 app.use('/api/meta-qualification',  require('./routes/metaQualification'));
 app.use('/api/superadmin',          superAdminRoute);
