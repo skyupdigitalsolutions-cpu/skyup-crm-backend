@@ -230,6 +230,19 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
     throw new Error("pageId and pageAccessToken are required");
   }
 
+  // Fallback ads_read token: the page token often cannot read ad-set / campaign
+  // effective_status (needed to mirror campaign/ad-set pauses). The Meta
+  // Performance report stores an ads_read token on MetaConfig — reuse it so
+  // status detection works without any extra setup.
+  let fallbackAdsToken = "";
+  try {
+    const credCfg = await MetaConfig.findOne({
+      company: companyId,
+      adsToken: { $nin: ["", null] },
+    }).select("adsToken").lean();
+    if (credCfg && credCfg.adsToken) fallbackAdsToken = credCfg.adsToken;
+  } catch (e) { /* optional — ignore */ }
+
   // ── Step 1: legacy index migration ──────────────────────────────────────────
   await dropLegacyPageIdIndex();
 
@@ -263,26 +276,38 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
   const getAdsetInfo = async (adsetId) => {
     if (!adsetId) return null;
     if (adsetCache.has(adsetId)) return adsetCache.get(adsetId);
-    try {
+    const fetchWith = async (tok) => {
       const adsetRes = await axios.get(
         `https://graph.facebook.com/${graphApiVersion}/${adsetId}`,
         {
           params: {
             fields: "id,name,effective_status,status,campaign_id,campaign{id,name}",
-            access_token: pageAccessToken,
+            access_token: tok,
           },
         }
       );
       const a = adsetRes.data || {};
-      const info = {
+      return {
+        id:              a.id || adsetId,
         name:            a.name || "",
-        campaignName:    a.campaign?.name || "",
-        campaignId:      a.campaign?.id || a.campaign_id || "",
+        campaignName:    a.campaign && a.campaign.name ? a.campaign.name : "",
+        campaignId:      (a.campaign && a.campaign.id) ? a.campaign.id : (a.campaign_id || ""),
         effectiveStatus: a.effective_status || a.status || "",
       };
+    };
+    try {
+      // Try the page token first; on failure (usually missing ads_read) retry
+      // with the account's ads_read token so campaign/ad-set pauses are still read.
+      let info;
+      try {
+        info = await fetchWith(pageAccessToken);
+      } catch (pageErr) {
+        if (fallbackAdsToken) info = await fetchWith(fallbackAdsToken);
+        else throw pageErr;
+      }
       adsetCache.set(adsetId, info);
       return info;
-    } catch {
+    } catch (e) {
       adsetCache.set(adsetId, null);
       return null;
     }
@@ -296,6 +321,7 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
         adset_name:    form.adset_name    || info?.name         || "",
         campaign_name: form.campaign_name || info?.campaignName || "",
         campaign_id:   form.campaign_id   || info?.campaignId   || "",
+        _adsetId:      form.adset_id       || (info && info.id ? info.id : ""),
         _adsetStatus:  info?.effectiveStatus || "",
       };
     })
@@ -377,6 +403,10 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
       // Always record the raw statuses for display.
       update.metaFormStatus     = formStatus;
       update.metaAdsetStatus    = adsetStatus;
+      // Backfill Meta IDs so the ads_read reconcile can match this card by id
+      // (more reliable than name matching when card names differ from Meta).
+      if (form._adsetId && !existing.metaAdsetId)       update.metaAdsetId    = form._adsetId;
+      if (form.campaign_id && !existing.metaCampaignId) update.metaCampaignId = form.campaign_id;
       update.metaActive         = metaActive;
       update.metaStatusSyncedAt = new Date();
 
@@ -424,6 +454,8 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
       pausedByMeta:    !metaActive,
       metaFormStatus:     formStatus,
       metaAdsetStatus:    adsetStatus,
+      metaAdsetId:        form._adsetId || "",
+      metaCampaignId:     form.campaign_id || "",
       metaActive,
       metaStatusSyncedAt: new Date(),
       defaultStatus:   "New",
