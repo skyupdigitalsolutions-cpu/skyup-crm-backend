@@ -16,10 +16,31 @@
 // no adAccountId/adsToken, it's reported as "not configured" (not an error).
 // ─────────────────────────────────────────────────────────────────────────────
 
-const axios     = require("axios");
+const axios      = require("axios");
+const mongoose   = require("mongoose");
 const MetaConfig = require("../models/MetaConfig");
 const Lead       = require("../models/Leads");
 const { callGroq } = require("../utils/leadActionSummary");
+
+// Defensive AiAnalysisCache accessor — registers the schema on-demand the first
+// time it is needed, so it never throws "Schema hasn't been registered for model".
+function getAiCache(conn) {
+  try {
+    return conn.model("AiAnalysisCache");
+  } catch (e) {
+    const schema = new mongoose.Schema(
+      {
+        kind:     String,
+        company:  mongoose.Schema.Types.ObjectId,
+        rangeKey: String,
+        payload:  mongoose.Schema.Types.Mixed,
+        createdAt: { type: Date, default: Date.now },
+      },
+      { strict: false }
+    );
+    return conn.model("AiAnalysisCache", schema);
+  }
+}
 
 // Call the AI with automatic retry on transient rate limits (HTTP 429).
 // callGroq rethrows the underlying axios error, so we catch a 429 here, wait
@@ -345,7 +366,7 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
   // Only analyse campaigns that actually returned data; skip if none configured.
   const configured = campaigns.filter((c) => c.configured && c.metrics && (c.metrics.spend > 0 || c.metrics.impressions > 0));
   if (withAI && configured.length > 0) {
-    const AiCache = Lead.db.model("AiAnalysisCache");
+    const AiCache = getAiCache(Lead.db);
     const rangeKey = `${from || "all"}..${to || "all"}`;
     try {
       // 1. Reuse a fresh cached analysis if present (avoids a provider call → no 429).
