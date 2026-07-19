@@ -218,6 +218,22 @@ const deleteConfig = async (req, res) => {
 // GET /api/meta-config/insights?from=&to=
 // Ad performance report (spend, CPM, CPC, CTR, reach) + cost-per-lead + setup
 // issue detection, per campaign/ad set, for the admin's company.
+const getAdLevelInsights = async (req, res) => {
+  try {
+    const companyId = req.admin && req.admin.company ? (req.admin.company._id || req.admin.company) : null;
+    if (!companyId) return res.status(400).json({ message: "Company not resolved" });
+    const { getMetaAdLevelReport } = require("../services/metaInsightsService");
+    const report = await getMetaAdLevelReport({
+      company: companyId,
+      from: req.query.from || null,
+      to:   req.query.to   || null,
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 const getInsights = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
@@ -244,4 +260,5 @@ module.exports = {
   toggleConfig,
   deleteConfig,
   getInsights,
+  getAdLevelInsights,
 };
