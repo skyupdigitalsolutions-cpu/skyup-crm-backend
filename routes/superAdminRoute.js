@@ -13,6 +13,10 @@ const {
   resendSuperAdminOtp,
   createCompany,
   createAdmin,
+  createMarketingUser,
+  listMarketingUsers,
+  toggleMarketingAccess,
+  deleteMarketingUser,
   getCompanies,
   getCompany,
   toggleCompany,
@@ -90,5 +94,12 @@ router.post   ("/custom-reports/:id/analyze",protectSuperAdmin, analyzeCustomRep
 router.get    ("/custom-reports/:id",        protectSuperAdmin, getCustomReport);
 router.put    ("/custom-reports/:id",        protectSuperAdmin, updateCustomReport);
 router.delete ("/custom-reports/:id",        protectSuperAdmin, deleteCustomReport);
+
+
+// ── Marketing Panel credential management ─────────────────────────────────────
+router.post("/marketing-users",             protectUnified, authorizeRoles("super_admin"), companyIsolation, createMarketingUser);
+router.get("/marketing-users",              protectUnified, authorizeRoles("super_admin"), companyIsolation, listMarketingUsers);
+router.patch("/marketing-users/:id/toggle", protectUnified, authorizeRoles("super_admin"), companyIsolation, toggleMarketingAccess);
+router.delete("/marketing-users/:id",       protectUnified, authorizeRoles("super_admin"), companyIsolation, deleteMarketingUser);
 
 module.exports = router;
