@@ -20,7 +20,7 @@ const axios      = require("axios");
 const mongoose   = require("mongoose");
 const MetaConfig = require("../models/MetaConfig");
 const Lead       = require("../models/Leads");
-const { callGroq } = require("../utils/leadActionSummary");
+const { callGrok } = require("../utils/leadActionSummary");
 
 // Defensive AiAnalysisCache accessor — registers the schema on-demand the first
 // time it is needed, so it never throws "Schema hasn't been registered for model".
@@ -51,7 +51,7 @@ async function callGroqWithRetry(systemPrompt, userContent, maxTokens, maxRetrie
   let attempt = 0;
   for (;;) {
     try {
-      return await callGroq(systemPrompt, userContent, maxTokens);
+      return await callGrok(systemPrompt, userContent, maxTokens);
     } catch (e) {
       const status = e?.response?.status;
       if (status === 429 && attempt < maxRetries) {
