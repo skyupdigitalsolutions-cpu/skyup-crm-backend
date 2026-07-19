@@ -426,4 +426,191 @@ async function runMetaAIAnalysis(campaigns, totals) {
   }
 }
 
-module.exports = { getMetaInsightsReport };
+// ─────────────────────────────────────────────────────────────────────────────
+// Ad-level performance report
+// Fetches insights at level=ad (one row per individual ad) and enriches each
+// ad with its creative copy (text, headline, CTA, URL, thumbnail) from the
+// /{ad_id}/adcreatives endpoint. Uses the same adsToken + adAccountId that
+// the campaign-level insights use — no new permissions required.
+// ─────────────────────────────────────────────────────────────────────────────
+async function getMetaAdLevelReport({ company, from, to }) {
+  const configs = await MetaConfig.find({ company: company, isActive: true }).lean();
+
+  // Collect one entry per unique adAccountId + adsToken pair.
+  const acctMap = {};
+  for (let i = 0; i < configs.length; i++) {
+    const c = configs[i];
+    const token = c.adsToken;
+    const acct  = c.adAccountId;
+    if (!token || !acct) continue;
+    const key = String(acct) + "|" + String(token);
+    if (!acctMap[key]) acctMap[key] = { acct: acct, token: token, ver: c.graphApiVersion || "v22.0" };
+  }
+
+  const entries = Object.values(acctMap);
+  if (entries.length === 0) {
+    return { configured: false, ads: [], message: "No Meta ad accounts configured. Add adAccountId + adsToken to a campaign config." };
+  }
+
+  // Helper: safe number
+  const n = function (v) { return v != null && !isNaN(Number(v)) ? Math.round(Number(v) * 100) / 100 : 0; };
+
+  // Date range
+  const today    = new Date();
+  const daysAgo  = function (d) { const dt = new Date(today); dt.setDate(dt.getDate() - d); return dt.toISOString().slice(0, 10); };
+  const since    = from  || daysAgo(30);
+  const until    = to    || daysAgo(0);
+  const timeRange = JSON.stringify({ since: since, until: until });
+
+  // Fetch creative details (text, headline, CTA, link, thumbnail)
+  const fetchCreative = async function (adId, token, ver) {
+    try {
+      const fields = "body,title,object_story_spec,image_url,thumbnail_url,call_to_action_type,link_url,name";
+      const r = await axios.get(
+        "https://graph.facebook.com/" + ver + "/" + adId + "/adcreatives",
+        { params: { fields: fields, access_token: token }, timeout: 10000 }
+      );
+      const cr = (r.data && r.data.data && r.data.data[0]) ? r.data.data[0] : null;
+      if (!cr) return {};
+      // Dig out text + headline from object_story_spec (link/video/photo stories)
+      let body = cr.body || "";
+      let headline = cr.title || "";
+      let linkUrl  = cr.link_url || "";
+      const spec = cr.object_story_spec;
+      if (spec) {
+        const ld = spec.link_data || spec.video_data || spec.photo_data || null;
+        if (ld) {
+          body     = body     || ld.message || "";
+          headline = headline || ld.name    || ld.title || "";
+          linkUrl  = linkUrl  || ld.link    || "";
+        }
+      }
+      return {
+        body:      body,
+        headline:  headline,
+        cta:       cr.call_to_action_type || "",
+        linkUrl:   linkUrl,
+        thumbnail: cr.thumbnail_url || cr.image_url || "",
+      };
+    } catch (e) {
+      return {}; // creative fetch is best-effort
+    }
+  };
+
+  const allAds = [];
+  const errors = [];
+
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    try {
+      // Fetch insights at ad level
+      const insightsRes = await axios.get(
+        "https://graph.facebook.com/" + e.ver + "/" + e.acct + "/insights",
+        {
+          params: {
+            level:        "ad",
+            fields:       "ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,spend,impressions,reach,clicks,cpm,cpc,ctr,frequency",
+            time_range:   timeRange,
+            limit:        500,
+            access_token: e.token,
+          },
+          timeout: 25000,
+        }
+      );
+
+      const rows = (insightsRes.data && Array.isArray(insightsRes.data.data)) ? insightsRes.data.data : [];
+
+      // Fetch ad status (active/paused) in a single batch call
+      const adIds = rows.map(function (r) { return r.ad_id; }).filter(Boolean);
+      const statusMap = {};
+      if (adIds.length) {
+        try {
+          const idsParam = adIds.join(",");
+          const batchRes = await axios.get(
+            "https://graph.facebook.com/" + e.ver + "/",
+            {
+              params: {
+                ids:          idsParam,
+                fields:       "id,name,status,effective_status",
+                access_token: e.token,
+              },
+              timeout: 15000,
+            }
+          );
+          const batchData = batchRes.data || {};
+          const keys = Object.keys(batchData);
+          for (let k = 0; k < keys.length; k++) {
+            const ad = batchData[keys[k]];
+            if (ad && ad.id) statusMap[String(ad.id)] = ad.effective_status || ad.status || "";
+          }
+        } catch (batchErr) { /* status is best-effort */ }
+      }
+
+      // Enrich each ad with creative — run in parallel, limit concurrency
+      const BATCH = 5;
+      const enriched = [];
+      for (let j = 0; j < rows.length; j += BATCH) {
+        const chunk = rows.slice(j, j + BATCH);
+        const results = await Promise.all(chunk.map(async function (row) {
+          const creative = await fetchCreative(row.ad_id, e.token, e.ver);
+          const adStatus = statusMap[String(row.ad_id)] || "";
+          return {
+            adId:         row.ad_id         || "",
+            adName:       row.ad_name        || "(unnamed ad)",
+            adsetId:      row.adset_id       || "",
+            adsetName:    row.adset_name     || "",
+            campaignId:   row.campaign_id    || "",
+            campaignName: row.campaign_name  || "",
+            status:       adStatus,
+            metrics: {
+              spend:       n(row.spend),
+              impressions: n(row.impressions),
+              reach:       n(row.reach),
+              clicks:      n(row.clicks),
+              cpm:         n(row.cpm),
+              cpc:         n(row.cpc),
+              ctr:         n(row.ctr),
+              frequency:   n(row.frequency),
+            },
+            creative: creative,
+          };
+        }));
+        for (let r = 0; r < results.length; r++) enriched.push(results[r]);
+      }
+
+      for (let j = 0; j < enriched.length; j++) allAds.push(enriched[j]);
+    } catch (fetchErr) {
+      const fbErr = fetchErr && fetchErr.response && fetchErr.response.data && fetchErr.response.data.error
+        ? fetchErr.response.data.error.message : fetchErr.message;
+      errors.push({ account: e.acct, error: fbErr });
+    }
+  }
+
+  // Sort by spend desc
+  allAds.sort(function (a, b) { return b.metrics.spend - a.metrics.spend; });
+
+  // Totals
+  const totals = { spend: 0, impressions: 0, reach: 0, clicks: 0 };
+  for (let i = 0; i < allAds.length; i++) {
+    const m = allAds[i].metrics;
+    totals.spend       += m.spend;
+    totals.impressions += m.impressions;
+    totals.reach       += m.reach;
+    totals.clicks      += m.clicks;
+  }
+  totals.spend       = Math.round(totals.spend * 100) / 100;
+  totals.impressions = Math.round(totals.impressions);
+  totals.reach       = Math.round(totals.reach);
+  totals.clicks      = Math.round(totals.clicks);
+
+  return {
+    configured: true,
+    range: { from: since, to: until },
+    totals: totals,
+    ads: allAds,
+    errors: errors,
+    accountsQueried: entries.length,
+  };
+}
+
+module.exports = { getMetaInsightsReport, getMetaAdLevelReport };
