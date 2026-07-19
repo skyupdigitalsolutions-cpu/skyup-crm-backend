@@ -1166,6 +1166,18 @@ const saveAttendanceConfig = async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
+
+const getMarketingDashboard = async (req, res) => {
+  try {
+    const companyId = req.admin.company._id || req.admin.company;
+    const { getMarketingDashboard: svc } = require("../services/marketingDashboardService");
+    const data = await svc({ company: companyId, query: req.query });
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -1175,6 +1187,7 @@ module.exports = {
   updateAdmin,
   getCompanyUsers,
   getCompanyLeads,
+  getMarketingDashboard,
   getDistinctLeadLanguages,
   updateLeadLanguage,
   updateUserLanguages,
