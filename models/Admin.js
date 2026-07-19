@@ -42,6 +42,11 @@ const adminSchema = mongoose.Schema(
     telegramChatId:             { type: String, default: null, trim: true },
     telegramNotificationsEnabled: { type: Boolean, default: true },
 
+    // ── Marketing Panel access ────────────────────────────────────────────────
+    // When true, this admin can log into the standalone Performance Marketing
+    // Panel (/marketing/login). Set by super admin in Company Details.
+    marketingAccess: { type: Boolean, default: false },
+
     // ── Forgot-password OTP fields ────────────────────────────────────────────
     resetOtp:         { type: String, default: null },   // bcrypt-hashed OTP
     resetOtpExpiry:   { type: Date,   default: null },
