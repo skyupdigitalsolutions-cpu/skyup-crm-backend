@@ -451,6 +451,65 @@ const toggleCallLogSync = async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Marketing Panel credential management (super admin only)
+// Creates / lists / toggles / deletes Admin records with marketingAccess=true
+// ─────────────────────────────────────────────────────────────────────────────
+
+const createMarketingUser = async (req, res) => {
+  try {
+    const companyId = req.companyId;
+    if (!companyId) return res.status(400).json({ message: "Company context missing" });
+    const { name, email, password } = req.body;
+    if (!name || !email || !password) return res.status(400).json({ message: "Name, email and password are required." });
+    const existing = await Admin.findOne({ email: email.toLowerCase().trim() });
+    if (existing) return res.status(400).json({ message: "An account with this email already exists." });
+    const admin = await Admin.create({
+      name:            name.trim(),
+      email:           email.toLowerCase().trim(),
+      password:        password,
+      plainPassword:   password,
+      role:            "admin",
+      company:         companyId,
+      marketingAccess: true,
+      isActive:        true,
+    });
+    res.status(201).json({ _id: admin._id, name: admin.name, email: admin.email, marketingAccess: admin.marketingAccess, isActive: admin.isActive, createdAt: admin.createdAt });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
+const listMarketingUsers = async (req, res) => {
+  try {
+    const companyId = req.companyId;
+    if (!companyId) return res.status(400).json({ message: "Company context missing" });
+    const users = await Admin.find({ company: companyId, marketingAccess: true }).select("-password -resetOtp").lean();
+    res.json(users);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
+const toggleMarketingAccess = async (req, res) => {
+  try {
+    const companyId = req.companyId;
+    const admin = await Admin.findOne({ _id: req.params.id, company: companyId });
+    if (!admin) return res.status(404).json({ message: "User not found" });
+    admin.marketingAccess = !admin.marketingAccess;
+    await admin.save();
+    res.json({ _id: admin._id, marketingAccess: admin.marketingAccess });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
+const deleteMarketingUser = async (req, res) => {
+  try {
+    const companyId = req.companyId;
+    const admin = await Admin.findOne({ _id: req.params.id, company: companyId, marketingAccess: true });
+    if (!admin) return res.status(404).json({ message: "Marketing user not found" });
+    if (admin.role === "super_admin") return res.status(403).json({ message: "Cannot delete super admin." });
+    await Admin.deleteOne({ _id: admin._id });
+    res.json({ deleted: true });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
 module.exports = {
   registerSuperAdmin,
   loginSuperAdmin,
@@ -458,6 +517,10 @@ module.exports = {
   resendSuperAdminOtp,
   createCompany,
   createAdmin,
+  createMarketingUser,
+  listMarketingUsers,
+  toggleMarketingAccess,
+  deleteMarketingUser,
   getCompanies,
   getCompany,
   toggleCompany,
