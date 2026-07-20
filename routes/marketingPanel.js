@@ -97,4 +97,130 @@ router.get("/google-ads", protectMarketing, function (req, res, next) {
   }
 });
 
+// ── Meta ad-level (individual ad performance + creatives) ────────────────────
+router.get("/meta-ad-level", protectMarketing, function (req, res) {
+  try {
+    const { getMetaAdLevelReport } = require("../services/metaInsightsService");
+    const companyId = req.admin.company._id || req.admin.company;
+    getMetaAdLevelReport({ company: companyId, from: req.query.from || null, to: req.query.to || null })
+      .then(function (data) { res.json(data); })
+      .catch(function (err) { res.status(500).json({ message: err.message }); });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ── Leads Intelligence — ad-level lead breakdown + converting leads ───────────
+router.get("/leads-intelligence", protectMarketing, function (req, res) {
+  try {
+    const Lead      = require("../models/Leads");
+    const companyId = req.admin.company._id || req.admin.company;
+    const from      = req.query.from || null;
+    const to        = req.query.to   || null;
+    const status    = req.query.status || null;
+    const campaign  = req.query.campaign || null;
+
+    const filter = { company: companyId, mergedInto: null };
+    if (from || to) {
+      filter.date = {};
+      if (from) { const d = new Date(from); filter.date["$gte"] = d; }
+      if (to)   { const d = new Date(to); d.setHours(23,59,59,999); filter.date["$lte"] = d; }
+    }
+    if (status)   filter.status   = status;
+    if (campaign) filter.campaign = campaign;
+
+    // Run all queries in parallel
+    Promise.all([
+      // 1. Ad-level (campaign + adSetName) breakdown with status counts
+      Lead.aggregate([
+        { "$match": filter },
+        { "$group": {
+          "_id": { campaign: "$campaign", adSet: "$adSetName", source: "$source" },
+          total:      { "$sum": 1 },
+          converted:  { "$sum": { "$cond": [{ "$eq": ["$status","Converted"] }, 1, 0] } },
+          inProgress: { "$sum": { "$cond": [{ "$eq": ["$status","In Progress"] }, 1, 0] } },
+          newLeads:   { "$sum": { "$cond": [{ "$eq": ["$status","New"] }, 1, 0] } },
+          notInt:     { "$sum": { "$cond": [{ "$eq": ["$status","Not Interested"] }, 1, 0] } },
+          verif:      { "$sum": { "$cond": [{ "$eq": ["$status","Verification"] }, 1, 0] } },
+          firstLead:  { "$min": "$date" },
+          lastLead:   { "$max": "$date" },
+        }},
+        { "$sort": { total: -1 } },
+      ]),
+      // 2. Converted leads with full detail
+      Lead.find(Object.assign({}, filter, { status: "Converted" }))
+        .select("name mobile email campaign adSetName source status date remark user language")
+        .sort({ date: -1 }).limit(200).lean(),
+      // 3. Recent leads (all) for the table
+      Lead.find(filter)
+        .select("name mobile email campaign adSetName source status date remark followUpDate user language")
+        .sort({ date: -1 }).limit(500).lean(),
+      // 4. Distinct campaigns for filter
+      Lead.distinct("campaign", { company: companyId, campaign: { "$nin": [null, ""] } }),
+    ]).then(function(results) {
+      const adLevelRaw = results[0];
+      const convertedLeads = results[1];
+      const allLeads = results[2];
+      const campaigns = results[3];
+
+      // Group ad-level by campaign
+      const campaignMap = {};
+      for (let i = 0; i < adLevelRaw.length; i++) {
+        const r = adLevelRaw[i];
+        const campName = (r["_id"] && r["_id"].campaign) ? r["_id"].campaign : "Unknown";
+        const adSet    = (r["_id"] && r["_id"].adSet)    ? r["_id"].adSet    : "—";
+        const source   = (r["_id"] && r["_id"].source)   ? r["_id"].source   : "—";
+        if (!campaignMap[campName]) campaignMap[campName] = { campaign: campName, adSets: [], total: 0, converted: 0 };
+        const convRate = r.total > 0 ? Math.round((r.converted / r.total) * 10000) / 100 : 0;
+        campaignMap[campName].adSets.push({
+          adSet: adSet, source: source,
+          total: r.total, converted: r.converted, inProgress: r.inProgress,
+          newLeads: r.newLeads, notInt: r.notInt, verif: r.verif,
+          convRate: convRate,
+          firstLead: r.firstLead, lastLead: r.lastLead,
+        });
+        campaignMap[campName].total     += r.total;
+        campaignMap[campName].converted += r.converted;
+      }
+      const adLevel = Object.values(campaignMap)
+        .sort(function(a,b){ return b.total - a.total; })
+        .map(function(c) {
+          c.convRate = c.total > 0 ? Math.round((c.converted / c.total) * 10000) / 100 : 0;
+          c.adSets = c.adSets.sort(function(a,b){ return b.total - a.total; });
+          return c;
+        });
+
+      // Format lead lists
+      const fmt = function(l) {
+        return {
+          _id:        String(l._id),
+          name:       l.name || "",
+          mobile:     l.mobile || "",
+          email:      l.email  || "",
+          campaign:   l.campaign  || "—",
+          adSet:      l.adSetName || "—",
+          source:     l.source    || "—",
+          status:     l.status    || "",
+          date:       l.date,
+          remark:     l.remark    || "",
+          agent:      (l.user && l.user.name) ? l.user.name : "Unassigned",
+          language:   l.language  || "",
+        };
+      };
+
+      res.json({
+        adLevel:        adLevel,
+        convertedLeads: convertedLeads.map(fmt),
+        allLeads:       allLeads.map(fmt),
+        filters:        { campaigns: (campaigns || []).filter(Boolean).sort() },
+        range:          { from: from, to: to },
+      });
+    }).catch(function(err) {
+      res.status(500).json({ message: err.message });
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 module.exports = router;
