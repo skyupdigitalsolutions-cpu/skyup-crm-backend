@@ -120,7 +120,10 @@ router.get("/leads-intelligence", protectMarketing, function (req, res) {
     const status    = req.query.status || null;
     const campaign  = req.query.campaign || null;
 
-    const filter = { company: companyId, mergedInto: null };
+    const filter = { company: companyId, mergedInto: null,
+      // Only Meta Ads and Google Ads leads — exclude organic, WhatsApp, manual, etc.
+      source: { "$in": ["Meta Ads", "Google Ads", "meta", "google", "Facebook Ads", "Instagram Ads"] },
+    };
     if (from || to) {
       filter.date = {};
       if (from) { const d = new Date(from); filter.date["$gte"] = d; }
