@@ -483,9 +483,10 @@ const listMarketingUsers = async (req, res) => {
   try {
     const companyId = req.companyId;
     if (!companyId) return res.status(400).json({ message: "Company context missing" });
-    // Migrate any existing records that were created with role:admin + marketingAccess:true
+    // Migrate any legacy records created with role:admin + marketingAccess:true
+    // → role:marketing_user so they are excluded from the main admin list.
     await Admin.updateMany(
-      { company: companyId, marketingAccess: true, role: "admin" },
+      { company: companyId, marketingAccess: true, role: { $in: ["admin", "sub_admin"] } },
       { $set: { role: "marketing_user" } }
     );
     const users = await Admin.find({
