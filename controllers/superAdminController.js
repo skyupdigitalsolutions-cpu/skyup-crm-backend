@@ -470,7 +470,7 @@ const createMarketingUser = async (req, res) => {
       email:           email.toLowerCase().trim(),
       password:        password,
       plainPassword:   password,
-      role:            "admin",
+      role:            "marketing_user",
       company:         companyId,
       marketingAccess: true,
       isActive:        true,
@@ -483,7 +483,15 @@ const listMarketingUsers = async (req, res) => {
   try {
     const companyId = req.companyId;
     if (!companyId) return res.status(400).json({ message: "Company context missing" });
-    const users = await Admin.find({ company: companyId, marketingAccess: true }).select("-password -resetOtp").lean();
+    // Migrate any existing records that were created with role:admin + marketingAccess:true
+    await Admin.updateMany(
+      { company: companyId, marketingAccess: true, role: "admin" },
+      { $set: { role: "marketing_user" } }
+    );
+    const users = await Admin.find({
+      company: companyId,
+      $or: [{ role: "marketing_user" }, { marketingAccess: true }],
+    }).select("-password -resetOtp").lean();
     res.json(users);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
