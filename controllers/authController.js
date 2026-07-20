@@ -149,9 +149,8 @@ const loginUnified = async (req, res) => {
       if (!admin.company?.isActive)
         return res.status(403).json({ message: "Company is suspended" });
 
-      // Marketing-only users logging into the main CRM get redirected to the
-      // marketing panel — their token works there but not here.
-      if (admin.marketingAccess && admin.role === "admin") {
+      // marketing_user role = marketing-panel-only account, cannot use main CRM
+      if (admin.role === "marketing_user" || admin.marketingAccess) {
         return res.status(403).json({
           message: "This account is for the Performance Marketing Dashboard. Please log in at skyupcrm.com/marketing/login",
           redirectTo: "/marketing/login",
@@ -165,7 +164,6 @@ const loginUnified = async (req, res) => {
         companyId: admin.company._id,
         companyName: admin.company.name,
         brandLogoUrl: admin.company.brandLogoUrl,
-        marketingAccess: admin.marketingAccess || false,
         token: generateToken(admin._id, admin.role),
       });
     }
