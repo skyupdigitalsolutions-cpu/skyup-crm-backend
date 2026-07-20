@@ -12,7 +12,10 @@ function safeNum(v) { return v && !isNaN(Number(v)) ? Math.round(Number(v) * 100
 
 // Build Mongo filter from query params
 function buildFilter(company, query) {
-  const filter = { company: company, mergedInto: null };
+  const filter = { company: company, mergedInto: null,
+    // Marketing dashboard only shows leads from paid ad platforms
+    source: { "$in": ["Meta Ads", "Google Ads", "meta", "google", "Facebook Ads", "Instagram Ads"] },
+  };
 
   // Date range
   if (query.from || query.to) {
