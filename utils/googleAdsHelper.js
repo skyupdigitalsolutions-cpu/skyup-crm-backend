@@ -87,6 +87,7 @@ const mapGoogleLeadToSchema = (parsed, config, googleLeadId, assignedUserId) => 
     email,
     source:      "Google Ads",
     campaign:    config.campaignName,
+    adSetName:   config.adGroupName || config.adSetName || "",
     status:      config.defaultStatus,
     date:        new Date(),
     remark:      config.defaultRemark,
