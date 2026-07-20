@@ -31,9 +31,7 @@ const protectMarketing = async (req, res, next) => {
     // Employees (role: "user") can never access even with a flag
     if (decoded.role === "user") {
       return res.status(403).json({ message: "Access denied — admin login required." });
-    }
-
-    const admin = await Admin.findById(decoded.id).populate("company").lean();
+    }    const admin = await Admin.findById(decoded.id).populate("company").lean();
     if (!admin) {
       return res.status(401).json({ message: "Account not found." });
     }
@@ -41,7 +39,8 @@ const protectMarketing = async (req, res, next) => {
     // Must have marketingAccess: true — set by super admin in Company Details.
     // super_admin always has access; regular admins need the flag set.
     const isSuperAdmin = admin.role === "super_admin" || admin.role === "superadmin";
-    if (!isSuperAdmin && !admin.marketingAccess) {
+    const isMarketingUser = admin.role === "marketing_user" || admin.marketingAccess;
+    if (!isSuperAdmin && !isMarketingUser) {
       return res.status(403).json({ message: "Marketing panel access not granted. Contact your super admin." });
     }
 
