@@ -16,7 +16,7 @@ const adminSchema = mongoose.Schema(
     // ── UPDATED: "superadmin" renamed to "super_admin" ────────────────────────
     role: {
       type: String,
-      enum: ["super_admin", "admin"],
+      enum: ["super_admin", "admin", "marketing_user"],
       default: "admin",
     },
 
