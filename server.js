@@ -232,6 +232,23 @@ app.use('/wa-webhook',    whatsappRoutes);
 // rejected by the origin allowlist. See the block above `app.use(cors(...))`.
 
 // ── API Routes ────────────────────────────────────────────────────────────────
+// ── One-time migration: marketing-only admins → role:marketing_user ───────────
+// Runs once after DB connects. Safe to run on every deploy (no-op when done).
+const runMarketingRoleMigration = async () => {
+  try {
+    const Admin = require("./models/Admin");
+    const result = await Admin.updateMany(
+      { marketingAccess: true, role: { $in: ["admin", "sub_admin"] } },
+      { $set: { role: "marketing_user" } }
+    );
+    if (result.modifiedCount > 0) {
+      console.log("[Migration] marketing_user role: updated " + result.modifiedCount + " admin(s) → marketing_user");
+    }
+  } catch (e) {
+    console.warn("[Migration] marketing_user role migration failed (non-fatal):", e.message);
+  }
+};
+
 app.use('/api/marketing-panel',     require('./routes/marketingPanel'));
 app.use('/api/meta-config',         metaConfigRoute);
 app.use('/api/meta-qualification',  require('./routes/metaQualification'));
@@ -327,6 +344,9 @@ global._io = io;
 initSocket(io);
 
 connectDB().then(() => {
+  // Migrate any marketing-only admins that still have role:admin → marketing_user
+  runMarketingRoleMigration();
+
   const PORT = process.env.PORT || 5000;
   server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
