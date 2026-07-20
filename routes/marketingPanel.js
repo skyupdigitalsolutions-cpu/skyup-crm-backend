@@ -121,8 +121,13 @@ router.get("/leads-intelligence", protectMarketing, function (req, res) {
     const campaign  = req.query.campaign || null;
 
     const filter = { company: companyId, mergedInto: null,
-      // Only Meta Ads and Google Ads leads — exclude organic, WhatsApp, manual, etc.
-      source: { "$in": ["Meta Ads", "Google Ads", "meta", "google", "Facebook Ads", "Instagram Ads"] },
+      // Only paid ad platform leads. Uses $or so leads with a metaConfigId
+      // are always included even if source field was set inconsistently.
+      "$or": [
+        { source: { "$in": ["Meta Ads", "Meta", "Google Ads", "meta", "google", "Facebook Ads", "Instagram Ads"] } },
+        { metaConfigId: { "$ne": null, "$exists": true } },
+        { formId:       { "$ne": "",   "$exists": true } },
+      ],
     };
     if (from || to) {
       filter.date = {};
