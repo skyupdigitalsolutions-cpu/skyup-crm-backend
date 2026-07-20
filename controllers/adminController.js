@@ -45,6 +45,12 @@ const getAdmins = async (req, res) => {
   try {
     const filter = { company: req.admin.company._id };
     if (req.admin.role !== "super_admin") filter.role = { $ne: "super_admin" };
+    // Never show marketing-panel-only users in the admin list — they are
+    // managed in the Marketing Panel Access section of User Management.
+    filter.role = filter.role
+      ? { $nin: ["super_admin", "marketing_user"] }
+      : { $nin: ["marketing_user"] };
+    filter.marketingAccess = { $ne: true };
     const selectFields = req.admin.role === "super_admin" ? "-password" : "-password -plainPassword";
     const admins = await Admin.find(filter).select(selectFields);
     res.status(200).json(admins);
