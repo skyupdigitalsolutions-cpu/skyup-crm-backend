@@ -13,8 +13,13 @@ function safeNum(v) { return v && !isNaN(Number(v)) ? Math.round(Number(v) * 100
 // Build Mongo filter from query params
 function buildFilter(company, query) {
   const filter = { company: company, mergedInto: null,
-    // Marketing dashboard only shows leads from paid ad platforms
-    source: { "$in": ["Meta Ads", "Google Ads", "meta", "google", "Facebook Ads", "Instagram Ads"] },
+    // Only paid ad leads. $or catches leads by source value OR by having a
+    // metaConfigId/formId (older leads where source may have been set differently).
+    "$or": [
+      { source: { "$in": ["Meta Ads", "Meta", "Google Ads", "meta", "google", "Facebook Ads", "Instagram Ads"] } },
+      { metaConfigId: { "$ne": null, "$exists": true } },
+      { formId:       { "$ne": "",   "$exists": true } },
+    ],
   };
 
   // Date range
