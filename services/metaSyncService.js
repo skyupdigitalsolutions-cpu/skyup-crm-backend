@@ -14,6 +14,64 @@
 const axios      = require("axios");
 const MetaConfig = require("../models/MetaConfig");
 
+// ── Auto-category from Meta campaign objective ────────────────────────────────
+// Maps Meta's OBJECTIVE enum → a readable category label stored on MetaConfig.
+// Only sets category when blank — never overwrites a manually set one.
+function objectiveToCategory(objective) {
+  if (!objective) return "";
+  const map = {
+    LEAD_GENERATION:       "Lead Generation",
+    LEADS:                 "Lead Generation",
+    OUTCOME_LEADS:         "Lead Generation",
+    CONVERSIONS:           "Conversions",
+    OUTCOME_SALES:         "Conversions",
+    TRAFFIC:               "Traffic",
+    OUTCOME_TRAFFIC:       "Traffic",
+    BRAND_AWARENESS:       "Brand Awareness",
+    REACH:                 "Brand Awareness",
+    OUTCOME_AWARENESS:     "Brand Awareness",
+    VIDEO_VIEWS:           "Video Views",
+    POST_ENGAGEMENT:       "Engagement",
+    PAGE_LIKES:            "Engagement",
+    OUTCOME_ENGAGEMENT:    "Engagement",
+    APP_INSTALLS:          "App Installs",
+    OUTCOME_APP_PROMOTION: "App Installs",
+    MESSAGES:              "Messages",
+    STORE_VISITS:          "Store Visits",
+    PRODUCT_CATALOG_SALES: "Catalogue Sales",
+    EVENT_RESPONSES:       "Events",
+  };
+  return map[String(objective).toUpperCase()] || "";
+}
+
+// ── Keyword-based category fallback from campaign name ───────────────────────
+// When Meta doesn't return an objective (e.g. no adsToken), infer category
+// from keywords in the campaign name. Returns "" if nothing matches.
+function inferCategoryFromName(campaignName) {
+  if (!campaignName) return "";
+  const name = campaignName.toLowerCase();
+  const keywords = [
+    { cat: "Real Estate",      words: ["real estate","property","realty","flat","villa","apartment","plot","housing","builder"] },
+    { cat: "Education",        words: ["education","school","college","course","coaching","admission","training","tuition","academy","university","skill"] },
+    { cat: "Healthcare",       words: ["health","hospital","clinic","doctor","medical","pharma","wellness","dental","ayur","therapy"] },
+    { cat: "Finance",          words: ["finance","loan","insurance","invest","bank","credit","emi","mutual fund","sip","nri","gold","fd"] },
+    { cat: "Automotive",       words: ["car","bike","vehicle","auto","motor","ev","electric vehicle","suv","sedan"] },
+    { cat: "E-commerce",       words: ["sale","offer","discount","shop","buy","deal","brand","product","ecom","fashion","clothing"] },
+    { cat: "Lead Generation",  words: ["lead gen","lead generation","leadgen","inquiry","enquiry"] },
+    { cat: "Brand Awareness",  words: ["brand","awareness","reach","impression","visibility"] },
+    { cat: "Travel",           words: ["travel","tour","holiday","vacation","flight","hotel","resort","trip"] },
+    { cat: "Technology",       words: ["software","saas","app","tech","crm","erp","digital","it ","website","startup"] },
+    { cat: "Events",           words: ["event","webinar","seminar","conference","workshop","launch","expo"] },
+  ];
+  for (var i = 0; i < keywords.length; i++) {
+    var k = keywords[i];
+    for (var j = 0; j < k.words.length; j++) {
+      if (name.indexOf(k.words[j]) !== -1) return k.cat;
+    }
+  }
+  return "";
+}
+
 const DEFAULT_VER = "v22.0";
 
 // Ad set / campaign effective_status values that mean "not delivering / paused".
@@ -281,7 +339,7 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
         `https://graph.facebook.com/${graphApiVersion}/${adsetId}`,
         {
           params: {
-            fields: "id,name,effective_status,status,campaign_id,campaign{id,name}",
+            fields: "id,name,effective_status,status,campaign_id,campaign{id,name,objective}",
             access_token: tok,
           },
         }
@@ -292,6 +350,7 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
         name:            a.name || "",
         campaignName:    a.campaign && a.campaign.name ? a.campaign.name : "",
         campaignId:      (a.campaign && a.campaign.id) ? a.campaign.id : (a.campaign_id || ""),
+        objective:       (a.campaign && a.campaign.objective) ? a.campaign.objective : "",
         effectiveStatus: a.effective_status || a.status || "",
       };
     };
@@ -318,11 +377,12 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
       const info = await getAdsetInfo(form.adset_id);
       return {
         ...form,
-        adset_name:    form.adset_name    || info?.name         || "",
-        campaign_name: form.campaign_name || info?.campaignName || "",
-        campaign_id:   form.campaign_id   || info?.campaignId   || "",
-        _adsetId:      form.adset_id       || (info && info.id ? info.id : ""),
-        _adsetStatus:  info?.effectiveStatus || "",
+        adset_name:    form.adset_name    || (info && info.name)         || "",
+        campaign_name: form.campaign_name || (info && info.campaignName) || "",
+        campaign_id:   form.campaign_id   || (info && info.campaignId)   || "",
+        _adsetId:      form.adset_id      || (info && info.id ? info.id : ""),
+        _adsetStatus:  (info && info.effectiveStatus) || "",
+        _objective:    (info && info.objective) || "",
       };
     })
   );
@@ -376,6 +436,9 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
 
     const parentCampaignName = (form.campaign_name || "").trim();
     const adSetName          = (form.adset_name    || "").trim();
+    // Auto-detect category from Meta objective (preferred) or campaign name keywords
+    const autoCategory = objectiveToCategory(form._objective || "") ||
+                         inferCategoryFromName(form.campaign_name || "");
 
     let campaignName;
     if (parentCampaignName && adSetName) {
@@ -397,6 +460,10 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
       }
       if (!existing.adSetName && adSetName) {
         update.adSetName = adSetName;
+      }
+      // Auto-set category only when the admin hasn't manually set one
+      if (!existing.category && autoCategory) {
+        update.category = autoCategory;
       }
 
       // ── Mirror Meta's live status ──────────────────────────────────────────
@@ -443,6 +510,7 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
       campaignName,
       adSetName,
       parentCampaignName,
+      category: autoCategory || "",
       pageId,
       pageAccessToken,
       formId:          form.id,
