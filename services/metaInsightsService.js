@@ -268,6 +268,7 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
         const issues = detectIssues(insights, leadCount);
         campaigns.push({
           configId:     cfg._id,
+          category:     cfg.category || "",
           campaignName: cfg.parentCampaignName || cfg.campaignName,
           adSetName:    "",
           configured:   true,
@@ -304,6 +305,7 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
 
           campaigns.push({
             configId:     cfg._id,
+            category:     cfg.category || "",
             adsetId:      a.adsetId,
             campaignName: a.campaignName || cfg.parentCampaignName || cfg.campaignName,
             adSetName:    a.adsetName,
@@ -339,6 +341,7 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
 
     campaigns.push({
       configId:     cfg._id,
+      category:     cfg.category || "",
       campaignName: cfg.parentCampaignName || cfg.campaignName,
       adSetName:    cfg.adSetName || "",
       configured:   !!insights.configured,
