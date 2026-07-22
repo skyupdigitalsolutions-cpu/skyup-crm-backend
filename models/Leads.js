@@ -321,6 +321,17 @@ const leadSchema = mongoose.Schema(
     followUpReminderLastSentDate: { type: String, default: null }, // "YYYY-M-D" (IST)
     followUpReminderLastSentSlot: { type: String, default: null }, // "morning" | "evening"
 
+    // Start (IST day key) of the current reminder cycle. The reminder now fires
+    // only once every N days (default 3) instead of daily: both the 9:30 AM and
+    // 8:30 PM slots fire on the cycle-start day, then the lead is skipped until
+    // N days have elapsed. Reset to the new day whenever a fresh cycle begins.
+    followUpReminderCycleStart:   { type: String,  default: null }, // "YYYY-M-D" (IST)
+
+    // Set true when a lead taps the "Stop Promotion" button on the
+    // crm_followup_reminder WhatsApp template. Opted-out leads are permanently
+    // excluded from the follow-up reminder job (other automations still fire).
+    followUpReminderOptOut:       { type: Boolean, default: false },
+
     // ── Per-outcome automation dedupe (WhatsApp + Email to the LEAD) ──────────
     // Maps an outcome key (e.g. "answered", "notAnswered", "busy", "switchOff",
     // "callBackLater", "notInterested") → the IST calendar-day key ("YYYY-M-D")

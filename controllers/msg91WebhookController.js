@@ -462,6 +462,29 @@ async function processMSG91Payload(rawBody, opts = {}) {
 
     if (!msgBody) msgBody = `[${contentType}]`;
 
+    // ── "Stop Promotion" opt-out ──────────────────────────────────────────────
+    // When a lead taps the Stop Promotion quick-reply button on the
+    // crm_followup_reminder template, WhatsApp delivers the button's title as an
+    // inbound message. Flag every lead on this phone (within this company) so
+    // the follow-up reminder job stops nudging them. Other automations (outcome
+    // messages, new-lead blast, meeting reminders) are unaffected.
+    try {
+      const optOutText = String(
+        extractInteractiveTitle(item) || msgText || msgBody || ""
+      ).trim().toLowerCase();
+      const isStopRequest = optOutText === "stop promotion" || optOutText === "stop";
+      if (isStopRequest && matchingLeads.length) {
+        const ids = matchingLeads.map((l) => l._id);
+        await Lead.updateMany(
+          { _id: { $in: ids } },
+          { $set: { followUpReminderOptOut: true } }
+        );
+        console.log(`🛑 Stop Promotion → opted ${ids.length} lead(s) out of follow-up reminders (phone ${waPhone})`);
+      }
+    } catch (e) {
+      console.error("[optOut] Stop Promotion handling error:", e.message);
+    }
+
     // ── Save message ──────────────────────────────────────────────────────────
     const savedMsg = await WhatsAppMessage.create({
       conversation: conversation._id,

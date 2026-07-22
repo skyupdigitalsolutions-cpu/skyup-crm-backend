@@ -32,6 +32,24 @@ const { sendAutoWhatsApp, sendAutoEmail } = require("../services/autoTemplateSer
 
 const IST_TIMEZONE = "Asia/Kolkata";
 
+// How many days between reminder cycles. Default 3 (was effectively 1 = daily).
+// Override with env FOLLOWUP_REMINDER_INTERVAL_DAYS if you ever want a different
+// cadence without a code change.
+const REMINDER_INTERVAL_DAYS = Number(process.env.FOLLOWUP_REMINDER_INTERVAL_DAYS) || 3;
+
+// ── Whole-day difference between two IST day keys ("YYYY-M-D"). ──────────────
+// Returns k2 - k1 in days (positive when k2 is later). Used to decide whether a
+// lead's 3-day reminder cycle has elapsed.
+function dayDiffKeys(k1, k2) {
+  if (!k1 || !k2) return Infinity;
+  const [y1, m1, d1] = String(k1).split("-").map(Number);
+  const [y2, m2, d2] = String(k2).split("-").map(Number);
+  if ([y1, m1, d1, y2, m2, d2].some((n) => !Number.isFinite(n))) return Infinity;
+  const t1 = Date.UTC(y1, m1 - 1, d1);
+  const t2 = Date.UTC(y2, m2 - 1, d2);
+  return Math.round((t2 - t1) / 86400000);
+}
+
 // ── IST calendar-day key, e.g. "2026-7-3" — used purely for same-day dedupe ──
 function istDayKey(date) {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -99,6 +117,8 @@ async function runFollowUpReminderCheck(slot) {
       isClosed:   { $ne: true },
       status:     { $ne: "Converted" },
       mergedInto: null,
+      // Leads who tapped "Stop Promotion" are permanently excluded
+      followUpReminderOptOut: { $ne: true },
       scheduledCalls: {
         $elemMatch: { type: "follow-up", done: false, scheduledAt: { $lte: todayEnd } },
       },
@@ -107,7 +127,7 @@ async function runFollowUpReminderCheck(slot) {
         { followUpReminderLastSentDate: todayKey, followUpReminderLastSentSlot: slot },
       ],
     })
-      .select("name mobile email company scheduledCalls followUpReminderLastSentDate followUpReminderLastSentSlot")
+      .select("name mobile email company scheduledCalls followUpReminderLastSentDate followUpReminderLastSentSlot followUpReminderCycleStart")
       .lean();
   } catch (err) {
     console.error(`[followUpReminder:${slot}] query error:`, err.message);
@@ -157,6 +177,22 @@ async function runFollowUpReminderCheck(slot) {
     }
 
     for (const lead of companyLeads) {
+      // ── 3-day cadence gate ────────────────────────────────────────────────
+      // Fire only when a new cycle is due. On the cycle-start day BOTH slots
+      // (9:30 AM + 8:30 PM) fire; the lead is then skipped until
+      // REMINDER_INTERVAL_DAYS have elapsed.
+      //   • never reminded            → eligible, start a cycle
+      //   • same day as cycle start   → eligible (this is the day's 2nd slot)
+      //   • >= interval days elapsed  → eligible, start a NEW cycle
+      //   • 1..interval-1 days        → skip (inside the quiet window)
+      const cycleStart   = lead.followUpReminderCycleStart || null;
+      const daysElapsed  = dayDiffKeys(cycleStart, todayKey); // Infinity if never
+      const startNewCycle = !cycleStart || daysElapsed >= REMINDER_INTERVAL_DAYS;
+      const sameCycleDay  = daysElapsed === 0;
+      if (!startNewCycle && !sameCycleDay) {
+        continue; // inside the quiet window — no reminder today
+      }
+
       const results = await fireFollowUpReminder(lead, company);
       console.log(
         `[followUpReminder:${slot}] lead ${lead._id} ("${lead.name}"):`,
@@ -164,10 +200,11 @@ async function runFollowUpReminderCheck(slot) {
       );
       details.push({ leadId: String(lead._id), leadName: lead.name, company: company.name, results });
       try {
-        await Lead.updateOne(
-          { _id: lead._id },
-          { $set: { followUpReminderLastSentDate: todayKey, followUpReminderLastSentSlot: slot } }
-        );
+        const update = { followUpReminderLastSentDate: todayKey, followUpReminderLastSentSlot: slot };
+        // Only stamp a new cycle start when a fresh cycle actually begins, so
+        // the evening slot on the same day doesn't reset the 3-day clock.
+        if (startNewCycle) update.followUpReminderCycleStart = todayKey;
+        await Lead.updateOne({ _id: lead._id }, { $set: update });
       } catch (err) {
         console.error(`[followUpReminder:${slot}] mark-sent error for lead ${lead._id}:`, err.message);
       }
@@ -202,7 +239,7 @@ function startFollowUpReminderJob() {
     { timezone: IST_TIMEZONE }
   );
 
-  console.log("✅ Follow-up reminder job started (WhatsApp + Email to lead, 9:30 AM & 8:30 PM IST).");
+  console.log(`✅ Follow-up reminder job started (WhatsApp + Email to lead, every ${REMINDER_INTERVAL_DAYS} day(s) at 9:30 AM & 8:30 PM IST).`);
 }
 
 module.exports = { startFollowUpReminderJob, runFollowUpReminderCheck };
