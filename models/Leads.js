@@ -70,6 +70,12 @@ const leadSchema = mongoose.Schema(
     email:     { type: String, default: "", trim: true },
     source:    { type: String, required: true, trim: true },
     campaign:  { type: String, required: false, default: null },
+
+    // True for leads created through the Import CSV / Excel flow. Used to
+    // exclude imported leads from the "Not Answered" outcome automation (they
+    // should not receive the crm_call_missed template). Other automations are
+    // unaffected.
+    importedViaCsv: { type: Boolean, default: false },
     adSetName: { type: String, default: "", trim: true },
     // Reference to the exact MetaConfig (ad set) this lead came from. Lets the
     // Campaigns page count leads per AD SET instead of per campaign name (which

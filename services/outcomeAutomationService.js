@@ -94,6 +94,26 @@ async function sendOutcomeAutomation(lead, companyId, outcome) {
       return { skipped: `outcome "${outcome}" is not handled by outcomeAutomation` };
     }
 
+    // ── CSV/Excel-imported leads are excluded from the "Not Answered" reminder ─
+    // Per requirement: leads added via Import CSV must NOT receive the
+    // crm_call_missed template when their outcome is logged as "Not Answered".
+    // Only this one outcome is affected — every other outcome still fires for
+    // imported leads. We check the passed lead first (fast path) and fall back
+    // to a tiny DB read so leads imported BEFORE this flag existed (which only
+    // carry source "Excel Import") are also correctly excluded.
+    if (key === "notAnswered") {
+      let imported = lead.importedViaCsv === true || lead.source === "Excel Import";
+      if (!imported && lead._id) {
+        try {
+          const src = await Lead.findById(lead._id).select("importedViaCsv source").lean();
+          imported = !!(src && (src.importedViaCsv === true || src.source === "Excel Import"));
+        } catch (_) { /* if the lookup fails, fall through and treat as not-imported */ }
+      }
+      if (imported) {
+        return { skipped: `lead ${lead._id} is CSV-imported — "Not Answered" automation disabled for imported leads` };
+      }
+    }
+
     // NOTE: intentionally NOT using .lean() here. Mongoose does not apply
     // schema defaults to lean() results, and there is no admin UI that saves
     // `outcomeAutomation` to the DB (this automation is backend-only). Fetching
