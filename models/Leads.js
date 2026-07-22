@@ -68,6 +68,28 @@ const leadSchema = mongoose.Schema(
     name:      { type: String, required: true, trim: true },
     mobile:    { type: String, required: true },
     email:     { type: String, default: "", trim: true },
+    // ── WhatsApp template trigger history (shown in the Update Lead popup) ─────
+    // Every automated WhatsApp TEMPLATE actually sent to this lead is appended
+    // here (crm_call_answered / crm_call_missed / crm_meeting_scheduled /
+    // crm_followup_leads / crm_followup_reminder / client_meeting_reminder …),
+    // newest entries pushed to the end. Recorded by autoTemplateService.js and
+    // the meeting-reminder sender. This is forward-looking — only sends that
+    // happen after deploy are captured.
+    templateHistory: {
+      type: [
+        new mongoose.Schema(
+          {
+            templateName: { type: String, required: true },
+            sentAt:       { type: Date,   default: Date.now },
+            channel:      { type: String, default: "whatsapp" },
+            status:       { type: String, default: "sent" }, // "sent" | "failed"
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
+
     source:    { type: String, required: true, trim: true },
     campaign:  { type: String, required: false, default: null },
 

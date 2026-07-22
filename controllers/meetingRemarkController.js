@@ -193,6 +193,18 @@ async function _sendClientMeetingWhatsApp({ lead, companyId, meetingDate, meetin
       console.error('[meetingWhatsApp] conversation log error:', logErr.message);
     }
 
+    // Record in the lead's template history (shown in the Update Lead popup)
+    try {
+      if (lead?._id) {
+        await Lead.updateOne(
+          { _id: lead._id },
+          { $push: { templateHistory: { templateName: 'client_meeting_reminder', sentAt: new Date(), channel: 'whatsapp', status: 'sent' } } }
+        );
+      }
+    } catch (histErr) {
+      console.error('[meetingWhatsApp] templateHistory record error:', histErr.message);
+    }
+
     return { success: true, waMessageId };
   } catch (apiErr) {
     const errBody = apiErr?.response?.data;
