@@ -61,6 +61,14 @@ const metaConfigSchema = new mongoose.Schema(
       trim: true,
       // e.g. "Summer Sale 2025" — used to group ad sets under the same campaign header
     },
+    // ── Campaign category (user-defined) ──────────────────────────────────────
+    // Free-form label to group campaigns in the Performance Marketing Dashboard.
+    // Examples: "Real Estate", "Education", "Healthcare", "Product Launch", etc.
+    category: {
+      type: String,
+      default: "",
+      trim: true,
+    },
 
     // ── Meta-side live status (auto-synced) ───────────────────────────────────
     // Mirrors the real ACTIVE/PAUSED/ARCHIVED state of the ad set + lead form on
