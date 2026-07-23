@@ -20,22 +20,6 @@ const getCompanyId = (req) =>
   req.user?.company ||
   null;
 
-// ── Resolve extra ownership restriction for admin callers ────────────────────
-// Regular admins (role !== "super_admin") only see/act on leads assigned to
-// them specifically (Lead.assignedAdmin). The company's single super_admin
-// retains full visibility across every admin's leads, and employees
-// (req.user) are unaffected — their existing user-based scoping is untouched.
-// NOTE: deliberately NOT applied to phone-uniqueness/duplicate-detection
-// queries (findLeadByPhone, checkDuplicate, and the merge-conflict checks) —
-// those must stay company-wide or two admins could create duplicate leads
-// for the same phone number.
-const adminOwnerFilter = (req) => {
-  if (req.admin && req.admin.role !== "super_admin") {
-    return { assignedAdmin: req.admin._id };
-  }
-  return {};
-};
-
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
 const { autoSendTemplates, sendInterestedBlast } = require("../services/autoTemplateService");
 const { sendOutcomeAutomation } = require("../services/outcomeAutomationService");
@@ -163,7 +147,7 @@ const getLeadsByCampaign = async (req, res) => {
         }
         or.push(legacy);
       }
-      const leads = await Lead.find({ company: companyId, $or: or, ...adminOwnerFilter(req) })
+      const leads = await Lead.find({ company: companyId, $or: or })
         .populate("user", "name email")
         .populate("previousAgents", "name email");
       return res.status(200).json(leads);
@@ -176,7 +160,7 @@ const getLeadsByCampaign = async (req, res) => {
 
     // Build filter — when adSetName is provided, scope leads to that specific
     // ad set so the Campaigns page drill-down shows only the correct subset.
-    const filter = { company: companyId, campaign, ...adminOwnerFilter(req) };
+    const filter = { company: companyId, campaign };
     if (adSetName && adSetName.trim() !== "") {
       filter.adSetName = adSetName.trim();
     }
@@ -863,11 +847,7 @@ const adminUpdateLead = async (req, res) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
-    const leadQuery = {
-      _id: id,
-      ...(companyId ? { company: companyId } : {}),
-      ...adminOwnerFilter(req),
-    };
+    const leadQuery = companyId ? { _id: id, company: companyId } : { _id: id };
     const lead = await Lead.findOne(leadQuery);
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
@@ -987,11 +967,7 @@ const adminDeleteLead = async (req, res) => {
     const companyId = req.admin
       ? req.admin.company._id || req.admin.company
       : null;
-    const query = {
-      _id: id,
-      ...(companyId ? { company: companyId } : {}),
-      ...adminOwnerFilter(req),
-    };
+    const query = companyId ? { _id: id, company: companyId } : { _id: id };
     const lead = await Lead.findOne(query);
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
     await Lead.findByIdAndDelete(id);
@@ -1224,7 +1200,7 @@ const patchLeadTemperature = async (req, res) => {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId)
       return res.status(400).json({ message: "Company not found in token." });
-    const lead = await Lead.findOne({ _id: id, company: companyId, ...adminOwnerFilter(req) });
+    const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const update = { temperature };
@@ -1783,7 +1759,7 @@ const closeLeadWrongEntry = async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
     const companyId = getCompanyId(req);
-    const lead = await Lead.findOne({ _id: id, company: companyId, ...adminOwnerFilter(req) });
+    const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const updated = await Lead.findByIdAndUpdate(
@@ -1899,7 +1875,7 @@ const updateLeadEmail = async (req, res) => {
       return res.status(400).json({ message: "email is required" });
 
     const companyId = req.admin?.company?._id || req.admin?.company;
-    const lead = await Lead.findOne({ _id: id, company: companyId, ...adminOwnerFilter(req) });
+    const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found" });
 
     lead.email = email.trim().toLowerCase();
@@ -1929,7 +1905,7 @@ const bulkUpdateEmails = async (req, res) => {
       if (!mobile || !email) continue;
 
       const result = await Lead.updateMany(
-        { company: companyId, mobile, ...adminOwnerFilter(req) },
+        { company: companyId, mobile },
         { $set: { email } },
       );
 
@@ -1957,7 +1933,7 @@ const adminGetAllLeads = async (req, res) => {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId)
       return res.status(400).json({ message: "Company not found in token." });
-    const leads = await Lead.find({ company: companyId, mergedInto: null, ...adminOwnerFilter(req) })
+    const leads = await Lead.find({ company: companyId, mergedInto: null })
       .sort({ createdAt: -1 })
       .populate("user", "name email")
       .populate("previousAgents", "name email");
@@ -1968,9 +1944,6 @@ const adminGetAllLeads = async (req, res) => {
 };
 
 // ── checkDuplicate: checks both primary and secondary phone ───────────────────
-// Deliberately company-wide (NOT scoped by assignedAdmin) — this exists to
-// stop two different people creating two leads for the same phone number, so
-// it must see every lead in the company regardless of who it's assigned to.
 const checkDuplicate = async (req, res) => {
   try {
     const { mobile } = req.query;
@@ -2011,7 +1984,7 @@ const logPhoneReveal = async (req, res) => {
     const companyId =
       req.user?.company || req.admin?.company?._id || req.admin?.company;
 
-    const lead = await Lead.findOne({ _id: id, company: companyId, ...adminOwnerFilter(req) });
+    const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found" });
 
     await Lead.findByIdAndUpdate(id, {
@@ -2040,7 +2013,7 @@ const logEmailReveal = async (req, res) => {
     const companyId =
       req.user?.company || req.admin?.company?._id || req.admin?.company;
 
-    const lead = await Lead.findOne({ _id: id, company: companyId, ...adminOwnerFilter(req) });
+    const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found" });
 
     await Lead.findByIdAndUpdate(id, {
@@ -2074,10 +2047,7 @@ const getFollowUpAlerts = async (req, res) => {
     todayEnd.setHours(23, 59, 59, 999);
 
     const baseQuery = { company };
-    if (req.admin && req.admin.role !== "super_admin") {
-      // Regular admin — only their own assigned leads.
-      baseQuery.assignedAdmin = req.admin._id;
-    } else if (
+    if (
       req.user &&
       req.user.role !== "admin" &&
       req.user.role !== "superadmin"
@@ -2242,7 +2212,6 @@ const addSecondaryPhone = async (req, res) => {
     const lead = await Lead.findOne({
       _id: id,
       ...(companyId ? { company: companyId } : {}),
-      ...adminOwnerFilter(req),
     });
     if (!lead) return res.status(404).json({ message: "Lead not found" });
 
@@ -2317,7 +2286,6 @@ const removeSecondaryPhone = async (req, res) => {
     const lead = await Lead.findOne({
       _id: id,
       ...(companyId ? { company: companyId } : {}),
-      ...adminOwnerFilter(req),
     });
     if (!lead) return res.status(404).json({ message: "Lead not found" });
 
@@ -2359,7 +2327,6 @@ const swapPhones = async (req, res) => {
     const lead = await Lead.findOne({
       _id: id,
       ...(companyId ? { company: companyId } : {}),
-      ...adminOwnerFilter(req),
     });
     if (!lead) return res.status(404).json({ message: "Lead not found" });
 
@@ -2432,7 +2399,6 @@ const mergeLead = async (req, res) => {
     const survivor = await Lead.findOne({
       _id: id,
       ...(companyId ? { company: companyId } : {}),
-      ...adminOwnerFilter(req),
     });
     if (!survivor) return res.status(404).json({ message: "Target lead not found." });
 
@@ -2451,7 +2417,6 @@ const mergeLead = async (req, res) => {
       source = await Lead.findOne({
         _id: sourceLeadId,
         ...(companyId ? { company: companyId } : {}),
-        ...adminOwnerFilter(req),
       });
     }
 
@@ -2606,7 +2571,7 @@ const getLeadActionSummary = async (req, res) => {
     const forceRefresh = String(req.query.refresh || "") === "1";
     const companyId = getCompanyId(req);
 
-    const lead = await Lead.findOne({ _id: id, company: companyId, ...adminOwnerFilter(req) });
+    const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     // Resolve entitlements → decide whether transcripts are available.
