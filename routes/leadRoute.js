@@ -150,13 +150,7 @@ router.patch("/admin/:id/assign-roundrobin", protectAdmin, async (req, res) => {
     const { id } = req.params;
     const companyId = req.admin?.company?._id || req.admin?.company;
 
-    // Regular admins may only round-robin-reassign their own assigned leads.
-    const ownerFilter =
-      req.admin && req.admin.role !== "super_admin"
-        ? { assignedAdmin: req.admin._id }
-        : {};
-
-    const lead = await Lead.findOne({ _id: id, company: companyId, ...ownerFilter });
+    const lead = await Lead.findOne({ _id: id, company: companyId });
     if (!lead) return res.status(404).json({ message: "Lead Not Found" });
 
     const users = await User.find({ company: companyId }).select("_id").lean();
