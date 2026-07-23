@@ -289,8 +289,11 @@ const updateLeadLanguage = async (req, res) => {
   try {
     const companyId = req.admin.company._id;
     const language = typeof req.body.language === "string" ? req.body.language.trim() : "";
+    // Regular admins may only edit leads assigned to them.
+    const ownerFilter =
+      req.admin.role !== "super_admin" ? { assignedAdmin: req.admin._id } : {};
     const lead = await Lead.findOneAndUpdate(
-      { _id: req.params.id, company: companyId },
+      { _id: req.params.id, company: companyId, ...ownerFilter },
       { language: language },
       { new: true }
     ).populate("user", "name email").lean();
