@@ -235,12 +235,6 @@ const getCompanyLeads = async (req, res) => {
 
     const isAdminRole = ["admin", "super_admin"].includes(req.admin.role);
     const filter = { company: companyId, mergedInto: null };
-
-    // Regular admins only see leads assigned to them; super_admin sees everything.
-    if (req.admin.role !== "super_admin") {
-      filter.assignedAdmin = req.admin._id;
-    }
-
     if (!isAdminRole) {
       filter.isClosed = { $ne: true };
     }
@@ -289,11 +283,8 @@ const updateLeadLanguage = async (req, res) => {
   try {
     const companyId = req.admin.company._id;
     const language = typeof req.body.language === "string" ? req.body.language.trim() : "";
-    // Regular admins may only edit leads assigned to them.
-    const ownerFilter =
-      req.admin.role !== "super_admin" ? { assignedAdmin: req.admin._id } : {};
     const lead = await Lead.findOneAndUpdate(
-      { _id: req.params.id, company: companyId, ...ownerFilter },
+      { _id: req.params.id, company: companyId },
       { language: language },
       { new: true }
     ).populate("user", "name email").lean();
@@ -346,19 +337,12 @@ const getDashboardStats = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
 
-    // Regular admins only see stats for leads assigned to them; super_admin
-    // (the single company owner account) sees the whole company's numbers.
-    const matchStage = { company: companyId };
-    if (req.admin?.role !== "super_admin") {
-      matchStage.assignedAdmin = req.admin._id;
-    }
-
     // FIX PERFORMANCE: Collapse 6 separate DB round trips into 1 aggregate
     // Previously: 4 countDocuments + 2 aggregates = 6 round trips to MongoDB
     // Now: 1 aggregate covers all counts + reveal stats = 1 round trip
     const [statsAgg, topRevealed, topEmailRevealed] = await Promise.all([
       Lead.aggregate([
-        { $match: matchStage },
+        { $match: { company: companyId } },
         { $group: {
             _id: null,
             totalLeads:         { $sum: 1 },
@@ -371,10 +355,10 @@ const getDashboardStats = async (req, res) => {
             emailLeadsRevealed: { $sum: { $cond: [{ $gt: ["$emailRevealCount", 0] }, 1, 0] } },
         }},
       ]),
-      Lead.find({ ...matchStage, phoneRevealCount: { $gt: 0 } })
+      Lead.find({ company: companyId, phoneRevealCount: { $gt: 0 } })
         .sort({ phoneRevealCount: -1 }).limit(5)
         .select("name mobile phoneRevealCount").lean(),
-      Lead.find({ ...matchStage, emailRevealCount: { $gt: 0 } })
+      Lead.find({ company: companyId, emailRevealCount: { $gt: 0 } })
         .sort({ emailRevealCount: -1 }).limit(5)
         .select("name email emailRevealCount").lean(),
     ]);
