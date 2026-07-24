@@ -3,6 +3,7 @@ const Admin   = require("../models/Admin");
 const User    = require("../models/Users");
 const Lead    = require("../models/Leads");
 const Company = require("../models/Company");
+const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
 const multer  = require("multer");
 const path    = require("path");
 const fs      = require("fs");
@@ -234,7 +235,7 @@ const getCompanyLeads = async (req, res) => {
     const companyId = req.admin.company._id;
 
     const isAdminRole = ["admin", "super_admin"].includes(req.admin.role);
-    const filter = { company: companyId, mergedInto: null };
+    let filter = { company: companyId, mergedInto: null };
     if (!isAdminRole) {
       filter.isClosed = { $ne: true };
     }
@@ -245,6 +246,10 @@ const getCompanyLeads = async (req, res) => {
       if (l.toLowerCase() === "none") filter.$or = [{ language: "" }, { language: null }, { language: { $exists: false } }];
       else filter.language = l;
     }
+
+    // Per-admin isolation: a plain admin sees only their own leads.
+    const scope = await getAdminLeadScope(req, companyId);
+    filter = mergeLeadScope(filter, scope);
 
     const [leads, total] = await Promise.all([
       Lead.find(filter)
@@ -267,10 +272,11 @@ const getCompanyLeads = async (req, res) => {
 const getDistinctLeadLanguages = async (req, res) => {
   try {
     const companyId = req.admin.company._id;
-    const langs = await Lead.distinct("language", {
-      company: companyId,
-      language: { $nin: [null, ""] },
-    });
+    const scope = await getAdminLeadScope(req, companyId);
+    const langs = await Lead.distinct(
+      "language",
+      mergeLeadScope({ company: companyId, language: { $nin: [null, ""] } }, scope)
+    );
     res.status(200).json({ languages: (langs || []).filter(Boolean).sort() });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -283,8 +289,9 @@ const updateLeadLanguage = async (req, res) => {
   try {
     const companyId = req.admin.company._id;
     const language = typeof req.body.language === "string" ? req.body.language.trim() : "";
+    const scope = await getAdminLeadScope(req, companyId);
     const lead = await Lead.findOneAndUpdate(
-      { _id: req.params.id, company: companyId },
+      mergeLeadScope({ _id: req.params.id, company: companyId }, scope),
       { language: language },
       { new: true }
     ).populate("user", "name email").lean();
@@ -337,12 +344,19 @@ const getDashboardStats = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
 
+    // Per-admin isolation: a normal admin's dashboard reflects ONLY their own
+    // leads; super_admin sees company-wide numbers.
+    const scope = await getAdminLeadScope(req, companyId);
+    const statsMatch = mergeLeadScope({ company: companyId }, scope);
+    const phoneFind  = mergeLeadScope({ company: companyId, phoneRevealCount: { $gt: 0 } }, scope);
+    const emailFind  = mergeLeadScope({ company: companyId, emailRevealCount: { $gt: 0 } }, scope);
+
     // FIX PERFORMANCE: Collapse 6 separate DB round trips into 1 aggregate
     // Previously: 4 countDocuments + 2 aggregates = 6 round trips to MongoDB
     // Now: 1 aggregate covers all counts + reveal stats = 1 round trip
     const [statsAgg, topRevealed, topEmailRevealed] = await Promise.all([
       Lead.aggregate([
-        { $match: { company: companyId } },
+        { $match: statsMatch },
         { $group: {
             _id: null,
             totalLeads:         { $sum: 1 },
@@ -355,10 +369,10 @@ const getDashboardStats = async (req, res) => {
             emailLeadsRevealed: { $sum: { $cond: [{ $gt: ["$emailRevealCount", 0] }, 1, 0] } },
         }},
       ]),
-      Lead.find({ company: companyId, phoneRevealCount: { $gt: 0 } })
+      Lead.find(phoneFind)
         .sort({ phoneRevealCount: -1 }).limit(5)
         .select("name mobile phoneRevealCount").lean(),
-      Lead.find({ company: companyId, emailRevealCount: { $gt: 0 } })
+      Lead.find(emailFind)
         .sort({ emailRevealCount: -1 }).limit(5)
         .select("name email emailRevealCount").lean(),
     ]);
@@ -1177,7 +1191,8 @@ const getMarketingDashboard = async (req, res) => {
   try {
     const companyId = req.admin.company._id || req.admin.company;
     const { getMarketingDashboard: svc } = require("../services/marketingDashboardService");
-    const data = await svc({ company: companyId, query: req.query });
+    const leadScope = await getAdminLeadScope(req, companyId);
+    const data = await svc({ company: companyId, query: req.query, leadScope });
     res.json(data);
   } catch (err) {
     res.status(500).json({ message: err.message });

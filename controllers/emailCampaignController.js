@@ -8,6 +8,7 @@
 const axios = require("axios");
 const Lead = require("../models/Leads");
 const EmailLog = require("../models/EmailLog");
+const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
 const Company = require("../models/Company");
 const {
   sendViaMsg91Email,
@@ -231,11 +232,12 @@ const sendBulkEmails = async (req, res) => {
         .json({ message: "campaign, subject, and bodyTemplate are required" });
     }
 
-    const leads = await Lead.find({
+    const emailScope = await getAdminLeadScope(req, req.admin.company._id);
+    const leads = await Lead.find(mergeLeadScope({
       company: req.admin.company._id,
       campaign,
       email: { $exists: true, $ne: "" },
-    });
+    }, emailScope));
 
     if (leads.length === 0) {
       return res
@@ -274,11 +276,12 @@ const previewCampaign = async (req, res) => {
     const { campaign } = req.query;
     if (!campaign)
       return res.status(400).json({ message: "campaign is required" });
-    const count = await Lead.countDocuments({
+    const previewScope = await getAdminLeadScope(req, req.admin.company._id);
+    const count = await Lead.countDocuments(mergeLeadScope({
       company: req.admin.company._id,
       campaign,
       email: { $exists: true, $ne: "" },
-    });
+    }, previewScope));
     res.json({ campaign, leadCount: count });
   } catch (err) {
     res.status(500).json({ message: "Server error", error: err.message });

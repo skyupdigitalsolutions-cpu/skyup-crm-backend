@@ -4,6 +4,7 @@ const User = require("../models/Users");
 const Company = require("../models/Company");
 const { normalizePhone } = require("../utils/normalizePhone");
 const { computeQuality } = require("../utils/qualityHelper");
+const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
 const {
   sendNewLeadNotification,
   sendReassignedLeadNotification,
@@ -147,7 +148,9 @@ const getLeadsByCampaign = async (req, res) => {
         }
         or.push(legacy);
       }
-      const leads = await Lead.find({ company: companyId, $or: or })
+      const scope = await getAdminLeadScope(req, companyId);
+      const q = mergeLeadScope({ company: companyId, $or: or }, scope);
+      const leads = await Lead.find(q)
         .populate("user", "name email")
         .populate("previousAgents", "name email");
       return res.status(200).json(leads);
@@ -165,7 +168,8 @@ const getLeadsByCampaign = async (req, res) => {
       filter.adSetName = adSetName.trim();
     }
 
-    const leads = await Lead.find(filter)
+    const scope = await getAdminLeadScope(req, companyId);
+    const leads = await Lead.find(mergeLeadScope(filter, scope))
       .populate("user", "name email")
       .populate("previousAgents", "name email");
     res.status(200).json(leads);
@@ -179,10 +183,11 @@ const getDistinctCampaigns = async (req, res) => {
     const companyId = getCompanyId(req);
     if (!companyId)
       return res.status(400).json({ message: "companyId is required." });
-    const campaigns = await Lead.distinct("campaign", {
-      company: companyId,
-      campaign: { $nin: [null, ""] },
-    });
+    const scope = await getAdminLeadScope(req, companyId);
+    const campaigns = await Lead.distinct(
+      "campaign",
+      mergeLeadScope({ company: companyId, campaign: { $nin: [null, ""] } }, scope)
+    );
     res.status(200).json({
       success: true,
       data: campaigns.filter(Boolean).sort(),
@@ -847,7 +852,11 @@ const adminUpdateLead = async (req, res) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
-    const leadQuery = companyId ? { _id: id, company: companyId } : { _id: id };
+    const scope = await getAdminLeadScope(req, companyId);
+    const leadQuery = mergeLeadScope(
+      companyId ? { _id: id, company: companyId } : { _id: id },
+      scope
+    );
     const lead = await Lead.findOne(leadQuery);
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
@@ -967,7 +976,11 @@ const adminDeleteLead = async (req, res) => {
     const companyId = req.admin
       ? req.admin.company._id || req.admin.company
       : null;
-    const query = companyId ? { _id: id, company: companyId } : { _id: id };
+    const scope = await getAdminLeadScope(req, companyId);
+    const query = mergeLeadScope(
+      companyId ? { _id: id, company: companyId } : { _id: id },
+      scope
+    );
     const lead = await Lead.findOne(query);
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
     await Lead.findByIdAndDelete(id);
@@ -1200,7 +1213,8 @@ const patchLeadTemperature = async (req, res) => {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId)
       return res.status(400).json({ message: "Company not found in token." });
-    const lead = await Lead.findOne({ _id: id, company: companyId });
+    const scope = await getAdminLeadScope(req, companyId);
+    const lead = await Lead.findOne(mergeLeadScope({ _id: id, company: companyId }, scope));
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const update = { temperature };
@@ -1759,7 +1773,8 @@ const closeLeadWrongEntry = async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
     const companyId = getCompanyId(req);
-    const lead = await Lead.findOne({ _id: id, company: companyId });
+    const scope = await getAdminLeadScope(req, companyId);
+    const lead = await Lead.findOne(mergeLeadScope({ _id: id, company: companyId }, scope));
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const updated = await Lead.findByIdAndUpdate(
@@ -1875,7 +1890,8 @@ const updateLeadEmail = async (req, res) => {
       return res.status(400).json({ message: "email is required" });
 
     const companyId = req.admin?.company?._id || req.admin?.company;
-    const lead = await Lead.findOne({ _id: id, company: companyId });
+    const scope = await getAdminLeadScope(req, companyId);
+    const lead = await Lead.findOne(mergeLeadScope({ _id: id, company: companyId }, scope));
     if (!lead) return res.status(404).json({ message: "Lead Not Found" });
 
     lead.email = email.trim().toLowerCase();
@@ -1899,13 +1915,15 @@ const bulkUpdateEmails = async (req, res) => {
       notFound = 0;
     const notFoundList = [];
 
+    const scope = await getAdminLeadScope(req, companyId);
+
     for (const row of updates) {
       const mobile = (row.mobile || "").replace(/\D/g, "");
       const email = (row.email || "").trim().toLowerCase();
       if (!mobile || !email) continue;
 
       const result = await Lead.updateMany(
-        { company: companyId, mobile },
+        mergeLeadScope({ company: companyId, mobile }, scope),
         { $set: { email } },
       );
 
@@ -1933,7 +1951,12 @@ const adminGetAllLeads = async (req, res) => {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId)
       return res.status(400).json({ message: "Company not found in token." });
-    const leads = await Lead.find({ company: companyId, mergedInto: null })
+
+    // Per-admin isolation: admins see only their own leads; super_admin sees all.
+    const scope = await getAdminLeadScope(req, companyId);
+    const query = mergeLeadScope({ company: companyId, mergedInto: null }, scope);
+
+    const leads = await Lead.find(query)
       .sort({ createdAt: -1 })
       .populate("user", "name email")
       .populate("previousAgents", "name email");
@@ -1984,7 +2007,8 @@ const logPhoneReveal = async (req, res) => {
     const companyId =
       req.user?.company || req.admin?.company?._id || req.admin?.company;
 
-    const lead = await Lead.findOne({ _id: id, company: companyId });
+    const scope = await getAdminLeadScope(req, companyId);
+    const lead = await Lead.findOne(mergeLeadScope({ _id: id, company: companyId }, scope));
     if (!lead) return res.status(404).json({ message: "Lead Not Found" });
 
     await Lead.findByIdAndUpdate(id, {
@@ -2013,7 +2037,8 @@ const logEmailReveal = async (req, res) => {
     const companyId =
       req.user?.company || req.admin?.company?._id || req.admin?.company;
 
-    const lead = await Lead.findOne({ _id: id, company: companyId });
+    const scope = await getAdminLeadScope(req, companyId);
+    const lead = await Lead.findOne(mergeLeadScope({ _id: id, company: companyId }, scope));
     if (!lead) return res.status(404).json({ message: "Lead Not Found" });
 
     await Lead.findByIdAndUpdate(id, {
@@ -2055,12 +2080,16 @@ const getFollowUpAlerts = async (req, res) => {
       baseQuery.user = req.user._id;
     }
 
-    const leads = await Lead.find({
+    // Per-admin isolation (no-op for super_admin and employees).
+    const scope = await getAdminLeadScope(req, company);
+    const alertQuery = mergeLeadScope({
       ...baseQuery,
       scheduledCalls: {
         $elemMatch: { done: false, scheduledAt: { $lte: todayEnd } },
       },
-    })
+    }, scope);
+
+    const leads = await Lead.find(alertQuery)
       .select("_id name status scheduledCalls")
       .lean();
 
@@ -2209,10 +2238,11 @@ const addSecondaryPhone = async (req, res) => {
       return res.status(400).json({ message: "secondaryPhone is required" });
     }
     const companyId = getCompanyId(req);
-    const lead = await Lead.findOne({
+    const scope = await getAdminLeadScope(req, companyId);
+    const lead = await Lead.findOne(mergeLeadScope({
       _id: id,
       ...(companyId ? { company: companyId } : {}),
-    });
+    }, scope));
     if (!lead) return res.status(404).json({ message: "Lead not found" });
 
     const normPrimary   = normalizePhone(lead.primaryPhone || lead.mobile || "");
@@ -2283,10 +2313,11 @@ const removeSecondaryPhone = async (req, res) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
-    const lead = await Lead.findOne({
+    const scope = await getAdminLeadScope(req, companyId);
+    const lead = await Lead.findOne(mergeLeadScope({
       _id: id,
       ...(companyId ? { company: companyId } : {}),
-    });
+    }, scope));
     if (!lead) return res.status(404).json({ message: "Lead not found" });
 
     const actorId = req.user?._id || req.admin?._id || null;
@@ -2324,10 +2355,11 @@ const swapPhones = async (req, res) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
-    const lead = await Lead.findOne({
+    const scope = await getAdminLeadScope(req, companyId);
+    const lead = await Lead.findOne(mergeLeadScope({
       _id: id,
       ...(companyId ? { company: companyId } : {}),
-    });
+    }, scope));
     if (!lead) return res.status(404).json({ message: "Lead not found" });
 
     if (!lead.secondaryPhone) {
@@ -2396,10 +2428,11 @@ const mergeLead = async (req, res) => {
     const actorRole = req.admin ? "admin" : (req.superAdmin ? "superadmin" : "user");
 
     // ── Load the SURVIVING lead (the one we keep) ────────────────────────────
-    const survivor = await Lead.findOne({
+    const scope = await getAdminLeadScope(req, companyId);
+    const survivor = await Lead.findOne(mergeLeadScope({
       _id: id,
       ...(companyId ? { company: companyId } : {}),
-    });
+    }, scope));
     if (!survivor) return res.status(404).json({ message: "Target lead not found." });
 
     const normSecondary = normalizePhone(secondaryPhone);
@@ -2571,7 +2604,8 @@ const getLeadActionSummary = async (req, res) => {
     const forceRefresh = String(req.query.refresh || "") === "1";
     const companyId = getCompanyId(req);
 
-    const lead = await Lead.findOne({ _id: id, company: companyId });
+    const scope = await getAdminLeadScope(req, companyId);
+    const lead = await Lead.findOne(mergeLeadScope({ _id: id, company: companyId }, scope));
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     // Resolve entitlements → decide whether transcripts are available.

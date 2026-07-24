@@ -7,6 +7,7 @@
 
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
+const { mergeLeadScope } = require("../utils/adminLeadScope");
 
 function safeNum(v) { return v && !isNaN(Number(v)) ? Math.round(Number(v) * 100) / 100 : 0; }
 
@@ -46,12 +47,14 @@ function buildFilter(company, query) {
 }
 
 // ── Main dashboard aggregation ────────────────────────────────────────────────
-async function getMarketingDashboard({ company, query }) {
+async function getMarketingDashboard({ company, query, leadScope = {} }) {
   const filter = buildFilter(company, query);
+  // Per-admin isolation (no-op for super_admin / marketing_user / employees).
+  const scopedFilter = mergeLeadScope(filter, leadScope);
 
   // ── 1. Status counts ───────────────────────────────────────────────────────
   const statusAgg = await Lead.aggregate([
-    { "$match": filter },
+    { "$match": scopedFilter },
     { "$group": {
       "_id": "$status",
       "count": { "$sum": 1 },
@@ -80,7 +83,7 @@ async function getMarketingDashboard({ company, query }) {
     delete prevFilter.date["$gte"];
     prevFilter.date = { "$gte": new Date(fromD.getTime() - diff), "$lte": fromD };
     const prevAgg = await Lead.aggregate([
-      { "$match": prevFilter },
+      { "$match": mergeLeadScope(prevFilter, leadScope) },
       { "$group": { "_id": null, count: { "$sum": 1 }, conv: { "$sum": { "$cond": [{ "$eq": ["$status", "Converted"] }, 1, 0] } } } },
     ]);
     if (prevAgg.length) { prevTotal = prevAgg[0].count; prevConverted = prevAgg[0].conv; }
@@ -93,7 +96,7 @@ async function getMarketingDashboard({ company, query }) {
 
   // ── 3. Daily trend (last 30 days if no filter) ────────────────────────────
   const dailyAgg = await Lead.aggregate([
-    { "$match": filter },
+    { "$match": scopedFilter },
     { "$group": {
       "_id": { "$dateToString": { "format": "%Y-%m-%d", "date": "$date" } },
       total:     { "$sum": 1 },
@@ -106,7 +109,7 @@ async function getMarketingDashboard({ company, query }) {
 
   // ── 4. Campaign breakdown ─────────────────────────────────────────────────
   const campaignAgg = await Lead.aggregate([
-    { "$match": filter },
+    { "$match": scopedFilter },
     { "$group": {
       "_id": { campaign: "$campaign", source: "$source" },
       total:     { "$sum": 1 },
@@ -121,7 +124,7 @@ async function getMarketingDashboard({ company, query }) {
 
   // ── 5. Source (platform) breakdown ───────────────────────────────────────
   const sourceAgg = await Lead.aggregate([
-    { "$match": filter },
+    { "$match": scopedFilter },
     { "$group": {
       "_id": "$source",
       count:     { "$sum": 1 },
@@ -132,7 +135,7 @@ async function getMarketingDashboard({ company, query }) {
 
   // ── 6. Employee leaderboard ────────────────────────────────────────────────
   const empAgg = await Lead.aggregate([
-    { "$match": filter },
+    { "$match": scopedFilter },
     { "$group": {
       "_id": { userId: "$user._id", name: "$user.name" },
       total:     { "$sum": 1 },
@@ -151,13 +154,13 @@ async function getMarketingDashboard({ company, query }) {
   const baseFollow = { company: company, mergedInto: null, followUpDate: { "$ne": null } };
   if (query.userId) baseFollow["user._id"] = query.userId;
 
-  const todayFollowups    = await Lead.countDocuments(Object.assign({}, baseFollow, { followUpDate: { "$gte": todayStart, "$lte": todayEnd } }));
-  const upcomingFollowups = await Lead.countDocuments(Object.assign({}, baseFollow, { followUpDate: { "$gt": todayEnd } }));
-  const missedFollowups   = await Lead.countDocuments(Object.assign({}, baseFollow, { followUpDate: { "$lt": todayStart }, status: { "$nin": ["Converted", "Not Interested"] } }));
+  const todayFollowups    = await Lead.countDocuments(mergeLeadScope(Object.assign({}, baseFollow, { followUpDate: { "$gte": todayStart, "$lte": todayEnd } }), leadScope));
+  const upcomingFollowups = await Lead.countDocuments(mergeLeadScope(Object.assign({}, baseFollow, { followUpDate: { "$gt": todayEnd } }), leadScope));
+  const missedFollowups   = await Lead.countDocuments(mergeLeadScope(Object.assign({}, baseFollow, { followUpDate: { "$lt": todayStart }, status: { "$nin": ["Converted", "Not Interested"] } }), leadScope));
 
   // ── 8. Distinct campaigns + sources for filter dropdowns ─────────────────
-  const distinctCampaigns = await Lead.distinct("campaign", { company: company, campaign: { "$nin": [null, ""] } });
-  const distinctSources   = await Lead.distinct("source",   { company: company });
+  const distinctCampaigns = await Lead.distinct("campaign", mergeLeadScope({ company: company, campaign: { "$nin": [null, ""] } }, leadScope));
+  const distinctSources   = await Lead.distinct("source",   mergeLeadScope({ company: company }, leadScope));
 
   // ── 9. Ad-level data (join with GoogleAdsConfig where available) ──────────
   let adPerformance = [];
@@ -166,8 +169,8 @@ async function getMarketingDashboard({ company, query }) {
     const gAds = await GoogleAdsConfig.find({ company: company, isActive: true }).lean();
     for (let i = 0; i < gAds.length; i++) {
       const g = gAds[i];
-      const leadCount = await Lead.countDocuments({ company: company, campaign: g.campaignName, mergedInto: null });
-      const convCount = await Lead.countDocuments({ company: company, campaign: g.campaignName, status: "Converted", mergedInto: null });
+      const leadCount = await Lead.countDocuments(mergeLeadScope({ company: company, campaign: g.campaignName, mergedInto: null }, leadScope));
+      const convCount = await Lead.countDocuments(mergeLeadScope({ company: company, campaign: g.campaignName, status: "Converted", mergedInto: null }, leadScope));
       adPerformance.push({
         name:        g.campaignName,
         source:      "Google Ads",

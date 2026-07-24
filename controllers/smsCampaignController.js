@@ -7,6 +7,7 @@
 const axios     = require("axios");
 const Lead      = require("../models/Leads");
 const SmsLog    = require("../models/SmsLog");
+const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
 const SmsConfig = require("../models/SmsConfig");
 
 // ── Helper: get auth key + sender ID for a company ───────────────────────────
@@ -218,11 +219,12 @@ const sendBulkSms = async (req, res) => {
       });
     }
 
-    const leads = await Lead.find({
+    const smsScope = await getAdminLeadScope(req, companyId);
+    const leads = await Lead.find(mergeLeadScope({
       company: companyId,
       campaign,
       mobile: { $exists: true, $ne: "" },
-    })
+    }, smsScope))
       .select("name mobile email campaign")
       .lean();
 
@@ -432,11 +434,12 @@ const previewSmsCampaign = async (req, res) => {
   try {
     const { campaign } = req.query;
     if (!campaign) return res.status(400).json({ message: "campaign is required" });
-    const count = await Lead.countDocuments({
+    const previewScope = await getAdminLeadScope(req, req.admin.company._id);
+    const count = await Lead.countDocuments(mergeLeadScope({
       company:  req.admin.company._id,
       campaign,
       mobile:   { $exists: true, $ne: "" },
-    });
+    }, previewScope));
     res.json({ success: true, count });
   } catch (err) {
     res.status(500).json({ message: "Failed to preview campaign" });

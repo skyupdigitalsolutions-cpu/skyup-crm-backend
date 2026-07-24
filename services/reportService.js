@@ -12,6 +12,7 @@
 const Lead        = require('../models/Leads');
 const MobileCallLog = require('../models/MobileCallLog');
 const mongoose    = require('mongoose');
+const { mergeLeadScope } = require('../utils/adminLeadScope');
 
 // IST timezone offset in milliseconds (+5:30)
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -48,7 +49,7 @@ function getISTDayBounds(dateInput) {
  * @param {string}          [options.campaign]    - filter by campaign name
  * @param {string}          [options.status]      - filter by lead status
  */
-async function getDailyReport({ company, date, userId, campaign, status, excludeClosed = false } = {}) {
+async function getDailyReport({ company, date, userId, campaign, status, excludeClosed = false, leadScope = {} } = {}) {
   if (!company) throw new Error('company is required');
 
   const { dayStart, dayEnd } = getISTDayBounds(date);
@@ -80,7 +81,7 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
   const [todayLeads, prevLeads, followUpLeads] = await Promise.all([
     // Today's leads
     Lead.aggregate([
-      { $match: baseMatch },
+      { $match: mergeLeadScope(baseMatch, leadScope) },
       {
         $lookup: {
           from:         'users',
@@ -107,7 +108,7 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
 
     // Previous day — for trend numbers only
     Lead.aggregate([
-      { $match: prevMatch },
+      { $match: mergeLeadScope(prevMatch, leadScope) },
       { $group: {
         _id:       null,
         total:     { $sum: 1 },
@@ -117,7 +118,7 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
 
     // Pending follow-ups
     Lead.aggregate([
-      { $match: { ...followUpMatch, 'scheduledCalls.done': false } },
+      { $match: mergeLeadScope({ ...followUpMatch, 'scheduledCalls.done': false }, leadScope) },
       { $unwind: '$scheduledCalls' },
       { $match:  { 'scheduledCalls.done': false } },
       {
@@ -276,7 +277,7 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
  * @param {string}          [options.toDate]    ISO date
  * @param {string|ObjectId} [options.userId]    single employee
  */
-async function getEmployeeReport({ company, fromDate, toDate, userId } = {}) {
+async function getEmployeeReport({ company, fromDate, toDate, userId, leadScope = {} } = {}) {
   if (!company) throw new Error('company is required');
 
   const { dayStart: from } = getISTDayBounds(fromDate);
@@ -289,7 +290,7 @@ async function getEmployeeReport({ company, fromDate, toDate, userId } = {}) {
   if (userId) match.user = new mongoose.Types.ObjectId(userId);
 
   const rows = await Lead.aggregate([
-    { $match: match },
+    { $match: mergeLeadScope(match, leadScope) },
     {
       $group: {
         _id:         '$user',
@@ -333,7 +334,7 @@ async function getEmployeeReport({ company, fromDate, toDate, userId } = {}) {
 /**
  * Per-campaign stats. Optionally filtered by date range.
  */
-async function getCampaignReport({ company, fromDate, toDate } = {}) {
+async function getCampaignReport({ company, fromDate, toDate, leadScope = {} } = {}) {
   if (!company) throw new Error('company is required');
 
   const match = { company: new mongoose.Types.ObjectId(company) };
@@ -344,7 +345,7 @@ async function getCampaignReport({ company, fromDate, toDate } = {}) {
   }
 
   const rows = await Lead.aggregate([
-    { $match: match },
+    { $match: mergeLeadScope(match, leadScope) },
     {
       $group: {
         _id:       { $ifNull: ['$campaign', 'Direct / None'] },

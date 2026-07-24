@@ -13,6 +13,7 @@ const {
   getCampaignReport,
 } = require('../services/reportService');
 const { getNonConversionReport } = require('../services/nonConversionService');
+const { getAdminLeadScope } = require('../utils/adminLeadScope');
 
 // ── GET /api/reports/daily ────────────────────────────────────────────────────
 // Works for both admin (req.admin) and user (req.user) tokens.
@@ -29,8 +30,10 @@ const dailyReport = async (req, res) => {
 
     if (!company) return res.status(400).json({ message: 'Company not resolved from token' });
 
+    const leadScope = await getAdminLeadScope(req, company);
     const report = await getDailyReport({ company, date, userId, campaign, status,
       excludeClosed: !isAdmin,  // employees must not see closed leads
+      leadScope,
     });
 
     // Mask phone numbers for non-superadmin admins
@@ -62,7 +65,8 @@ const employeeReport = async (req, res) => {
     if (!company) return res.status(400).json({ message: 'Company not resolved' });
 
     const { fromDate, toDate, userId } = req.query;
-    const report = await getEmployeeReport({ company, fromDate, toDate, userId });
+    const leadScope = await getAdminLeadScope(req, company);
+    const report = await getEmployeeReport({ company, fromDate, toDate, userId, leadScope });
 
     res.json({ success: true, ...report });
   } catch (err) {
@@ -78,7 +82,8 @@ const campaignReport = async (req, res) => {
     if (!company) return res.status(400).json({ message: 'Company not resolved' });
 
     const { fromDate, toDate } = req.query;
-    const report = await getCampaignReport({ company, fromDate, toDate });
+    const leadScope = await getAdminLeadScope(req, company);
+    const report = await getCampaignReport({ company, fromDate, toDate, leadScope });
 
     res.json({ success: true, ...report });
   } catch (err) {
@@ -127,7 +132,8 @@ const nonConversionReport = async (req, res) => {
     const to     = req.query.to   || null;
     const withAI = req.query.ai !== 'false';   // ai=false → skip AI (fast, charts only)
 
-    const report = await getNonConversionReport({ company, from, to, withAI });
+    const leadScope = await getAdminLeadScope(req, company);
+    const report = await getNonConversionReport({ company, from, to, withAI, leadScope });
     res.json(report);
   } catch (err) {
     res.status(500).json({ message: err.message });

@@ -24,6 +24,7 @@ const mongoose       = require("mongoose");
 const Lead           = require("../models/Leads");
 const MobileCallLog  = require("../models/MobileCallLog");
 const { callGrok }   = require("../utils/leadActionSummary");
+const { mergeLeadScope } = require("../utils/adminLeadScope");
 
 // Retry the AI call on transient rate limits (HTTP 429), honoring Retry-After
 // and backing off, so a 429 doesn't surface as a raw error in the
@@ -148,12 +149,12 @@ function categorise(text, status) {
  * @param {string} [opts.to]    ISO date (defaults: today)
  * @param {boolean} [opts.withAI=true]
  */
-async function getNonConversionReport({ company, from, to, withAI = true }) {
+async function getNonConversionReport({ company, from, to, withAI = true, leadScope = {} }) {
   const toDate   = to   ? endOfDay(new Date(to))   : endOfDay(new Date());
   const fromDate = from ? startOfDay(new Date(from)) : startOfDay(new Date(Date.now() - 30 * 86400000));
 
   // Candidate leads in range (created, last-updated, or closed within range).
-  const leads = await Lead.find({
+  const leads = await Lead.find(mergeLeadScope({
     company,
     mergedInto: null,
     $or: [
@@ -161,7 +162,7 @@ async function getNonConversionReport({ company, from, to, withAI = true }) {
       { closedAt:  { $gte: fromDate, $lte: toDate } },
       { updatedAt: { $gte: fromDate, $lte: toDate } },
     ],
-  })
+  }, leadScope))
     .select("name status isClosed remark callHistory meetingRemarks source campaign user primaryPhone mobile phone value temperature closedAt updatedAt createdAt leadScore maxScore qualificationPercentage leadCategory qualificationBreakdown")
     .populate("user", "name")
     .lean();
