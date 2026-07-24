@@ -50,6 +50,6 @@ router.delete("/:id", protectAdmin, deleteConfig);
 
 module.exports = router;
 
-router.post("/claim-ownership", protectAdmin, requireCompanySuperAdmin, claimMetaConfigOwnership);
+router.post("/claim-ownership", protectAdmin, claimMetaConfigOwnership);
 
 module.exports = router;
