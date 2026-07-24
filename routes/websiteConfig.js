@@ -11,6 +11,7 @@ const { checkLimit, requireFeature } = require("../middlewares/entitlementMiddle
 const WebsiteConfig = require("../models/WebsiteConfig");
 const {
   getConfigs,
+  claimWebsiteConfigOwnership,
   createConfig,
   updateConfig,
   toggleConfig,
@@ -38,5 +39,9 @@ router.post(
 router.put("/:id",           protectAdmin, requireFeature("websiteTracking"), updateConfig);
 router.patch("/:id/toggle",  protectAdmin, requireFeature("websiteTracking"), toggleConfig);
 router.delete("/:id",        protectAdmin, requireFeature("websiteTracking"), deleteConfig);
+
+module.exports = router;
+
+router.post("/claim-ownership", protectAdmin, requireCompanySuperAdmin, claimWebsiteConfigOwnership);
 
 module.exports = router;
