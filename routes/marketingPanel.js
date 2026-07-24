@@ -101,9 +101,53 @@ router.get("/google-ads", protectMarketing, function (req, res, next) {
 router.get("/meta-ad-level", protectMarketing, function (req, res) {
   try {
     const { getMetaAdLevelReport } = require("../services/metaInsightsService");
+    const Lead      = require("../models/Leads");
     const companyId = req.admin.company._id || req.admin.company;
-    getMetaAdLevelReport({ company: companyId, from: req.query.from || null, to: req.query.to || null })
-      .then(function (data) { res.json(data); })
+    const from      = req.query.from || null;
+    const to        = req.query.to   || null;
+    const today     = new Date();
+    const daysAgo   = function(d){ const dt=new Date(today); dt.setDate(dt.getDate()-d); return dt.toISOString().slice(0,10); };
+    const since     = from || daysAgo(30);
+    const until     = to   || daysAgo(0);
+
+    getMetaAdLevelReport({ company: companyId, from: since, to: until })
+      .then(async function (data) {
+        if (!data.configured || !data.ads || !data.ads.length) return res.json(data);
+
+        // Build CRM lead counts per campaign name so each ad card can show CRM stats
+        try {
+          const fromD = new Date(since);
+          const toD   = new Date(until + "T23:59:59Z");
+          const campaignNames = Array.from(new Set(data.ads.map(function(a){ return a.campaignName; }).filter(Boolean)));
+          const crmAgg = await Lead.aggregate([
+            { $match: { company: companyId, mergedInto: null, createdAt: { $gte: fromD, $lte: toD }, campaign: { $in: campaignNames } } },
+            { $group: {
+              _id:       "$campaign",
+              total:     { $sum: 1 },
+              converted: { $sum: { $cond: [{ $eq: ["$status","Converted"] },1,0] } },
+              qualified: { $sum: { $cond: [{ $in: ["$temperature",["Hot"]] },1,0] } },
+              latestRemark: { $last: "$remark" },
+            }},
+          ]);
+          const crmMap = {};
+          crmAgg.forEach(function(r){ crmMap[r._id] = { crmLeads: r.total, crmConverted: r.converted, crmQualified: r.qualified, latestRemark: r.latestRemark || "" }; });
+
+          // Attach CRM stats to each ad
+          data.ads = data.ads.map(function(ad){
+            const crm = crmMap[ad.campaignName] || { crmLeads: 0, crmConverted: 0, crmQualified: 0, latestRemark: "" };
+            return Object.assign({}, ad, crm);
+          });
+
+          // Rebuild totals crmLeads summed uniquely per campaign (not per ad)
+          data.crmTotals = {
+            leads:     crmAgg.reduce(function(s,r){ return s+r.total; },0),
+            converted: crmAgg.reduce(function(s,r){ return s+r.converted; },0),
+            qualified: crmAgg.reduce(function(s,r){ return s+r.qualified; },0),
+          };
+        } catch(e) { /* crm enrich is best-effort */ }
+
+        res.json(data);
+      })
       .catch(function (err) { res.status(500).json({ message: err.message }); });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -157,12 +201,12 @@ router.get("/leads-intelligence", protectMarketing, function (req, res) {
       ]),
       // 2. Converted leads with full detail
       Lead.find(Object.assign({}, filter, { status: "Converted" }))
-        .select("name mobile email campaign adSetName source status date remark user language")
+        .select("name mobile email campaign adSetName source status date remark callHistory user language followUpDate")
         .populate("user", "name")
         .sort({ date: -1 }).limit(200).lean(),
       // 3. Recent leads (all) for the table
       Lead.find(filter)
-        .select("name mobile email campaign adSetName source status date remark followUpDate user language")
+        .select("name mobile email campaign adSetName source status date remark callHistory user language followUpDate")
         .populate("user", "name")
         .sort({ date: -1 }).limit(500).lean(),
       // 4. Distinct campaigns for filter
@@ -200,21 +244,42 @@ router.get("/leads-intelligence", protectMarketing, function (req, res) {
           return c;
         });
 
-      // Format lead lists
+      // Format lead lists — derive latest remark from callHistory array
       const fmt = function(l) {
+        // Find the most recent call-history entry (sorted by calledAt desc)
+        const history = Array.isArray(l.callHistory) ? l.callHistory : [];
+        let latestRemark = "";
+        let latestRemarkBy = "";
+        let latestRemarkAt = null;
+        if (history.length > 0) {
+          const sorted = history.slice().sort(function(a, b) {
+            return new Date(b.calledAt) - new Date(a.calledAt);
+          });
+          const last = sorted[0];
+          latestRemark   = last.remark    || "";
+          latestRemarkBy = last.userName  || "";
+          latestRemarkAt = last.calledAt  || null;
+        }
+        // Fallback to the top-level remark if no call history
+        if (!latestRemark) latestRemark = l.remark || "";
+
         return {
-          _id:        String(l._id),
-          name:       l.name || "",
-          mobile:     l.mobile || "",
-          email:      l.email  || "",
-          campaign:   l.campaign  || "—",
-          adSet:      l.adSetName || "—",
-          source:     l.source    || "—",
-          status:     l.status    || "",
-          date:       l.date,
-          remark:     l.remark    || "",
-          agent:      (l.user && l.user.name) ? l.user.name : "Unassigned",
-          language:   l.language  || "",
+          _id:            String(l._id),
+          name:           l.name       || "",
+          mobile:         l.mobile     || "",
+          email:          l.email      || "",
+          campaign:       l.campaign   || "—",
+          adSet:          l.adSetName  || "—",
+          source:         l.source     || "—",
+          status:         l.status     || "",
+          date:           l.date,
+          followUpDate:   l.followUpDate || null,
+          remark:         l.remark     || "",
+          latestRemark:   latestRemark,
+          latestRemarkBy: latestRemarkBy,
+          latestRemarkAt: latestRemarkAt,
+          agent:          (l.user && l.user.name) ? l.user.name : "Unassigned",
+          language:       l.language   || "",
         };
       };
 
