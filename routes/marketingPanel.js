@@ -114,35 +114,53 @@ router.get("/meta-ad-level", protectMarketing, function (req, res) {
       .then(async function (data) {
         if (!data.configured || !data.ads || !data.ads.length) return res.json(data);
 
-        // Build CRM lead counts per campaign name so each ad card can show CRM stats
+        // Build CRM lead counts per campaign+adset pair so each ad card shows
+        // its OWN ad-set-scoped CRM data, not the whole campaign total.
         try {
           const fromD = new Date(since);
           const toD   = new Date(until + "T23:59:59Z");
           const campaignNames = Array.from(new Set(data.ads.map(function(a){ return a.campaignName; }).filter(Boolean)));
+
+          // Group by campaign + adsetName to get per-ad-set CRM counts
           const crmAgg = await Lead.aggregate([
             { $match: { company: companyId, mergedInto: null, createdAt: { $gte: fromD, $lte: toD }, campaign: { $in: campaignNames } } },
             { $group: {
-              _id:       "$campaign",
+              _id:       { campaign: "$campaign", adSetName: { $ifNull: ["$adSetName", ""] } },
               total:     { $sum: 1 },
               converted: { $sum: { $cond: [{ $eq: ["$status","Converted"] },1,0] } },
               qualified: { $sum: { $cond: [{ $in: ["$temperature",["Hot"]] },1,0] } },
-              latestRemark: { $last: "$remark" },
             }},
           ]);
-          const crmMap = {};
-          crmAgg.forEach(function(r){ crmMap[r._id] = { crmLeads: r.total, crmConverted: r.converted, crmQualified: r.qualified, latestRemark: r.latestRemark || "" }; });
 
-          // Attach CRM stats to each ad
-          data.ads = data.ads.map(function(ad){
-            const crm = crmMap[ad.campaignName] || { crmLeads: 0, crmConverted: 0, crmQualified: 0, latestRemark: "" };
+          // Build composite key map: "campaignName||adSetName"
+          const crmMap = {};
+          const campOnlyMap = {};  // fallback: campaign-level totals
+          crmAgg.forEach(function(r) {
+            const adSet = (r._id && r._id.adSetName) ? r._id.adSetName : "";
+            const camp  = (r._id && r._id.campaign)  ? r._id.campaign  : "";
+            const key = camp + "||" + adSet;
+            crmMap[key] = { crmLeads: r.total, crmConverted: r.converted, crmQualified: r.qualified };
+            if (!campOnlyMap[camp]) campOnlyMap[camp] = { crmLeads: 0, crmConverted: 0, crmQualified: 0 };
+            campOnlyMap[camp].crmLeads     += r.total;
+            campOnlyMap[camp].crmConverted += r.converted;
+            campOnlyMap[camp].crmQualified += r.qualified;
+          });
+
+          // Attach CRM stats to each ad — prefer ad-set match, fall back to campaign total
+          data.ads = data.ads.map(function(ad) {
+            const adSetKey = (ad.campaignName || "") + "||" + (ad.adsetName || "");
+            const crm = crmMap[adSetKey]
+              || crmMap[(ad.campaignName || "") + "||"]  // try blank adset match
+              || campOnlyMap[ad.campaignName]
+              || { crmLeads: 0, crmConverted: 0, crmQualified: 0 };
             return Object.assign({}, ad, crm);
           });
 
-          // Rebuild totals crmLeads summed uniquely per campaign (not per ad)
+          // Overall CRM totals (de-duped at campaign level)
           data.crmTotals = {
-            leads:     crmAgg.reduce(function(s,r){ return s+r.total; },0),
-            converted: crmAgg.reduce(function(s,r){ return s+r.converted; },0),
-            qualified: crmAgg.reduce(function(s,r){ return s+r.qualified; },0),
+            leads:     Object.values(campOnlyMap).reduce(function(s,r){ return s+r.crmLeads; },0),
+            converted: Object.values(campOnlyMap).reduce(function(s,r){ return s+r.crmConverted; },0),
+            qualified: Object.values(campOnlyMap).reduce(function(s,r){ return s+r.crmQualified; },0),
           };
         } catch(e) { /* crm enrich is best-effort */ }
 
@@ -324,7 +342,9 @@ router.get("/meta-campaign/:id", protectMarketing, function (req, res) {
 
         const n = function (v) { return v != null && !isNaN(Number(v)) ? Math.round(Number(v) * 100) / 100 : 0; };
 
-        // CRM counts
+        // CRM counts — scoped to this specific config's campaign AND ad set when present.
+        // Without adSetName scoping, a config for one ad set would show leads from ALL
+        // ad sets in the campaign, inflating the numbers.
         const crmFilter = {
           company: companyId,
           mergedInto: null,
@@ -332,6 +352,10 @@ router.get("/meta-campaign/:id", protectMarketing, function (req, res) {
         };
         const campName = cfg.parentCampaignName || cfg.campaignName;
         if (campName) crmFilter.campaign = campName;
+        // Scope to specific ad set when this config represents one
+        if (cfg.adSetName && cfg.adSetName.trim()) {
+          crmFilter.adSetName = cfg.adSetName.trim();
+        }
 
         const [totalLeads, convertedLeads, qualifiedLeads] = await Promise.all([
           Lead.countDocuments(crmFilter),
@@ -345,6 +369,7 @@ router.get("/meta-campaign/:id", protectMarketing, function (req, res) {
         if (!cfg.adAccountId || !cfg.adsToken) {
           return res.json({
             config: cfg, configured: false,
+            scopedToAdSet: !!(cfg.adSetName && cfg.adSetName.trim()),
             crmLeads: totalLeads, crmConverted: convertedLeads, crmQualified: qualifiedLeads,
             revenue: revenue, roas: null,
             daily: [], breakdowns: {},
@@ -402,6 +427,7 @@ router.get("/meta-campaign/:id", protectMarketing, function (req, res) {
 
         return res.json({
           config: cfg, configured: true,
+          scopedToAdSet: !!(cfg.adSetName && cfg.adSetName.trim()),
           totals: totalsAgg,
           crmLeads: totalLeads, crmConverted: convertedLeads, crmQualified: qualifiedLeads,
           revenue: revenue, roas: roas, avgDealValue: avgDeal,
