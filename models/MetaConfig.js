@@ -21,6 +21,19 @@ const metaConfigSchema = new mongoose.Schema(
       required: true,
     },
 
+    // The admin who connected this campaign. Leads from it are attributed to
+    // this admin, and round-robin is restricted to this admin's employees.
+    // null = legacy/shared config (company-wide behaviour, super_admin only).
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref:  "Admin",
+      default: null,
+    },
+
+    // ── Average deal value for ROAS calculation ────────────────────────────────
+    // Revenue per won customer for this campaign. ROAS = (converted × avgDealValue) / spend.
+    avgDealValue: { type: Number, default: 0 },
+
     // Round-robin: no single assignedUser — leads rotate across all company users
     roundRobinIndex: {
       type:    Number,
