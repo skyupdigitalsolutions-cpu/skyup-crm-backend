@@ -207,9 +207,42 @@ async function reconcileMetaStatusesForCompany(companyId) {
       (cfg.parentCampaignName && merged.campaignByName.get(cfg.parentCampaignName.trim().toLowerCase())) ||
       null;
 
-    // If we couldn't resolve EITHER, this config isn't in these accounts — skip
-    // (don't guess; leave the admin's current state alone).
-    if (!adsetRec && !campaignRec) continue;
+    // If we couldn't resolve EITHER via the Ads API, fall back to the status
+    // data already stored by syncPageForms (metaFormStatus / metaAdsetStatus).
+    // This covers manually-created configs and configs whose adSetName doesn't
+    // exactly match Meta's ad-set name in the Ads API — without this they would
+    // permanently retain metaActive=true (the schema default) and always show
+    // "Active" in the CRM even when the campaign is paused on Meta.
+    if (!adsetRec && !campaignRec) {
+      const storedFormStr  = String(cfg.metaFormStatus  || "").trim().toUpperCase();
+      const storedAdsetStr = String(cfg.metaAdsetStatus || "").trim().toUpperCase();
+
+      // Only act when syncPageForms has written real status data (non-empty).
+      // If both are still empty the config has never been synced — leave it alone.
+      if (storedFormStr === "" && storedAdsetStr === "") continue;
+
+      const formPausedStored  = storedFormStr  !== "" && storedFormStr  !== "ACTIVE";
+      const adsetPausedStored = storedAdsetStr !== "" && isPausedStatus(storedAdsetStr);
+      const metaActiveStored  = !formPausedStored && !adsetPausedStored;
+
+      const fallbackUpdate = { metaActive: metaActiveStored, metaStatusSyncedAt: new Date() };
+
+      if (!metaActiveStored && cfg.isActive) {
+        fallbackUpdate.isActive     = false;
+        fallbackUpdate.pausedByMeta = true;
+        paused++;
+        console.log("[MetaStatusSync] Paused (stored status) \"" + cfg.campaignName + "\" form=" + storedFormStr + " adset=" + storedAdsetStr);
+      } else if (metaActiveStored && cfg.pausedByMeta && !cfg.isActive) {
+        fallbackUpdate.isActive     = true;
+        fallbackUpdate.pausedByMeta = false;
+        reactivated++;
+        console.log("[MetaStatusSync] Reactivated (stored status) \"" + cfg.campaignName + "\"");
+      }
+
+      checked++;
+      await MetaConfig.findByIdAndUpdate(cfg._id, fallbackUpdate);
+      continue;
+    }
 
     checked++;
 
@@ -374,7 +407,7 @@ async function syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersi
 
   const enrichedForms = await Promise.all(
     allForms.map(async (form) => {
-      const info = await getAdsetInfo(form.adset_id);
+      const info = await getAdsetInfo(form.adset_id || "");
       return {
         ...form,
         adset_name:    form.adset_name    || (info && info.name)         || "",
