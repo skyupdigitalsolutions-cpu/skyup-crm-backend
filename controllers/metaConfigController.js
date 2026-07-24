@@ -267,6 +267,36 @@ const getInsights = async (req, res) => {
   }
 };
 
+// ── Claim ownership of legacy (createdBy=null) configs ───────────────────────
+// POST /api/admin/meta-config/claim-ownership { adminId }
+// Super-admin only. Stamps createdBy on all unowned Meta configs for a given
+// admin so they stop appearing in every admin's campaign list.
+const claimMetaConfigOwnership = async (req, res) => {
+  try {
+    const isSuperAdmin = req.admin && (req.admin.role === "super_admin" || req.admin.role === "superadmin" || req.admin.isSuperAdmin);
+    if (!isSuperAdmin) return res.status(403).json({ message: "Super admin only." });
+
+    const { adminId, configId } = req.body;
+    if (!adminId) return res.status(400).json({ message: "adminId is required." });
+
+    const companyId = req.admin.company._id || req.admin.company;
+    const Admin = require("../models/Admin");
+    const targetAdmin = await Admin.findOne({ _id: adminId, company: companyId }).lean();
+    if (!targetAdmin) return res.status(404).json({ message: "Admin not found in this company." });
+
+    // If configId provided: assign just that one config (used from campaign card "Assign" button).
+    // Otherwise: bulk-assign all unowned configs (legacy migration).
+    const matchQuery = configId
+      ? { _id: configId, company: companyId }
+      : { company: companyId, $or: [{ createdBy: null }, { createdBy: { $exists: false } }] };
+
+    const result = await MetaConfig.updateMany(matchQuery, { $set: { createdBy: adminId } });
+    return res.json({ message: `Ownership assigned to ${targetAdmin.name}`, updated: result.modifiedCount });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getAllConfigs,
   getConfigById,
@@ -276,4 +306,5 @@ module.exports = {
   deleteConfig,
   getInsights,
   getAdLevelInsights,
+  claimMetaConfigOwnership,
 };
