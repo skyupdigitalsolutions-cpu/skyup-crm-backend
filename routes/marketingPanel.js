@@ -158,10 +158,12 @@ router.get("/leads-intelligence", protectMarketing, function (req, res) {
       // 2. Converted leads with full detail
       Lead.find(Object.assign({}, filter, { status: "Converted" }))
         .select("name mobile email campaign adSetName source status date remark user language")
+        .populate("user", "name")
         .sort({ date: -1 }).limit(200).lean(),
       // 3. Recent leads (all) for the table
       Lead.find(filter)
         .select("name mobile email campaign adSetName source status date remark followUpDate user language")
+        .populate("user", "name")
         .sort({ date: -1 }).limit(500).lean(),
       // 4. Distinct campaigns for filter
       Lead.distinct("campaign", { company: companyId, campaign: { "$nin": [null, ""] } }),
