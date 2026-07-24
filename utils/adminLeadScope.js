@@ -76,18 +76,21 @@ function mergeLeadScope(baseFilter, scope) {
 // Per-admin CAMPAIGN-CONFIG visibility (Meta / Google / Website configs).
 //
 // A campaign "belongs" to the admin who connected it (config.createdBy).
-//   • admin        -> { createdBy: adminId }  (only their own campaigns)
-//   • super_admin  -> {}                       (all campaigns)
-//   • employee/other -> {}                      (unchanged)
-// This is synchronous — no DB lookup needed. Spread it straight into a config
-// query object: `Config.find({ company, ...getAdminConfigScope(req) })`.
+//   • admin        -> own configs + unclaimed (createdBy null = legacy/pre-ownership)
+//   • super_admin  -> all configs
+//   • employee/other -> unchanged
+//
+// Use $or so legacy configs (createdBy null) are accessible to ALL admins
+// until a backfill assigns proper ownership. Once createdBy is set on a config
+// it becomes exclusive to that admin.
 // ─────────────────────────────────────────────────────────────────────────────
 function getAdminConfigScope(req) {
   const role = resolveRole(req);
   if (role !== "admin") return {};
   const adminId = resolveAdminId(req);
   if (!adminId) return {};
-  return { createdBy: adminId };
+  // Show: (a) own configs, (b) legacy configs with no owner yet
+  return { $or: [{ createdBy: adminId }, { createdBy: null }, { createdBy: { $exists: false } }] };
 }
 
 module.exports = { getAdminLeadScope, mergeLeadScope, isSuperAdminRole, getAdminConfigScope, resolveAdminId };
