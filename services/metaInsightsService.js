@@ -221,7 +221,26 @@ async function convertedCountForConfig(cfg, fromD, toD) {
   }
 }
 
-// ── Setup-issue detector ──────────────────────────────────────────────────────
+// ── CRM QUALIFIED (Hot) lead count for this config in the period ──────────────
+// "Qualified lead" = lead with temperature/leadCategory === "Hot".
+async function qualifiedLeadCountForConfig(cfg, fromD, toD) {
+  const q = {
+    company: cfg.company,
+    mergedInto: null,
+    createdAt: { $gte: fromD, $lte: toD },
+    $or: [{ temperature: "Hot" }, { leadCategory: "Hot" }],
+  };
+  if (cfg.parentCampaignName || cfg.campaignName) {
+    q.campaign = cfg.parentCampaignName || cfg.campaignName;
+  }
+  try {
+    return await Lead.countDocuments(q);
+  } catch {
+    return 0;
+  }
+}
+
+
 function detectIssues({ configured, hasData, metrics, error, needsAdsRead, tokenExpired }, leadCount) {
   const issues = [];
   if (!configured) {
@@ -251,12 +270,14 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
   const configs = await Lead.db.model("MetaConfig").find({ company, isActive: true }).lean();
 
   const campaigns = [];
-  const totals = { spend: 0, impressions: 0, reach: 0, clicks: 0, leads: 0, converted: 0 };
+  const totals = { spend: 0, impressions: 0, reach: 0, clicks: 0, leads: 0, converted: 0, qualified: 0, revenue: 0 };
 
   for (const cfg of configs) {
     const insights = await fetchInsightsForConfig(cfg, since, until);
     const leadCount = await leadCountForConfig(cfg, fromD, toD);
     const convertedCount = await convertedCountForConfig(cfg, fromD, toD);
+    const qualifiedCount = await qualifiedLeadCountForConfig(cfg, fromD, toD);
+    const avgDeal = Number(cfg.avgDealValue) || 0;
 
     // ── Account/campaign scope: one card PER AD SET ───────────────────────────
     // fetchInsightsForConfig returns an `adsets` array for these. We emit a
@@ -275,6 +296,9 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
           metrics:      { spend: 0, impressions: 0, reach: 0, clicks: 0, cpm: 0, cpc: 0, ctr: 0, frequency: 0 },
           leads:        leadCount,
           converted:    convertedCount,
+          qualified:    qualifiedCount,
+          revenue:      Math.round(convertedCount * avgDeal * 100) / 100,
+          roas:         0,
           costPerLead:  null,
           costPerConversion: null,
           issues,
@@ -292,10 +316,11 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
           const m = a.metrics;
           const adsetLeads = i === topSpendIdx ? leadCount : 0;
           const adsetConverted = i === topSpendIdx ? convertedCount : 0;
+          const adsetQualified = i === topSpendIdx ? qualifiedCount : 0;
+          const adsetRevenue = Math.round(adsetConverted * avgDeal * 100) / 100;
+          const adsetRoas = m.spend > 0 && adsetRevenue > 0 ? Math.round((adsetRevenue / m.spend) * 100) / 100 : 0;
           const costPerLead = adsetLeads > 0 ? Math.round((m.spend / adsetLeads) * 100) / 100 : null;
           const costPerConversion = adsetConverted > 0 ? Math.round((m.spend / adsetConverted) * 100) / 100 : null;
-
-          // Per-ad-set health check (reuse detectIssues with a single-row shape).
           const issues = detectIssues({ configured: true, hasData: true, metrics: m }, adsetLeads);
 
           totals.spend       += m.spend;
@@ -313,14 +338,19 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
             metrics:      m,
             leads:        adsetLeads,
             converted:    adsetConverted,
+            qualified:    adsetQualified,
+            revenue:      adsetRevenue,
+            roas:         adsetRoas,
             costPerLead,
             costPerConversion,
             issues,
           });
         });
       }
-      totals.leads += leadCount;
+      totals.leads     += leadCount;
       totals.converted += convertedCount;
+      totals.qualified += qualifiedCount;
+      totals.revenue   += Math.round(convertedCount * avgDeal * 100) / 100;
       continue;
     }
 
@@ -329,6 +359,8 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
     const m = insights.metrics || { spend: 0, impressions: 0, reach: 0, clicks: 0, cpm: 0, cpc: 0, ctr: 0, frequency: 0 };
     const costPerLead = leadCount > 0 ? Math.round((m.spend / leadCount) * 100) / 100 : null;
     const costPerConversion = convertedCount > 0 ? Math.round((m.spend / convertedCount) * 100) / 100 : null;
+    const cardRevenue = Math.round(convertedCount * avgDeal * 100) / 100;
+    const cardRoas = m.spend > 0 && cardRevenue > 0 ? Math.round((cardRevenue / m.spend) * 100) / 100 : 0;
 
     if (insights.configured && insights.hasData) {
       totals.spend       += m.spend;
@@ -336,8 +368,10 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
       totals.reach       += m.reach;
       totals.clicks      += m.clicks;
     }
-    totals.leads += leadCount;
+    totals.leads     += leadCount;
     totals.converted += convertedCount;
+    totals.qualified += qualifiedCount;
+    totals.revenue   += cardRevenue;
 
     campaigns.push({
       configId:     cfg._id,
@@ -348,6 +382,9 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
       metrics:      m,
       leads:        leadCount,
       converted:    convertedCount,
+      qualified:    qualifiedCount,
+      revenue:      cardRevenue,
+      roas:         cardRoas,
       costPerLead,
       costPerConversion,
       issues,
@@ -357,10 +394,12 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
   const overallCPL = totals.leads > 0 ? Math.round((totals.spend / totals.leads) * 100) / 100 : null;
   const overallCPConv = totals.converted > 0 ? Math.round((totals.spend / totals.converted) * 100) / 100 : null;
   const overallConvRate = totals.leads > 0 ? Math.round((totals.converted / totals.leads) * 10000) / 100 : null;
+  const overallRoas = totals.spend > 0 && totals.revenue > 0 ? Math.round((totals.revenue / totals.spend) * 100) / 100 : null;
+  totals.revenue = Math.round(totals.revenue * 100) / 100;
 
   const result = {
     range: { from: fromD, to: toD },
-    totals: { ...totals, costPerLead: overallCPL, costPerConversion: overallCPConv, conversionRatePct: overallConvRate },
+    totals: { ...totals, costPerLead: overallCPL, costPerConversion: overallCPConv, conversionRatePct: overallConvRate, roas: overallRoas },
     campaigns,
     aiAnalysis: null,
   };
