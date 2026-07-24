@@ -31,6 +31,6 @@ router.delete("/:id",       protectAdmin, requireFeature("googleAds"), deleteCon
 
 module.exports = router;
 
-router.post("/claim-ownership", protectAdmin, requireCompanySuperAdmin, claimGoogleConfigOwnership);
+router.post("/claim-ownership", protectAdmin, claimGoogleConfigOwnership);
 
 module.exports = router;
