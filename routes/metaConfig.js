@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const {
   getAllConfigs,
+  claimMetaConfigOwnership,
   getConfigById,
   addConfig,
   updateConfig,
@@ -46,5 +47,9 @@ router.post(
 router.put("/:id", protectAdmin, updateConfig);
 router.patch("/:id/toggle", protectAdmin, requireFeature("metaAds"), toggleConfig);
 router.delete("/:id", protectAdmin, deleteConfig);
+
+module.exports = router;
+
+router.post("/claim-ownership", protectAdmin, requireCompanySuperAdmin, claimMetaConfigOwnership);
 
 module.exports = router;
