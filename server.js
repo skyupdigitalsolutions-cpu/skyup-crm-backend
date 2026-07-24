@@ -347,6 +347,46 @@ connectDB().then(() => {
   // Migrate any marketing-only admins that still have role:admin → marketing_user
   runMarketingRoleMigration();
 
+  // ── Backfill createdBy on campaign configs ──────────────────────────────────
+  // Assigns all unowned Meta/Google/Website configs to the first-created admin
+  // in their company. Safe to run on every deploy — skips already-owned configs.
+  (async function backfillConfigOwnership() {
+    try {
+      const MetaConfig      = require("./models/MetaConfig");
+      const GoogleAdsConfig = require("./models/GoogleAdsConfig");
+      const WebsiteConfig   = require("./models/WebsiteConfig");
+      const Admin           = require("./models/Admin");
+      const Company         = require("./models/Company");
+
+      const companies = await Company.find({ isActive: true }).select("_id").lean();
+      let totalUpdated = 0;
+
+      for (const company of companies) {
+        // Oldest admin (by createdAt) in this company — most likely the original owner.
+        const firstAdmin = await Admin.findOne({ company: company._id, role: "admin" })
+          .sort({ createdAt: 1 })
+          .select("_id name")
+          .lean();
+
+        if (!firstAdmin) continue; // no plain admin yet — skip
+
+        for (const Model of [MetaConfig, GoogleAdsConfig, WebsiteConfig]) {
+          const result = await Model.updateMany(
+            { company: company._id, $or: [{ createdBy: null }, { createdBy: { $exists: false } }] },
+            { $set: { createdBy: firstAdmin._id } }
+          );
+          totalUpdated += result.modifiedCount;
+        }
+      }
+
+      if (totalUpdated > 0) {
+        console.log("🔧 Backfilled createdBy on " + totalUpdated + " campaign config(s) to first-created admin.");
+      }
+    } catch (e) {
+      console.warn("⚠️  backfillConfigOwnership:", e.message);
+    }
+  })();
+
   const PORT = process.env.PORT || 5000;
   server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
