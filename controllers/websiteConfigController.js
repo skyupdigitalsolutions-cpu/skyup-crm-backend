@@ -1,8 +1,9 @@
 const WebsiteConfig = require("../models/WebsiteConfig");
+const { getAdminConfigScope, resolveAdminId } = require("../utils/adminLeadScope");
 
 const getConfigs = async (req, res) => {
   try {
-    const configs = await WebsiteConfig.find({ company: req.admin.company });
+    const configs = await WebsiteConfig.find({ company: req.admin.company, ...getAdminConfigScope(req) });
     res.json({ data: configs });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
@@ -16,6 +17,7 @@ const createConfig = async (req, res) => {
       defaultStatus: defaultStatus || "New",
       defaultRemark: defaultRemark || "Lead from Website",
       company:       req.admin.company,
+      createdBy:     resolveAdminId(req),
     });
     res.status(201).json({ data: config });
   } catch (err) { res.status(400).json({ message: err.message }); }
@@ -28,7 +30,7 @@ const updateConfig = async (req, res) => {
     if (webhookSecret && webhookSecret.trim()) payload.webhookSecret = webhookSecret.trim();
 
     const config = await WebsiteConfig.findOneAndUpdate(
-      { _id: req.params.id, company: req.admin.company },
+      { _id: req.params.id, company: req.admin.company, ...getAdminConfigScope(req) },
       payload,
       { new: true }
     );
@@ -40,7 +42,7 @@ const updateConfig = async (req, res) => {
 const toggleConfig = async (req, res) => {
   try {
     const config = await WebsiteConfig.findOneAndUpdate(
-      { _id: req.params.id, company: req.admin.company },
+      { _id: req.params.id, company: req.admin.company, ...getAdminConfigScope(req) },
       [{ $set: { isActive: { $not: "$isActive" } } }],
       { new: true }
     );
@@ -51,7 +53,7 @@ const toggleConfig = async (req, res) => {
 
 const deleteConfig = async (req, res) => {
   try {
-    await WebsiteConfig.findOneAndDelete({ _id: req.params.id, company: req.admin.company });
+    await WebsiteConfig.findOneAndDelete({ _id: req.params.id, company: req.admin.company, ...getAdminConfigScope(req) });
     res.json({ message: "Disconnected" });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
@@ -75,4 +77,24 @@ const getInsights = async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
-module.exports = { getConfigs, createConfig, updateConfig, toggleConfig, deleteConfig, getInsights };
+
+// ── Claim ownership of legacy (createdBy=null) Website configs ────────────────
+const claimWebsiteConfigOwnership = async (req, res) => {
+  try {
+    const isSuperAdmin = req.admin && (req.admin.role === "super_admin" || req.admin.role === "superadmin" || req.admin.isSuperAdmin);
+    if (!isSuperAdmin) return res.status(403).json({ message: "Super admin only." });
+    const { adminId, configId } = req.body;
+    if (!adminId) return res.status(400).json({ message: "adminId is required." });
+    const companyId = req.admin.company._id || req.admin.company;
+    const Admin = require("../models/Admin");
+    const targetAdmin = await Admin.findOne({ _id: adminId, company: companyId }).lean();
+    if (!targetAdmin) return res.status(404).json({ message: "Admin not found in this company." });
+    const matchQuery = configId
+      ? { _id: configId, company: companyId }
+      : { company: companyId, $or: [{ createdBy: null }, { createdBy: { $exists: false } }] };
+    const result = await WebsiteConfig.updateMany(matchQuery, { $set: { createdBy: adminId } });
+    return res.json({ message: "Ownership assigned to " + targetAdmin.name, updated: result.modifiedCount });
+  } catch (err) { return res.status(500).json({ message: err.message }); }
+};
+
+module.exports = { getConfigs, createConfig, updateConfig, toggleConfig, deleteConfig, getInsights, claimWebsiteConfigOwnership };
