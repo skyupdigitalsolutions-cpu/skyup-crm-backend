@@ -42,6 +42,6 @@ router.delete("/:id",        protectAdmin, requireFeature("websiteTracking"), de
 
 module.exports = router;
 
-router.post("/claim-ownership", protectAdmin, requireCompanySuperAdmin, claimWebsiteConfigOwnership);
+router.post("/claim-ownership", protectAdmin, claimWebsiteConfigOwnership);
 
 module.exports = router;
