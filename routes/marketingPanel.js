@@ -233,4 +233,334 @@ router.get("/leads-intelligence", protectMarketing, function (req, res) {
   }
 });
 
+// ── Meta campaign detail (single config) ──────────────────────────────────────
+// GET /api/marketing-panel/meta-campaign/:id?from=&to=
+// Returns full detail for ONE MetaConfig: daily spend trend, audience-level
+// breakdown from Insights API (age, gender, placement, device), plus CRM counts.
+router.get("/meta-campaign/:id", protectMarketing, function (req, res) {
+  try {
+    const MetaConfig = require("../models/MetaConfig");
+    const Lead       = require("../models/Leads");
+    const axios      = require("axios");
+    const companyId  = req.admin.company._id || req.admin.company;
+    const configId   = req.params.id;
+
+    MetaConfig.findOne({ _id: configId, company: companyId }).lean()
+      .then(async function (cfg) {
+        if (!cfg) return res.status(404).json({ message: "Config not found." });
+
+        const from  = req.query.from || null;
+        const to    = req.query.to   || null;
+        const today = new Date();
+        const daysAgo = function (d) { const dt = new Date(today); dt.setDate(dt.getDate() - d); return dt.toISOString().slice(0, 10); };
+        const since = from || daysAgo(30);
+        const until = to   || daysAgo(0);
+        const timeRange = JSON.stringify({ since: since, until: until });
+
+        const n = function (v) { return v != null && !isNaN(Number(v)) ? Math.round(Number(v) * 100) / 100 : 0; };
+
+        // CRM counts
+        const crmFilter = {
+          company: companyId,
+          mergedInto: null,
+          createdAt: { $gte: new Date(since), $lte: new Date(until + "T23:59:59Z") },
+        };
+        const campName = cfg.parentCampaignName || cfg.campaignName;
+        if (campName) crmFilter.campaign = campName;
+
+        const [totalLeads, convertedLeads, qualifiedLeads] = await Promise.all([
+          Lead.countDocuments(crmFilter),
+          Lead.countDocuments(Object.assign({}, crmFilter, { status: "Converted" })),
+          Lead.countDocuments(Object.assign({}, crmFilter, { $or: [{ temperature: "Hot" }, { leadCategory: "Hot" }] })),
+        ]);
+
+        const avgDeal = Number(cfg.avgDealValue) || 0;
+        const revenue = Math.round(convertedLeads * avgDeal * 100) / 100;
+
+        if (!cfg.adAccountId || !cfg.adsToken) {
+          return res.json({
+            config: cfg, configured: false,
+            crmLeads: totalLeads, crmConverted: convertedLeads, crmQualified: qualifiedLeads,
+            revenue: revenue, roas: null,
+            daily: [], breakdowns: {},
+          });
+        }
+
+        const ver = cfg.graphApiVersion || "v22.0";
+        const node = cfg.metaAdsetId || cfg.metaCampaignId || cfg.adAccountId;
+        const level = cfg.metaAdsetId ? "adset" : cfg.metaCampaignId ? "campaign" : "account";
+
+        // Fetch daily breakdown
+        const [dailyRes, ageGenderRes, placementRes, deviceRes] = await Promise.allSettled([
+          axios.get("https://graph.facebook.com/" + ver + "/" + node + "/insights", {
+            params: { fields: "spend,impressions,reach,clicks,cpm,cpc,ctr,frequency", time_range: timeRange, time_increment: 1, level: level, access_token: cfg.adsToken, limit: 100 },
+            timeout: 20000,
+          }),
+          axios.get("https://graph.facebook.com/" + ver + "/" + node + "/insights", {
+            params: { fields: "spend,impressions,clicks,ctr,reach", time_range: timeRange, breakdowns: "age,gender", level: level, access_token: cfg.adsToken, limit: 200 },
+            timeout: 20000,
+          }),
+          axios.get("https://graph.facebook.com/" + ver + "/" + node + "/insights", {
+            params: { fields: "spend,impressions,clicks,ctr", time_range: timeRange, breakdowns: "publisher_platform,platform_position", level: level, access_token: cfg.adsToken, limit: 100 },
+            timeout: 20000,
+          }),
+          axios.get("https://graph.facebook.com/" + ver + "/" + node + "/insights", {
+            params: { fields: "spend,impressions,clicks,ctr", time_range: timeRange, breakdowns: "device_platform", level: level, access_token: cfg.adsToken, limit: 50 },
+            timeout: 20000,
+          }),
+        ]);
+
+        const daily = dailyRes.status === "fulfilled"
+          ? (dailyRes.value.data.data || []).map(function (r) {
+              return { date: r.date_start, spend: n(r.spend), impressions: n(r.impressions), reach: n(r.reach), clicks: n(r.clicks), cpm: n(r.cpm), cpc: n(r.cpc), ctr: n(r.ctr), frequency: n(r.frequency) };
+            })
+          : [];
+
+        const ageGender = ageGenderRes.status === "fulfilled"
+          ? (ageGenderRes.value.data.data || []).map(function (r) { return { age: r.age, gender: r.gender, spend: n(r.spend), impressions: n(r.impressions), clicks: n(r.clicks), ctr: n(r.ctr), reach: n(r.reach) }; })
+          : [];
+
+        const placement = placementRes.status === "fulfilled"
+          ? (placementRes.value.data.data || []).map(function (r) { return { platform: r.publisher_platform, position: r.platform_position, spend: n(r.spend), impressions: n(r.impressions), clicks: n(r.clicks), ctr: n(r.ctr) }; })
+          : [];
+
+        const device = deviceRes.status === "fulfilled"
+          ? (deviceRes.value.data.data || []).map(function (r) { return { device: r.device_platform, spend: n(r.spend), impressions: n(r.impressions), clicks: n(r.clicks), ctr: n(r.ctr) }; })
+          : [];
+
+        // Aggregate totals from daily
+        const totalsAgg = daily.reduce(function (acc, d) {
+          acc.spend += d.spend; acc.impressions += d.impressions; acc.reach += d.reach; acc.clicks += d.clicks;
+          return acc;
+        }, { spend: 0, impressions: 0, reach: 0, clicks: 0 });
+        const roas = totalsAgg.spend > 0 && revenue > 0 ? Math.round((revenue / totalsAgg.spend) * 100) / 100 : null;
+
+        return res.json({
+          config: cfg, configured: true,
+          totals: totalsAgg,
+          crmLeads: totalLeads, crmConverted: convertedLeads, crmQualified: qualifiedLeads,
+          revenue: revenue, roas: roas, avgDealValue: avgDeal,
+          daily: daily,
+          breakdowns: { ageGender: ageGender, placement: placement, device: device },
+        });
+      })
+      .catch(function (err) { res.status(500).json({ message: err.message }); });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ── Google Ads campaign detail ─────────────────────────────────────────────────
+// GET /api/marketing-panel/google-campaign/:id?from=&to=
+// Returns detail for ONE GoogleAdsConfig including CRM counts and ROAS.
+router.get("/google-campaign/:id", protectMarketing, function (req, res) {
+  try {
+    const GoogleAdsConfig = require("../models/GoogleAdsConfig");
+    const Lead            = require("../models/Leads");
+    const companyId       = req.admin.company._id || req.admin.company;
+    const configId        = req.params.id;
+    const from            = req.query.from || null;
+    const to              = req.query.to   || null;
+    const today           = new Date();
+    const daysAgo         = function (d) { const dt = new Date(today); dt.setDate(dt.getDate() - d); return dt.toISOString().slice(0, 10); };
+    const since           = from || daysAgo(30);
+    const until           = to   || daysAgo(0);
+
+    GoogleAdsConfig.findOne({ _id: configId, company: companyId }).lean()
+      .then(async function (cfg) {
+        if (!cfg) return res.status(404).json({ message: "Config not found." });
+
+        const crmFilter = {
+          company: companyId, mergedInto: null,
+          createdAt: { $gte: new Date(since), $lte: new Date(until + "T23:59:59Z") },
+          campaign: cfg.campaignName,
+        };
+        const [totalLeads, convertedLeads, qualifiedLeads] = await Promise.all([
+          Lead.countDocuments(crmFilter),
+          Lead.countDocuments(Object.assign({}, crmFilter, { status: "Converted" })),
+          Lead.countDocuments(Object.assign({}, crmFilter, { $or: [{ temperature: "Hot" }, { leadCategory: "Hot" }] })),
+        ]);
+
+        const avgDeal = Number(cfg.avgDealValue) || 0;
+        const revenue = Math.round(convertedLeads * avgDeal * 100) / 100;
+        const spend   = Number(cfg.cost) || 0;
+        const roas    = spend > 0 && revenue > 0 ? Math.round((revenue / spend) * 100) / 100 : null;
+        const cpl     = totalLeads > 0 ? Math.round((spend / totalLeads) * 100) / 100 : null;
+
+        return res.json({
+          config: cfg, configured: true,
+          crmLeads: totalLeads, crmConverted: convertedLeads, crmQualified: qualifiedLeads,
+          revenue: revenue, roas: roas, avgDealValue: avgDeal,
+          spend: spend, cpl: cpl,
+          from: since, to: until,
+        });
+      })
+      .catch(function (err) { res.status(500).json({ message: err.message }); });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ── Google Ads full campaign list with CRM stats ──────────────────────────────
+// GET /api/marketing-panel/google-campaigns?from=&to=
+router.get("/google-campaigns", protectMarketing, function (req, res) {
+  try {
+    const GoogleAdsConfig = require("../models/GoogleAdsConfig");
+    const Lead            = require("../models/Leads");
+    const companyId       = req.admin.company._id || req.admin.company;
+    const from  = req.query.from || null;
+    const to    = req.query.to   || null;
+    const today = new Date();
+    const daysAgo = function (d) { const dt = new Date(today); dt.setDate(dt.getDate() - d); return dt.toISOString().slice(0, 10); };
+    const since = from || daysAgo(30);
+    const until = to   || daysAgo(0);
+
+    GoogleAdsConfig.find({ company: companyId }).lean()
+      .then(async function (configs) {
+        const enriched = await Promise.all(configs.map(async function (cfg) {
+          const crmFilter = {
+            company: companyId, mergedInto: null,
+            createdAt: { $gte: new Date(since), $lte: new Date(until + "T23:59:59Z") },
+            campaign: cfg.campaignName,
+          };
+          const [leads, converted, qualified] = await Promise.all([
+            Lead.countDocuments(crmFilter),
+            Lead.countDocuments(Object.assign({}, crmFilter, { status: "Converted" })),
+            Lead.countDocuments(Object.assign({}, crmFilter, { $or: [{ temperature: "Hot" }, { leadCategory: "Hot" }] })),
+          ]);
+          const avgDeal = Number(cfg.avgDealValue) || 0;
+          const revenue = Math.round(converted * avgDeal * 100) / 100;
+          const spend   = Number(cfg.cost) || 0;
+          const roas    = spend > 0 && revenue > 0 ? Math.round((revenue / spend) * 100) / 100 : null;
+          const cpl     = leads > 0 ? Math.round((spend / leads) * 100) / 100 : null;
+          const convRate = leads > 0 ? Math.round((converted / leads) * 10000) / 100 : 0;
+          return Object.assign({}, cfg, { crmLeads: leads, crmConverted: converted, crmQualified: qualified, revenue: revenue, roas: roas, cpl: cpl, convRate: convRate });
+        }));
+
+        const totals = enriched.reduce(function (acc, c) {
+          acc.spend       += Number(c.cost)       || 0;
+          acc.impressions += Number(c.impressions) || 0;
+          acc.clicks      += Number(c.clicks)      || 0;
+          acc.leads       += c.crmLeads;
+          acc.converted   += c.crmConverted;
+          acc.qualified   += c.crmQualified;
+          acc.revenue     += c.revenue;
+          return acc;
+        }, { spend: 0, impressions: 0, clicks: 0, leads: 0, converted: 0, qualified: 0, revenue: 0 });
+        const totalRoas = totals.spend > 0 && totals.revenue > 0 ? Math.round((totals.revenue / totals.spend) * 100) / 100 : null;
+
+        return res.json({ campaigns: enriched, totals: Object.assign({}, totals, { roas: totalRoas }), range: { from: since, to: until } });
+      })
+      .catch(function (err) { res.status(500).json({ message: err.message }); });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ── Reports — scheduled summary ───────────────────────────────────────────────
+// GET /api/marketing-panel/reports/summary?from=&to=
+// Generates a combined Meta + Google + CRM summary suitable for export/email.
+router.get("/reports/summary", protectMarketing, function (req, res) {
+  try {
+    const Lead            = require("../models/Leads");
+    const MetaConfig      = require("../models/MetaConfig");
+    const GoogleAdsConfig = require("../models/GoogleAdsConfig");
+    const companyId       = req.admin.company._id || req.admin.company;
+    const from  = req.query.from || null;
+    const to    = req.query.to   || null;
+    const today = new Date();
+    const daysAgo = function (d) { const dt = new Date(today); dt.setDate(dt.getDate() - d); return dt.toISOString().slice(0, 10); };
+    const since = from || daysAgo(30);
+    const until = to   || daysAgo(0);
+    const fromD = new Date(since);
+    const toD   = new Date(until + "T23:59:59Z");
+
+    Promise.all([
+      // Overall CRM pipeline
+      Lead.aggregate([
+        { $match: { company: companyId, mergedInto: null, createdAt: { $gte: fromD, $lte: toD } } },
+        { $group: {
+          _id: null,
+          total:      { $sum: 1 },
+          converted:  { $sum: { $cond: [{ $eq: ["$status", "Converted"] }, 1, 0] } },
+          inProgress: { $sum: { $cond: [{ $eq: ["$status", "In Progress"] }, 1, 0] } },
+          newLeads:   { $sum: { $cond: [{ $eq: ["$status", "New"] }, 1, 0] } },
+          notInt:     { $sum: { $cond: [{ $eq: ["$status", "Not Interested"] }, 1, 0] } },
+          hotLeads:   { $sum: { $cond: [{ $in: ["$temperature", ["Hot"]] }, 1, 0] } },
+        }},
+      ]),
+      // Per-source breakdown
+      Lead.aggregate([
+        { $match: { company: companyId, mergedInto: null, createdAt: { $gte: fromD, $lte: toD } } },
+        { $group: {
+          _id: "$source",
+          total:     { $sum: 1 },
+          converted: { $sum: { $cond: [{ $eq: ["$status", "Converted"] }, 1, 0] } },
+        }},
+        { $sort: { total: -1 } },
+      ]),
+      // Per-campaign breakdown
+      Lead.aggregate([
+        { $match: { company: companyId, mergedInto: null, createdAt: { $gte: fromD, $lte: toD } } },
+        { $group: {
+          _id: "$campaign",
+          total:     { $sum: 1 },
+          converted: { $sum: { $cond: [{ $eq: ["$status", "Converted"] }, 1, 0] } },
+        }},
+        { $sort: { total: -1 } },
+        { $limit: 20 },
+      ]),
+      // Per-employee performance
+      Lead.aggregate([
+        { $match: { company: companyId, mergedInto: null, createdAt: { $gte: fromD, $lte: toD }, user: { $ne: null } } },
+        { $group: {
+          _id: "$user",
+          total:     { $sum: 1 },
+          converted: { $sum: { $cond: [{ $eq: ["$status", "Converted"] }, 1, 0] } },
+        }},
+        { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "userInfo" } },
+        { $project: {
+          name:      { $arrayElemAt: ["$userInfo.name", 0] },
+          total: 1,  converted: 1,
+          convRate:  { $cond: [{ $gt: ["$total", 0] }, { $multiply: [{ $divide: ["$converted", "$total"] }, 100] }, 0] },
+        }},
+        { $sort: { converted: -1 } },
+        { $limit: 20 },
+      ]),
+      // Meta spend total (from MetaConfig stored fields)
+      MetaConfig.aggregate([
+        { $match: { company: companyId } },
+      ]),
+      // Google spend total
+      GoogleAdsConfig.aggregate([
+        { $match: { company: companyId } },
+      ]),
+    ]).then(function (results) {
+      const pipeline  = (results[0] && results[0][0]) ? results[0][0] : { total: 0, converted: 0, inProgress: 0, newLeads: 0, notInt: 0, hotLeads: 0 };
+      const bySrc     = results[1].map(function (r) { return { source: r._id || "Unknown", total: r.total, converted: r.converted, convRate: r.total > 0 ? Math.round((r.converted / r.total) * 10000) / 100 : 0 }; });
+      const byCamp    = results[2].map(function (r) { return { campaign: r._id || "Unknown", total: r.total, converted: r.converted }; });
+      const byEmp     = results[3].map(function (r) { return { name: r.name || "Unassigned", total: r.total, converted: r.converted, convRate: Math.round((r.convRate || 0) * 100) / 100 }; });
+      const metaCfgs  = results[4];
+      const gCfgs     = results[5];
+
+      const googleSpend = gCfgs.reduce(function (s, c) { return s + (Number(c.cost) || 0); }, 0);
+      const convRate = pipeline.total > 0 ? Math.round((pipeline.converted / pipeline.total) * 10000) / 100 : 0;
+
+      res.json({
+        range: { from: since, to: until },
+        pipeline: Object.assign({}, pipeline, { convRate: convRate }),
+        bySrc: bySrc,
+        byCamp: byCamp,
+        byEmployee: byEmp,
+        adSpend: { google: Math.round(googleSpend * 100) / 100 },
+        metaCampaigns: metaCfgs.length,
+        googleCampaigns: gCfgs.length,
+        generatedAt: new Date().toISOString(),
+      });
+    }).catch(function (err) { res.status(500).json({ message: err.message }); });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 module.exports = router;
