@@ -5,6 +5,7 @@ const { checkLimit, requireFeature } = require("../middlewares/entitlementMiddle
 const GoogleAdsConfig = require("../models/GoogleAdsConfig");
 const {
   getConfigs, createConfig, updateConfig, toggleConfig, deleteConfig, getInsights, getDashboard,
+  claimGoogleConfigOwnership,
 } = require("../controllers/googleAdsConfigController");
 
 // Count existing Google Ads configs for the caller's company.
@@ -27,5 +28,9 @@ router.post(
 router.patch("/:id/toggle", protectAdmin, requireFeature("googleAds"), toggleConfig);
 router.put("/:id",          protectAdmin, requireFeature("googleAds"), updateConfig); // edit campaign + ad metrics
 router.delete("/:id",       protectAdmin, requireFeature("googleAds"), deleteConfig);
+
+module.exports = router;
+
+router.post("/claim-ownership", protectAdmin, requireCompanySuperAdmin, claimGoogleConfigOwnership);
 
 module.exports = router;
