@@ -236,6 +236,7 @@ const createLead = async (req, res) => {
       secondaryPhone: normSecondary ? secondaryMobile : null,
       user:    req.body.user || req.user._id,
       company: companyId,
+      addedManually: true,
     });
 
     autoSendTemplates(lead, companyId);
@@ -321,6 +322,7 @@ const adminCreateLead = async (req, res) => {
       user: assignedUser,
       company: companyId,
       assignedAdmin: req.admin?._id || req.superAdmin?._id || null,
+      addedManually: true,
     });
 
     const populated = await Lead.findById(lead._id)

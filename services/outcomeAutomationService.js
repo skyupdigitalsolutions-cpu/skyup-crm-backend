@@ -94,23 +94,33 @@ async function sendOutcomeAutomation(lead, companyId, outcome) {
       return { skipped: `outcome "${outcome}" is not handled by outcomeAutomation` };
     }
 
-    // ── CSV/Excel-imported leads are excluded from the "Not Answered" reminder ─
-    // Per requirement: leads added via Import CSV must NOT receive the
-    // crm_call_missed template when their outcome is logged as "Not Answered".
+    // ── Only CAMPAIGN leads get the "Not Answered" reminder ───────────────────
+    // Per requirement: the crm_call_missed template on the "Not Answered"
+    // outcome should fire ONLY for campaign leads (Meta / Website / Google Ads /
+    // etc.). It must be SKIPPED for:
+    //   • CSV/Excel-imported leads  → importedViaCsv === true (or source "Excel Import")
+    //   • Manually-added leads (Add Lead button) → addedManually === true (or source "Manual")
     // Only this one outcome is affected — every other outcome still fires for
-    // imported leads. We check the passed lead first (fast path) and fall back
-    // to a tiny DB read so leads imported BEFORE this flag existed (which only
-    // carry source "Excel Import") are also correctly excluded.
+    // these leads. We check the passed lead first (fast path) and fall back to a
+    // tiny DB read so leads created BEFORE these flags existed (carrying only
+    // source "Excel Import" / "Manual") are also correctly excluded.
     if (key === "notAnswered") {
-      let imported = lead.importedViaCsv === true || lead.source === "Excel Import";
-      if (!imported && lead._id) {
+      const isExcluded = (l) =>
+        !!l && (
+          l.importedViaCsv === true ||
+          l.addedManually  === true ||
+          l.source === "Excel Import" ||
+          l.source === "Manual"
+        );
+      let excluded = isExcluded(lead);
+      if (!excluded && lead._id) {
         try {
-          const src = await Lead.findById(lead._id).select("importedViaCsv source").lean();
-          imported = !!(src && (src.importedViaCsv === true || src.source === "Excel Import"));
-        } catch (_) { /* if the lookup fails, fall through and treat as not-imported */ }
+          const src = await Lead.findById(lead._id).select("importedViaCsv addedManually source").lean();
+          excluded = isExcluded(src);
+        } catch (_) { /* if the lookup fails, fall through and treat as campaign lead */ }
       }
-      if (imported) {
-        return { skipped: `lead ${lead._id} is CSV-imported — "Not Answered" automation disabled for imported leads` };
+      if (excluded) {
+        return { skipped: `lead ${lead._id} is CSV-imported or manually added — "Not Answered" automation only fires for campaign leads` };
       }
     }
 

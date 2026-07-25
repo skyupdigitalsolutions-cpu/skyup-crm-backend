@@ -98,6 +98,11 @@ const leadSchema = mongoose.Schema(
     // should not receive the crm_call_missed template). Other automations are
     // unaffected.
     importedViaCsv: { type: Boolean, default: false },
+
+    // True for leads created through the "Add Lead" button (manual entry).
+    // Also excluded from the "Not Answered" outcome automation — that template
+    // fires only for campaign leads (Meta / Website / Google Ads / etc.).
+    addedManually:  { type: Boolean, default: false },
     adSetName: { type: String, default: "", trim: true },
     // Reference to the exact MetaConfig (ad set) this lead came from. Lets the
     // Campaigns page count leads per AD SET instead of per campaign name (which
