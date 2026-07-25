@@ -120,6 +120,12 @@ const requireNotReadOnly = () => async (req, res, next) => {
  */
 const requireFeature = (featureKey) => async (req, res, next) => {
   try {
+    // Super_admin has unrestricted access to all features — no entitlement check needed.
+    const role = (req.admin && req.admin.role) ? req.admin.role : "";
+    if (role === "super_admin" || role === "superadmin" || (req.admin && req.admin.isSuperAdmin)) {
+      return next();
+    }
+
     let ent = req.entitlements;
 
     if (!ent) {
