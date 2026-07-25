@@ -48,8 +48,6 @@ router.put("/:id", protectAdmin, updateConfig);
 router.patch("/:id/toggle", protectAdmin, requireFeature("metaAds"), toggleConfig);
 router.delete("/:id", protectAdmin, deleteConfig);
 
-module.exports = router;
-
 router.post("/claim-ownership", protectAdmin, claimMetaConfigOwnership);
 
 module.exports = router;
