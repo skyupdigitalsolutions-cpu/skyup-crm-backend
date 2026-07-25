@@ -10,6 +10,7 @@ const getAllConfigs = async (req, res) => {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const configs = await MetaConfig.find({ company: companyId, ...getAdminConfigScope(req) })
       .populate("company", "name")
+      .populate("createdBy", "name")
       .select("-pageAccessToken -adsToken")
       .lean();
 
