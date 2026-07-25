@@ -3,7 +3,7 @@ const { getAdminConfigScope, resolveAdminId } = require("../utils/adminLeadScope
 
 const getConfigs = async (req, res) => {
   try {
-    const configs = await WebsiteConfig.find({ company: req.admin.company, ...getAdminConfigScope(req) });
+    const configs = await WebsiteConfig.find({ company: req.admin.company, ...getAdminConfigScope(req) }).populate("createdBy", "name").lean();
     res.json({ data: configs });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
