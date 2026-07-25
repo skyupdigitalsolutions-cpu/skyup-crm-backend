@@ -4,7 +4,8 @@ const { getAdminConfigScope, resolveAdminId } = require("../utils/adminLeadScope
 // GET all configs for the logged-in company
 const getConfigs = async (req, res) => {
   try {
-    const configs = await GoogleAdsConfig.find({ company: req.admin.company, ...getAdminConfigScope(req) }).populate("createdBy", "name").lean();
+    const companyId = req.admin.company._id || req.admin.company;
+    const configs = await GoogleAdsConfig.find({ company: companyId, ...getAdminConfigScope(req) }).populate("createdBy", "name").lean();
     res.json({ data: configs });
   } catch (err) {
     res.status(500).json({ message: err.message });
