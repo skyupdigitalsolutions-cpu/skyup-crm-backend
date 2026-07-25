@@ -96,18 +96,23 @@ function dateRange(from, to) {
 //   individual cards.
 async function fetchInsightsForConfig(cfg, since, until) {
   const ver   = cfg.graphApiVersion || DEFAULT_VER;
-  const token = cfg.adsToken;
+  const token = cfg.adsToken || cfg.pageAccessToken; // page token as fallback for basic insights
   const acct  = cfg.adAccountId;
 
-  if (!acct || !token) {
+  if (!token) {
     return { configured: false };
   }
 
-  // Scope: explicit ad set > explicit campaign > whole account (per-adset breakdown).
+  // If no adAccountId but we have metaCampaignId or metaAdsetId, we can still
+  // fetch insights using the page token scoped to that specific campaign/adset.
   let node, level;
   if (cfg.metaAdsetId)         { node = cfg.metaAdsetId;    level = "adset";    }
   else if (cfg.metaCampaignId) { node = cfg.metaCampaignId; level = "campaign"; }
-  else                         { node = acct;               level = "account";  }
+  else if (acct)               { node = acct;               level = "account";  }
+  else {
+    // No specific node to query — cannot fetch insights
+    return { configured: false };
+  }
 
   const url = `https://graph.facebook.com/${ver}/${node}/insights`;
 
@@ -264,10 +269,14 @@ function detectIssues({ configured, hasData, metrics, error, needsAdsRead, token
 }
 
 // ── Public: full report for a company ─────────────────────────────────────────
-async function getMetaInsightsReport({ company, from, to, withAI = true }) {
+async function getMetaInsightsReport({ company, from, to, withAI = true, createdBy = null }) {
   const { since, until, fromD, toD } = dateRange(from, to);
 
-  const configs = await Lead.db.model("MetaConfig").find({ company, isActive: true }).lean();
+  // Include both active and paused configs — paused campaigns still have
+  // historical spend data worth showing in the performance report.
+  const cfgQuery = { company };
+  if (createdBy) cfgQuery.createdBy = createdBy;
+  const configs = await Lead.db.model("MetaConfig").find(cfgQuery).lean();
 
   const campaigns = [];
   const totals = { spend: 0, impressions: 0, reach: 0, clicks: 0, leads: 0, converted: 0, qualified: 0, revenue: 0 };
@@ -496,8 +505,11 @@ async function runMetaAIAnalysis(campaigns, totals) {
 // /{ad_id}/adcreatives endpoint. Uses the same adsToken + adAccountId that
 // the campaign-level insights use — no new permissions required.
 // ─────────────────────────────────────────────────────────────────────────────
-async function getMetaAdLevelReport({ company, from, to }) {
-  const configs = await MetaConfig.find({ company: company, isActive: true }).lean();
+async function getMetaAdLevelReport({ company, from, to, createdBy = null }) {
+  // Include paused configs too — their ads still have spend/creative data.
+  const cfgQuery = { company: company };
+  if (createdBy) cfgQuery.createdBy = createdBy;
+  const configs = await MetaConfig.find(cfgQuery).lean();
 
   // Collect one entry per unique adAccountId + adsToken pair.
   const acctMap = {};
