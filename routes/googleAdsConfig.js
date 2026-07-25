@@ -29,8 +29,6 @@ router.patch("/:id/toggle", protectAdmin, requireFeature("googleAds"), toggleCon
 router.put("/:id",          protectAdmin, requireFeature("googleAds"), updateConfig); // edit campaign + ad metrics
 router.delete("/:id",       protectAdmin, requireFeature("googleAds"), deleteConfig);
 
-module.exports = router;
-
 router.post("/claim-ownership", protectAdmin, claimGoogleConfigOwnership);
 
 module.exports = router;
