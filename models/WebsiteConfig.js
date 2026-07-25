@@ -13,6 +13,12 @@ const websiteConfigSchema = new mongoose.Schema(
       ref:  "Company",
       required: true,
     },
+    // Owning admin — stamped at creation. null = legacy/shared config visible to all admins.
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref:  "Admin",
+      default: null,
+    },
     roundRobinIndex: { type: Number, default: 0 },
   },
   { timestamps: true }
