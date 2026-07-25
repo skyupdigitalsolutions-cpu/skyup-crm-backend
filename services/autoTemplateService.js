@@ -429,6 +429,19 @@ async function autoSendTemplates(lead, companyId) {
     return [{ channel: "all", status: "skipped", detail: "Missing lead or companyId" }];
   }
 
+  // ── Source guard ────────────────────────────────────────────────────────────
+  // Leads added manually or imported from CSV/Excel must NOT receive any
+  // automated WhatsApp / Email / SMS messages. Only leads that arrive via
+  // Meta, Google, or Website webhooks (organic / campaign sources) should
+  // trigger the crm_followup_leads template.
+  const blockedSources = new Set(["manual", "csv import", "excel import", "other"]);
+  const leadSource = String(lead.source || "").toLowerCase().trim();
+  const isImported = lead.importedViaCsv === true;
+  if (isImported || blockedSources.has(leadSource)) {
+    console.log(`[autoTemplate] ⏭ Skipped — source="${lead.source}" (manual/imported leads are excluded from automation)`);
+    return [{ channel: "all", status: "skipped", detail: `Source "${lead.source}" is excluded from automation` }];
+  }
+
   console.log(`[autoTemplate] ▶ New lead: "${lead.name}" company=${companyId}`);
 
   try {

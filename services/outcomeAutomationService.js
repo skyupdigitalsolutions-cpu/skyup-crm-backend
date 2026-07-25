@@ -94,34 +94,29 @@ async function sendOutcomeAutomation(lead, companyId, outcome) {
       return { skipped: `outcome "${outcome}" is not handled by outcomeAutomation` };
     }
 
-    // ── Only CAMPAIGN leads get the "Not Answered" reminder ───────────────────
-    // Per requirement: the crm_call_missed template on the "Not Answered"
-    // outcome should fire ONLY for campaign leads (Meta / Website / Google Ads /
-    // etc.). It must be SKIPPED for:
-    //   • CSV/Excel-imported leads  → importedViaCsv === true (or source "Excel Import")
-    //   • Manually-added leads (Add Lead button) → addedManually === true (or source "Manual")
-    // Only this one outcome is affected — every other outcome still fires for
-    // these leads. We check the passed lead first (fast path) and fall back to a
-    // tiny DB read so leads created BEFORE these flags existed (carrying only
-    // source "Excel Import" / "Manual") are also correctly excluded.
-    if (key === "notAnswered") {
-      const isExcluded = (l) =>
-        !!l && (
-          l.importedViaCsv === true ||
-          l.addedManually  === true ||
-          l.source === "Excel Import" ||
-          l.source === "Manual"
-        );
-      let excluded = isExcluded(lead);
-      if (!excluded && lead._id) {
-        try {
-          const src = await Lead.findById(lead._id).select("importedViaCsv addedManually source").lean();
-          excluded = isExcluded(src);
-        } catch (_) { /* if the lookup fails, fall through and treat as campaign lead */ }
-      }
-      if (excluded) {
-        return { skipped: `lead ${lead._id} is CSV-imported or manually added — "Not Answered" automation only fires for campaign leads` };
-      }
+    // ── CSV/Excel-imported leads are excluded from the "Not Answered" reminder ─
+    // Per requirement: leads added via Import CSV must NOT receive the
+    // crm_call_missed template when their outcome is logged as "Not Answered".
+    // ── Source guard ────────────────────────────────────────────────────────────
+    // Leads added manually or imported from CSV/Excel are excluded from ALL
+    // outcome automations. A manually-entered lead should never receive an
+    // automated WhatsApp/Email when an agent logs a call outcome.
+    const BLOCKED_SOURCES = new Set(["manual", "csv import", "excel import", "other"]);
+    let isManualOrImported = lead.importedViaCsv === true ||
+      BLOCKED_SOURCES.has(String(lead.source || "").toLowerCase().trim());
+
+    if (!isManualOrImported && lead._id) {
+      try {
+        const src = await Lead.findById(lead._id).select("importedViaCsv source").lean();
+        if (src) {
+          isManualOrImported = src.importedViaCsv === true ||
+            BLOCKED_SOURCES.has(String(src.source || "").toLowerCase().trim());
+        }
+      } catch (_) { /* if the lookup fails, fall through */ }
+    }
+
+    if (isManualOrImported) {
+      return { skipped: `lead ${lead._id} source="${lead.source}" — all outcome automations disabled for manual/imported leads` };
     }
 
     // NOTE: intentionally NOT using .lean() here. Mongoose does not apply

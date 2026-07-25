@@ -8,13 +8,16 @@ const { notifyCampaignLead, notifyAllAdminsCampaignLead } = require("../services
 const { sendNewLeadNotification } = require("../services/fcmService");
 
 async function getNextAssignedUser(config) {
-  const users = await User.find({
-    company:  config.company,
-    isActive: { $ne: false },
-  }).select("_id").lean();
+  // Round-robin only among the OWNING admin's employees (config.createdBy).
+  // Never assign to another admin's staff — that would make the lead invisible
+  // to the config's owning admin under the per-admin lead scope.
+  const userFilter = { company: config.company, isActive: { $ne: false } };
+  if (config.createdBy) userFilter.createdBy = config.createdBy;
+
+  const users = await User.find(userFilter).select("_id").lean();
 
   if (!users || users.length === 0) {
-    console.warn(`⚠️  No active users for company ${config.company} — lead unassigned`);
+    console.warn(`⚠️  No eligible users for website config ${config._id} (owner ${config.createdBy}) — lead left unassigned`);
     return null;
   }
 
@@ -32,9 +35,17 @@ const receiveWebsiteWebhook = async (req, res) => {
   res.sendStatus(200);
 
   try {
-    const { webhook_secret, name, mobile, email, message } = req.body;
+    // Accept multiple field name variants — different form builders and landing
+    // pages send phone as "phone", "mobile", "contact", "whatsapp" etc.
+    const webhook_secret = req.body.webhook_secret || req.body.secret || req.body.key;
+    const name   = req.body.name   || req.body.full_name || req.body.fullName  || req.body.customer_name || req.body.form_name || "";
+    const mobile = req.body.mobile || req.body.phone     || req.body.whatsapp  || req.body.contact       || req.body.form_mobile || req.body.phoneNumber || req.body.phone_number || "";
+    const email  = req.body.email  || req.body.email_id  || req.body.form_email || "";
+    const message = req.body.message || req.body.query || req.body.remarks || req.body.form_message || req.body.description || "";
 
-    if (!webhook_secret) return console.warn("⚠️  No webhook_secret in payload");
+    if (!webhook_secret) return console.warn("⚠️  No webhook_secret in payload. Body keys:", Object.keys(req.body).join(", "));
+
+    console.log(`[WebhookDebug] secret=****${String(webhook_secret).slice(-4)} name="${name}" mobile="${mobile}" email="${email}"`);
 
     const config = await WebsiteConfig.findOne({ webhookSecret: webhook_secret });
     if (!config) return console.error(`❌ No WebsiteConfig found for secret: "${webhook_secret}"`);
@@ -72,7 +83,7 @@ const receiveWebsiteWebhook = async (req, res) => {
         name:            (name || "Unknown").trim(),
         mobile:          cleanMobile,
         primaryPhone:    cleanMobile,
-        normalizedPhone: cleanMobile, // redundant but guards against hook timing issues
+        normalizedPhone: cleanMobile,
         secondaryPhone:  null,
         normalizedSecondaryPhone: null,
         email:           (email || "").trim(),
@@ -82,6 +93,7 @@ const receiveWebsiteWebhook = async (req, res) => {
         date:         new Date(),
         remark:       message ? `${config.defaultRemark} — ${message}` : config.defaultRemark,
         user:         assignedUserId,
+        assignedAdmin: config.createdBy || null,
         company:      config.company,
       });
     } catch (createErr) {
