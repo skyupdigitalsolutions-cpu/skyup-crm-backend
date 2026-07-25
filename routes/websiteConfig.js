@@ -26,8 +26,9 @@ const countCompanyWebsiteConfigs = async (req) => {
   return WebsiteConfig.countDocuments({ company: companyId });
 };
 
-// All routes require websiteTracking feature
-router.get("/",    protectAdmin, requireFeature("websiteTracking"), getConfigs);
+// All write routes require websiteTracking feature; reads are ungated so
+// admins can always see their own connected campaigns regardless of plan.
+router.get("/",    protectAdmin, getConfigs);
 router.get("/insights", protectAdmin, requireFeature("websiteTracking"), getInsights); // ← Website performance report
 router.post(
   "/",
@@ -39,8 +40,6 @@ router.post(
 router.put("/:id",           protectAdmin, requireFeature("websiteTracking"), updateConfig);
 router.patch("/:id/toggle",  protectAdmin, requireFeature("websiteTracking"), toggleConfig);
 router.delete("/:id",        protectAdmin, requireFeature("websiteTracking"), deleteConfig);
-
-module.exports = router;
 
 router.post("/claim-ownership", protectAdmin, claimWebsiteConfigOwnership);
 
