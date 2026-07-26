@@ -13,12 +13,13 @@ const syncFromMeta = async (req, res) => {
   try {
     const { pageId, pageAccessToken, graphApiVersion = "v22.0" } = req.body;
     const companyId = req.admin?.company?._id || req.admin?.company;
+    const adminId   = req.admin?._id || req.admin?.id || null;
 
     if (!pageId || !pageAccessToken) {
       return res.status(400).json({ message: "pageId and pageAccessToken are required" });
     }
 
-    const result = await syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersion });
+    const result = await syncPageForms({ pageId, pageAccessToken, companyId, graphApiVersion, adminId });
 
     // Mirror Meta's paused/archived ad sets & campaigns into the CRM right away.
     let statusSync = null;

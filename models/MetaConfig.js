@@ -21,19 +21,6 @@ const metaConfigSchema = new mongoose.Schema(
       required: true,
     },
 
-    // The admin who connected this campaign. Leads from it are attributed to
-    // this admin, and round-robin is restricted to this admin's employees.
-    // null = legacy/shared config (company-wide behaviour, super_admin only).
-    createdBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref:  "Admin",
-      default: null,
-    },
-
-    // ── Average deal value for ROAS calculation ────────────────────────────────
-    // Revenue per won customer for this campaign. ROAS = (converted × avgDealValue) / spend.
-    avgDealValue: { type: Number, default: 0 },
-
     // Round-robin: no single assignedUser — leads rotate across all company users
     roundRobinIndex: {
       type:    Number,
@@ -74,6 +61,14 @@ const metaConfigSchema = new mongoose.Schema(
       trim: true,
       // e.g. "Summer Sale 2025" — used to group ad sets under the same campaign header
     },
+    // Admin who created / owns this config — used to scope round-robin
+    // assignment so Meta leads only go to employees under that admin.
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Admin",
+      default: null,
+    },
+
     // ── Campaign category (user-defined) ──────────────────────────────────────
     // Free-form label to group campaigns in the Performance Marketing Dashboard.
     // Examples: "Real Estate", "Education", "Healthcare", "Product Launch", etc.

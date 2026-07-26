@@ -86,12 +86,25 @@ function extractPhone(parsedFields) {
 const getNextAssignedUser = async (config) => {
   const MetaConfig = require("../models/MetaConfig");
 
-  const users = await User.find({ company: config.company, isActive: { $ne: false } })
-    .select("_id")
-    .lean();
+  // Scope to only employees assigned to the admin who owns this Meta config.
+  // This prevents leads from one admin's campaign going to another admin's employees.
+  const userFilter = { company: config.company, isActive: { $ne: false } };
+
+  if (config.createdBy) {
+    // createdBy is set — filter to employees under that admin only
+    userFilter.createdBy = config.createdBy;
+  }
+  // else: no createdBy (legacy config) — fall back to all company users
+
+  let users = await User.find(userFilter).select("_id").lean();
+
+  // Fallback: if admin has no employees assigned, use all company users
+  if (!users || users.length === 0) {
+    users = await User.find({ company: config.company, isActive: { $ne: false } }).select("_id").lean();
+  }
 
   if (!users || users.length === 0) {
-    console.warn(`No users found for company ${config.company} — lead will be unassigned`);
+    console.warn("[MetaRoundRobin] No users found for company", String(config.company), "— lead will be unassigned");
     return null;
   }
 

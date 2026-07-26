@@ -1,6 +1,5 @@
 const MetaConfig = require("../models/MetaConfig");
 const Lead       = require("../models/Leads");
-const { getAdminConfigScope, mergeLeadScope, resolveAdminId } = require("../utils/adminLeadScope");
 
 // GET - All campaign connections for the admin's company (token hidden)
 // BUG FIX: also returns real lead counts so the Campaigns page card shows the
@@ -8,9 +7,8 @@ const { getAdminConfigScope, mergeLeadScope, resolveAdminId } = require("../util
 const getAllConfigs = async (req, res) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
-    const configs = await MetaConfig.find({ company: companyId, ...getAdminConfigScope(req) })
+    const configs = await MetaConfig.find({ company: companyId })
       .populate("company", "name")
-      .populate("createdBy", "name")
       .select("-pageAccessToken -adsToken")
       .lean();
 
@@ -75,8 +73,7 @@ const getAllConfigs = async (req, res) => {
 // GET - Single config by ID
 const getConfigById = async (req, res) => {
   try {
-    const companyId = req.admin?.company?._id || req.admin?.company;
-    const config = await MetaConfig.findOne({ _id: req.params.id, company: companyId, ...getAdminConfigScope(req) })
+    const config = await MetaConfig.findById(req.params.id)
       .populate("company", "name")
       .select("-pageAccessToken -adsToken");
     if (!config) return res.status(404).json({ message: "Config not found" });
@@ -142,11 +139,12 @@ const addConfig = async (req, res) => {
       pageId,
       pageAccessToken,
       formIds:         formIds || [],
-      formId:          req.body.formId?.trim() || "",         // ← ADD
-      adSetName:       req.body.adSetName?.trim() || "",      // ← ADD
+      formId:          req.body.formId?.trim() || "",
+      adSetName:       req.body.adSetName?.trim() || "",
       parentCampaignName: req.body.parentCampaignName?.trim() || "",
+      category:        req.body.category?.trim() || "",
       company:         companyId,
-      createdBy:        resolveAdminId(req),
+      createdBy:       req.admin._id || req.admin.id || null,
       roundRobinIndex: 0,
       defaultStatus:   defaultStatus || "New",
       defaultRemark:   defaultRemark || "Lead from Meta Campaign",
@@ -171,13 +169,11 @@ const updateConfig = async (req, res) => {
   try {
     // Prevent accidental overwrite of round-robin pointer via PUT
     delete req.body.roundRobinIndex;
-    // Prevent changing company / owner via PUT
+    // Prevent changing company via PUT
     delete req.body.company;
-    delete req.body.createdBy;
 
-    const companyId = req.admin?.company?._id || req.admin?.company;
-    const updated = await MetaConfig.findOneAndUpdate(
-      { _id: req.params.id, company: companyId, ...getAdminConfigScope(req) },
+    const updated = await MetaConfig.findByIdAndUpdate(
+      req.params.id,
       req.body,
       { new: true, runValidators: true }
     ).populate("company", "name");
@@ -192,8 +188,7 @@ const updateConfig = async (req, res) => {
 // PATCH - Toggle active/inactive
 const toggleConfig = async (req, res) => {
   try {
-    const companyId = req.admin?.company?._id || req.admin?.company;
-    const config = await MetaConfig.findOne({ _id: req.params.id, company: companyId, ...getAdminConfigScope(req) });
+    const config = await MetaConfig.findById(req.params.id);
     if (!config) return res.status(404).json({ message: "Config not found" });
     config.isActive = !config.isActive;
     // This is an explicit admin action — clear the Meta-driven pause flag so the
@@ -214,8 +209,7 @@ const toggleConfig = async (req, res) => {
 // DELETE - Disconnect a campaign
 const deleteConfig = async (req, res) => {
   try {
-    const companyId = req.admin?.company?._id || req.admin?.company;
-    const config = await MetaConfig.findOneAndDelete({ _id: req.params.id, company: companyId, ...getAdminConfigScope(req) });
+    const config = await MetaConfig.findByIdAndDelete(req.params.id);
     if (!config) return res.status(404).json({ message: "Config not found" });
     res.json({ success: true, message: "Campaign disconnected successfully" });
   } catch (err) {
@@ -231,14 +225,10 @@ const getAdLevelInsights = async (req, res) => {
     const companyId = req.admin && req.admin.company ? (req.admin.company._id || req.admin.company) : null;
     if (!companyId) return res.status(400).json({ message: "Company not resolved" });
     const { getMetaAdLevelReport } = require("../services/metaInsightsService");
-    const { resolveAdminId, isSuperAdminRole } = require("../utils/adminLeadScope");
-    const role = req.admin && req.admin.role ? req.admin.role : "";
-    const createdBy = isSuperAdminRole(role) ? null : resolveAdminId(req);
     const report = await getMetaAdLevelReport({
       company: companyId,
       from: req.query.from || null,
       to:   req.query.to   || null,
-      createdBy: createdBy,
     });
     res.json(report);
   } catch (err) {
@@ -252,49 +242,15 @@ const getInsights = async (req, res) => {
     if (!companyId) return res.status(400).json({ message: "Company not resolved" });
 
     const { getMetaInsightsReport } = require("../services/metaInsightsService");
-    const { resolveAdminId, isSuperAdminRole } = require("../utils/adminLeadScope");
-    const role = req.admin && req.admin.role ? req.admin.role : "";
-    const createdBy = isSuperAdminRole(role) ? null : resolveAdminId(req);
     const report = await getMetaInsightsReport({
       company: companyId,
       from: req.query.from || null,
       to:   req.query.to   || null,
       withAI: req.query.ai !== "false",
-      createdBy: createdBy,
     });
     res.json(report);
   } catch (err) {
     res.status(500).json({ message: err.message });
-  }
-};
-
-// ── Claim ownership of legacy (createdBy=null) configs ───────────────────────
-// POST /api/admin/meta-config/claim-ownership { adminId }
-// Super-admin only. Stamps createdBy on all unowned Meta configs for a given
-// admin so they stop appearing in every admin's campaign list.
-const claimMetaConfigOwnership = async (req, res) => {
-  try {
-    const isSuperAdmin = req.admin && (req.admin.role === "super_admin" || req.admin.role === "superadmin" || req.admin.isSuperAdmin);
-    if (!isSuperAdmin) return res.status(403).json({ message: "Super admin only." });
-
-    const { adminId, configId } = req.body;
-    if (!adminId) return res.status(400).json({ message: "adminId is required." });
-
-    const companyId = req.admin.company._id || req.admin.company;
-    const Admin = require("../models/Admin");
-    const targetAdmin = await Admin.findOne({ _id: adminId, company: companyId }).lean();
-    if (!targetAdmin) return res.status(404).json({ message: "Admin not found in this company." });
-
-    // If configId provided: assign just that one config (used from campaign card "Assign" button).
-    // Otherwise: bulk-assign all unowned configs (legacy migration).
-    const matchQuery = configId
-      ? { _id: configId, company: companyId }
-      : { company: companyId, $or: [{ createdBy: null }, { createdBy: { $exists: false } }] };
-
-    const result = await MetaConfig.updateMany(matchQuery, { $set: { createdBy: adminId } });
-    return res.json({ message: `Ownership assigned to ${targetAdmin.name}`, updated: result.modifiedCount });
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
   }
 };
 
@@ -307,5 +263,4 @@ module.exports = {
   deleteConfig,
   getInsights,
   getAdLevelInsights,
-  claimMetaConfigOwnership,
 };
