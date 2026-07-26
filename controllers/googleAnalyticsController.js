@@ -219,9 +219,9 @@ const saveProperty = async (req, res) => {
     const cfg = await GoogleAnalyticsConfig.findOneAndUpdate(
       { company: companyOf(req) },
       { propertyId: String(propertyId), propertyName: propertyName || null },
-      { returnDocument: "after", new: true }
+      { returnDocument: "after", new: true, upsert: false }
     );
-    if (!cfg) return res.status(404).json({ message: "Not connected" });
+    if (!cfg) return res.status(404).json({ message: "Not connected — please reconnect Google Analytics first." });
     res.json({ propertyId: cfg.propertyId, propertyName: cfg.propertyName });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
