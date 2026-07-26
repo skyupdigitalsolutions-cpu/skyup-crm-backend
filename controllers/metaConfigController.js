@@ -254,8 +254,32 @@ const getInsights = async (req, res) => {
   }
 };
 
+// ── Assign / claim ownership of Meta config(s) to an admin (super admin only) ─
+// Mirrors claimGoogleConfigOwnership / claimWebsiteConfigOwnership. The
+// Campaigns UI posts { adminId, configId } to /meta-config/claim-ownership.
+// Without this export the route handler was undefined and the server crashed
+// on boot ("argument handler must be a function" at routes/metaConfig.js).
+const claimMetaConfigOwnership = async (req, res) => {
+  try {
+    const isSuperAdmin = req.admin && (req.admin.role === "super_admin" || req.admin.role === "superadmin" || req.admin.isSuperAdmin);
+    if (!isSuperAdmin) return res.status(403).json({ message: "Super admin only." });
+    const { adminId, configId } = req.body;
+    if (!adminId) return res.status(400).json({ message: "adminId is required." });
+    const companyId = req.admin.company._id || req.admin.company;
+    const Admin = require("../models/Admin");
+    const targetAdmin = await Admin.findOne({ _id: adminId, company: companyId }).lean();
+    if (!targetAdmin) return res.status(404).json({ message: "Admin not found in this company." });
+    const matchQuery = configId
+      ? { _id: configId, company: companyId }
+      : { company: companyId, $or: [{ createdBy: null }, { createdBy: { $exists: false } }] };
+    const result = await MetaConfig.updateMany(matchQuery, { $set: { createdBy: adminId } });
+    return res.json({ message: "Ownership assigned to " + targetAdmin.name, updated: result.modifiedCount });
+  } catch (err) { return res.status(500).json({ message: err.message }); }
+};
+
 module.exports = {
   getAllConfigs,
+  claimMetaConfigOwnership,
   getConfigById,
   addConfig,
   updateConfig,
