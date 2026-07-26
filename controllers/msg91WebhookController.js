@@ -441,26 +441,41 @@ async function processMSG91Payload(rawBody, opts = {}) {
     let mediaId     = null;
     let mediaCaption = null;
 
+    // Friendly labels shown when a message carries no readable text (media,
+    // reactions, polls, view-once, etc.). Avoids surfacing scary raw tags like
+    // "[unsupported]" in chat and notifications.
+    const MEDIA_LABEL = {
+      image:    "📷 Photo",
+      video:    "🎥 Video",
+      audio:    "🎤 Voice message",
+      document: "📄 Document",
+      sticker:  "💬 Sticker",
+    };
+
     if (["image", "document", "audio", "video", "sticker"].includes(contentType)) {
       messageType  = contentType;
       mediaCaption = item.caption || item.payload?.caption || null;
       mediaId      = item.url || item.payload?.url || item.payload?.id || null;
-      msgBody      = mediaCaption || mediaId || `[${contentType}]`;
+      msgBody      = mediaCaption || MEDIA_LABEL[contentType] || "📎 Attachment";
     } else if (contentType === "location") {
       messageType = "location";
       msgBody     = `📍 Location: ${item.latitude || "?"}, ${item.longitude || "?"}`;
     } else if (looksInteractive(item, contentType)) {
       // Button / interactive / list reply (e.g. Confirm / Reschedule / Cancel)
       messageType = "text";
-      msgBody     = extractInteractiveTitle(item) || msgText || "[reply]";
+      msgBody     = extractInteractiveTitle(item) || msgText || "📩 New message";
     } else if (["text", "inbound", "incoming"].includes(contentType)) {
       msgBody     = msgText || "";
       messageType = "text";
     } else {
-      msgBody = msgText || extractInteractiveTitle(item) || `[${contentType}]`;
+      // Unknown / "unsupported" content type — WhatsApp sends this for reactions,
+      // polls, view-once media, and newer message types that carry no text.
+      // Try any text we can find, otherwise a friendly generic (never "[unsupported]").
+      messageType = "text";
+      msgBody = msgText || extractInteractiveTitle(item) || "📩 New message";
     }
 
-    if (!msgBody) msgBody = `[${contentType}]`;
+    if (!msgBody) msgBody = "📩 New message";
 
     // ── "Stop Promotion" opt-out ──────────────────────────────────────────────
     // When a lead taps the Stop Promotion quick-reply button on the
@@ -537,6 +552,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
         },
         waPhone,
         contactName:   contactName || conversation.contactName,
+        leadName:      lead?.name || conversation.leadName || null,
         companyId:     config.company.toString(),
         assignedAgent: assignedAgentId,
         leadOwners:    leadOwnerIds,
