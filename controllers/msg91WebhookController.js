@@ -59,7 +59,7 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
           console.error(
             `[inboundMedia] ❌ link already expired at ${expiresAt.toISOString()} — WhatsApp media links are short-lived and cannot be recovered afterwards.`
           );
-          return;
+          return { ok: false, reason: `WhatsApp's download link expired at ${expiresAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}` };
         }
       }
     } catch (_) { /* not a parseable URL — carry on */ }
@@ -75,6 +75,7 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
 
     let buffer = null;
     let usedName = null;
+    const attemptErrors = [];
     for (const a of attempts) {
       try {
         const resp = await axios.get(rawUrl, {
@@ -86,20 +87,28 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
         // Meta sometimes returns a JSON auth error with HTTP 200.
         const ct = String(resp.headers?.["content-type"] || "");
         if (ct.includes("application/json")) {
-          console.warn(`[inboundMedia] "${a.name}" returned JSON (auth error) — trying next`);
+          let body = "";
+          try { body = Buffer.from(resp.data).toString("utf8").slice(0, 200); } catch (_) {}
+          attemptErrors.push(`${a.name}: ${body || "JSON error body"}`);
+          console.warn(`[inboundMedia] "${a.name}" returned JSON (auth error): ${body}`);
           continue;
         }
         buffer = Buffer.from(resp.data);
         usedName = a.name;
         break;
       } catch (e) {
-        console.warn(`[inboundMedia] download via "${a.name}" failed: ${e?.response?.status || e.message}`);
+        let body = "";
+        try { if (e?.response?.data) body = Buffer.from(e.response.data).toString("utf8").slice(0, 200); } catch (_) {}
+        const msg = `${a.name}: HTTP ${e?.response?.status || "?"} ${body || e.message}`;
+        attemptErrors.push(msg);
+        console.warn(`[inboundMedia] download failed — ${msg}`);
       }
     }
 
     if (!buffer || !buffer.length) {
-      console.error("[inboundMedia] ❌ could not download media — it will show as a label only");
-      return;
+      const detail = attemptErrors.join(" | ") || "no attempts made";
+      console.error(`[inboundMedia] ❌ could not download media — ${detail}`);
+      return { ok: false, reason: detail };
     }
 
     const { instance } = await getCloudinaryForCompany(companyId);
@@ -134,8 +143,10 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
       io.to("wa_admin").emit("wa_media_ready", evt);
       io.to(`wa_company_${String(companyId)}`).emit("wa_media_ready", evt);
     }
+    return { ok: true, mediaUrl: publicUrl };
   } catch (err) {
     console.error("[inboundMedia] mirror error:", err.message);
+    return { ok: false, reason: err.message };
   }
 }
 
