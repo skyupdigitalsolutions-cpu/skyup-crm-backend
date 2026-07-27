@@ -94,29 +94,36 @@ async function sendOutcomeAutomation(lead, companyId, outcome) {
       return { skipped: `outcome "${outcome}" is not handled by outcomeAutomation` };
     }
 
-    // ── CSV/Excel-imported leads are excluded from the "Not Answered" reminder ─
-    // Per requirement: leads added via Import CSV must NOT receive the
-    // crm_call_missed template when their outcome is logged as "Not Answered".
-    // ── Source guard ────────────────────────────────────────────────────────────
-    // Leads added manually or imported from CSV/Excel are excluded from ALL
-    // outcome automations. A manually-entered lead should never receive an
-    // automated WhatsApp/Email when an agent logs a call outcome.
+    // ── Source guard (allowlist) ────────────────────────────────────────────────
+    // Leads added manually ("Add Lead" button) or imported from CSV/Excel are
+    // NOT campaign leads, so they are excluded from outcome automations —
+    // EXCEPT "Answered". Per requirement, manual/imported leads may receive
+    // only two automated messages:
+    //   • "Answered"   → handled here (crm_call_answered)
+    //   • "Interested" → handled by sendInterestedBlast (separate service, not
+    //                    routed through OUTCOME_KEY, so it is unaffected)
+    // The new-lead welcome template (crm_followup_leads) is separately blocked
+    // for these sources inside autoTemplateService.autoSendTemplates().
+    const OUTCOMES_ALLOWED_FOR_MANUAL = new Set(["answered"]);
     const BLOCKED_SOURCES = new Set(["manual", "csv import", "excel import", "other"]);
-    let isManualOrImported = lead.importedViaCsv === true ||
-      BLOCKED_SOURCES.has(String(lead.source || "").toLowerCase().trim());
+    const isManualOrImportedLead = (l) =>
+      !!l && (
+        l.importedViaCsv === true ||
+        l.addedManually  === true ||
+        BLOCKED_SOURCES.has(String(l.source || "").toLowerCase().trim())
+      );
+
+    let isManualOrImported = isManualOrImportedLead(lead);
 
     if (!isManualOrImported && lead._id) {
       try {
-        const src = await Lead.findById(lead._id).select("importedViaCsv source").lean();
-        if (src) {
-          isManualOrImported = src.importedViaCsv === true ||
-            BLOCKED_SOURCES.has(String(src.source || "").toLowerCase().trim());
-        }
+        const src = await Lead.findById(lead._id).select("importedViaCsv addedManually source").lean();
+        if (src) isManualOrImported = isManualOrImportedLead(src);
       } catch (_) { /* if the lookup fails, fall through */ }
     }
 
-    if (isManualOrImported) {
-      return { skipped: `lead ${lead._id} source="${lead.source}" — all outcome automations disabled for manual/imported leads` };
+    if (isManualOrImported && !OUTCOMES_ALLOWED_FOR_MANUAL.has(key)) {
+      return { skipped: `lead ${lead._id} source="${lead.source}" — manual/imported leads only receive the "Answered" outcome automation` };
     }
 
     // NOTE: intentionally NOT using .lean() here. Mongoose does not apply
