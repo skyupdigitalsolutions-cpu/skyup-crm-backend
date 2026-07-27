@@ -454,9 +454,34 @@ async function processMSG91Payload(rawBody, opts = {}) {
 
     if (["image", "document", "audio", "video", "sticker"].includes(contentType)) {
       messageType  = contentType;
-      mediaCaption = item.caption || item.payload?.caption || null;
-      mediaId      = item.url || item.payload?.url || item.payload?.id || null;
-      msgBody      = mediaCaption || MEDIA_LABEL[contentType] || "📎 Attachment";
+      mediaCaption = item.caption || item.payload?.caption || item[contentType]?.caption || null;
+
+      // MSG91 is inconsistent about where the inbound media URL lives (and uses
+      // "attachment_url" on the outbound side), so check every plausible field.
+      // The first value that looks like an http(s) URL wins; otherwise we fall
+      // back to whatever ID was provided.
+      const p = item.payload || {};
+      const typed = item[contentType] || p[contentType] || {};
+      const candidates = [
+        item.attachment_url, p.attachment_url, typed.attachment_url,
+        item.url,   p.url,   typed.url,
+        item.link,  p.link,  typed.link,
+        item.media_url, p.media_url,
+        item.media?.url, p.media?.url,
+        typed.id, item.id, p.id,
+      ];
+      mediaId = candidates.find((c) => c) || null;
+      const httpUrl = candidates.find((c) => /^https?:\/\//i.test(String(c || "")));
+      if (httpUrl) mediaId = httpUrl;
+
+      // One-line diagnostic so a non-rendering attachment is immediately
+      // traceable to the field MSG91 actually used.
+      console.log(
+        `📎 Inbound ${contentType}: resolvedUrl=${httpUrl ? "YES" : "NO"} value="${String(mediaId).slice(0, 120)}"` +
+        (httpUrl ? "" : ` | raw keys: ${Object.keys(item).join(",")}`)
+      );
+
+      msgBody = mediaCaption || MEDIA_LABEL[contentType] || "📎 Attachment";
     } else if (contentType === "location") {
       messageType = "location";
       msgBody     = `📍 Location: ${item.latitude || "?"}, ${item.longitude || "?"}`;
@@ -501,6 +526,11 @@ async function processMSG91Payload(rawBody, opts = {}) {
     }
 
     // ── Save message ──────────────────────────────────────────────────────────
+    // MSG91 delivers inbound media as a direct URL. Store it in mediaUrl (what
+    // the chat UI renders from) as well as mediaId, so images/documents the
+    // LEAD sends actually display instead of a "[image]" placeholder.
+    const inboundMediaUrl = /^https?:\/\//i.test(String(mediaId || "")) ? mediaId : null;
+
     const savedMsg = await WhatsAppMessage.create({
       conversation: conversation._id,
       direction:    "inbound",
@@ -508,6 +538,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
       messageType,
       waMessageId,
       mediaId,
+      mediaUrl:     inboundMediaUrl,
       mediaCaption,
       sentBy:       null,
       status:       "delivered",
@@ -547,6 +578,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
           direction:   "inbound",
           body:        msgBody,
           messageType,
+          mediaUrl:    inboundMediaUrl,
           waTimestamp: timestamp,
           status:      "delivered",
         },
