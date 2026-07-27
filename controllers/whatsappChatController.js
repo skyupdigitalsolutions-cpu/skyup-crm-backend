@@ -1871,10 +1871,23 @@ const refreshMedia = async (req, res) => {
     const updated = await WhatsAppMessage.findById(id).select("mediaUrl").lean();
     const ok = updated?.mediaUrl && !/lookaside\.fbsbx\.com/i.test(updated.mediaUrl);
     if (!ok) {
+      // Meta's webhook media links are signed and short-lived. If this message
+      // arrived before media-mirroring was deployed (or simply a while ago),
+      // the link has expired and the file genuinely cannot be recovered.
+      let expiredNote = "";
+      try {
+        const ext = Number(new URL(String(source)).searchParams.get("ext"));
+        if (Number.isFinite(ext) && ext * 1000 < Date.now()) {
+          expiredNote =
+            ` WhatsApp's download link for this file expired on ${new Date(ext * 1000).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}, ` +
+            "so this older attachment can no longer be retrieved. Newer messages will be saved automatically as they arrive.";
+        }
+      } catch (_) { /* ignore */ }
+
       return res.status(502).json({
         error:
-          "Couldn't retrieve this attachment from WhatsApp. The download link is private to Meta and " +
-          "none of the stored credentials were accepted — check the server logs for [inboundMedia].",
+          (expiredNote ||
+            "Couldn't retrieve this attachment from WhatsApp — check the server logs for [inboundMedia]."),
       });
     }
     res.json({ success: true, mediaUrl: updated.mediaUrl });

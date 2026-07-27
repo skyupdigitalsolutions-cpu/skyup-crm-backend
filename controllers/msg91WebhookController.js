@@ -40,11 +40,38 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
   try {
     if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return;
 
-    const attempts = [
-      { name: "meta bearer",   headers: config?.accessToken  ? { Authorization: `Bearer ${config.accessToken}` } : null },
-      { name: "msg91 authkey", headers: config?.msg91AuthKey ? { authkey: config.msg91AuthKey } : null },
-      { name: "no auth",       headers: {} },
-    ].filter((a) => a.headers);
+    // Meta's webhook media links are SIGNED, time-limited URLs, e.g.
+    //   lookaside.fbsbx.com/...?ext=<unixExpiry>&hash=<signature>
+    // They are downloadable WITHOUT a token while the signature is valid, and
+    // sending an unexpected Authorization header can itself trigger a 401 — so
+    // for signed URLs we try unauthenticated FIRST, then fall back to tokens.
+    // Once `ext` passes, the link is dead and the media is unrecoverable, which
+    // is why mirroring must happen the moment the webhook arrives.
+    let isSigned = false;
+    let expiresAt = null;
+    try {
+      const u = new URL(rawUrl);
+      const ext = Number(u.searchParams.get("ext"));
+      isSigned = !!u.searchParams.get("hash");
+      if (Number.isFinite(ext) && ext > 0) {
+        expiresAt = new Date(ext * 1000);
+        if (expiresAt.getTime() < Date.now()) {
+          console.error(
+            `[inboundMedia] ❌ link already expired at ${expiresAt.toISOString()} — WhatsApp media links are short-lived and cannot be recovered afterwards.`
+          );
+          return;
+        }
+      }
+    } catch (_) { /* not a parseable URL — carry on */ }
+
+    const noAuth  = { name: "no auth (signed URL)", headers: {} };
+    const withMeta  = config?.accessToken  ? { name: "meta bearer",   headers: { Authorization: `Bearer ${config.accessToken}` } } : null;
+    const withMsg91 = config?.msg91AuthKey ? { name: "msg91 authkey", headers: { authkey: config.msg91AuthKey } } : null;
+
+    const attempts = (isSigned
+      ? [noAuth, withMeta, withMsg91]
+      : [withMeta, withMsg91, noAuth]
+    ).filter(Boolean);
 
     let buffer = null;
     let usedName = null;
