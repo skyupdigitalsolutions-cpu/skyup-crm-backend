@@ -18,6 +18,7 @@
 // }
 // ─────────────────────────────────────────────────────────────────────────────
 
+const axios                = require("axios");
 const WhatsAppConfig       = require("../models/WhatsAppConfig");
 const WhatsAppConversation = require("../models/WhatsAppConversation");
 const WhatsAppMessage      = require("../models/WhatsAppMessage");
