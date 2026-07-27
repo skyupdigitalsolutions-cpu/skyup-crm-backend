@@ -24,6 +24,93 @@ const WhatsAppMessage      = require("../models/WhatsAppMessage");
 const Lead                 = require("../models/Leads");
 const User                 = require("../models/Users");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
+const { getCloudinaryForCompany } = require("../services/cloudinaryService");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// mirrorInboundMedia — make lead-sent media viewable in the CRM.
+//
+// WhatsApp delivers inbound attachments as a PRIVATE Meta URL
+// (lookaside.fbsbx.com/...) that returns 401 "Authentication Error" unless the
+// request carries the WhatsApp access token. A browser <img> tag cannot do
+// that, so the media never renders. We download it server-side (trying each
+// credential we hold) and re-upload it to Cloudinary, producing a public URL
+// the UI can display. Runs in the background so the webhook still replies fast.
+// ─────────────────────────────────────────────────────────────────────────────
+async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conversationId, contentType }) {
+  try {
+    if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return;
+
+    const attempts = [
+      { name: "meta bearer",   headers: config?.accessToken  ? { Authorization: `Bearer ${config.accessToken}` } : null },
+      { name: "msg91 authkey", headers: config?.msg91AuthKey ? { authkey: config.msg91AuthKey } : null },
+      { name: "no auth",       headers: {} },
+    ].filter((a) => a.headers);
+
+    let buffer = null;
+    let usedName = null;
+    for (const a of attempts) {
+      try {
+        const resp = await axios.get(rawUrl, {
+          headers: a.headers,
+          responseType: "arraybuffer",
+          timeout: 25000,
+          maxContentLength: 30 * 1024 * 1024,
+        });
+        // Meta sometimes returns a JSON auth error with HTTP 200.
+        const ct = String(resp.headers?.["content-type"] || "");
+        if (ct.includes("application/json")) {
+          console.warn(`[inboundMedia] "${a.name}" returned JSON (auth error) — trying next`);
+          continue;
+        }
+        buffer = Buffer.from(resp.data);
+        usedName = a.name;
+        break;
+      } catch (e) {
+        console.warn(`[inboundMedia] download via "${a.name}" failed: ${e?.response?.status || e.message}`);
+      }
+    }
+
+    if (!buffer || !buffer.length) {
+      console.error("[inboundMedia] ❌ could not download media — it will show as a label only");
+      return;
+    }
+
+    const { instance } = await getCloudinaryForCompany(companyId);
+    const resourceType =
+      contentType === "image" ? "image"
+      : (contentType === "video" || contentType === "sticker") ? "video"
+      : "raw";
+
+    const uploaded = await new Promise((resolve, reject) => {
+      const stream = instance.uploader.upload_stream(
+        { folder: `skyup-crm/whatsapp-inbound/${companyId}`, resource_type: resourceType },
+        (err, result) => (err ? reject(err) : resolve(result)),
+      );
+      stream.end(buffer);
+    });
+
+    const publicUrl = uploaded?.secure_url || uploaded?.url;
+    if (!publicUrl) return;
+
+    await WhatsAppMessage.findByIdAndUpdate(messageId, { mediaUrl: publicUrl });
+    console.log(`[inboundMedia] ✅ mirrored ${contentType} via "${usedName}" → ${publicUrl}`);
+
+    // Tell any open chat window to swap in the now-viewable URL.
+    const io = global._io;
+    if (io) {
+      const evt = {
+        type: "wa_media_ready",
+        conversationId: String(conversationId),
+        messageId: String(messageId),
+        mediaUrl: publicUrl,
+      };
+      io.to("wa_admin").emit("wa_media_ready", evt);
+      io.to(`wa_company_${String(companyId)}`).emit("wa_media_ready", evt);
+    }
+  } catch (err) {
+    console.error("[inboundMedia] mirror error:", err.message);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -544,6 +631,20 @@ async function processMSG91Payload(rawBody, opts = {}) {
       status:       "delivered",
       waTimestamp:  timestamp,
     });
+
+    // Lead-sent media arrives as a private Meta URL that 401s in the browser.
+    // Mirror it to Cloudinary in the background so it becomes viewable; the UI
+    // is updated live via the wa_media_ready socket event when it's ready.
+    if (inboundMediaUrl) {
+      mirrorInboundMedia({
+        rawUrl:         inboundMediaUrl,
+        companyId:      config.company,
+        config,
+        messageId:      savedMsg._id,
+        conversationId: conversation._id,
+        contentType,
+      }).catch(() => {});
+    }
 
     // ── Update conversation ───────────────────────────────────────────────────
     const sessionExpiry = new Date(timestamp.getTime() + 24 * 60 * 60 * 1000);
