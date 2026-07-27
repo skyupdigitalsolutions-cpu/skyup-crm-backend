@@ -1901,6 +1901,36 @@ const refreshMedia = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/whatsapp/conversations/:id/mark-read
+// Clears the stored unread count for a conversation.
+//
+// getConversationByLead already clears it when a chat is OPENED, but that misses
+// the common case: the agent already has the chat open when a new message
+// arrives. The webhook increments unreadCount, the socket shows the message
+// (so it has effectively been read), yet nothing resets the counter — leaving a
+// red badge that only disappeared after a full page refresh. The chat window
+// calls this whenever it displays a message for the open conversation.
+// ─────────────────────────────────────────────────────────────────────────────
+const markConversationRead = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { companyId } = callerCtx(req);
+    if (!companyId) return res.status(401).json({ error: "No company context" });
+
+    const conv = await WhatsAppConversation.findOne({ _id: id, company: companyId }).select("_id unreadCount");
+    if (!conv) return res.status(404).json({ error: "Conversation not found" });
+
+    if ((conv.unreadCount || 0) !== 0) {
+      await WhatsAppConversation.updateOne({ _id: id }, { $set: { unreadCount: 0 } });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("markConversationRead error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getConversations,
   getMessages,
@@ -1908,6 +1938,7 @@ module.exports = {
   sendMedia,
   editMessage,
   refreshMedia,
+  markConversationRead,
   sendTemplate,
   assignConversation,
   closeConversation,

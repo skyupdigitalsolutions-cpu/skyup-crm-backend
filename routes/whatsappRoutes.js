@@ -23,6 +23,7 @@ const {
   sendMedia,
   editMessage,
   refreshMedia,
+  markConversationRead,
 } = require("../controllers/whatsappChatController");
 const { makeCompanyUploadMiddleware } = require("../services/cloudinaryService");
 
@@ -72,6 +73,8 @@ router.post("/send-media", protectAny, waMediaUpload, sendMedia);
 router.patch("/messages/:id", protectAny, editMessage);
 // Retry fetching a lead-sent attachment that failed to mirror on arrival
 router.post("/messages/:id/refresh-media", protectAny, refreshMedia);
+// Clear the unread badge for a conversation the agent is actively reading
+router.post("/conversations/:id/mark-read", protectAny, markConversationRead);
 
 // ─── Admin or agent starts a fresh conversation with any client number ────────
 router.post("/start-conversation", protectAny, startConversation);
