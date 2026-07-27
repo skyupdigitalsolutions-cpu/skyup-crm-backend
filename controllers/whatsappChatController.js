@@ -1590,19 +1590,58 @@ const sendMedia = async (req, res) => {
     let waMessageId;
     try {
       if (provider === "msg91") {
-        // MSG91's media payload shape is not consistently documented across
-        // account types, so try the known-valid variants in order and use the
-        // first one accepted. Each rejection is logged with MSG91's exact
-        // reason so a failure is diagnosable rather than a bare "400".
+        // MSG91 explicitly reports "attachment_url not found in request", so it
+        // expects the media URL in an `attachment_url` field (not Meta's `link`
+        // or a nested media.url). Variants are ordered with the attachment_url
+        // shapes first; each rejection is logged with MSG91's exact reason.
         const metaMediaObj = { link: mediaUrl };
         if (mediaType === "document") metaMediaObj.filename = fileName;
         if (cap && mediaType !== "document") metaMediaObj.caption = cap;
 
-        const flatMedia = { type: mediaType, url: mediaUrl };
-        if (mediaType === "document") flatMedia.filename = fileName;
-        if (cap && mediaType !== "document") flatMedia.caption = cap;
+        // Base flat payload using MSG91's attachment_url field.
+        const flatAttachment = {
+          integrated_number: senderNumber,
+          recipient_number:  recipientPhone,
+          content_type:      "media",
+          attachment_url:    mediaUrl,
+          attachment_type:   mediaType,
+        };
+        if (mediaType === "document") flatAttachment.filename = fileName;
+        if (cap) flatAttachment.caption = cap;
 
         const variants = [
+          {
+            name: "flat attachment_url",
+            body: flatAttachment,
+          },
+          {
+            name: "attachment_url + type as content_type",
+            body: (() => {
+              const b = {
+                integrated_number: senderNumber,
+                recipient_number:  recipientPhone,
+                content_type:      mediaType,
+                attachment_url:    mediaUrl,
+              };
+              if (mediaType === "document") b.filename = fileName;
+              if (cap) b.caption = cap;
+              return b;
+            })(),
+          },
+          {
+            name: "media object with attachment_url",
+            body: (() => {
+              const media = { type: mediaType, attachment_url: mediaUrl, url: mediaUrl };
+              if (mediaType === "document") media.filename = fileName;
+              if (cap) media.caption = cap;
+              return {
+                integrated_number: senderNumber,
+                recipient_number:  recipientPhone,
+                content_type:      "media",
+                media,
+              };
+            })(),
+          },
           {
             name: "payload-wrapped (Meta style)",
             body: {
@@ -1614,24 +1653,6 @@ const sendMedia = async (req, res) => {
                 type: mediaType,
                 [mediaType]: metaMediaObj,
               },
-            },
-          },
-          {
-            name: "flat media object",
-            body: {
-              integrated_number: senderNumber,
-              recipient_number: recipientPhone,
-              content_type: "media",
-              media: flatMedia,
-            },
-          },
-          {
-            name: "flat type-keyed",
-            body: {
-              integrated_number: senderNumber,
-              recipient_number: recipientPhone,
-              content_type: mediaType,
-              [mediaType]: metaMediaObj,
             },
           },
         ];
