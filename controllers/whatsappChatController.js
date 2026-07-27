@@ -1358,6 +1358,13 @@ const getConversationByLead = async (req, res) => {
       patch.assignedAgent = userId;
     }
 
+    // Opening the chat marks it read → clear the persistent unread badge.
+    // This is the ONLY thing that clears it; the notification bell's "Clear all"
+    // is purely local to the bell and never touches these counts.
+    if ((conversation.unreadCount || 0) > 0) {
+      patch.unreadCount = 0;
+    }
+
     if (Object.keys(patch).length) {
       await WhatsAppConversation.findByIdAndUpdate(conversation._id, patch);
       conversation = { ...conversation.toObject(), ...patch };
@@ -1475,10 +1482,265 @@ const employeeBulkSend = async (req, res) => {
   }
 };
 
+// ── Unread inbound-message counts for the lead list badges ───────────────────
+// Returns the PERSISTENT per-conversation unreadCount (incremented by the MSG91
+// inbound webhook, cleared only when the agent opens that lead's chat) so the
+// red badge in Communications survives page reloads and is completely
+// independent of the notification bell's local "Clear all".
+//
+// Returned as two maps so the UI can match either way:
+//   byLead  → { "<leadId>": 3 }
+//   byPhone → { "<last10digits>": 3 }   (covers convs not yet linked to a lead)
+const getUnreadCounts = async (req, res) => {
+  try {
+    const { companyId, userId, role } = req.user;
+    const isAdmin = role === "admin" || role === "super_admin";
+
+    const query = { company: companyId, unreadCount: { $gt: 0 } };
+    if (!isAdmin) {
+      // Employees only see counts for their own leads / conversations.
+      const myLeads = await Lead.find({ company: companyId, user: userId }).select("_id").lean();
+      const leadIds = myLeads.map((l) => l._id);
+      query.$or = [{ assignedAgent: userId }, { lead: { $in: leadIds } }];
+    }
+
+    const convs = await WhatsAppConversation.find(query)
+      .select("lead waPhone unreadCount")
+      .lean();
+
+    const byLead = {};
+    const byPhone = {};
+    for (const c of convs) {
+      const n = c.unreadCount || 0;
+      if (n <= 0) continue;
+      if (c.lead) {
+        const k = String(c.lead);
+        byLead[k] = (byLead[k] || 0) + n;
+      }
+      const last10 = String(c.waPhone || "").replace(/\D/g, "").slice(-10);
+      if (last10) byPhone[last10] = (byPhone[last10] || 0) + n;
+    }
+
+    res.json({ success: true, byLead, byPhone });
+  } catch (err) {
+    console.error("getUnreadCounts error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/whatsapp/send-media
+// Sends an image / video / audio / document (incl. GIF) to the lead.
+// The file is uploaded to Cloudinary first (by the route middleware), which
+// gives WhatsApp the public HTTPS URL it requires — WhatsApp cannot read local
+// files. Mirrors sendMessage(): same 24-hour session rule, same save + socket
+// emit, so the message appears live in the chat for everyone.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Map an uploaded file's mimetype to the WhatsApp media type.
+// NOTE: WhatsApp has no "gif" type — animated GIFs must be sent as video to
+// animate. A .gif sent as an image shows only the first frame.
+function waMediaTypeFor(mimetype = "", originalname = "") {
+  const mt = String(mimetype).toLowerCase();
+  const name = String(originalname).toLowerCase();
+  if (mt === "image/gif" || name.endsWith(".gif")) return "video";
+  if (mt.startsWith("image/")) return "image";
+  if (mt.startsWith("video/")) return "video";
+  if (mt.startsWith("audio/")) return "audio";
+  return "document";
+}
+
+const sendMedia = async (req, res) => {
+  try {
+    const { conversationId, caption } = req.body;
+    const { companyId, userId } = req.user;
+
+    if (!req.file || !req.file.path) {
+      return res.status(400).json({ error: "No file received. Attach a file and try again." });
+    }
+    const mediaUrl  = req.file.path;                       // public Cloudinary HTTPS URL
+    const fileName  = req.file.originalname || "file";
+    const mediaType = waMediaTypeFor(req.file.mimetype, fileName);
+    const cap       = (caption || "").trim();
+
+    const conversation = await WhatsAppConversation.findById(conversationId);
+    if (!conversation) return res.status(404).json({ error: "Conversation not found" });
+
+    const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
+    if (!config) return res.status(400).json({ error: "WhatsApp is not configured for this company" });
+
+    // Same 24-hour rule as text: free-form media only inside the session window.
+    const sessionOpen = conversation.sessionExpiresAt && conversation.sessionExpiresAt > new Date();
+    if (!sessionOpen) {
+      return res.status(400).json({
+        error: "24-hour session window has expired. You must send a pre-approved template message to re-engage this customer.",
+        code:  "SESSION_EXPIRED",
+      });
+    }
+
+    const provider      = config.provider || "msg91";
+    const authKey       = config.msg91AuthKey;
+    const senderNumber  = normalizePhone(config.msg91IntegratedNumber);
+    const recipientPhone = safeWaPhone(conversation.waPhone);
+
+    if (provider === "msg91" && (!authKey || !senderNumber)) {
+      return res.status(500).json({ error: "MSG91 credentials not configured." });
+    }
+
+    let waMessageId;
+    try {
+      if (provider === "msg91") {
+        const media = { type: mediaType, url: mediaUrl };
+        if (mediaType === "document") media.filename = fileName;
+        if (cap && mediaType !== "document") media.caption = cap;
+
+        const resp = await axios.post(
+          "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
+          {
+            integrated_number: senderNumber,
+            recipient_number:  recipientPhone,
+            content_type:      "media",
+            media,
+          },
+          { headers: { authkey: authKey, "Content-Type": "application/json", accept: "application/json" } },
+        );
+        waMessageId =
+          resp.data?.data?.message_uuid || resp.data?.data?.id ||
+          resp.data?.requestId || `out_${Date.now()}_${crypto.randomUUID()}`;
+      } else {
+        // Meta Cloud API — { type: "image", image: { link, caption } }
+        const mediaObj = { link: mediaUrl };
+        if (mediaType === "document") mediaObj.filename = fileName;
+        if (cap && mediaType !== "document") mediaObj.caption = cap;
+
+        const resp = await axios.post(
+          `https://graph.facebook.com/${config.graphApiVersion}/${config.phoneNumberId}/messages`,
+          { messaging_product: "whatsapp", recipient_type: "individual", to: recipientPhone, type: mediaType, [mediaType]: mediaObj },
+          { headers: { Authorization: `Bearer ${config.accessToken}`, "Content-Type": "application/json" } },
+        );
+        waMessageId = resp.data?.messages?.[0]?.id || `out_${Date.now()}_${crypto.randomUUID()}`;
+      }
+    } catch (apiErr) {
+      // Log the provider's exact rejection — invaluable if a payload shape needs tweaking.
+      console.error("[sendMedia] provider error:", JSON.stringify(apiErr?.response?.data || apiErr.message));
+      const { status, message } = describeWaApiError(apiErr, "sendMedia");
+      return res.status(502).json({ error: message, providerStatus: status });
+    }
+
+    const preview = cap || `${{ image: "📷 Photo", video: "🎥 Video", audio: "🎤 Voice message", document: "📄 " + fileName }[mediaType]}`;
+
+    const savedMsg = await WhatsAppMessage.create({
+      conversation: conversationId,
+      direction:    "outbound",
+      body:         cap || fileName,
+      messageType:  mediaType,
+      mediaUrl,
+      waMessageId,
+      sentBy:       userId,
+      status:       "sent",
+      waTimestamp:  new Date(),
+    });
+
+    await WhatsAppConversation.findByIdAndUpdate(conversationId, {
+      lastMessage:      preview,
+      lastMessageAt:    new Date(),
+      status:           "open",
+      sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    });
+
+    const io = global._io;
+    if (io) {
+      const payload = {
+        type:           "wa_new_message",
+        conversationId: conversationId.toString(),
+        message: {
+          _id:         savedMsg._id.toString(),
+          direction:   "outbound",
+          body:        cap || fileName,
+          messageType: mediaType,
+          mediaUrl,
+          waTimestamp: new Date(),
+          status:      "sent",
+          sentBy:      { _id: userId, name: req.admin?.name || req.user?.name || "Admin" },
+        },
+        waPhone:   conversation.waPhone,
+        companyId: companyId.toString(),
+      };
+      io.to("wa_admin").emit("wa_message", payload);
+      io.to(`wa_agent_${conversation.assignedAgent?.toString()}`).emit("wa_message", payload);
+      io.to(`wa_company_${companyId.toString()}`).emit("wa_message", payload);
+    }
+
+    res.json({ success: true, message: savedMsg });
+  } catch (err) {
+    console.error("sendMedia error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/whatsapp/messages/:id
+// Edits the CRM's stored copy of an OUTBOUND message.
+//
+// ⚠ WhatsApp's Business API provides no way to edit or revoke a message that has
+// already been delivered — the lead still sees the ORIGINAL text on their phone.
+// This edit only corrects the record inside the CRM. The delivered text is
+// preserved in originalBody so the true history is never lost.
+//
+// Inbound (lead) messages are deliberately NOT editable: rewriting what a
+// customer said would falsify the record.
+// ─────────────────────────────────────────────────────────────────────────────
+const editMessage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { text } = req.body;
+    const { companyId, userId } = req.user;
+
+    const newText = (text || "").trim();
+    if (!newText) return res.status(400).json({ error: "Message text is required" });
+    if (newText.length > 4096) return res.status(400).json({ error: "Message is too long (max 4096 characters)" });
+
+    const msg = await WhatsAppMessage.findById(id);
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    if (msg.direction !== "outbound") {
+      return res.status(403).json({
+        error: "Only your own sent messages can be edited. A message received from the lead cannot be altered.",
+      });
+    }
+
+    // Scope check — the message must belong to a conversation in this company.
+    const conv = await WhatsAppConversation.findById(msg.conversation).select("company").lean();
+    if (!conv || String(conv.company) !== String(companyId)) {
+      return res.status(403).json({ error: "This message does not belong to your company" });
+    }
+
+    // Preserve what was actually delivered the first time it's edited.
+    if (!msg.originalBody) msg.originalBody = msg.body || "";
+    msg.body     = newText;
+    msg.editedAt = new Date();
+    msg.editedBy = userId || null;
+    await msg.save();
+
+    // Keep the conversation preview in sync if this was the latest message.
+    await WhatsAppConversation.updateOne(
+      { _id: msg.conversation, lastMessageAt: msg.waTimestamp },
+      { $set: { lastMessage: newText } },
+    );
+
+    res.json({ success: true, message: msg });
+  } catch (err) {
+    console.error("editMessage error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getConversations,
   getMessages,
   sendMessage,
+  sendMedia,
+  editMessage,
   sendTemplate,
   assignConversation,
   closeConversation,
@@ -1491,4 +1753,5 @@ module.exports = {
   getLeadsForWhatsApp,
   employeeBulkSend,
   getConversationByLead,
+  getUnreadCounts,
 };

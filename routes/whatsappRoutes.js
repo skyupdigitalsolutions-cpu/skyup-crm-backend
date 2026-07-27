@@ -19,7 +19,19 @@ const {
   getLeadsForWhatsApp,
   employeeBulkSend,
   getConversationByLead,
+  getUnreadCounts,
+  sendMedia,
+  editMessage,
 } = require("../controllers/whatsappChatController");
+const { makeCompanyUploadMiddleware } = require("../services/cloudinaryService");
+
+// Uploads the attachment to Cloudinary first so WhatsApp gets a public HTTPS
+// URL (it cannot read local files). resource_type 'auto' handles images,
+// video, audio and documents alike.
+const waMediaUpload = makeCompanyUploadMiddleware({
+  field: "file",
+  folderBase: "skyup-crm/whatsapp",
+});
 
 const { protect, protectAny }            = require("../middlewares/authMiddleware");
 const { protectAdmin: adminProtect }     = require("../middlewares/adminAuthMiddleware");
@@ -50,6 +62,13 @@ router.post("/send-template",      protectAny, sendTemplate);
 
 // ─── Look up conversation by lead ID (employee chat) ─────────────────────────
 router.get("/conversation-by-lead/:leadId", protectAny, getConversationByLead);
+// Persistent unread inbound counts for the Communications lead-list badges
+router.get("/unread-counts", protectAny, getUnreadCounts);
+// Send an image / video / audio / document (incl. GIF) in an open chat
+router.post("/send-media", protectAny, waMediaUpload, sendMedia);
+// Edit the CRM's stored copy of an outbound message (does NOT change the
+// lead's copy — WhatsApp has no edit-sent-message API).
+router.patch("/messages/:id", protectAny, editMessage);
 
 // ─── Admin or agent starts a fresh conversation with any client number ────────
 router.post("/start-conversation", protectAny, startConversation);

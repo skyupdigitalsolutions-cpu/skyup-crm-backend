@@ -24,6 +24,25 @@ const whatsAppMessageSchema = new mongoose.Schema(
       default: "",
     },
 
+    // ── CRM-side edit tracking ────────────────────────────────────────────────
+    // IMPORTANT: WhatsApp's Business API has no "edit sent message" endpoint, so
+    // editing here changes ONLY the copy stored in this CRM. The lead still sees
+    // the ORIGINAL text on their phone. originalBody preserves what was actually
+    // delivered, so the true record is never lost.
+    originalBody: {
+      type: String,
+      default: null,
+    },
+    editedAt: {
+      type: Date,
+      default: null,
+    },
+    editedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
     // Message type — text is most common; others for media/interactive
     messageType: {
       type: String,
