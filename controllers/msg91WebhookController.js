@@ -66,12 +66,19 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
     } catch (_) { /* not a parseable URL — carry on */ }
 
     const noAuth  = { name: "no auth (signed URL)", headers: {} };
+    // Meta's lookaside links require a WhatsApp access token belonging to YOUR
+    // WABA. With MSG91 as the BSP, config.accessToken is normally empty, so we
+    // also accept a token from the environment — set META_MEDIA_ACCESS_TOKEN on
+    // the server (a System User token with whatsapp_business_messaging on your
+    // WhatsApp Business Account) to enable inbound-media downloads.
+    const envToken  = process.env.META_MEDIA_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || "";
+    const withEnv   = envToken             ? { name: "meta token (env)", headers: { Authorization: `Bearer ${envToken}` } } : null;
     const withMeta  = config?.accessToken  ? { name: "meta bearer",   headers: { Authorization: `Bearer ${config.accessToken}` } } : null;
     const withMsg91 = config?.msg91AuthKey ? { name: "msg91 authkey", headers: { authkey: config.msg91AuthKey } } : null;
 
     const attempts = (isSigned
-      ? [noAuth, withMeta, withMsg91]
-      : [withMeta, withMsg91, noAuth]
+      ? [withEnv, withMeta, noAuth, withMsg91]
+      : [withEnv, withMeta, withMsg91, noAuth]
     ).filter(Boolean);
 
     let buffer = null;
@@ -108,8 +115,12 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
 
     if (!buffer || !buffer.length) {
       const detail = attemptErrors.join(" | ") || "no attempts made";
-      console.error(`[inboundMedia] ❌ could not download media — ${detail}`);
-      return { ok: false, reason: detail };
+      const all401 = /401/.test(detail) && !/META_MEDIA_ACCESS_TOKEN/.test(detail);
+      const hint = (all401 && !process.env.META_MEDIA_ACCESS_TOKEN && !config?.accessToken)
+        ? "Meta requires a WhatsApp access token to download inbound media. Set META_MEDIA_ACCESS_TOKEN on the server (a System User token with whatsapp_business_messaging on your WhatsApp Business Account), or ask MSG91 for their media-download endpoint."
+        : "";
+      console.error(`[inboundMedia] ❌ could not download media — ${detail}${hint ? " || " + hint : ""}`);
+      return { ok: false, reason: hint || detail };
     }
 
     const { instance } = await getCloudinaryForCompany(companyId);
