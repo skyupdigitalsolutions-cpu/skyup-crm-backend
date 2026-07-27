@@ -102,6 +102,31 @@ async function getGoogleAdsDashboard({ company, from, to, campaign, salesperson,
   } catch { configs = []; }
   const cfgByName = new Map(configs.map((c) => [String(c.campaignName || "").trim(), c]));
 
+  // ── Try to fetch live campaign data from Google Ads API ───────────────────
+  // If a config has OAuth credentials, fetch live cost/impressions/clicks.
+  // Fall back to manually-entered values when API is unavailable.
+  const liveDataByCampaign = new Map(); // campaignName -> { cost, impressions, clicks, ctr, avgCpc }
+  try {
+    const { getGoogleAdsReport } = require("./googleAdsApiService");
+    // Use the first config that has OAuth credentials
+    const oauthCfg = configs.find((c) => c.refreshToken || c.accessToken);
+    if (oauthCfg) {
+      const fromStr = fromD.toISOString().slice(0, 10);
+      const toStr   = toD.toISOString().slice(0, 10);
+      const report  = await getGoogleAdsReport(oauthCfg, fromStr, toStr).catch(() => null);
+      if (report && Array.isArray(report.campaigns)) {
+        for (const rc of report.campaigns) {
+          const key = String(rc.campaignName || "").trim();
+          liveDataByCampaign.set(key, {
+            cost:        rc.cost        || 0,
+            impressions: rc.impressions || 0,
+            clicks:      rc.clicks      || 0,
+          });
+        }
+      }
+    }
+  } catch { /* live fetch is best-effort — fall back to manual values */ }
+
   // Users (salesperson names).
   let userMap = new Map();
   try {
@@ -134,9 +159,10 @@ async function getGoogleAdsDashboard({ company, from, to, campaign, salesperson,
 
   for (const [name, agg] of camp.entries()) {
     const cfg = cfgByName.get(name) || null;
-    const spend       = cfg ? num(cfg.cost)         : 0;
-    const impressions = cfg ? num(cfg.impressions)  : 0;
-    const clicks      = cfg ? num(cfg.clicks)       : 0;
+    const live        = liveDataByCampaign.get(name) || null;
+    const spend       = live ? live.cost        : (cfg ? num(cfg.cost)        : 0);
+    const impressions = live ? live.impressions : (cfg ? num(cfg.impressions) : 0);
+    const clicks      = live ? live.clicks      : (cfg ? num(cfg.clicks)      : 0);
     const avgDeal     = cfg ? num(cfg.avgDealValue) : 0;
     const active      = cfg ? cfg.isActive !== false : true;
 
