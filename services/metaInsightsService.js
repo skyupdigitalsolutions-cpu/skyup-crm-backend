@@ -219,8 +219,11 @@ function buildLeadQueries(cfg, fromD, toD) {
   if (cfg.parentCampaignName && cfg.adSetName) {
     matchers.push(`${cfg.parentCampaignName} › ${cfg.adSetName}`);
   }
-  if (cfg.adSetName)          matchers.push(cfg.adSetName);
-  if (cfg.parentCampaignName) matchers.push(cfg.parentCampaignName);
+  if (cfg.adSetName) matchers.push(cfg.adSetName);
+  // NOTE: intentionally NOT matching the bare parentCampaignName. Every ad set
+  // under one campaign shares that value, so matching it would count a legacy
+  // (metaConfigId-less) lead once PER sibling ad-set config = duplicate leads.
+  // This mirrors getAllConfigs, which also omits the bare parent name.
   const uniq = [...new Set(matchers.filter(Boolean))];
 
   const legacy = uniq.length
@@ -376,9 +379,11 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
           const issues = detectIssues({ configured: true, hasData: true, metrics: m }, adsetLeads);
 
           // Only add to totals if this adset hasn't been counted yet
-          // (prevents double-counting when multiple configs share the same ad account)
-          if (!seenAdsetIds.has(a.adsetId)) {
-            seenAdsetIds.add(a.adsetId);
+          // (prevents double-counting when multiple configs share the same ad
+          // account). Guard on a truthy adsetId so ad sets with a missing id
+          // (rare) aren't wrongly collapsed into a single bucket.
+          if (!a.adsetId || !seenAdsetIds.has(a.adsetId)) {
+            if (a.adsetId) seenAdsetIds.add(a.adsetId);
             totals.spend       += m.spend;
             totals.impressions += m.impressions;
             totals.reach       += m.reach;
@@ -410,13 +415,23 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
       continue;
     }
 
-    // ── Explicit single ad set / campaign scope, or not-configured ────────────
+    // ── Explicit single ad set scope, or not-configured ──────────────────────
     const issues = detectIssues(insights, leadCount);
     const m = insights.metrics || { spend: 0, impressions: 0, reach: 0, clicks: 0, cpm: 0, cpc: 0, ctr: 0, frequency: 0 };
     const costPerLead = leadCount > 0 ? Math.round((m.spend / leadCount) * 100) / 100 : null;
     const costPerConversion = convertedCount > 0 ? Math.round((m.spend / convertedCount) * 100) / 100 : null;
 
-    if (insights.configured && insights.hasData) {
+    // DEDUP FIX (mixed-scope double count): an explicit metaAdsetId config points
+    // at ONE ad set. If that same ad set is ALSO covered by an account-scope
+    // config (which breaks the account down per ad set above), its spend would be
+    // added twice — once here, once there. Share the same seenAdsetIds set and
+    // register this ad set so each ad set is counted at most once, no matter how
+    // many configs reference it or in what order they're processed.
+    const explicitAdsetId = cfg.metaAdsetId ? String(cfg.metaAdsetId) : "";
+    const alreadyCounted   = explicitAdsetId && seenAdsetIds.has(explicitAdsetId);
+
+    if (insights.configured && insights.hasData && !alreadyCounted) {
+      if (explicitAdsetId) seenAdsetIds.add(explicitAdsetId);
       totals.spend       += m.spend;
       totals.impressions += m.impressions;
       totals.reach       += m.reach;
@@ -432,6 +447,9 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
       metaActive:   cfg.metaActive !== false,
       pausedByMeta: !!cfg.pausedByMeta,
       metaAdsetStatus: cfg.metaAdsetStatus || "",
+      // adsetId lets the dedupedCampaigns filter drop a duplicate card when the
+      // same ad set is also emitted by an account-scope query.
+      adsetId:      explicitAdsetId || undefined,
       campaignName: cfg.parentCampaignName || cfg.campaignName,
       adSetName:    cfg.adSetName || "",
       configured:   !!insights.configured,
@@ -563,14 +581,21 @@ async function getMetaAdLevelReport({ company, from, to }) {
   // drops that whole ad account's spend from the ad-level report.
   const configs = await MetaConfig.find({ company: company }).lean();
 
-  // Collect one entry per unique adAccountId + adsToken pair.
+  // Collect one entry per unique ad ACCOUNT.
   const acctMap = {};
   for (let i = 0; i < configs.length; i++) {
     const c = configs[i];
     const token = c.adsToken;
     const acct  = c.adAccountId;
     if (!token || !acct) continue;
-    const key = String(acct) + "|" + String(token);
+    // BUG FIX (doubled spend): dedup by ACCOUNT only — NOT account+token. The
+    // same ad account is usually referenced by several configs (one per ad set).
+    // If two of them carry slightly different token strings, keying on
+    // account+token queried that account twice and DOUBLED every ad's spend /
+    // impressions / clicks in the totals (the donut still summed to the doubled
+    // total, so it looked internally consistent but was 2× too high). One query
+    // per account is correct — any valid token for that account works.
+    const key = String(acct).trim();
     if (!acctMap[key]) acctMap[key] = { acct: acct, token: token, ver: c.graphApiVersion || "v22.0" };
   }
 
@@ -630,22 +655,30 @@ async function getMetaAdLevelReport({ company, from, to }) {
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
     try {
-      // Fetch insights at ad level
-      const insightsRes = await axios.get(
-        "https://graph.facebook.com/" + e.ver + "/" + e.acct + "/insights",
-        {
-          params: {
-            level:        "ad",
-            fields:       "ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,spend,impressions,reach,clicks,cpm,cpc,ctr,frequency",
-            time_range:   timeRange,
-            limit:        500,
-            access_token: e.token,
-          },
-          timeout: 25000,
-        }
-      );
-
-      const rows = (insightsRes.data && Array.isArray(insightsRes.data.data)) ? insightsRes.data.data : [];
+      // Fetch insights at ad level — FOLLOW PAGINATION. limit=500 only returns
+      // the FIRST page; accounts with more ads than that were silently truncated,
+      // making totals too low. Meta returns a ready-to-use follow-up URL in
+      // paging.next (it already carries the access_token + cursor), so we just
+      // keep GETting it until there are no more pages (guarded at 20 pages).
+      const rows = [];
+      let nextUrl = "https://graph.facebook.com/" + e.ver + "/" + e.acct + "/insights";
+      let nextParams = {
+        level:        "ad",
+        fields:       "ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,spend,impressions,reach,clicks,cpm,cpc,ctr,frequency",
+        time_range:   timeRange,
+        limit:        500,
+        access_token: e.token,
+      };
+      let pageGuard = 0;
+      while (nextUrl && pageGuard < 20) {
+        const insightsRes = await axios.get(nextUrl, { params: nextParams, timeout: 25000 });
+        const pageRows = (insightsRes.data && Array.isArray(insightsRes.data.data)) ? insightsRes.data.data : [];
+        for (let r = 0; r < pageRows.length; r++) rows.push(pageRows[r]);
+        const paging = insightsRes.data && insightsRes.data.paging;
+        nextUrl    = paging && paging.next ? paging.next : null;
+        nextParams = undefined; // paging.next already contains all query params
+        pageGuard++;
+      }
 
       // Fetch ad status (active/paused) in a single batch call
       const adIds = rows.map(function (r) { return r.ad_id; }).filter(Boolean);
@@ -713,13 +746,23 @@ async function getMetaAdLevelReport({ company, from, to }) {
     }
   }
 
+  // Safety net: dedup by adId so a given ad is never counted twice in the
+  // totals or listed twice (guards against any overlapping account references).
+  const seenAdIds = new Set();
+  const ads = allAds.filter(function (a) {
+    if (!a.adId) return true;
+    if (seenAdIds.has(a.adId)) return false;
+    seenAdIds.add(a.adId);
+    return true;
+  });
+
   // Sort by spend desc
-  allAds.sort(function (a, b) { return b.metrics.spend - a.metrics.spend; });
+  ads.sort(function (a, b) { return b.metrics.spend - a.metrics.spend; });
 
   // Totals
   const totals = { spend: 0, impressions: 0, reach: 0, clicks: 0 };
-  for (let i = 0; i < allAds.length; i++) {
-    const m = allAds[i].metrics;
+  for (let i = 0; i < ads.length; i++) {
+    const m = ads[i].metrics;
     totals.spend       += m.spend;
     totals.impressions += m.impressions;
     totals.reach       += m.reach;
@@ -734,7 +777,7 @@ async function getMetaAdLevelReport({ company, from, to }) {
     configured: true,
     range: { from: since, to: until },
     totals: totals,
-    ads: allAds,
+    ads: ads,
     errors: errors,
     accountsQueried: entries.length,
   };
