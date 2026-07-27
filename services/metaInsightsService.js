@@ -773,10 +773,41 @@ async function getMetaAdLevelReport({ company, from, to }) {
   totals.reach       = Math.round(totals.reach);
   totals.clicks      = Math.round(totals.clicks);
 
+  // ── CRM leads for this period ─────────────────────────────────────────────
+  // The ad-level view is per individual ad, but CRM leads attribute to an ad set
+  // / campaign (never to a single Meta ad). So surface a company total plus a
+  // per-campaign map (keyed by Meta campaign name) the UI can show against each
+  // campaign group. Reuses the same full-day window + attribution (metaConfigId
+  // primary, legacy name fallback) as the campaign-level report.
+  const { fromD, toD } = dateRange(from, to);
+  let totalLeads = 0;
+  try {
+    totalLeads = await Lead.countDocuments({
+      company: company,
+      mergedInto: null,
+      source: { $regex: /meta/i },
+      createdAt: { $gte: fromD, $lte: toD },
+    });
+  } catch (e) { totalLeads = 0; }
+
+  const leadsByCampaign = {};
+  for (let i = 0; i < configs.length; i++) {
+    const cfg = configs[i];
+    let lc = 0;
+    try { lc = await leadCountForConfig(cfg, fromD, toD); } catch (e) { lc = 0; }
+    if (!lc) continue;
+    const key = String(cfg.parentCampaignName || cfg.campaignName || "").trim();
+    if (key) leadsByCampaign[key] = (leadsByCampaign[key] || 0) + lc;
+  }
+
+  totals.leads       = totalLeads;
+  totals.costPerLead = totalLeads > 0 ? Math.round((totals.spend / totalLeads) * 100) / 100 : null;
+
   return {
     configured: true,
     range: { from: since, to: until },
     totals: totals,
+    leadsByCampaign: leadsByCampaign,
     ads: ads,
     errors: errors,
     accountsQueried: entries.length,

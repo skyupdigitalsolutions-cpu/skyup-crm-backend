@@ -127,7 +127,29 @@ async function getValidAccessToken(config) {
   }
   const refresh = decryptToken(config.refreshToken);
   if (!refresh) { const e = new Error("Google Ads is not connected (no refresh token)."); e.code = "NOT_CONNECTED"; throw e; }
-  const tok = await refreshAccessToken(refresh, resolveCreds(config));
+  let tok;
+  try {
+    tok = await refreshAccessToken(refresh, resolveCreds(config));
+  } catch (err) {
+    // Classify OAuth refresh failures. A 400 invalid_grant (or 401) means the
+    // refresh token was revoked or expired — user changed password, revoked app
+    // access, or the token aged out. No request can fix that; the account must be
+    // reconnected. Surface a clear, actionable code instead of letting the raw
+    // axios 400 bubble up to the controller as a confusing HTTP 500 whose body
+    // reads "Request failed with status code 400".
+    const data    = err && err.response && err.response.data;
+    const gDetail = data && (data.error_description || data.error) ? (data.error_description || data.error) : "";
+    const status  = err && err.response ? err.response.status : null;
+    const isReauth =
+      status === 400 || status === 401 ||
+      /invalid_grant|invalid_client|unauthorized|expired|revoked/i.test(String(gDetail || err.message || ""));
+    if (isReauth) {
+      const e = new Error("Google Ads session expired — please reconnect your Google Ads account.");
+      e.code = "REAUTH_REQUIRED";
+      throw e;
+    }
+    throw err;
+  }
   config.accessToken = encryptToken(tok.access_token);
   config.accessTokenExpiry = new Date(now + (tok.expires_in || 3600) * 1000);
   await config.save();

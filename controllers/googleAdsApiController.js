@@ -248,7 +248,7 @@ const getReport = async (req, res) => {
   } catch (err) {
     const code = err.code;
     if (code === "NO_DEV_TOKEN") return res.status(503).json({ message: err.message, code: code });
-    if (code === "NOT_CONNECTED" || code === "NO_ACCOUNT") return res.status(400).json({ message: err.message, code: code });
+    if (code === "NOT_CONNECTED" || code === "NO_ACCOUNT" || code === "REAUTH_REQUIRED") return res.status(400).json({ message: err.message, code: code });
     const apiMsg = err && err.response && err.response.data && err.response.data.error ? err.response.data.error.message : null;
     res.status(500).json({ message: apiMsg || err.message });
   }
