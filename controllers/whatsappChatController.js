@@ -1482,6 +1482,22 @@ const employeeBulkSend = async (req, res) => {
   }
 };
 
+// ── Caller context (role-safe) ───────────────────────────────────────────────
+// protectAny populates req.user for employees and admins, but for super_admin
+// it returns early having set only req.admin / req.callerCompany. Destructuring
+// req.user therefore threw "Cannot destructure property 'companyId' of
+// 'req.user'" for super admins. Read the context defensively so every role
+// works regardless of which property the middleware happened to set.
+function callerCtx(req) {
+  const u = req.user || {};
+  const adminCompany = req.admin && (req.admin.company?._id || req.admin.company);
+  return {
+    companyId: u.companyId || req.callerCompany || adminCompany || null,
+    userId:    u.userId || u.id || u._id || (req.admin && req.admin._id) || null,
+    role:      u.role || (req.admin && req.admin.role) || "user",
+  };
+}
+
 // ── Unread inbound-message counts for the lead list badges ───────────────────
 // Returns the PERSISTENT per-conversation unreadCount (incremented by the MSG91
 // inbound webhook, cleared only when the agent opens that lead's chat) so the
@@ -1493,7 +1509,8 @@ const employeeBulkSend = async (req, res) => {
 //   byPhone → { "<last10digits>": 3 }   (covers convs not yet linked to a lead)
 const getUnreadCounts = async (req, res) => {
   try {
-    const { companyId, userId, role } = req.user;
+    const { companyId, userId, role } = callerCtx(req);
+    if (!companyId) return res.json({ success: true, byLead: {}, byPhone: {} });
     const isAdmin = role === "admin" || role === "super_admin";
 
     const query = { company: companyId, unreadCount: { $gt: 0 } };
@@ -1553,7 +1570,7 @@ function waMediaTypeFor(mimetype = "", originalname = "") {
 const sendMedia = async (req, res) => {
   try {
     const { conversationId, caption } = req.body;
-    const { companyId, userId } = req.user;
+    const { companyId, userId } = callerCtx(req);
 
     if (!req.file || !req.file.path) {
       return res.status(400).json({ error: "No file received. Attach a file and try again." });
@@ -1782,7 +1799,7 @@ const editMessage = async (req, res) => {
   try {
     const { id } = req.params;
     const { text } = req.body;
-    const { companyId, userId } = req.user;
+    const { companyId, userId } = callerCtx(req);
 
     const newText = (text || "").trim();
     if (!newText) return res.status(400).json({ error: "Message text is required" });
@@ -1835,7 +1852,7 @@ const editMessage = async (req, res) => {
 const refreshMedia = async (req, res) => {
   try {
     const { id } = req.params;
-    const { companyId } = req.user;
+    const { companyId } = callerCtx(req);
 
     const msg = await WhatsAppMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Message not found" });
