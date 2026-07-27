@@ -1590,23 +1590,90 @@ const sendMedia = async (req, res) => {
     let waMessageId;
     try {
       if (provider === "msg91") {
-        const media = { type: mediaType, url: mediaUrl };
-        if (mediaType === "document") media.filename = fileName;
-        if (cap && mediaType !== "document") media.caption = cap;
+        // MSG91's media payload shape is not consistently documented across
+        // account types, so try the known-valid variants in order and use the
+        // first one accepted. Each rejection is logged with MSG91's exact
+        // reason so a failure is diagnosable rather than a bare "400".
+        const metaMediaObj = { link: mediaUrl };
+        if (mediaType === "document") metaMediaObj.filename = fileName;
+        if (cap && mediaType !== "document") metaMediaObj.caption = cap;
 
-        const resp = await axios.post(
-          "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
+        const flatMedia = { type: mediaType, url: mediaUrl };
+        if (mediaType === "document") flatMedia.filename = fileName;
+        if (cap && mediaType !== "document") flatMedia.caption = cap;
+
+        const variants = [
           {
-            integrated_number: senderNumber,
-            recipient_number:  recipientPhone,
-            content_type:      "media",
-            media,
+            name: "payload-wrapped (Meta style)",
+            body: {
+              integrated_number: senderNumber,
+              content_type: "media",
+              payload: {
+                messaging_product: "whatsapp",
+                to: recipientPhone,
+                type: mediaType,
+                [mediaType]: metaMediaObj,
+              },
+            },
           },
-          { headers: { authkey: authKey, "Content-Type": "application/json", accept: "application/json" } },
-        );
-        waMessageId =
-          resp.data?.data?.message_uuid || resp.data?.data?.id ||
-          resp.data?.requestId || `out_${Date.now()}_${crypto.randomUUID()}`;
+          {
+            name: "flat media object",
+            body: {
+              integrated_number: senderNumber,
+              recipient_number: recipientPhone,
+              content_type: "media",
+              media: flatMedia,
+            },
+          },
+          {
+            name: "flat type-keyed",
+            body: {
+              integrated_number: senderNumber,
+              recipient_number: recipientPhone,
+              content_type: mediaType,
+              [mediaType]: metaMediaObj,
+            },
+          },
+        ];
+
+        let lastErr = null;
+        for (const v of variants) {
+          try {
+            const resp = await axios.post(
+              "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
+              v.body,
+              { headers: { authkey: authKey, "Content-Type": "application/json", accept: "application/json" } },
+            );
+            // MSG91 can return HTTP 200 with an error flag in the body.
+            if (resp.data?.hasError === true || resp.data?.status === "error") {
+              lastErr = new Error(JSON.stringify(resp.data));
+              console.error(`[sendMedia] variant "${v.name}" rejected in body:`, JSON.stringify(resp.data));
+              continue;
+            }
+            waMessageId =
+              resp.data?.data?.message_uuid || resp.data?.data?.id ||
+              resp.data?.requestId || `out_${Date.now()}_${crypto.randomUUID()}`;
+            console.log(`[sendMedia] ✅ sent using variant "${v.name}" (${mediaType})`);
+            break;
+          } catch (e) {
+            lastErr = e;
+            console.error(
+              `[sendMedia] variant "${v.name}" failed:`,
+              JSON.stringify(e?.response?.data || e.message),
+            );
+          }
+        }
+
+        if (!waMessageId) {
+          const body = lastErr?.response?.data;
+          const detail =
+            body?.message || body?.errors?.[0]?.message ||
+            (typeof body === "string" ? body.slice(0, 300) : JSON.stringify(body || {})) ||
+            lastErr?.message || "unknown error";
+          return res.status(502).json({
+            error: `MSG91 rejected the ${mediaType}: ${detail}`,
+          });
+        }
       } else {
         // Meta Cloud API — { type: "image", image: { link, caption } }
         const mediaObj = { link: mediaUrl };
