@@ -73,10 +73,18 @@ const DEFAULT_VER = process.env.META_GRAPH_API_VERSION || "v21.0";
 const num = (v) => (v == null || v === "" ? 0 : Number(v));
 
 function dateRange(from, to) {
-  const toD   = to   ? new Date(to)   : new Date();
-  const fromD = from ? new Date(from) : new Date(Date.now() - 30 * 86400000);
+  const toRaw   = to   ? new Date(to)   : new Date();
+  const fromRaw = from ? new Date(from) : new Date(Date.now() - 30 * 86400000);
   const fmt = (d) => d.toISOString().slice(0, 10);
-  return { since: fmt(fromD), until: fmt(toD), fromD, toD };
+  // BUG FIX (lead window): Meta's Insights `time_range.until` is an INCLUSIVE
+  // full day, but the CRM lead filter used `createdAt <= midnight-of-to-date`,
+  // which silently dropped every lead created on the final day (and, in IST,
+  // shifted the whole window ~5.5h). That made leads/cost-per-lead look wrong
+  // or empty. Expand fromD to the START of its day and toD to the END of its
+  // day so the spend window and the lead window cover the same span.
+  const fromD = new Date(fromRaw); fromD.setUTCHours(0, 0, 0, 0);
+  const toD   = new Date(toRaw);   toD.setUTCHours(23, 59, 59, 999);
+  return { since: fmt(fromRaw), until: fmt(toRaw), fromD, toD };
 }
 
 // ── Fetch insights for one config ─────────────────────────────────────────────
@@ -180,42 +188,80 @@ async function fetchInsightsForConfig(cfg, since, until) {
   }
 }
 
-// ── CRM lead count for this config's campaign/ad set in the period ────────────
-async function leadCountForConfig(cfg, fromD, toD) {
-  const q = {
+// ── Attribution queries: match CRM leads to a MetaConfig ──────────────────────
+// BUG FIX (leads/cost blank): leads are SAVED with `metaConfigId = config._id`
+// (canonical, per-ad-set — see utils/metaHelper.mapToLeadSchema) and
+// `campaign = config.campaignName`. The report previously matched leads with
+//     q.campaign = cfg.parentCampaignName || cfg.campaignName
+// which is wrong on two counts:
+//   1. It PREFERS parentCampaignName, but leads never store that — they store
+//      campaignName (often the composite "Parent › AdSet" for synced configs).
+//   2. It ignores metaConfigId entirely.
+// So synced / ad-set configs matched nothing → 0 leads, null cost-per-lead,
+// 0 converted, null conversion rate. Meanwhile the Campaigns page (getAllConfigs)
+// counts by metaConfigId and looked correct — hence "works there, blank here".
+//
+// This mirrors getAllConfigs exactly:
+//   PRIMARY — leads whose metaConfigId === cfg._id (reliable, per-ad-set).
+//   LEGACY  — pre-metaConfigId leads (metaConfigId: null) matched by campaign
+//             name / composite / adSetName, so old leads aren't lost and are
+//             never double-counted with the primary set.
+function buildLeadQueries(cfg, fromD, toD) {
+  const base = {
     company: cfg.company,
     mergedInto: null,
     createdAt: { $gte: fromD, $lte: toD },
   };
-  // Match leads to this config by campaign / ad set name (how leads are tagged).
-  if (cfg.parentCampaignName || cfg.campaignName) {
-    q.campaign = cfg.parentCampaignName || cfg.campaignName;
+  const primary = { ...base, metaConfigId: cfg._id };
+
+  const matchers = [];
+  if (cfg.campaignName) matchers.push(cfg.campaignName);
+  if (cfg.parentCampaignName && cfg.adSetName) {
+    matchers.push(`${cfg.parentCampaignName} › ${cfg.adSetName}`);
   }
+  if (cfg.adSetName)          matchers.push(cfg.adSetName);
+  if (cfg.parentCampaignName) matchers.push(cfg.parentCampaignName);
+  const uniq = [...new Set(matchers.filter(Boolean))];
+
+  const legacy = uniq.length
+    ? { ...base, metaConfigId: null, campaign: uniq.length === 1 ? uniq[0] : { $in: uniq } }
+    : null;
+
+  return { primary, legacy };
+}
+
+// ── CRM lead count for this config's campaign/ad set in the period ────────────
+async function leadCountForConfig(cfg, fromD, toD) {
+  const { primary, legacy } = buildLeadQueries(cfg, fromD, toD);
   try {
-    return await Lead.countDocuments(q);
+    const [byId, byName] = await Promise.all([
+      Lead.countDocuments(primary),
+      legacy ? Lead.countDocuments(legacy) : Promise.resolve(0),
+    ]);
+    return byId + byName;
   } catch {
     return 0;
   }
 }
 
 // ── CRM CONVERTED count for this config in the period ─────────────────────────
-// Same attribution as leadCountForConfig (Meta-sourced leads matched by
-// campaign/ad-set name), but only those now marked converted in the CRM. This
-// is CRM outcome data shown against Meta spend — Meta itself doesn't know which
-// leads converted.
+// Same attribution as leadCountForConfig, but only leads now marked converted in
+// the CRM. This is CRM outcome data shown against Meta spend — Meta itself
+// doesn't know which leads converted.
 const CONVERTED_RE = /^(converted|won|customer|closed won|closed-won|complete[d]?)$/i;
 async function convertedCountForConfig(cfg, fromD, toD) {
-  const q = {
-    company: cfg.company,
-    mergedInto: null,
-    createdAt: { $gte: fromD, $lte: toD },
-  };
-  if (cfg.parentCampaignName || cfg.campaignName) {
-    q.campaign = cfg.parentCampaignName || cfg.campaignName;
-  }
-  try {
+  const { primary, legacy } = buildLeadQueries(cfg, fromD, toD);
+  const countConverted = async (q) => {
+    if (!q) return 0;
     const rows = await Lead.find(q).select("status").lean();
     return rows.filter(l => CONVERTED_RE.test(String(l.status || "").trim())).length;
+  };
+  try {
+    const [byId, byName] = await Promise.all([
+      countConverted(primary),
+      countConverted(legacy),
+    ]);
+    return byId + byName;
   } catch {
     return 0;
   }
@@ -248,7 +294,13 @@ function detectIssues({ configured, hasData, metrics, error, needsAdsRead, token
 async function getMetaInsightsReport({ company, from, to, withAI = true }) {
   const { since, until, fromD, toD } = dateRange(from, to);
 
-  const configs = await Lead.db.model("MetaConfig").find({ company, isActive: true }).lean();
+  // BUG FIX (spend/leads vanish): do NOT filter isActive:true here. The auto-sync
+  // sets isActive=false + pausedByMeta=true whenever an ad set is paused on Meta
+  // (metaSyncService lines ~237/483). A PERFORMANCE REPORT covering a past range
+  // must still include ad sets that are currently paused — otherwise all of their
+  // historical spend AND leads silently disappear from the totals. Each card
+  // already carries isActive / metaActive / pausedByMeta so the UI can show state.
+  const configs = await Lead.db.model("MetaConfig").find({ company }).lean();
 
   const campaigns = [];
   const totals = { spend: 0, impressions: 0, reach: 0, clicks: 0, leads: 0, converted: 0 };
@@ -506,7 +558,10 @@ async function runMetaAIAnalysis(campaigns, totals) {
 // the campaign-level insights use — no new permissions required.
 // ─────────────────────────────────────────────────────────────────────────────
 async function getMetaAdLevelReport({ company, from, to }) {
-  const configs = await MetaConfig.find({ company: company, isActive: true }).lean();
+  // Include paused configs (see note in getMetaInsightsReport): a currently-paused
+  // ad set may be the only config holding an account's adsToken; filtering it out
+  // drops that whole ad account's spend from the ad-level report.
+  const configs = await MetaConfig.find({ company: company }).lean();
 
   // Collect one entry per unique adAccountId + adsToken pair.
   const acctMap = {};
