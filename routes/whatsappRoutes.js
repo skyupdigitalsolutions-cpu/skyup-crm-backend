@@ -22,6 +22,7 @@ const {
   getUnreadCounts,
   sendMedia,
   editMessage,
+  refreshMedia,
 } = require("../controllers/whatsappChatController");
 const { makeCompanyUploadMiddleware } = require("../services/cloudinaryService");
 
@@ -69,6 +70,8 @@ router.post("/send-media", protectAny, waMediaUpload, sendMedia);
 // Edit the CRM's stored copy of an outbound message (does NOT change the
 // lead's copy — WhatsApp has no edit-sent-message API).
 router.patch("/messages/:id", protectAny, editMessage);
+// Retry fetching a lead-sent attachment that failed to mirror on arrival
+router.post("/messages/:id/refresh-media", protectAny, refreshMedia);
 
 // ─── Admin or agent starts a fresh conversation with any client number ────────
 router.post("/start-conversation", protectAny, startConversation);

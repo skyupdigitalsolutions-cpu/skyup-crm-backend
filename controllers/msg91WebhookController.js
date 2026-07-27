@@ -743,4 +743,4 @@ function looksLikeMsg91Payload(body) {
   );
 }
 
-module.exports = { receiveMSG91Webhook, processMSG91Payload, looksLikeMsg91Payload };
+module.exports = { receiveMSG91Webhook, processMSG91Payload, looksLikeMsg91Payload, mirrorInboundMedia };

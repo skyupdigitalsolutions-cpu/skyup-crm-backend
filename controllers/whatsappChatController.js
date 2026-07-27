@@ -1823,12 +1823,74 @@ const editMessage = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/whatsapp/messages/:id/refresh-media
+// Re-attempts fetching a lead-sent attachment and re-hosting it publicly.
+// Inbound media arrives as a private Meta URL (lookaside.fbsbx.com) that 401s
+// in a browser, so it must be downloaded server-side and mirrored. If the
+// mirror failed when the message first arrived (transient error, missing
+// Cloudinary config, or no usable credential), this lets the agent retry from
+// the chat and reports the specific reason on failure.
+// ─────────────────────────────────────────────────────────────────────────────
+const refreshMedia = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { companyId } = req.user;
+
+    const msg = await WhatsAppMessage.findById(id);
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    const conv = await WhatsAppConversation.findById(msg.conversation).select("company").lean();
+    if (!conv || String(conv.company) !== String(companyId)) {
+      return res.status(403).json({ error: "This message does not belong to your company" });
+    }
+
+    // Already publicly viewable — nothing to do.
+    if (msg.mediaUrl && !/lookaside\.fbsbx\.com|graph\.facebook\.com/i.test(msg.mediaUrl)) {
+      return res.json({ success: true, mediaUrl: msg.mediaUrl });
+    }
+
+    const source = msg.mediaUrl || msg.mediaId;
+    if (!source || !/^https?:\/\//i.test(String(source))) {
+      return res.status(400).json({
+        error: "No downloadable link was received for this attachment, so it can't be recovered.",
+      });
+    }
+
+    const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
+    const { mirrorInboundMedia } = require("./msg91WebhookController");
+    await mirrorInboundMedia({
+      rawUrl:         source,
+      companyId,
+      config,
+      messageId:      msg._id,
+      conversationId: msg.conversation,
+      contentType:    msg.messageType,
+    });
+
+    const updated = await WhatsAppMessage.findById(id).select("mediaUrl").lean();
+    const ok = updated?.mediaUrl && !/lookaside\.fbsbx\.com/i.test(updated.mediaUrl);
+    if (!ok) {
+      return res.status(502).json({
+        error:
+          "Couldn't retrieve this attachment from WhatsApp. The download link is private to Meta and " +
+          "none of the stored credentials were accepted — check the server logs for [inboundMedia].",
+      });
+    }
+    res.json({ success: true, mediaUrl: updated.mediaUrl });
+  } catch (err) {
+    console.error("refreshMedia error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getConversations,
   getMessages,
   sendMessage,
   sendMedia,
   editMessage,
+  refreshMedia,
   sendTemplate,
   assignConversation,
   closeConversation,
