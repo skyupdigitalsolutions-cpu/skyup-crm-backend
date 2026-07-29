@@ -47,7 +47,23 @@ const receiveWebsiteWebhook = async (req, res) => {
 
     console.log(`[WebhookDebug] secret=****${String(webhook_secret).slice(-4)} name="${name}" mobile="${mobile}" email="${email}"`);
 
-    const config = await WebsiteConfig.findOne({ webhookSecret: webhook_secret });
+    // Accept the current secret, or one still inside its rotation window.
+    // Using a retired secret is logged loudly so you can tell exactly when the
+    // GTM tag has finished switching over and the old value can be removed.
+    const config = await WebsiteConfig.findOne({
+      $or: [
+        { webhookSecret: webhook_secret },
+        { previousSecrets: webhook_secret },
+      ],
+    });
+    if (config && config.webhookSecret !== webhook_secret) {
+      console.warn(
+        `[SECRET-ROTATION] Lead accepted using a RETIRED secret for campaign ` +
+        `"${config.sourceName || config.campaignName || config._id}". ` +
+        `Update the GTM tag to the current secret; remove the old one from ` +
+        `previousSecrets once these warnings stop.`
+      );
+    }
     if (!config) return console.error(`❌ No WebsiteConfig found for secret: "${webhook_secret}"`);
     if (!config.isActive) return console.warn(`⚠️  WebsiteConfig "${config.sourceName}" is PAUSED`);
 
