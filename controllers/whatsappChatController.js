@@ -150,7 +150,7 @@ async function findLeadByPhoneDual(cleanPhone, companyId) {
 // ─────────────────────────────────────────────────────────────────────────────
 const getConversations = async (req, res) => {
   try {
-    const { companyId, userId, role } = req.user;
+    const { companyId, userId, role } = callerCtx(req);
     const filter = { company: companyId };
     if (role !== "admin") filter.assignedAgent = userId;
 
@@ -172,7 +172,7 @@ const getConversations = async (req, res) => {
 const getMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
-    const { companyId, userId, role } = req.user;
+    const { companyId, userId, role } = callerCtx(req);
 
     const conversation = await WhatsAppConversation.findById(conversationId);
     if (!conversation)
@@ -202,7 +202,13 @@ const getMessages = async (req, res) => {
       conversation: conversationId,
     })
       .populate("sentBy", "name")
-      .sort({ waTimestamp: 1 });
+      // Oldest first, newest last — same as the WhatsApp app.
+      // _id is the TIE-BREAKER: MSG91 timestamps are only second-accurate, so
+      // several messages can share the exact same waTimestamp. Sorting on
+      // timestamp alone leaves those in an arbitrary order that can even change
+      // between page loads. ObjectIds increase monotonically, so adding _id
+      // guarantees true insertion order.
+      .sort({ waTimestamp: 1, _id: 1 });
 
     await WhatsAppConversation.findByIdAndUpdate(conversationId, {
       unreadCount: 0,
@@ -221,7 +227,7 @@ const getMessages = async (req, res) => {
 const sendMessage = async (req, res) => {
   try {
     const { conversationId, text } = req.body;
-    const { companyId, userId, role } = req.user;
+    const { companyId, userId, role } = callerCtx(req);
 
     if (!text?.trim())
       return res.status(400).json({ error: "Message text is required" });
@@ -378,7 +384,7 @@ const sendTemplate = async (req, res) => {
       languageCode = "en_US",
       components: reqComponents = [],
     } = req.body;
-    const { companyId, userId } = req.user;
+    const { companyId, userId } = callerCtx(req);
 
     const conversation = await WhatsAppConversation.findById(conversationId);
     if (!conversation)
@@ -555,7 +561,7 @@ const closeConversation = async (req, res) => {
 const deleteConversation = async (req, res) => {
   try {
     const { id } = req.params;
-    const { role } = req.user;
+    const { role } = callerCtx(req);
     if (role !== "admin")
       return res
         .status(403)
@@ -583,7 +589,7 @@ const saveConfig = async (req, res) => {
       graphApiVersion,
       phoneNumber,
     } = req.body;
-    const { companyId } = req.user;
+    const { companyId } = callerCtx(req);
 
     if (
       provider !== "msg91" &&
@@ -637,7 +643,7 @@ const saveConfig = async (req, res) => {
 
 const getConfig = async (req, res) => {
   try {
-    const { companyId } = req.user;
+    const { companyId } = callerCtx(req);
     const config = await WhatsAppConfig.findOne({ company: companyId });
     if (!config) return res.json({ configured: false });
 
@@ -1034,7 +1040,7 @@ const _saveConversationAndMessage = async ({
 const bulkSendToLeads = async (req, res) => {
   try {
     const { templateName, languageCode = "en_US", campaign, filter: blastFilter } = req.body;
-    const { companyId, userId } = req.user;
+    const { companyId, userId } = callerCtx(req);
 
     if (!templateName?.trim())
       return res.status(400).json({ error: "templateName is required" });
@@ -1152,7 +1158,7 @@ const bulkSendToLeads = async (req, res) => {
 const bulkSendCSV = async (req, res) => {
   try {
     const { recipients, templateName, languageCode = "en_US" } = req.body;
-    const { companyId, userId } = req.user;
+    const { companyId, userId } = callerCtx(req);
 
     if (!templateName?.trim())
       return res.status(400).json({ error: "templateName is required" });
@@ -1303,7 +1309,7 @@ const getLeadsForWhatsApp = async (req, res) => {
 const getConversationByLead = async (req, res) => {
   try {
     const { leadId } = req.params;
-    const { companyId, userId, role } = req.user;
+    const { companyId, userId, role } = callerCtx(req);
 
     const lead = await Lead.findOne({ _id: leadId, company: companyId }).lean();
     if (!lead) return res.status(404).json({ error: "Lead not found" });
@@ -1380,7 +1386,7 @@ const getConversationByLead = async (req, res) => {
 const employeeBulkSend = async (req, res) => {
   try {
     const { templateName, languageCode = "en_US" } = req.body;
-    const { _id: userId, company: companyId } = req.user;
+    const { _id: userId, company: companyId } = callerCtx(req);
 
     if (!templateName?.trim())
       return res.status(400).json({ error: "templateName is required" });
