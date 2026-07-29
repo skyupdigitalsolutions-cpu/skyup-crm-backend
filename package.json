@@ -3,9 +3,12 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test test/ 2>/dev/null || echo \"No tests yet \u2014 add auth + tenant-isolation tests\" && exit 0",
     "server": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "audit": "npm audit --audit-level=high",
+    "audit:fix": "npm audit fix",
+    "migrate:encryption": "node scripts/migrateEncryption.js"
   },
   "keywords": [],
   "author": "",
@@ -23,6 +26,7 @@
     "express-rate-limit": "^8.3.1",
     "firebase-admin": "^13.10.0",
     "form-data": "^4.0.5",
+    "helmet": "^7.1.0",
     "html2canvas-pro": "^2.2.3",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.3.1",

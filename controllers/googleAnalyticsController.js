@@ -4,7 +4,12 @@ const GoogleAnalyticsConfig = require("../models/GoogleAnalyticsConfig");
 const { encryptToken, decryptToken } = require("../utils/tokenCrypto");
 const ga4 = require("../services/ga4Service");
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
+// SECURITY (A.8.24): no fallback secret. A missing JWT_SECRET must fail loudly
+// at boot rather than silently signing tokens with a publicly-known string.
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET is not set — refusing to start with an insecure fallback secret.");
+}
 
 // Resolve the caller's company id without optional chaining (Beautify-safe).
 const companyOf = (req) => {

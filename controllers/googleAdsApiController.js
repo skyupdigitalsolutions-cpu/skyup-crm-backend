@@ -4,7 +4,12 @@ const GoogleAdsApiConfig = require("../models/GoogleAdsApiConfig");
 const { encryptToken } = require("../utils/tokenCrypto");
 const ads = require("../services/googleAdsApiService");
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
+// SECURITY (A.8.24): no fallback secret. A missing JWT_SECRET must fail loudly
+// at boot rather than silently signing tokens with a publicly-known string.
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET is not set — refusing to start with an insecure fallback secret.");
+}
 
 const companyOf = (req) => {
   const admin = req.admin || {};

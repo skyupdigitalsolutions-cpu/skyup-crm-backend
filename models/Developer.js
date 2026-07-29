@@ -1,6 +1,8 @@
 // models/Developer.js — NEW FILE
 const mongoose = require("mongoose");
 const bcrypt   = require("bcryptjs");
+// SECURITY (A.8.24): work factor raised from 10 to 12.
+const BCRYPT_COST = Number(process.env.BCRYPT_COST) || 12;
 
 const developerSchema = mongoose.Schema(
   {
@@ -14,7 +16,7 @@ const developerSchema = mongoose.Schema(
 
 developerSchema.pre("save", async function () {
   if (!this.isModified("password")) return;
-  this.password = await bcrypt.hash(this.password, 10);
+  this.password = await bcrypt.hash(this.password, BCRYPT_COST);
 });
 
 developerSchema.methods.matchPassword = async function (p) {

@@ -1,12 +1,21 @@
 // models/Admin.js — UPDATED (role enum: "superadmin" → "super_admin", added avatar/department/isActive + unique index)
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
+// SECURITY (A.8.24): work factor raised from 10 to 12.
+const BCRYPT_COST = Number(process.env.BCRYPT_COST) || 12;
 
 const adminSchema = mongoose.Schema(
   {
     name:     { type: String, required: true, trim: true },
     email:    { type: String, required: true, trim: true },
-    password: { type: String, required: true },
+    password: {
+      type: String,
+      required: true,
+      // SECURITY (A.5.17): minimum length enforced at the schema layer so no
+      // controller can bypass it. Complexity/breach checks live in
+      // utils/passwordPolicy.js and are applied at set/change time.
+      minlength: [12, "Password must be at least 12 characters"],
+    },
     company:  {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Company",
@@ -59,7 +68,7 @@ const adminSchema = mongoose.Schema(
 // Hashing the password before saving
 adminSchema.pre("save", async function () {
   if (!this.isModified("password")) return;
-  this.password = await bcrypt.hash(this.password, 10);
+  this.password = await bcrypt.hash(this.password, BCRYPT_COST);
 });
 
 // Compare the hashed password from DB to verify

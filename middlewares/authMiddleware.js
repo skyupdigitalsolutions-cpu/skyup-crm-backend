@@ -117,10 +117,23 @@ const protectAny = async (req, res, next) => {
         let company = null;
         if (headerCompanyId) {
           company = await Company.findById(headerCompanyId).catch(() => null);
+          if (!company) {
+            return res.status(404).json({ message: "Company specified in x-company-id was not found" });
+          }
         }
-        if (!company) company = await Company.findOne({ isActive: true }).sort({ createdAt: 1 });
-        if (!company) company = await Company.findOne().sort({ createdAt: 1 });
-        if (!company) return res.status(404).json({ message: "No company found for super_admin to manage" });
+        // SECURITY (A.8.3 Information access restriction): never INFER a tenant.
+        // Previously, a super-admin request without x-company-id silently bound
+        // to the oldest active company, so writes could land on the wrong
+        // tenant with no error surfaced. A missing company context is now a
+        // hard 400 — the caller must state which tenant it is acting on.
+        if (!company) {
+          return res.status(400).json({
+            message:
+              "Missing tenant context: super-admin requests must specify the target company " +
+              "via the x-company-id header.",
+            code: "COMPANY_CONTEXT_REQUIRED",
+          });
+        }
 
         req.superAdmin = superAdmin;
         req.admin = {

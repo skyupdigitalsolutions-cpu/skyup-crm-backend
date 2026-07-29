@@ -98,10 +98,42 @@ const saanviProxyRoute = require('./routes/saanviProxy');
 // ── WhatsApp Routes (MSG91 + Meta) ────────────────────────────────────────────
 const whatsappRoutes    = require('./routes/whatsappRoutes');
 const msg91WebhookRoute = require('./routes/msg91Webhook');
+const { auditAccess } = require('./middlewares/accessAudit');
+
+// ── Fail fast on missing/insecure secrets (A.8.9, A.8.24) ────────────────────
+// Must run before anything reads process.env for security purposes.
+require('./config/validateEnv')();
 
 const app = express();
 
 app.set('trust proxy', 1);
+
+// ── Security headers (A.8.9 Configuration management, A.8.26 Application
+// security requirements) ─────────────────────────────────────────────────────
+// helmet sets a set of hardening headers that were previously absent entirely.
+// crossOriginResourcePolicy is relaxed so the SPA on a different origin can
+// still load API-served assets (recordings, uploads).
+const helmet = require('helmet');
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      defaultSrc:  ["'self'"],
+      scriptSrc:   ["'self'"],
+      imgSrc:      ["'self'", 'data:', 'blob:', 'https:'],
+      mediaSrc:    ["'self'", 'https:', 'blob:'],
+      connectSrc:  ["'self'", 'https:', 'wss:'],
+      frameAncestors: ["'none'"],       // clickjacking
+      objectSrc:   ["'none'"],
+      baseUri:     ["'self'"],
+    },
+  },
+  // HSTS: force HTTPS for a year, including subdomains.
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  crossOriginEmbedderPolicy: false,
+}));
 
 const server = http.createServer(app);
 
@@ -257,7 +289,10 @@ app.use('/api/developer',           developerRoutes);
 app.use('/api/admin',               adminRoute);
 app.use('/api/auth',                authRoute);
 app.use('/api/terms',               require('./routes/termsRoute'));
-app.use('/api/lead',                leadRoute);
+// ── Personal-data access auditing (A.8.15 / A.8.16) ──────────────────────────
+// Mounted at the router level so every current and future lead/report endpoint
+// is logged automatically — see middlewares/accessAudit.js.
+app.use('/api/lead',                auditAccess({ resourceType: 'Lead' }), leadRoute);
 app.use('/api/project',             projectRoute);
 app.use('/api/attendance',          attendanceRoute);
 app.use('/api/razorpay',            razorpayRoute);

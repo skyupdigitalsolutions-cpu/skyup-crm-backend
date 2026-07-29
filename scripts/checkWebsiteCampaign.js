@@ -3,13 +3,13 @@
 // One-off diagnostic for a Website-source campaign (WebsiteConfig).
 // Prints the secret, active state, company, page URL, assigned users, and how
 // many leads are actually stored under it — and verifies that the secret your
-// landing-page script sends ("Skyup@2026") resolves to this config.
+// landing-page script sends resolves to this config.
 //
 // RUN (locally, with your backend .env present):
 //   node checkWebsiteCampaign.js
 //
 // Optionally override what to look for:
-//   SOURCE_NAME="SkyupCRM" SECRET="Skyup@2026" node checkWebsiteCampaign.js
+//   SOURCE_NAME="SkyupCRM" SECRET="<your-secret>" node checkWebsiteCampaign.js
 //
 // Safe & read-only — it does NOT modify anything.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -18,7 +18,14 @@ require("dotenv").config();
 const mongoose = require("mongoose");
 
 // What the landing-page script sends, and the campaign name shown in the UI.
-const SECRET_TO_TEST = process.env.SECRET      || "Skyup@2026";
+// SECURITY (A.5.17): no hardcoded credential. Supply the secret at runtime.
+// NOTE: the previously committed value must be treated as compromised and
+// rotated in WebsiteConfig and in the landing-page GTM tag.
+const SECRET_TO_TEST = process.env.SECRET;
+if (!SECRET_TO_TEST) {
+  console.error('Missing SECRET. Usage: SOURCE_NAME="..." SECRET="..." node checkWebsiteCampaign.js');
+  process.exit(1);
+}
 const SOURCE_NAME     = process.env.SOURCE_NAME || "SkyupCRM";
 
 // Try common env var names for the Mongo connection string.
