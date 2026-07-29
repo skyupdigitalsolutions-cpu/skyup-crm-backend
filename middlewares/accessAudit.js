@@ -43,12 +43,28 @@ function resolveActor(req) {
   const isSuper = !!req.superAdmin || a.role === "super_admin";
   const actorId = u.userId || u.id || u._id || a._id || null;
   const role    = u.role || a.role || "";
+
+  // The company can arrive in several shapes depending on which middleware ran:
+  //   • protectAny (admin)    → req.user.companyId (string)
+  //   • protectAny (employee) → req.user.companyId (string)
+  //   • protect               → req.user IS the Mongoose doc, so .company (ObjectId)
+  //   • super admin           → req.callerCompany / req.admin.company
+  // Checking only companyId left `company: null` on a lot of records, which
+  // makes a multi-tenant audit trail far less useful — an auditor needs to know
+  // WHOSE data was touched.
+  const company =
+    u.companyId ||
+    (u.company && (u.company._id || u.company)) ||
+    req.callerCompany ||
+    (a.company && (a.company._id || a.company)) ||
+    null;
+
   return {
     actorId,
     actorRole: role,
     actorEmail: u.email || a.email || "",
     actorModel: isSuper ? "SuperAdmin" : role === "admin" ? "Admin" : actorId ? "User" : "System",
-    company: u.companyId || req.callerCompany || (a.company && (a.company._id || a.company)) || null,
+    company,
     isSuper,
   };
 }
