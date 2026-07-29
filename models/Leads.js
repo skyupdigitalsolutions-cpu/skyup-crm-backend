@@ -491,6 +491,22 @@ leadSchema.index({ company: 1, phoneRevealCount: 1 });
 // isClosed: used by employee report excludeClosed filter
 leadSchema.index({ company: 1, isClosed: 1 });
 
+// PERF FIX: covers GET /lead/my-leads — the single most-hit mobile endpoint
+// (every screen open, pull-to-refresh, and background poll). Its query is
+// { company, user, mergedInto: null, isClosed: { $ne: true } } sorted by
+// createdAt: -1. None of the indexes above cover that combination — Mongo
+// was falling back to the {company,user,status} or {company,user,date}
+// prefix, then sorting every matching lead IN MEMORY on every request
+// (mergedInto/createdAt weren't indexed together at all). That in-memory
+// sort grows linearly with each employee's total historical lead count, so
+// the endpoint gets measurably slower over weeks of continued use even
+// though nothing in the request itself changed. This index lets Mongo
+// satisfy the company+user+mergedInto equality AND the createdAt sort
+// directly from the index (ESR: Equality, Sort, Range) — isClosed's $ne
+// gets filtered inline during that same index scan instead of triggering a
+// separate unindexed pass.
+leadSchema.index({ company: 1, user: 1, mergedInto: 1, createdAt: -1 });
+
 // ── PHONE DEDUP: Partial unique index on normalizedPhone ─────────────────────
 leadSchema.index(
   { company: 1, normalizedPhone: 1 },
