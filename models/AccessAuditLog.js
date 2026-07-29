@@ -74,14 +74,25 @@ accessAuditLogSchema.index({ action: 1, recordCount: -1, createdAt: -1 });
 
 // ── Append-only enforcement ──────────────────────────────────────────────────
 // An audit trail that can be edited is not an audit trail.
-const blockWrite = function (next) {
-  next(new Error("AccessAuditLog is append-only: updates and deletes are not permitted."));
+//
+// NOTE: these hooks deliberately take NO arguments and THROW rather than using
+// the callback style `function (next) { next(err) }`. Mongoose treats a
+// zero-arity hook as promise-based and catches thrown errors, which works
+// across Mongoose 6/7/8/9. The callback form broke on Mongoose 9 with
+// "next is not a function", which silently disabled ALL audit writes.
+const blockWrite = function () {
+  throw new Error("AccessAuditLog is append-only: updates and deletes are not permitted.");
 };
+
+// Explicitly scope these to QUERY middleware. updateOne/deleteOne exist as both
+// document and query hooks, and leaving it implicit changes behaviour between
+// Mongoose versions.
 ["updateOne", "updateMany", "findOneAndUpdate", "deleteOne", "deleteMany", "findOneAndDelete"]
-  .forEach((op) => accessAuditLogSchema.pre(op, blockWrite));
-accessAuditLogSchema.pre("save", function (next) {
-  if (!this.isNew) return next(new Error("AccessAuditLog records are immutable."));
-  next();
+  .forEach((op) => accessAuditLogSchema.pre(op, { document: false, query: true }, blockWrite));
+
+// Block edits to an existing document, but allow the initial insert.
+accessAuditLogSchema.pre("save", function () {
+  if (!this.isNew) throw new Error("AccessAuditLog records are immutable.");
 });
 
 module.exports = mongoose.model("AccessAuditLog", accessAuditLogSchema);

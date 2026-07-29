@@ -121,7 +121,12 @@ function auditAccess(options = {}) {
 
       // Fire-and-forget: auditing must never break or slow the request.
       AccessAuditLog.create(entry).catch((err) =>
-        console.error("[accessAudit] failed to write audit entry:", err.message)
+        // Include the error type and any validation detail — a bare message
+        // previously made this hard to diagnose from logs alone.
+        console.error(
+          `[accessAudit] failed to write audit entry: ${err.name || "Error"}: ${err.message}` +
+          (err.errors ? ` | fields: ${Object.keys(err.errors).join(", ")}` : "")
+        )
       );
     });
 
