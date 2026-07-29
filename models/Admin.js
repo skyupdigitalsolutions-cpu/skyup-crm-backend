@@ -11,10 +11,17 @@ const adminSchema = mongoose.Schema(
     password: {
       type: String,
       required: true,
-      // SECURITY (A.5.17): minimum length enforced at the schema layer so no
-      // controller can bypass it. Complexity/breach checks live in
-      // utils/passwordPolicy.js and are applied at set/change time.
-      minlength: [12, "Password must be at least 12 characters"],
+      // SECURITY (A.5.17): enforced at the schema layer so no controller can
+      // bypass it. Mongoose validates BEFORE the pre('save') hash hook, so this
+      // applies to the plaintext.
+      // PRODUCTION NOTE: defaults to 8 to avoid rejecting existing flows on
+      // deploy. Raise to 12 via PASSWORD_MIN_LENGTH once all user-creation
+      // paths issue longer passwords. utils/passwordPolicy.js enforces the
+      // full policy (length + complexity + common/reuse checks) at set time.
+      minlength: [
+        Number(process.env.PASSWORD_MIN_LENGTH) || 8,
+        `Password must be at least ${Number(process.env.PASSWORD_MIN_LENGTH) || 8} characters`,
+      ],
     },
     company:  {
       type: mongoose.Schema.Types.ObjectId,

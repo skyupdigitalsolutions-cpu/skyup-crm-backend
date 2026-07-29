@@ -121,18 +121,42 @@ const protectAny = async (req, res, next) => {
             return res.status(404).json({ message: "Company specified in x-company-id was not found" });
           }
         }
-        // SECURITY (A.8.3 Information access restriction): never INFER a tenant.
-        // Previously, a super-admin request without x-company-id silently bound
-        // to the oldest active company, so writes could land on the wrong
-        // tenant with no error surfaced. A missing company context is now a
-        // hard 400 — the caller must state which tenant it is acting on.
+
+        // SECURITY (A.8.3 Information access restriction) — SAFE ROLLOUT.
+        //
+        // Historically a super-admin request without x-company-id silently bound
+        // to the oldest active company, so writes could land on the wrong tenant.
+        // Rejecting outright is the correct end state, but doing so immediately
+        // breaks any existing caller that relied on the old behaviour — not
+        // acceptable on a live system.
+        //
+        // So: default is LOG-AND-CONTINUE. Every occurrence is logged loudly and
+        // flagged on the request so it lands in the access audit trail. Once the
+        // logs show no more warnings, set STRICT_TENANT_CONTEXT=true to enforce.
+        const STRICT_TENANT = String(process.env.STRICT_TENANT_CONTEXT || "").toLowerCase() === "true";
+
         if (!company) {
-          return res.status(400).json({
-            message:
-              "Missing tenant context: super-admin requests must specify the target company " +
-              "via the x-company-id header.",
-            code: "COMPANY_CONTEXT_REQUIRED",
-          });
+          if (STRICT_TENANT) {
+            return res.status(400).json({
+              message:
+                "Missing tenant context: super-admin requests must specify the target company " +
+                "via the x-company-id header.",
+              code: "COMPANY_CONTEXT_REQUIRED",
+            });
+          }
+
+          // Permissive mode — preserve the previous behaviour, but make it VISIBLE.
+          company = await Company.findOne({ isActive: true }).sort({ createdAt: 1 });
+          if (!company) company = await Company.findOne().sort({ createdAt: 1 });
+          if (!company) {
+            return res.status(404).json({ message: "No company found for super_admin to manage" });
+          }
+          req.inferredTenant = true; // picked up by the access audit log
+          console.warn(
+            `[TENANT-WARN] super_admin ${superAdmin.email || superAdmin._id} called ` +
+            `${req.method} ${req.originalUrl} with no x-company-id — defaulted to ` +
+            `"${company.name}" (${company._id}). Set STRICT_TENANT_CONTEXT=true once callers send the header.`
+          );
         }
 
         req.superAdmin = superAdmin;

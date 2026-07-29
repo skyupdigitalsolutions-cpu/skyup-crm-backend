@@ -1,2 +1,16 @@
 node_modules
 .env
+
+# ── Security / hygiene (A.8.9) ──────────────────────────────
+.DS_Store
+**/.DS_Store
+Thumbs.db
+.env.*
+!.env.example
+node_modules/
+*.log
+coverage/
+.idea/
+.vscode/
+*.pem
+*.key

@@ -94,7 +94,10 @@ function auditAccess(options = {}) {
         company:    actor.company,
         // A super admin operating inside a tenant is inherently cross-tenant
         // access and should stand out in the log.
-        crossTenant: actor.isSuper,
+        // Flag both super-admin activity and any request that had to INFER a
+        // tenant (missing x-company-id) — the latter is what STRICT_TENANT_CONTEXT
+        // will eventually reject, so these entries show what still needs fixing.
+        crossTenant: actor.isSuper || !!req.inferredTenant,
         action,
         resourceType,
         resourceId: (req.params && req.params.id) || null,

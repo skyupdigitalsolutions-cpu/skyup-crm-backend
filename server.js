@@ -110,29 +110,40 @@ app.set('trust proxy', 1);
 
 // ── Security headers (A.8.9 Configuration management, A.8.26 Application
 // security requirements) ─────────────────────────────────────────────────────
-// helmet sets a set of hardening headers that were previously absent entirely.
-// crossOriginResourcePolicy is relaxed so the SPA on a different origin can
-// still load API-served assets (recordings, uploads).
+// helmet adds hardening headers that were previously absent entirely.
+//
+// PRODUCTION NOTE: Content-Security-Policy is the one header that can break a
+// working app (it can block a served SPA bundle, inline scripts, or media from
+// another origin). This server also serves /recordings, /uploads/logos and
+// possibly a frontend build, so CSP is OPT-IN via ENABLE_CSP=true. Every other
+// header below is safe for an API and is enabled now.
+//
+// crossOriginResourcePolicy stays 'cross-origin' so the separately-hosted
+// frontend can keep loading recordings and logos.
 const helmet = require('helmet');
 app.use(helmet({
-  contentSecurityPolicy: {
-    useDefaults: true,
-    directives: {
-      defaultSrc:  ["'self'"],
-      scriptSrc:   ["'self'"],
-      imgSrc:      ["'self'", 'data:', 'blob:', 'https:'],
-      mediaSrc:    ["'self'", 'https:', 'blob:'],
-      connectSrc:  ["'self'", 'https:', 'wss:'],
-      frameAncestors: ["'none'"],       // clickjacking
-      objectSrc:   ["'none'"],
-      baseUri:     ["'self'"],
-    },
-  },
-  // HSTS: force HTTPS for a year, including subdomains.
+  contentSecurityPolicy:
+    String(process.env.ENABLE_CSP || '').toLowerCase() === 'true'
+      ? {
+          useDefaults: true,
+          directives: {
+            defaultSrc:     ["'self'"],
+            scriptSrc:      ["'self'"],
+            imgSrc:         ["'self'", 'data:', 'blob:', 'https:'],
+            mediaSrc:       ["'self'", 'https:', 'blob:'],
+            connectSrc:     ["'self'", 'https:', 'wss:'],
+            frameAncestors: ["'none'"],
+            objectSrc:      ["'none'"],
+            baseUri:        ["'self'"],
+          },
+        }
+      : false,
+  // Force HTTPS for a year (safe: Render already terminates TLS).
   hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   crossOriginResourcePolicy: { policy: 'cross-origin' },
   crossOriginEmbedderPolicy: false,
+  crossOriginOpenerPolicy: false,
 }));
 
 const server = http.createServer(app);
