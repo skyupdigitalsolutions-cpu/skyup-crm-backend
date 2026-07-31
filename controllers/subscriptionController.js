@@ -8,6 +8,7 @@
 //  6. DEFAULT_PLAN_FEATURES extended with "trial" plan + all new limit fields
 //  7. Added GET /my/entitlements route handler
 
+const { escapeRegex } = require("../utils/escapeRegex");
 const Company    = require("../models/Company");
 const PlanConfig = require("../models/PlanConfig");
 const CompanyAddon    = require("../models/CompanyAddon");
@@ -315,9 +316,12 @@ const getAllSubscriptions = async (req, res) => {
     const filter = {};
     if (status && status !== "all") filter.subscriptionStatus = status;
     if (search) {
+      // A.8.28 — treat user input as a literal substring, not a regex pattern
+      // (prevents regex-injection / ReDoS via crafted search strings).
+      const safe = escapeRegex(search);
       filter.$or = [
-        { name:  { $regex: search, $options: "i" } },
-        { email: { $regex: search, $options: "i" } },
+        { name:  { $regex: safe, $options: "i" } },
+        { email: { $regex: safe, $options: "i" } },
       ];
     }
 

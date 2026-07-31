@@ -4,6 +4,7 @@
 //
 // Auth Key is read from SmsConfig (DB, per-company).
 
+const { escapeRegex } = require("../utils/escapeRegex");
 const axios     = require("axios");
 const Lead      = require("../models/Leads");
 const SmsLog    = require("../models/SmsLog");
@@ -372,7 +373,7 @@ const getSmsHistory = async (req, res) => {
     } = req.query;
 
     const filter = { company: req.admin.company._id };
-    if (search)     filter.to         = { $regex: search, $options: "i" };
+    if (search)     filter.to         = { $regex: escapeRegex(search), $options: "i" }; // A.8.28 literal match
     if (campaignId) filter.campaignId = campaignId;
     if (dateFrom || dateTo) {
       filter.sentAt = {};

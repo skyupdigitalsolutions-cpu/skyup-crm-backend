@@ -72,6 +72,18 @@ const adminSchema = mongoose.Schema(
   { timestamps: true }
 );
 
+// ── Full password policy (A.5.17) ────────────────────────────────────────────
+// Enforces utils/passwordPolicy.js centrally at the schema layer so no admin/
+// super-admin creation path can bypass it. Runs before the hash hook (sees
+// plaintext) and is guarded by isModified so unrelated saves are untouched.
+const { validatePassword } = require("../utils/passwordPolicy");
+adminSchema.pre("validate", function (next) {
+  if (!this.isModified("password")) return next();
+  const { valid, errors } = validatePassword(this.password, { email: this.email, name: this.name });
+  if (!valid) this.invalidate("password", errors[0]);
+  next();
+});
+
 // Hashing the password before saving
 adminSchema.pre("save", async function () {
   if (!this.isModified("password")) return;

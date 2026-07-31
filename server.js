@@ -30,6 +30,9 @@ const path         = require('path');
 const { generalLimiter } = require('./middlewares/rateLimiter');
 const connectDB           = require('./config/db');
 const initSocket          = require('./socket/socketHandler');
+// ── Injection hardening (OWASP A03 · A.8.28) ─────────────────────────────────
+const { nosqlSanitize } = require('./utils/nosqlSanitize');
+const { escapeRegex }   = require('./utils/escapeRegex');
 
 // ── CRM Routes ────────────────────────────────────────────────────────────────
 const superAdminRoute   = require('./routes/superAdminRoute');
@@ -159,7 +162,7 @@ async function isDynamicOriginAllowed(origin) {
     const WebsiteConfig = require('./models/WebsiteConfig');
     const hostname = origin.replace(/^https?:\/\//, "").replace(/\/$/, "");
     const config = await WebsiteConfig.findOne({
-      pageUrl:  { $regex: hostname, $options: "i" },
+      pageUrl:  { $regex: escapeRegex(hostname), $options: "i" }, // A.8.28 literal match
       isActive: true,
     });
     return !!config;
@@ -240,6 +243,11 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ extended: true }));
 app.use(express.text({ type: "text/plain", limit: "5mb" }));
+
+// ── Strip Mongo operator/dotted keys from body & params (OWASP A03 · A.8.28) ──
+// Mounted AFTER parsers (so req.body exists) and BEFORE routes. Express-5 safe:
+// it mutates in place and never reassigns the read-only req.query getter.
+app.use(nosqlSanitize());
 
 app.use(generalLimiter);
 

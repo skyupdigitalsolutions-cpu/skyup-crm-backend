@@ -33,6 +33,17 @@ const superAdminSchema = mongoose.Schema(
   { timestamps: true }
 );
 
+// ── Full password policy (A.5.17) ────────────────────────────────────────────
+// Enforces utils/passwordPolicy.js centrally so no super-admin creation/reset
+// path can bypass it. Runs before the hash hook and is guarded by isModified.
+const { validatePassword } = require("../utils/passwordPolicy");
+superAdminSchema.pre("validate", function (next) {
+  if (!this.isModified("password")) return next();
+  const { valid, errors } = validatePassword(this.password, { email: this.email, name: this.name });
+  if (!valid) this.invalidate("password", errors[0]);
+  next();
+});
+
 superAdminSchema.pre("save", async function () {
   if (!this.isModified("password")) return;
   this.password = await bcrypt.hash(this.password, BCRYPT_COST);

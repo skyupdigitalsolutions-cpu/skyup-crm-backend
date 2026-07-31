@@ -5,6 +5,7 @@
 //   2. If MSG91 is not configured OR quota is exhausted, fall back to Brevo.
 //   3. If neither is available, throw a descriptive error.
 //
+const { escapeRegex } = require("../utils/escapeRegex");
 const axios = require("axios");
 const Lead = require("../models/Leads");
 const EmailLog = require("../models/EmailLog");
@@ -430,7 +431,7 @@ const getEmailHistory = async (req, res) => {
     const skip = (pageNum - 1) * limitNum;
 
     const filter = { company: req.admin.company._id };
-    if (search.trim()) filter.to = { $regex: search.trim(), $options: "i" };
+    if (search.trim()) filter.to = { $regex: escapeRegex(search.trim()), $options: "i" }; // A.8.28 literal match
     if (campaignId.trim()) filter.campaignId = campaignId.trim();
 
     // Date range filter on sentAt

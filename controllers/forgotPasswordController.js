@@ -8,6 +8,7 @@ const crypto  = require("crypto");
 const Admin   = require("../models/Admin");
 const User    = require("../models/Users");
 const { sendPasswordResetOtp } = require("../utils/brevoMailer");
+const { validatePassword } = require("../utils/passwordPolicy");
 
 const OTP_EXPIRY_MINUTES = 10;
 const MAX_ATTEMPTS       = 5;
@@ -83,8 +84,13 @@ const verifyOtpAndReset = async (req, res) => {
     if (!email || !otp || !newPassword) {
       return res.status(400).json({ message: "Email, OTP, and new password are required." });
     }
-    if (newPassword.length < 8) {
-      return res.status(400).json({ message: "Password must be at least 8 characters." });
+    // A.5.17 — enforce the full password policy on reset (length + complexity +
+    // common-password + identity-echo checks), not just a bare length floor.
+    // The model's pre('validate') hook enforces this too; validating here first
+    // returns a clean, specific 400 before the OTP/DB work runs.
+    {
+      const { valid, errors } = validatePassword(newPassword, { email });
+      if (!valid) return res.status(400).json({ message: errors[0], errors });
     }
 
     // Find across both models

@@ -104,6 +104,25 @@ const userSchema = mongoose.Schema(
   { timestamps: true }
 );
 
+// ── Full password policy (A.5.17) ────────────────────────────────────────────
+// The schema `minlength` above is only a length floor. The complete policy
+// (length + complexity + common-password + identity-echo checks) lives in
+// utils/passwordPolicy.js. This pre('validate') hook enforces it centrally so
+// NO controller can bypass it, on registration/creation/reset alike. It runs
+// BEFORE the pre('save') hash hook, so it sees the plaintext, and it is guarded
+// by isModified("password") so existing users saving other fields are never
+// re-validated (and their already-hashed passwords are never re-checked).
+const { validatePassword } = require("../utils/passwordPolicy");
+userSchema.pre("validate", function (next) {
+  if (!this.isModified("password")) return next();
+  const { valid, errors } = validatePassword(this.password, { email: this.email, name: this.name });
+  // invalidate() attaches a proper Mongoose ValidationError on the "password"
+  // path with our human-readable message — surfaces as a validation error the
+  // controllers already handle, not a raw 500.
+  if (!valid) this.invalidate("password", errors[0]);
+  next();
+});
+
 // Hashing the password before saving
 userSchema.pre("save", async function () {
   if (!this.isModified("password")) return;
