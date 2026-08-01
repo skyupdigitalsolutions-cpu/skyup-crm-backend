@@ -374,6 +374,16 @@ const leadSchema = mongoose.Schema(
     // outcome multiple times in one day only triggers one message.
     outcomeAutomationSent: { type: Map, of: String, default: () => ({}) },
 
+    // ── Nurture sequence dedupe (jobs/nurtureSequenceJob.js) ──────────────────
+    // Maps a NurtureRule _id (string) → the IST calendar-day key on which that
+    // rule last fired for THIS lead. Company-scoped feature (see
+    // Company.devOverrides.featureToggles.leadNurtureSequence) — only ever
+    // populated for the one company that has it enabled. A rule with
+    // repeatEveryDays set can fire again once that many days have elapsed
+    // since the stored date; a rule with repeatEveryDays = null fires once
+    // and is then permanently skipped for this lead.
+    nurtureSent: { type: Map, of: String, default: () => ({}) },
+
     // ── No-action 3h escalation guard (super_admin dedup) ────────────────────
     // BUG 2 FIX — without this field the 3h escalation guard in leadAlertsJob
     // never sticks: the query finds the same leads every 15-min tick and the

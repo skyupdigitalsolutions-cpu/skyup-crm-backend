@@ -11,6 +11,7 @@ const {
   getDailyReport,
   getEmployeeReport,
   getCampaignReport,
+  getDailyOutcomesReport,
 } = require('../services/reportService');
 const { getNonConversionReport } = require('../services/nonConversionService');
 const { getAdminLeadScope } = require('../utils/adminLeadScope');
@@ -140,4 +141,33 @@ const nonConversionReport = async (req, res) => {
   }
 };
 
-module.exports = { dailyReport, employeeReport, campaignReport, nonConversionReport };
+// ── GET /api/reports/daily-outcomes ───────────────────────────────────────────
+// Answered / Not Answered / Busy / etc. breakdown for a given day — counts
+// CALLS MADE that day (callHistory.calledAt), not leads created that day.
+// Works for both admin (req.admin) and user (req.user) tokens, same as
+// dailyReport above.
+const dailyOutcomesReport = async (req, res) => {
+  try {
+    const isAdmin = !!req.admin;
+    const company = req.callerCompany || req.admin?.company?._id || req.user?.company;
+    const userId  = isAdmin ? (req.query.userId || null) : String(req.user._id);
+    const date    = req.query.date || null;
+
+    if (!company) return res.status(400).json({ message: 'Company not resolved from token' });
+
+    const leadScope = await getAdminLeadScope(req, company);
+    const report = await getDailyOutcomesReport({ company, date, userId, leadScope });
+
+    // Mask phone numbers for non-superadmin admins, same rule as dailyReport
+    if (isAdmin && req.admin?.role !== 'superadmin') {
+      report.calls = report.calls.map(c => ({ ...c, mobile: maskPhone(c.mobile) }));
+    }
+
+    res.json({ success: true, ...report });
+  } catch (err) {
+    console.error('[reportController.dailyOutcomesReport]', err.message);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+module.exports = { dailyReport, employeeReport, campaignReport, nonConversionReport, dailyOutcomesReport };

@@ -383,6 +383,11 @@ async function getCompanyEntitlements(companyId) {
     // Feature flags from plan
     ...planLimits.features,
 
+    // ── Company-scoped features (default OFF for everyone; enabled per
+    //    company only via devOverrides.featureToggles from Developer panel) ──
+    leadNurtureSequence: false,
+    callOutcomesReport:  false,
+
     // Recording / retention meta
     recordingEnabled:  planLimits.recordingEnabled,
     dataRetentionDays: planLimits.dataRetentionDays,

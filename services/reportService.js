@@ -373,4 +373,99 @@ async function getCampaignReport({ company, fromDate, toDate, leadScope = {} } =
   return { campaigns: rows };
 }
 
-module.exports = { getDailyReport, getEmployeeReport, getCampaignReport, getISTDayBounds };
+// ── getDailyOutcomesReport ────────────────────────────────────────────────────
+/**
+ * Answered / Not Answered / Busy / etc. breakdown for a given IST calendar day.
+ * Unlike getDailyReport (which counts leads CREATED that day), this counts
+ * CALLS MADE that day — i.e. every callHistory entry whose calledAt falls in
+ * the selected day, grouped by outcome. Used by the admin "Call Outcomes" tab
+ * and (via the same endpoint) the mobile dashboard/call-logs screens, so all
+ * three surfaces always agree.
+ *
+ * @param {object} options
+ * @param {string|ObjectId} options.company  - required
+ * @param {string}          [options.date]   - ISO date string, defaults to today
+ * @param {string|ObjectId} [options.userId] - filter to single agent
+ */
+async function getDailyOutcomesReport({ company, date, userId, leadScope = {} } = {}) {
+  if (!company) throw new Error('company is required');
+
+  const { dayStart, dayEnd } = getISTDayBounds(date);
+
+  const baseMatch = { company: new mongoose.Types.ObjectId(company) };
+  if (userId) baseMatch.user = new mongoose.Types.ObjectId(userId);
+
+  const pipeline = [
+    { $match: mergeLeadScope(baseMatch, leadScope) },
+    { $unwind: '$callHistory' },
+    { $match: { 'callHistory.calledAt': { $gte: dayStart, $lte: dayEnd } } },
+    {
+      $lookup: {
+        from:         'users',
+        localField:   'callHistory.userId',
+        foreignField: '_id',
+        as:           'agentInfo',
+      },
+    },
+    {
+      $project: {
+        leadId:    '$_id',
+        leadName:  '$name',
+        mobile:    '$mobile',
+        outcome:   { $ifNull: ['$callHistory.outcome', 'Unspecified'] },
+        remark:    '$callHistory.remark',
+        calledAt:  '$callHistory.calledAt',
+        agentId:   '$callHistory.userId',
+        agentName: {
+          $ifNull: [
+            '$callHistory.userName',
+            { $arrayElemAt: ['$agentInfo.name', 0] },
+          ],
+        },
+      },
+    },
+    { $sort: { calledAt: -1 } },
+  ];
+
+  const calls = await Lead.aggregate(pipeline);
+
+  // ── Group by outcome for the summary chart ─────────────────────────────────
+  const byOutcome = {};
+  for (const c of calls) {
+    const key = c.outcome || 'Unspecified';
+    byOutcome[key] = (byOutcome[key] || 0) + 1;
+  }
+  const outcomes = Object.entries(byOutcome)
+    .map(([outcome, count]) => ({ outcome, count }))
+    .sort((a, b) => b.count - a.count);
+
+  // ── Per-agent breakdown (admin view) ────────────────────────────────────────
+  const byAgent = {};
+  for (const c of calls) {
+    const key = c.agentId ? String(c.agentId) : 'unassigned';
+    if (!byAgent[key]) {
+      byAgent[key] = { agentId: c.agentId || null, agentName: c.agentName || 'Unassigned', total: 0, outcomes: {} };
+    }
+    byAgent[key].total++;
+    byAgent[key].outcomes[c.outcome] = (byAgent[key].outcomes[c.outcome] || 0) + 1;
+  }
+
+  const totalCalls    = calls.length;
+  const answered       = byOutcome['Answered'] || 0;
+  const notAnsweredSet = ['Not Answered', 'Busy', 'Switch Off'];
+  const notAnswered    = notAnsweredSet.reduce((sum, k) => sum + (byOutcome[k] || 0), 0);
+
+  return {
+    summary: {
+      totalCalls,
+      answered,
+      notAnswered,
+      answerRate: totalCalls > 0 ? Math.round((answered / totalCalls) * 100) : 0,
+    },
+    outcomes,
+    agents: Object.values(byAgent),
+    calls, // raw list for drill-down
+  };
+}
+
+module.exports = { getDailyReport, getEmployeeReport, getCampaignReport, getDailyOutcomesReport, getISTDayBounds };

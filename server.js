@@ -88,6 +88,7 @@ const { startLimitOverrideExpiryJob } = require('./jobs/limitOverrideExpiryJob')
 const { startAddonExpiryJob }         = require('./jobs/addonExpiryJob');
 const { startMeetingReminderJob }     = require('./jobs/meetingReminderJob');
 const { startFollowUpReminderJob }    = require('./jobs/followUpReminderJob');
+const { startNurtureSequenceJob }     = require('./jobs/nurtureSequenceJob'); // NOT started yet — see note below, kept off until templates are reviewed
 const { startMetaAutoSyncJob }        = require('./jobs/metaAutoSyncJob'); // NEW — auto-syncs new Meta ad sets & forms
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
@@ -336,6 +337,7 @@ app.use('/api/benefits',            benefitRoutes);
 app.use('/api/saanvi',              saanviProxyRoute);
 app.use('/api/whatsapp',            whatsappRoutes);
 app.use('/api/reports',             require('./routes/reportRoutes'));
+app.use('/api/nurture',             require('./routes/nurtureRoute'));
 app.use('/api/call-logs',           require('./routes/mobileCallLog'));
 app.use('/api/transcription',       require('./routes/transcription'));
 
@@ -462,6 +464,15 @@ connectDB().then(() => {
     startAddonExpiryJob();          // NEW — marks expired add-ons (incl. 30-day credit packs) as expired
     startMeetingReminderJob();      // NEW — day-before + meeting-day WhatsApp/email reminders
     startFollowUpReminderJob();     // NEW — WhatsApp/email reminders to leads with due follow-ups (9:30 AM & 8:30 PM IST)
+
+    // ── Lead Nurture Sequence — INTENTIONALLY NOT STARTED YET ────────────────
+    // jobs/nurtureSequenceJob.js exists and works, and NurtureRule CRUD
+    // (/api/nurture/rules) is live so rules can be built/reviewed in the
+    // admin UI — but the cron itself is left OFF so no WhatsApp/Email
+    // template automation actually fires from the backend yet. Uncomment
+    // the line below once rules + templates are reviewed and you're ready
+    // to go live for the one enabled company:
+    // startNurtureSequenceJob();   // 11:00 AM IST daily, company-gated
     startMetaAutoSyncJob();         // NEW — every 30 min: auto-sync new Meta ad sets & lead forms into MetaConfig
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
