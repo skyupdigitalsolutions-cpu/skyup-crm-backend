@@ -24,6 +24,8 @@ const getCompanyId = (req) =>
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
 const { autoSendTemplates, sendInterestedBlast } = require("../services/autoTemplateService");
 const { sendOutcomeAutomation } = require("../services/outcomeAutomationService");
+const { sendMetaConversionEvent } = require("../services/metaConversionService");
+const { getCompanyEntitlements } = require("../services/entitlementService");
 const { notifyCampaignLead, notifyEmployeeLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
@@ -1182,6 +1184,31 @@ const patchLead = async (req, res) => {
         sendOutcomeAutomation(updatedLead, autoCompanyId, outcome).catch((err) =>
           console.error("[outcomeAutomation] patchLead trigger error:", err.message)
         );
+      }
+    }
+
+    // ── Meta Conversions API (CAPI) send-back ─────────────────────────────────
+    // Tells Meta which leads actually converted, mapped from CRM status
+    // (New→Lead, In Progress→Contact, Interested→Schedule, Converted→Purchase;
+    // Not Interested is never sent). STRICTLY company-gated — only fires when
+    // Company.devOverrides.featureToggles.metaConversionSync is true for this
+    // company; every other company is a silent no-op even if the lead came
+    // from Meta. Fire-and-forget, never blocks the response.
+    if (updatedLead && status !== undefined) {
+      const capiCompanyId = lead.company?._id || lead.company || getCompanyId(req);
+      if (capiCompanyId) {
+        getCompanyEntitlements(capiCompanyId)
+          .then((ent) => {
+            if (!ent?.metaConversionSync) return; // not enabled for this company — do nothing
+            return sendMetaConversionEvent(updatedLead, status).then((result) => {
+              if (result.sent) {
+                console.log(`[metaConversionSync] "${result.eventName}" sent for lead ${updatedLead._id}`);
+              } else {
+                console.log(`[metaConversionSync] Skipped for lead ${updatedLead._id}: ${result.reason}`);
+              }
+            });
+          })
+          .catch((err) => console.error("[metaConversionSync] patchLead trigger error:", err.message));
       }
     }
 

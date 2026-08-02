@@ -156,7 +156,18 @@ const dailyOutcomesReport = async (req, res) => {
     if (!company) return res.status(400).json({ message: 'Company not resolved from token' });
 
     const leadScope = await getAdminLeadScope(req, company);
-    const report = await getDailyOutcomesReport({ company, date, userId, leadScope });
+    const report = await getDailyOutcomesReport({
+      company,
+      date,
+      userId,
+      leadScope,
+      // ── New filters (all optional) ──────────────────────────────────────────
+      source:         req.query.source || null,
+      status:         req.query.status || null,
+      campaign:       req.query.campaign || null,
+      minDurationSec: req.query.minDurationSec ? Number(req.query.minDurationSec) : 5,
+      dataSource:     req.query.dataSource || 'auto', // 'auto' | 'device' | 'manual'
+    });
 
     // Mask phone numbers for non-superadmin admins, same rule as dailyReport
     if (isAdmin && req.admin?.role !== 'superadmin') {

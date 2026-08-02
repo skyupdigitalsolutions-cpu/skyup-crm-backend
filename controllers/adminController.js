@@ -1,4 +1,5 @@
 const axios   = require("axios");
+const crypto  = require("crypto");
 const Admin   = require("../models/Admin");
 const User    = require("../models/Users");
 const Lead    = require("../models/Leads");
@@ -52,7 +53,10 @@ const getAdmins = async (req, res) => {
       ? { $nin: ["super_admin", "marketing_user"] }
       : { $nin: ["marketing_user"] };
     filter.marketingAccess = { $ne: true };
-    const selectFields = req.admin.role === "super_admin" ? "-password" : "-password -plainPassword";
+    // SECURITY FIX: plainPassword is deprecated (see models/Admin.js) — always
+    // excluded now, not just for non-super_admin. It's never written to
+    // anymore, so returning it would only ever leak stale/legacy values.
+    const selectFields = "-password -plainPassword";
     const admins = await Admin.find(filter).select(selectFields);
     res.status(200).json(admins);
   } catch (error) {
@@ -93,7 +97,12 @@ const createAdmin = async (req, res) => {
     const adminExists = await Admin.findOne({ email });
     if (adminExists) return res.status(400).json({ message: "Admin already exists" });
 
-    const admin = await Admin.create({ name, email, password, plainPassword: password, company: companyId });
+    // SECURITY FIX: no longer stored — plainPassword is deprecated (see
+    // models/Admin.js). `password` here is only ever the plaintext value the
+    // caller just typed into the create-admin form; echoing it back once in
+    // this response (for the "copy this now" modal) is not a new disclosure
+    // since the caller already has it. It is never persisted anywhere.
+    const admin = await Admin.create({ name, email, password, company: companyId });
 
     res.status(201).json({
       _id:           admin._id,
@@ -101,7 +110,7 @@ const createAdmin = async (req, res) => {
       email:         admin.email,
       company:       admin.company,
       role:          "admin",
-      plainPassword: admin.plainPassword,
+      plainPassword: password, // shown once in the UI, then discarded client-side too
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -182,7 +191,7 @@ const createCompanyUser = async (req, res) => {
     if (exists) return res.status(400).json({ message: "User already exists" });
 
     const user = await User.create({
-      name, email, password, plainPassword: password,
+      name, email, password,
       company: companyId,
       role: "user",
       createdBy: req.admin._id,
@@ -196,10 +205,14 @@ const createCompanyUser = async (req, res) => {
         : [],
     });
 
+    // SECURITY FIX: plainPassword is deprecated (see models/Users.js) — not
+    // stored. `password` is the plaintext value the caller just typed into
+    // the create-user form; echoing it back once here is not a new
+    // disclosure and is never persisted.
     res.status(201).json({
       _id: user._id, name: user.name, email: user.email,
       company: user.company, role: user.role,
-      plainPassword: user.plainPassword,
+      plainPassword: password, // shown once in the UI, then discarded client-side too
       contactAccountEmail: user.contactAccountEmail,
     });
   } catch (error) {
@@ -214,7 +227,8 @@ const getCompanyUsers = async (req, res) => {
     const ownFilter = { company: companyId };
     if (req.admin.role !== "super_admin") ownFilter.createdBy = req.admin._id;
 
-    const userSelectFields = req.admin.role === "super_admin" ? "-password" : "-password -plainPassword";
+    // SECURITY FIX: plainPassword is deprecated — always excluded now.
+    const userSelectFields = "-password -plainPassword";
     const [users, totalCompanyUsers] = await Promise.all([
       User.find(ownFilter).select(userSelectFields),
       User.countDocuments(filter),
@@ -1199,6 +1213,88 @@ const getMarketingDashboard = async (req, res) => {
   }
 };
 
+// ── SECURITY FIX replacement feature ──────────────────────────────────────────
+// Previously, a super_admin could VIEW any existing admin/user's actual
+// password at any time (via the deprecated plainPassword field). That's the
+// vulnerability fixed in models/Admin.js / models/Users.js. The replacement:
+// admins can RESET a password to a brand-new random one, shown ONCE in the
+// response for the "copy this now" modal, and never stored anywhere
+// retrievable afterward. This is strictly less powerful than the old feature
+// (can't recover a still-active password) but is the correct trade-off —
+// authentication information should never be recoverable, only resettable.
+
+// Generates a random, readable-but-strong password: 12 chars, mixed case +
+// digits + one symbol, avoiding visually-ambiguous characters (0/O, 1/l/I).
+function generateSecurePassword() {
+  const upper  = "ABCDEFGHJKMNPQRSTUVWXYZ";
+  const lower  = "abcdefghjkmnpqrstuvwxyz";
+  const digits = "23456789";
+  const symbol = "!@#$%&*";
+  const all    = upper + lower + digits + symbol;
+
+  const pick = (set) => set[crypto.randomInt(0, set.length)];
+  const required = [pick(upper), pick(lower), pick(digits), pick(symbol)];
+  const rest = Array.from({ length: 8 }, () => pick(all));
+
+  // Shuffle so the required-character positions aren't predictable.
+  const chars = [...required, ...rest];
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join("");
+}
+
+// PATCH /api/admin/:id/reset-password — reset another ADMIN's password
+// (super_admin only — an admin resetting another admin's password is a
+// privileged action).
+const resetAdminPassword = async (req, res) => {
+  try {
+    if (req.admin.role !== "super_admin") {
+      return res.status(403).json({ message: "Only a super admin can reset another admin's password" });
+    }
+    const target = await Admin.findById(req.params.id);
+    if (!target) return res.status(404).json({ message: "Admin not found" });
+    if (String(target.company) !== String(req.admin.company?._id || req.admin.company)) {
+      return res.status(403).json({ message: "Admin not in your company" });
+    }
+
+    const newPassword = generateSecurePassword();
+    target.password = newPassword; // pre-save hook hashes it — never stored plain
+    await target.save();
+
+    res.json({
+      success: true,
+      message: "Password reset. Share this with the admin now — it will not be shown again.",
+      newPassword, // one-time reveal only, never persisted
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// PATCH /api/admin/user/:id/reset-password — reset an EMPLOYEE's password
+// (admin or super_admin, scoped to their own company).
+const resetUserPassword = async (req, res) => {
+  try {
+    const companyId = req.admin.company?._id || req.admin.company;
+    const target = await User.findOne({ _id: req.params.id, company: companyId });
+    if (!target) return res.status(404).json({ message: "User not found" });
+
+    const newPassword = generateSecurePassword();
+    target.password = newPassword; // pre-save hook hashes it — never stored plain
+    await target.save();
+
+    res.json({
+      success: true,
+      message: "Password reset. Share this with the employee now — it will not be shown again.",
+      newPassword, // one-time reveal only, never persisted
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -1214,6 +1310,8 @@ module.exports = {
   updateUserLanguages,
   createCompanyUser,
   deleteCompanyUser,
+  resetAdminPassword,
+  resetUserPassword,
   getDashboardStats,
   getAutoTemplateSettings,
   updateAutoTemplateSettings,

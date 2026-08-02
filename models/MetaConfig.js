@@ -95,6 +95,24 @@ const metaConfigSchema = new mongoose.Schema(
     metaActive:         { type: Boolean, default: true },
     pausedByMeta:       { type: Boolean, default: false },
     metaStatusSyncedAt: { type: Date, default: null },
+
+    // ── Conversions API (CAPI) — send-back, NOT pull ─────────────────────────
+    // Lets the CRM tell Meta which leads actually converted (status changes),
+    // so ad delivery optimizes toward real customers instead of raw form
+    // submissions. Company-gated overall via
+    // Company.devOverrides.featureToggles.metaConversionSync — this pixelId/
+    // token pair is the per-campaign credential the sync uses once that
+    // company-wide toggle is on. Both blank = CAPI sync silently skipped for
+    // leads from this config (see services/metaConversionService.js).
+    //   pixelId         — the Meta Pixel ID associated with this ad account
+    //                      (Events Manager → Data Sources → your Pixel).
+    //   capiAccessToken — a Conversions API access token for that pixel
+    //                      (Events Manager → Settings → Conversions API →
+    //                       Generate Access Token). Distinct from
+    //                      pageAccessToken above — CAPI tokens are
+    //                      pixel-scoped, not page-scoped.
+    pixelId:         { type: String, default: "", trim: true },
+    capiAccessToken: { type: String, default: "", trim: true },
   },
   { timestamps: true },
 );

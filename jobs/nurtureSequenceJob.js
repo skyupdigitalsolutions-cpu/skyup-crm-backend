@@ -130,12 +130,24 @@ async function fireRule(rule, lead, company) {
 
   if (action.whatsapp?.enabled) {
     if (lead.mobile) {
-      const r = await sendAutoWhatsApp({
-        companyId: company._id,
-        lead,
-        whatsappSettings: action.whatsapp,
-      }).catch((err) => ({ channel: "whatsapp", status: "failed", detail: err.message }));
-      results.push(r);
+      // Resolve which template to actually use: a per-status override (if
+      // this lead's current status has one configured) beats the rule's
+      // default/fallback templateName.
+      const templatesByStatus = action.whatsapp.templatesByStatus instanceof Map
+        ? Object.fromEntries(action.whatsapp.templatesByStatus)
+        : (action.whatsapp.templatesByStatus || {});
+      const resolvedTemplateName = templatesByStatus[lead.status] || action.whatsapp.templateName;
+
+      if (!resolvedTemplateName) {
+        results.push({ channel: "whatsapp", status: "skipped", detail: `No template configured for status "${lead.status}" and no default set` });
+      } else {
+        const r = await sendAutoWhatsApp({
+          companyId: company._id,
+          lead,
+          whatsappSettings: { ...action.whatsapp, templateName: resolvedTemplateName },
+        }).catch((err) => ({ channel: "whatsapp", status: "failed", detail: err.message }));
+        results.push(r);
+      }
     } else {
       results.push({ channel: "whatsapp", status: "skipped", detail: "Lead has no mobile number" });
     }

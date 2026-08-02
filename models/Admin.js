@@ -46,8 +46,22 @@ const adminSchema = mongoose.Schema(
     // push notifications to admin and super_admin devices.
     fcmToken:   { type: String, default: null },
 
-    // ── Plain-text password (for super admin credential view) ─────────────────
-    // Updated on creation and on password reset via forgot-password flow.
+    // ── DEPRECATED — plaintext password storage (SECURITY FIX) ────────────────
+    // This field used to store every admin's actual password in plaintext so
+    // super_admin could "view credentials" later. That's a critical security
+    // issue (ISO 27001 A.5.17/A.8.24 — authentication information must never
+    // be stored in a retrievable form): anyone with DB/backup access got
+    // every account's real password with zero cracking required, and since
+    // people reuse passwords across services, a leak here could compromise
+    // accounts outside this CRM too.
+    //
+    // No code writes to this field anymore (see controllers/adminController.js,
+    // superAdminController.js, forgotPasswordController.js). It's kept here
+    // ONLY so scripts/clearPlainPasswords.js can null out existing values in
+    // one pass — run that once, then this field can be dropped entirely.
+    // The replacement feature is a one-time "Reset Password" action: admins
+    // generate a brand-new password on demand (shown once, never stored),
+    // instead of ever being able to look up an existing one.
     plainPassword: { type: String, default: null },
 
     // ── Telegram personal notification ────────────────────────────────────────

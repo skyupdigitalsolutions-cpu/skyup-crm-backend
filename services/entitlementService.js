@@ -387,6 +387,7 @@ async function getCompanyEntitlements(companyId) {
     //    company only via devOverrides.featureToggles from Developer panel) ──
     leadNurtureSequence: false,
     callOutcomesReport:  false,
+    metaConversionSync:  false,
 
     // Recording / retention meta
     recordingEnabled:  planLimits.recordingEnabled,

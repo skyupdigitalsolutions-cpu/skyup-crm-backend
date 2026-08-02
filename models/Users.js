@@ -53,7 +53,10 @@ const userSchema = mongoose.Schema(
     // ✅ FIX: track last login time so frontend "Last Login" column works
     lastLoginAt: { type: Date,   default: null },
 
-    // ── Plain-text password (for super admin credential view) ─────────────────
+    // ── DEPRECATED — plaintext password storage (SECURITY FIX) ────────────────
+    // See models/Admin.js for the full explanation. No code writes to this
+    // field anymore; kept only so scripts/clearPlainPasswords.js can null out
+    // existing values once before this field is dropped entirely.
     plainPassword: { type: String, default: null },
 
     // ── Forgot-password OTP fields ────────────────────────────────────────────

@@ -1,7 +1,8 @@
 // controllers/forgotPasswordController.js
 // Handles OTP-based password reset for Admin, super_admin, and Employee (User) roles.
 // Flow: requestOtp → verifyOtpAndReset
-// On success the new plainPassword is also saved so the super_admin credential view stays current.
+// (No longer stores a plaintext password copy — see models/Admin.js / models/Users.js
+// for why that field was removed.)
 
 const bcrypt  = require("bcryptjs");
 const crypto  = require("crypto");
@@ -76,7 +77,6 @@ const requestOtp = async (req, res) => {
 // ── POST /api/auth/forgot-password/reset ──────────────────────────────────────
 // Body: { email, otp, newPassword }
 // Verifies OTP (not expired, not too many attempts), then updates the password.
-// Also updates plainPassword so super_admin credential view stays accurate.
 const verifyOtpAndReset = async (req, res) => {
   try {
     const { email, otp, newPassword } = req.body;
@@ -140,8 +140,9 @@ const verifyOtpAndReset = async (req, res) => {
     // OTP is valid — update password and clear OTP fields
     // Set password (the pre-save hook will hash it)
     doc.password      = newPassword;
-    // Store plain-text for super_admin credential view
-    doc.plainPassword = newPassword;
+    // SECURITY FIX: no longer storing a plaintext copy (see models/Admin.js /
+    // models/Users.js) — the person resetting their own password already has
+    // it, so there's nothing to "view" here anyway.
     // Clear OTP state
     doc.resetOtp         = null;
     doc.resetOtpExpiry   = null;

@@ -60,7 +60,16 @@ const nurtureRuleSchema = new mongoose.Schema(
     action: {
       whatsapp: {
         enabled: { type: Boolean, default: true },
+        // Default/fallback template — used when this rule's trigger.statuses
+        // is empty (matches "any" status) or the lead's current status has
+        // no override in templatesByStatus below.
         templateName: { type: String, default: "" }, // must exist & be approved in MSG91
+        // Per-status overrides — lets one rule send a different approved
+        // MSG91 template depending on which status the lead was actually in
+        // when the rule fired (e.g. a softer nudge for "New", a firmer one
+        // for "In Progress"). Keys are CRM status strings; blank/missing =
+        // fall back to templateName above.
+        templatesByStatus: { type: Map, of: String, default: () => ({}) },
         languageCode: { type: String, default: "en" },
       },
       email: {

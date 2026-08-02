@@ -374,62 +374,178 @@ async function getCampaignReport({ company, fromDate, toDate, leadScope = {} } =
 }
 
 // ── getDailyOutcomesReport ────────────────────────────────────────────────────
-/**
- * Answered / Not Answered / Busy / etc. breakdown for a given IST calendar day.
- * Unlike getDailyReport (which counts leads CREATED that day), this counts
- * CALLS MADE that day — i.e. every callHistory entry whose calledAt falls in
- * the selected day, grouped by outcome. Used by the admin "Call Outcomes" tab
- * and (via the same endpoint) the mobile dashboard/call-logs screens, so all
- * three surfaces always agree.
- *
- * @param {object} options
- * @param {string|ObjectId} options.company  - required
- * @param {string}          [options.date]   - ISO date string, defaults to today
- * @param {string|ObjectId} [options.userId] - filter to single agent
- */
-async function getDailyOutcomesReport({ company, date, userId, leadScope = {} } = {}) {
+// Answered / Not Answered breakdown for a given IST calendar day, from TWO
+// possible sources:
+//
+//   1. DEVICE call logs (models/MobileCallLog.js) — synced automatically from
+//      the agent's phone by the mobile app. callType + duration come straight
+//      from the OS, so this is ground truth: it can't be forgotten, mistyped,
+//      or mismarked by an agent. THIS IS THE ACCURATE SOURCE.
+//
+//   2. MANUAL outcome entries (Lead.callHistory.outcome) — whatever the agent
+//      typed into the call-remark box. Useful as a fallback for companies/
+//      calls that don't go through the mobile app's call-log sync (e.g. calls
+//      logged from the web CRM), but it's self-reported and can be wrong or
+//      simply skipped.
+//
+// FIX (accuracy): the old version only counted the literal string "Answered"
+// toward the Answered total. In practice, "Interested", "Not Interested",
+// "Client Meeting", and "Call Back Later" all only make sense if the phone
+// was actually picked up — those were previously invisible to the Answered
+// count, understating the real answer rate. Now classified properly below.
+//
+// Default behaviour ("auto"): use device logs when the company/day/filters
+// actually have any (most accurate); fall back to manual outcomes only when
+// there's no device data to look at. The response always says which source
+// was used (`usedDataSource`) so the UI can be transparent about it, and both
+// raw breakdowns are returned for comparison.
+async function getDailyOutcomesReport({
+  company,
+  date,
+  userId,
+  source,          // filter: lead.source (e.g. "Meta", "Website", "Manual")
+  status,          // filter: lead.status (e.g. "Interested", "Converted")
+  campaign,        // filter: lead.campaign (name string — same convention as getDailyReport)
+  minDurationSec = 5, // device calls shorter than this don't count as "answered" (accidental pocket dials, instant hangups)
+  dataSource = 'auto', // 'auto' | 'device' | 'manual' — force a specific source, or let it pick automatically
+  leadScope = {},
+} = {}) {
   if (!company) throw new Error('company is required');
 
   const { dayStart, dayEnd } = getISTDayBounds(date);
+  const companyOid = new mongoose.Types.ObjectId(company);
 
-  const baseMatch = { company: new mongoose.Types.ObjectId(company) };
-  if (userId) baseMatch.user = new mongoose.Types.ObjectId(userId);
+  // Outcome classification — the actual accuracy fix. A call only reaches any
+  // of these outcomes because the phone was picked up and a conversation (or
+  // at least a clear "no"/"later") happened.
+  const ANSWERED_OUTCOMES = new Set([
+    'Answered', 'Interested', 'Not Interested', 'Client Meeting', 'Call Back Later',
+  ]);
+  const NOT_ANSWERED_OUTCOMES = new Set(['Not Answered', 'Busy', 'Switch Off']);
+  // 'Invalid' (wrong/junk number) is neither — it's excluded from the answer
+  // rate entirely since it was never a real dial attempt at this lead.
 
-  const pipeline = [
-    { $match: mergeLeadScope(baseMatch, leadScope) },
-    { $unwind: '$callHistory' },
-    { $match: { 'callHistory.calledAt': { $gte: dayStart, $lte: dayEnd } } },
-    {
-      $lookup: {
-        from:         'users',
-        localField:   'callHistory.userId',
-        foreignField: '_id',
-        as:           'agentInfo',
-      },
-    },
-    {
-      $project: {
-        leadId:    '$_id',
-        leadName:  '$name',
-        mobile:    '$mobile',
-        outcome:   { $ifNull: ['$callHistory.outcome', 'Unspecified'] },
-        remark:    '$callHistory.remark',
-        calledAt:  '$callHistory.calledAt',
-        agentId:   '$callHistory.userId',
-        agentName: {
-          $ifNull: [
-            '$callHistory.userName',
-            { $arrayElemAt: ['$agentInfo.name', 0] },
-          ],
+  function classify(outcome) {
+    if (ANSWERED_OUTCOMES.has(outcome)) return 'answered';
+    if (NOT_ANSWERED_OUTCOMES.has(outcome)) return 'notAnswered';
+    return 'excluded';
+  }
+
+  // Shared lead-level filter fragment (source/status/campaign/agent) used to
+  // scope BOTH data sources identically, so switching sources never silently
+  // changes which leads are in view.
+  const leadFilter = { company: companyOid };
+  if (userId) leadFilter.user = new mongoose.Types.ObjectId(userId);
+  if (source) leadFilter.source = source;
+  if (status) leadFilter.status = status;
+  if (campaign) leadFilter.campaign = campaign;
+  const scopedLeadFilter = mergeLeadScope(leadFilter, leadScope);
+
+  // ── SOURCE 1: device call logs (ground truth) ───────────────────────────────
+  async function buildFromDeviceLogs() {
+    const matchStage = {
+      company: companyOid,
+      timestamp: { $gte: dayStart, $lte: dayEnd },
+      callType: { $in: ['incoming', 'outgoing', 'missed', 'voicemail', 'rejected', 'blocked'] },
+    };
+    if (userId) matchStage.user = new mongoose.Types.ObjectId(userId);
+
+    const pipeline = [
+      { $match: matchStage },
+      // Only calls that matched a lead in the CRM — otherwise source/status/
+      // campaign filters (which live on the Lead) can't be applied, and a
+      // stray personal call wouldn't belong in a lead-outcomes report anyway.
+      { $match: { matchedLead: { $ne: null } } },
+      {
+        $lookup: {
+          from: 'leads',
+          localField: 'matchedLead',
+          foreignField: '_id',
+          as: 'lead',
         },
       },
-    },
-    { $sort: { calledAt: -1 } },
-  ];
+      { $unwind: '$lead' },
+      // Apply source/status/campaign/scope filters against the joined lead.
+      { $match: buildMongoMatchAgainstLeadAlias(scopedLeadFilter, 'lead') },
+      {
+        $lookup: { from: 'users', localField: 'user', foreignField: '_id', as: 'agentInfo' },
+      },
+      {
+        $project: {
+          leadId:    '$lead._id',
+          leadName:  '$lead.name',
+          mobile:    '$phoneNumber',
+          callType:  1,
+          duration:  1,
+          calledAt:  '$timestamp',
+          agentId:   '$user',
+          agentName: { $arrayElemAt: ['$agentInfo.name', 0] },
+        },
+      },
+      { $sort: { calledAt: -1 } },
+    ];
 
-  const calls = await Lead.aggregate(pipeline);
+    const rows = await MobileCallLog.aggregate(pipeline);
 
-  // ── Group by outcome for the summary chart ─────────────────────────────────
+    const calls = rows.map((r) => {
+      const answeredByDevice = (r.callType === 'incoming' || r.callType === 'outgoing') && (r.duration || 0) >= minDurationSec;
+      const outcome = answeredByDevice
+        ? 'Answered'
+        : (r.callType === 'missed' ? 'Not Answered'
+          : r.callType === 'rejected' ? 'Rejected'
+          : r.callType === 'voicemail' ? 'Voicemail'
+          : r.callType === 'blocked' ? 'Blocked'
+          // incoming/outgoing but under the duration threshold — rang, nobody spoke
+          : 'Not Answered');
+      return { ...r, outcome, bucket: answeredByDevice ? 'answered' : (outcome === 'Rejected' || outcome === 'Voicemail' || outcome === 'Blocked' ? 'excluded' : 'notAnswered') };
+    });
+
+    return { calls, sourceLabel: 'device' };
+  }
+
+  // ── SOURCE 2: manual callHistory outcomes (fallback) ────────────────────────
+  async function buildFromManualOutcomes() {
+    const pipeline = [
+      { $match: scopedLeadFilter },
+      { $unwind: '$callHistory' },
+      { $match: { 'callHistory.calledAt': { $gte: dayStart, $lte: dayEnd } } },
+      {
+        $lookup: { from: 'users', localField: 'callHistory.userId', foreignField: '_id', as: 'agentInfo' },
+      },
+      {
+        $project: {
+          leadId:    '$_id',
+          leadName:  '$name',
+          mobile:    '$mobile',
+          outcome:   { $ifNull: ['$callHistory.outcome', 'Unspecified'] },
+          remark:    '$callHistory.remark',
+          calledAt:  '$callHistory.calledAt',
+          agentId:   '$callHistory.userId',
+          agentName: { $ifNull: ['$callHistory.userName', { $arrayElemAt: ['$agentInfo.name', 0] }] },
+        },
+      },
+      { $sort: { calledAt: -1 } },
+    ];
+
+    const rows = await Lead.aggregate(pipeline);
+    const calls = rows.map((r) => ({ ...r, bucket: classify(r.outcome) }));
+    return { calls, sourceLabel: 'manual' };
+  }
+
+  let result;
+  if (dataSource === 'device') {
+    result = await buildFromDeviceLogs();
+  } else if (dataSource === 'manual') {
+    result = await buildFromManualOutcomes();
+  } else {
+    // auto: prefer device data; only fall back if there's genuinely nothing there
+    const device = await buildFromDeviceLogs();
+    result = device.calls.length > 0 ? device : await buildFromManualOutcomes();
+  }
+
+  const { calls, sourceLabel } = result;
+
+  // ── Group by outcome (for the breakdown chart) ──────────────────────────────
   const byOutcome = {};
   for (const c of calls) {
     const key = c.outcome || 'Unspecified';
@@ -439,33 +555,65 @@ async function getDailyOutcomesReport({ company, date, userId, leadScope = {} } 
     .map(([outcome, count]) => ({ outcome, count }))
     .sort((a, b) => b.count - a.count);
 
-  // ── Per-agent breakdown (admin view) ────────────────────────────────────────
+  // ── Per-agent breakdown ──────────────────────────────────────────────────────
   const byAgent = {};
   for (const c of calls) {
     const key = c.agentId ? String(c.agentId) : 'unassigned';
     if (!byAgent[key]) {
-      byAgent[key] = { agentId: c.agentId || null, agentName: c.agentName || 'Unassigned', total: 0, outcomes: {} };
+      byAgent[key] = { agentId: c.agentId || null, agentName: c.agentName || 'Unassigned', total: 0, answered: 0, notAnswered: 0, outcomes: {} };
     }
     byAgent[key].total++;
+    if (c.bucket === 'answered') byAgent[key].answered++;
+    if (c.bucket === 'notAnswered') byAgent[key].notAnswered++;
     byAgent[key].outcomes[c.outcome] = (byAgent[key].outcomes[c.outcome] || 0) + 1;
   }
 
+  const answered      = calls.filter((c) => c.bucket === 'answered').length;
+  const notAnswered   = calls.filter((c) => c.bucket === 'notAnswered').length;
+  const excluded      = calls.filter((c) => c.bucket === 'excluded').length; // Invalid / rejected / voicemail / blocked — not counted in answer rate
+  const countedCalls  = answered + notAnswered; // denominator excludes junk/voicemail/etc.
   const totalCalls    = calls.length;
-  const answered       = byOutcome['Answered'] || 0;
-  const notAnsweredSet = ['Not Answered', 'Busy', 'Switch Off'];
-  const notAnswered    = notAnsweredSet.reduce((sum, k) => sum + (byOutcome[k] || 0), 0);
 
   return {
     summary: {
       totalCalls,
       answered,
       notAnswered,
-      answerRate: totalCalls > 0 ? Math.round((answered / totalCalls) * 100) : 0,
+      excluded,
+      answerRate: countedCalls > 0 ? Math.round((answered / countedCalls) * 100) : 0,
     },
+    usedDataSource: sourceLabel, // 'device' (accurate) or 'manual' (self-reported fallback)
     outcomes,
     agents: Object.values(byAgent),
     calls, // raw list for drill-down
+    filtersApplied: { userId: userId || null, source: source || null, status: status || null, campaign: campaign || null, minDurationSec, dataSource },
   };
+}
+
+// Rewrites a Mongo filter object built for the `leads` collection so it can be
+// applied against a joined sub-document alias (e.g. "lead.source" instead of
+// "source") after a $lookup + $unwind. Only handles the flat key/value and
+// mergeLeadScope's simple $or/$and shapes actually in use here — not a
+// general-purpose Mongo query rewriter.
+function buildMongoMatchAgainstLeadAlias(filter, alias) {
+  const prefix = (key) => (key.startsWith('$') ? key : `${alias}.${key}`);
+  const rewriteValue = (v) => {
+    if (Array.isArray(v)) return v.map((item) => rewriteObj(item));
+    return v;
+  };
+  const rewriteObj = (obj) => {
+    if (!obj || typeof obj !== 'object') return obj;
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (k === '$or' || k === '$and' || k === '$nor') {
+        out[k] = rewriteValue(v);
+      } else {
+        out[prefix(k)] = v;
+      }
+    }
+    return out;
+  };
+  return rewriteObj(filter);
 }
 
 module.exports = { getDailyReport, getEmployeeReport, getCampaignReport, getDailyOutcomesReport, getISTDayBounds };

@@ -17,6 +17,8 @@ const {
   updateUserLanguages,
   createCompanyUser,
   deleteCompanyUser,
+  resetAdminPassword,
+  resetUserPassword,
   getDashboardStats,
   getAutoTemplateSettings,
   updateAutoTemplateSettings,
@@ -211,6 +213,11 @@ router.post(
   createCompanyUser
 );
 router.delete("/user/:id", protectAdmin, deleteCompanyUser);
+
+// SECURITY FIX replacement feature — see controllers/adminController.js.
+// Reset (not view) a password: generates a brand-new one, returned once.
+router.patch("/:id/reset-password",      protectAdmin, requireCompanySuperAdmin, resetAdminPassword);
+router.patch("/user/:id/reset-password", protectAdmin, resetUserPassword);
 
 router.get("/:id",    protectAdmin, getAdmin);
 router.delete("/:id", protectAdmin, requireCompanySuperAdmin, deleteAdmin);
