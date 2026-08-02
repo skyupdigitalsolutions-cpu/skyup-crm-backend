@@ -181,4 +181,4 @@ const dailyOutcomesReport = async (req, res) => {
   }
 };
 
-module.exports = { dailyReport, employeeReport, campaignReport, nonConversionReport, dailyOutcomesReport };NurtureRule.js
+module.exports = { dailyReport, employeeReport, campaignReport, nonConversionReport, dailyOutcomesReport };
