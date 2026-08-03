@@ -472,7 +472,7 @@ connectDB().then(() => {
     // template automation actually fires from the backend yet. Uncomment
     // the line below once rules + templates are reviewed and you're ready
     // to go live for the one enabled company:
-    // startNurtureSequenceJob();   // 11:00 AM IST daily, company-gated
+    startNurtureSequenceJob();   // 11:00 AM IST daily, company 6a22662b7aea6e4034f44aae
     startMetaAutoSyncJob();         // NEW — every 30 min: auto-sync new Meta ad sets & lead forms into MetaConfig
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');

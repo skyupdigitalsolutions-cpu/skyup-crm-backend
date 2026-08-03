@@ -382,7 +382,12 @@ const leadSchema = mongoose.Schema(
     // repeatEveryDays set can fire again once that many days have elapsed
     // since the stored date; a rule with repeatEveryDays = null fires once
     // and is then permanently skipped for this lead.
-    nurtureSent: { type: Map, of: String, default: () => ({}) },
+    // nurtureSent: Map<ruleId, { lastFiredDate: string (IST day key), lastVariationIndex: number, stage: string }>
+    // lastVariationIndex tracks sequential V1→V5 rotation per lead per stage.
+    // stage tracks which CRM status stage was active when the rule last fired —
+    // when the lead moves to a new status, index resets to -1 so V1 fires first.
+    // Backward-compatible: old string values (plain date) are handled in nurtureSequenceJob.
+    nurtureSent: { type: Map, of: mongoose.Schema.Types.Mixed, default: () => ({}) },
 
     // ── No-action 3h escalation guard (super_admin dedup) ────────────────────
     // BUG 2 FIX — without this field the 3h escalation guard in leadAlertsJob

@@ -60,15 +60,21 @@ const nurtureRuleSchema = new mongoose.Schema(
     action: {
       whatsapp: {
         enabled: { type: Boolean, default: true },
-        // Default/fallback template — used when this rule's trigger.statuses
-        // is empty (matches "any" status) or the lead's current status has
-        // no override in templatesByStatus below.
+        // Default/fallback template — used when templateVariations is empty.
         templateName: { type: String, default: "" }, // must exist & be approved in MSG91
-        // Per-status overrides — lets one rule send a different approved
-        // MSG91 template depending on which status the lead was actually in
-        // when the rule fired (e.g. a softer nudge for "New", a firmer one
-        // for "In Progress"). Keys are CRM status strings; blank/missing =
-        // fall back to templateName above.
+
+        // Sequential variation pool — V1 through V5 template names in order.
+        // The job picks the next unused variation per lead per stage, resetting
+        // to V1 whenever the lead moves to a new status stage.
+        // e.g. ["real_estate_crm_awareness_v1", ..., "real_estate_crm_awareness_v5"]
+        templateVariations: { type: [String], default: [] },
+
+        // Which CRM status this rule's stage corresponds to — used to detect
+        // when a lead has moved to a new stage so the variation index resets.
+        // e.g. "New" for Awareness, "In Progress" for Interest, etc.
+        statusStage: { type: String, default: "" },
+
+        // Per-status overrides — kept for backward compatibility.
         templatesByStatus: { type: Map, of: String, default: () => ({}) },
         languageCode: { type: String, default: "en" },
       },

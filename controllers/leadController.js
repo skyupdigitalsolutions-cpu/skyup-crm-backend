@@ -24,6 +24,7 @@ const getCompanyId = (req) =>
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
 const { autoSendTemplates, sendInterestedBlast } = require("../services/autoTemplateService");
 const { sendOutcomeAutomation } = require("../services/outcomeAutomationService");
+const { triggerNurtureForLead } = require("../jobs/nurtureSequenceJob");
 const { sendMetaConversionEvent } = require("../services/metaConversionService");
 const { getCompanyEntitlements } = require("../services/entitlementService");
 const { notifyCampaignLead, notifyEmployeeLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
@@ -1210,6 +1211,16 @@ const patchLead = async (req, res) => {
           })
           .catch((err) => console.error("[metaConversionSync] patchLead trigger error:", err.message));
       }
+    }
+
+    // ── Nurture sequence — immediate status-change trigger ────────────────────
+    // Fires V1 (or next sequential variation) instantly when a lead's status
+    // changes. Company-gated inside triggerNurtureForLead — no-op for all
+    // other companies. Fire-and-forget, never blocks the response.
+    if (updatedLead && status !== undefined && status !== lead.status) {
+      triggerNurtureForLead(String(updatedLead._id), status).catch((err) =>
+        console.error("[nurtureSequence] patchLead trigger error:", err.message)
+      );
     }
 
     return res.status(200).json(updatedLead);
