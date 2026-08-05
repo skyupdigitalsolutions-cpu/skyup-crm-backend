@@ -42,6 +42,7 @@ const {
 const { protect } = require("../middlewares/authMiddleware");
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 const { protectSuperAdmin } = require("../middlewares/superAdminMiddleware");
+const { validateObjectId } = require("../middlewares/validateObjectId");
 const { checkLimit } = require("../middlewares/entitlementMiddleware");
 const Lead = require("../models/Leads");
 
