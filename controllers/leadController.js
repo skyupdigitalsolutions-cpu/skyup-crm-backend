@@ -1008,6 +1008,23 @@ const getMyLeads = async (req, res) => {
 
     const query = { company: getCompanyId(req), user: req.user._id, mergedInto: null, isClosed: { $ne: true } };
 
+    // ── Delta fetch: ?since=<ISO timestamp> ──────────────────────────────────
+    // Mobile app sends this on stale-check refreshes (every 5 min tab focus).
+    // Returns only leads whose updatedAt > since — no pagination, no limit —
+    // so the app can upsert just the changed leads instead of re-downloading
+    // the full list. Eliminates the full 200-lead download on every tab switch.
+    if (req.query.since) {
+      const since = new Date(req.query.since);
+      if (!isNaN(since.getTime())) {
+        const leads = await Lead.find({ ...query, updatedAt: { $gt: since } })
+          .sort({ updatedAt: -1 })
+          .populate("user", "name email")
+          .populate("previousAgents", "name email")
+          .populate("projects", "name color");
+        return res.status(200).json({ leads, delta: true });
+      }
+    }
+
     const [leads, total] = await Promise.all([
       Lead.find(query)
         .sort({ createdAt: -1 })
