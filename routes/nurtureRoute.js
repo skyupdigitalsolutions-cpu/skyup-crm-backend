@@ -9,6 +9,9 @@ const {
   createRule,
   updateRule,
   deleteRule,
+  syncTemplates,
+  listTemplates,
+  probeTemplates,
 } = require("../controllers/nurtureController");
 
 // Admin-only, and gated by the same company-scoped entitlement the cron job
@@ -19,5 +22,13 @@ router.get("/rules",        protectAdmin, requireFeature("leadNurtureSequence"),
 router.post("/rules",       protectAdmin, requireFeature("leadNurtureSequence"), createRule);
 router.patch("/rules/:id",  protectAdmin, requireFeature("leadNurtureSequence"), updateRule);
 router.delete("/rules/:id", protectAdmin, requireFeature("leadNurtureSequence"), deleteRule);
+
+// ── WhatsApp template cache (auto-fetched from MSG91) ────────────────────────
+// GET  /templates        → list cached templates (with ?stage= / ?nurtureOnly= / ?search=)
+// POST /templates/sync   → pull the latest list from MSG91 into the cache
+// GET  /templates/probe  → diagnostic: find which MSG91 endpoint works
+router.get("/templates",        protectAdmin, requireFeature("leadNurtureSequence"), listTemplates);
+router.post("/templates/sync",  protectAdmin, requireFeature("leadNurtureSequence"), syncTemplates);
+router.get("/templates/probe",  protectAdmin, requireFeature("leadNurtureSequence"), probeTemplates);
 
 module.exports = router;

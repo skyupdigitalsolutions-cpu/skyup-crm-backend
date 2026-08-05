@@ -31,6 +31,8 @@ const Company     = require("../models/Company");
 const NurtureRule = require("../models/NurtureRule");
 const { sendAutoWhatsApp } = require("../services/autoTemplateService");
 const { resolveForLead, canResolve } = require("../utils/templateNameResolver");
+const { findTemplate } = require("../services/msg91TemplateService");
+const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 
 const IST_TIMEZONE = "Asia/Kolkata";
 
@@ -140,7 +142,7 @@ function resolveNextVariation(rule, lead) {
       const count = Math.max(1, Number(wa.variationCount) || 5);
       const idx   = nextVariationIndex(rule, lead, count);
       const templateName = resolveForLead(lead, wa.funnelStage, idx + 1);
-      return { templateName, nextIndex: idx };
+      return { templateName, nextIndex: idx, autoResolved: true };
     }
   }
 
@@ -262,9 +264,42 @@ async function fireRule(rule, lead, company, todayKey) {
     return { status: "skipped", detail: "WhatsApp not enabled on rule" };
   }
 
-  const { templateName, nextIndex } = resolveNextVariation(rule, lead);
+  const { templateName, nextIndex, autoResolved } = resolveNextVariation(rule, lead);
   if (!templateName) {
     return { status: "skipped", detail: "No template name resolved" };
+  }
+
+  // ── Verify the template actually exists in MSG91 before spending a send ──
+  // Only for auto-resolved names: those are BUILT from the lead's industry +
+  // service, so a vertical with no approved templates would otherwise produce
+  // a plausible-looking name that Meta rejects. Checking the synced cache
+  // turns that into a clear log line instead of a failed message.
+  //
+  // If the cache is empty (never synced), we skip the check rather than block
+  // every send — run POST /api/nurture/templates/sync to enable verification.
+  if (autoResolved) {
+    try {
+      const cached = await findTemplate(lead.company, templateName);
+      if (cached) {
+        const st = String(cached.status || "").toUpperCase();
+        if (st && st !== "APPROVED" && st !== "ENABLED" && st !== "ACTIVE") {
+          console.warn(`[NurtureJob] template "${templateName}" is ${st} — skipping lead ${lead._id}`);
+          return { status: "skipped", detail: `Template not approved (${st})` };
+        }
+      } else {
+        const anySynced = await WhatsAppTemplate.countDocuments({ company: lead.company }).catch(() => 0);
+        if (anySynced > 0) {
+          console.warn(
+            `[NurtureJob] template "${templateName}" not found in synced MSG91 list — ` +
+            `skipping lead ${lead._id} (industry="${lead.industry}" service="${lead.service}")`
+          );
+          return { status: "skipped", detail: `Template "${templateName}" does not exist in MSG91` };
+        }
+        // No sync has ever run — proceed and let MSG91 be the judge.
+      }
+    } catch (e) {
+      console.warn(`[NurtureJob] template verification failed (${e.message}) — proceeding`);
+    }
   }
 
   // Atomic claim — prevent double-send on overlapping ticks

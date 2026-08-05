@@ -10,6 +10,7 @@
 
 const axios          = require("axios");
 const Company        = require("../models/Company");
+const { findTemplate } = require("./msg91TemplateService");
 const WhatsAppConfig = require("../models/WhatsAppConfig");
 const SmsConfig      = require("../models/SmsConfig");
 const EmailLog       = require("../models/EmailLog");
@@ -195,20 +196,38 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         type:  "text",
         value: (lead.name || "").trim() || "there",
       },
-      // ── {{2}} = the lead's BUSINESS name ────────────────────────────────
-      // Every nurture template in the approved library declares two body
-      // variables: {{1}} contact name, {{2}} business name
-      // ("is {{2}} getting enough new patients?").
-      //
-      // Meta/MSG91 REJECTS a template send when a declared variable is
-      // missing, so this must always be present — even when we don't know the
-      // business name. Falling back to "your business" keeps the sentence
-      // reading naturally and guarantees the send succeeds.
-      body_2: {
+    };
+
+    // ── {{2}} = the lead's BUSINESS name — ONLY when the template wants it ──
+    // The 1,760 nurture templates declare TWO body variables ({{1}} contact,
+    // {{2}} business). Older templates like crm_followup_leads declare only
+    // {{1}}.
+    //
+    // Meta rejects a send whose parameter COUNT doesn't match the template, in
+    // BOTH directions — too few and too many. So we look up how many variables
+    // this specific template actually declares (cached by
+    // services/msg91TemplateService.js) and attach body_2 only when it needs
+    // one. If the template isn't in the cache yet we fall back to the name
+    // pattern, since every nurture-library name ends in _<stage>_v<n>.
+    let wantsBusinessName = false;
+    try {
+      const cached = await findTemplate(companyId, templateName.trim());
+      if (cached) {
+        wantsBusinessName = Number(cached.bodyVariableCount) >= 2;
+      } else {
+        wantsBusinessName = /_(awareness|interest|desire|action)_v\d+$/i.test(templateName.trim());
+      }
+    } catch (e) {
+      // Cache lookup must never block a send — fall back to the name pattern.
+      wantsBusinessName = /_(awareness|interest|desire|action)_v\d+$/i.test(templateName.trim());
+    }
+
+    if (wantsBusinessName) {
+      components.body_2 = {
         type:  "text",
         value: (lead.businessName || "").trim() || "your business",
-      },
-    };
+      };
+    }
 
     const templateBlock = {
       name:              templateName.trim(),
