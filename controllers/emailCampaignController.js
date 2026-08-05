@@ -9,6 +9,7 @@ const { escapeRegex } = require("../utils/escapeRegex");
 const axios = require("axios");
 const Lead = require("../models/Leads");
 const EmailLog = require("../models/EmailLog");
+const { sanitizeEmailHtml } = require("../utils/sanitizeHtml");
 const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
 const Company = require("../models/Company");
 const {
@@ -110,7 +111,10 @@ const saveLog = async ({
     await EmailLog.create({
       to,
       subject,
-      body,
+      // Strip any XSS payload (e.g. a lead name containing <script>) before the
+      // email body is stored. The Communications / Email History panels render
+      // this HTML, so cleaning it here means the DB never holds a live payload.
+      body: sanitizeEmailHtml(body),
       campaignId: campaignId || null,
       status,
       errorMessage: errorMessage || null,
