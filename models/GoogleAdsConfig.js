@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 
 const googleAdsConfigSchema = new mongoose.Schema(
   {
@@ -47,5 +48,9 @@ const googleAdsConfigSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+googleAdsConfigSchema.plugin(encryptedFieldsPlugin, {
+  fields: ["googleKey"],
+});
 
 module.exports = mongoose.model("GoogleAdsConfig", googleAdsConfigSchema);

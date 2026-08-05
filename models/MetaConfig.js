@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 
 const metaConfigSchema = new mongoose.Schema(
   {
@@ -120,5 +121,9 @@ metaConfigSchema.index(
   { pageId: 1, formId: 1 },
   { unique: true, name: "pageId_formId_unique" }
 );
+
+metaConfigSchema.plugin(encryptedFieldsPlugin, {
+  fields: ["pageAccessToken", "appSecret", "verifyToken", "capiAccessToken"],
+});
 
 module.exports = mongoose.model("MetaConfig", metaConfigSchema);

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 
 // Stores the WhatsApp Business API credentials for each company
 // One company = one WhatsApp Business number
@@ -98,5 +99,9 @@ const whatsAppConfigSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+whatsAppConfigSchema.plugin(encryptedFieldsPlugin, {
+  fields: ["msg91AuthKey", "accessToken", "verifyToken"],
+});
 
 module.exports = mongoose.model("WhatsAppConfig", whatsAppConfigSchema);

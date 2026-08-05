@@ -8,6 +8,7 @@
 // All existing fields are UNCHANGED.
 
 const mongoose = require("mongoose");
+const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 
 const companySchema = mongoose.Schema(
   {
@@ -568,4 +569,9 @@ const companySchema = mongoose.Schema(
 );
 
 const Company = mongoose.model("Company", companySchema);
+
+companySchema.plugin(encryptedFieldsPlugin, {
+  fields: ["brevoApiKey", "msg91EmailApiKey", "razorpayTokenId"],
+});
+
 module.exports = Company;

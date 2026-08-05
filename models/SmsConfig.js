@@ -3,6 +3,7 @@
 // One company = one SMS config
 
 const mongoose = require("mongoose");
+const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 
 const smsConfigSchema = new mongoose.Schema(
   {
@@ -53,5 +54,9 @@ const smsConfigSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+smsConfigSchema.plugin(encryptedFieldsPlugin, {
+  fields: ["msg91AuthKey"],
+});
 
 module.exports = mongoose.model("SmsConfig", smsConfigSchema);

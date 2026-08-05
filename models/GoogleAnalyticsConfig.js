@@ -11,6 +11,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const mongoose = require("mongoose");
+const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 
 const googleAnalyticsConfigSchema = new mongoose.Schema(
   {
@@ -39,5 +40,9 @@ const googleAnalyticsConfigSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+googleAnalyticsConfigSchema.plugin(encryptedFieldsPlugin, {
+  fields: ["oauthClientSecret", "refreshToken", "accessToken"],
+});
 
 module.exports = mongoose.model("GoogleAnalyticsConfig", googleAnalyticsConfigSchema);
