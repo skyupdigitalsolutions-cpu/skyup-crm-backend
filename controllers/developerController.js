@@ -15,6 +15,7 @@ const User          = require("../models/Users");
 const generateToken = require("../utils/generateToken");
 const { sendEmail }           = require("../utils/brevoMailer");
 const { companyWelcomeEmail } = require("../utils/emailTemplates");
+const { generateCompanyKey, encryptCompanyKey, computeHmac } = require("../utils/companyKeyCrypto");
 
 // New dependencies for Phase 3 additions
 const CompanyAddon        = require("../models/CompanyAddon");
@@ -179,6 +180,28 @@ const _createCompanyHandler = async (req, res) => {
 
     const company = await Company.create(companyData);
 
+    // ── Generate per-company encryption key ────────────────────────────────────
+    // The frontend uses this key to encrypt lead PII (mobile, remark, call notes)
+    // before sending to the backend. The backend stores only ciphertext.
+    // We generate the key AFTER company creation so we have the company _id,
+    // then immediately update with the encrypted version.
+    // The raw key is returned to the caller ONCE for the admin to save as their
+    // recovery key — it is never returned again.
+    let rawCompanyKey = null;
+    try {
+      rawCompanyKey = generateCompanyKey();
+      const encKey  = encryptCompanyKey(rawCompanyKey);
+      const keyHash = computeHmac(rawCompanyKey, rawCompanyKey); // HMAC(key, key) as a stable fingerprint
+      await Company.findByIdAndUpdate(company._id, {
+        encryptedCompanyKey: encKey,
+        recoveryKeyHash:     keyHash,
+      });
+      console.log(`[createCompany] Encryption key generated for company ${company._id}`);
+    } catch (keyErr) {
+      console.error("[createCompany] Failed to generate encryption key:", keyErr.message);
+      // Non-fatal — company is created, key can be generated later
+    }
+
     setImmediate(async () => {
       try {
         const template = companyWelcomeEmail({ companyName: company.name, plan: company.plan });
@@ -189,7 +212,12 @@ const _createCompanyHandler = async (req, res) => {
       }
     });
 
-    res.status(201).json(company);
+    res.status(201).json({
+      ...company.toObject(),
+      // Return the raw key ONCE so the developer panel can show it to the admin.
+      // After this response, rawCompanyKey is gone from server memory.
+      recoveryKey: rawCompanyKey,
+    });
   } catch (error) {
     if (error?.code === 11000) {
       return res.status(400).json({ message: "A company with this email already exists." });

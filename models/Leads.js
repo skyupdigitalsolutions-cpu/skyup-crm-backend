@@ -275,7 +275,19 @@ const leadSchema = mongoose.Schema(
       default: null,
     },
 
-    // ── Primary phone (explicit field; mirrors mobile for backward compat) ────
+    // ── Client-side encryption fields ────────────────────────────────────────
+    // mobile is encrypted by the FRONTEND before sending (AES-256-GCM with the
+    // company key). The backend stores and returns only ciphertext ("enc:...").
+    // mobileHash is HMAC-SHA256(plainMobile, companyKey) — computed by the
+    // frontend alongside the encrypted value. The backend uses it to look up
+    // leads by phone number for incoming WhatsApp messages and call matching,
+    // without ever needing to decrypt the mobile field.
+    mobileHash: {
+      type:    String,
+      default: null,
+      trim:    true,
+      index:   true,   // fast lookup for WhatsApp webhook + call matching
+    },
     primaryPhone: {
       type:    String,
       default: null,

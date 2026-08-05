@@ -6,6 +6,7 @@ const Developer = require("../models/Developer");
 const Company = require("../models/Company");
 const generateToken = require("../utils/generateToken");
 const { blacklistToken } = require("../middlewares/rateLimiter");
+const { decryptCompanyKey } = require("../utils/companyKeyCrypto");
 
 // ── Register ───────────────────────────────────────────────────────────────────
 const register = async (req, res) => {
@@ -121,6 +122,19 @@ const login = async (req, res) => {
   }
 };
 
+// ── Helper: fetch and decrypt per-company encryption key ─────────────────────
+// Returns the raw hex companyKey (sent to frontend over HTTPS at login)
+// or null if the company doesn't have one yet (legacy companies pre-encryption).
+async function _getCompanyKey(companyId) {
+  try {
+    const co = await Company.findById(companyId).select("+encryptedCompanyKey").lean();
+    return co?.encryptedCompanyKey ? decryptCompanyKey(co.encryptedCompanyKey) : null;
+  } catch (e) {
+    console.error("[authController] _getCompanyKey error:", e.message);
+    return null;
+  }
+}
+
 // ── NEW: Unified login — single endpoint for all 4 roles ──────────────────────
 const loginUnified = async (req, res) => {
   try {
@@ -165,6 +179,7 @@ const loginUnified = async (req, res) => {
         companyName: admin.company.name,
         brandLogoUrl: admin.company.brandLogoUrl,
         token: generateToken(admin._id, admin.role),
+        companyKey: await _getCompanyKey(admin.company._id),
       });
     }
 
@@ -184,9 +199,10 @@ const loginUnified = async (req, res) => {
       return res.json({
         _id: user._id, name: user.name, email: user.email,
         role: user.role || "employee",
-        companyId: user.company._id,  // always send ObjectId, not the populated object
-        createdBy: user.createdBy,   // needed by UserChatWidget to resolve the admin chat thread
+        companyId: user.company._id,
+        createdBy: user.createdBy,
         token: generateToken(user._id, user.role || "employee"),
+        companyKey: await _getCompanyKey(user.company._id),
       });
     }
 

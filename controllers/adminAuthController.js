@@ -4,6 +4,7 @@ const Admin   = require("../models/Admin");
 const Company = require("../models/Company");
 const generateToken   = require("../utils/generateToken");
 const { blacklistToken } = require("../middlewares/rateLimiter");
+const { decryptCompanyKey } = require("../utils/companyKeyCrypto");
 
 // ── Register Admin (used when creating a new company) ─────────────────────────
 const registerAdmin = async (req, res) => {
@@ -59,14 +60,26 @@ const loginAdmin = async (req, res) => {
       return res.status(403).json({ message: "Your company is deactivated" });
     }
 
+    // Decrypt the per-company encryption key and send it to the frontend.
+    // The frontend holds it in Redux memory only (never localStorage/cookies)
+    // and uses it to encrypt/decrypt lead PII (mobile, remark, call notes).
+    let companyKey = null;
+    try {
+      const co = await Company.findById(admin.company._id).select("+encryptedCompanyKey").lean();
+      companyKey = co?.encryptedCompanyKey ? decryptCompanyKey(co.encryptedCompanyKey) : null;
+    } catch (e) {
+      console.error("[adminAuthController] companyKey decrypt failed:", e.message);
+    }
+
     res.status(200).json({
-      _id:     admin._id,
-      name:    admin.name,
-      email:   admin.email,
-      company: admin.company._id,
-      plan:    admin.company.plan,
-      role:    admin.role,          // "super_admin" | "admin"
-      token:   generateToken(admin._id, "admin"),
+      _id:        admin._id,
+      name:       admin.name,
+      email:      admin.email,
+      company:    admin.company._id,
+      plan:       admin.company.plan,
+      role:       admin.role,
+      token:      generateToken(admin._id, "admin"),
+      companyKey, // null if key not yet generated (old company pre-encryption)
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -96,4 +109,3 @@ const logoutAdmin = async (req, res) => {
 };
 
 module.exports = { registerAdmin, loginAdmin, logoutAdmin };
-  

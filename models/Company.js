@@ -10,6 +10,20 @@
 const mongoose = require("mongoose");
 const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 
+// ── Client-side encryption key fields ─────────────────────────────────────────
+// Each company has a unique 32-byte AES-256 key used by the FRONTEND to
+// encrypt/decrypt lead PII (mobile, remark, callHistory remarks).
+// The backend stores ONLY the SYSTEM_MASTER_KEY-encrypted version of this key.
+// At login, the backend decrypts it and sends the plaintext key to the frontend
+// over HTTPS — it is held in Redux memory only, never persisted client-side.
+//
+// encryptedCompanyKey — AES-256-GCM(companyKey, SYSTEM_MASTER_KEY). The only
+//   copy of the key the backend stores. select:false so it is NEVER returned
+//   in any API response accidentally.
+// recoveryKeyHash     — HMAC-SHA256(companyKey, SYSTEM_MASTER_KEY) so the
+//   backend can verify a recovery key entered by the admin without storing
+//   the plaintext key.
+
 const companySchema = mongoose.Schema(
   {
     name:    { type: String, required: true, trim: true },
@@ -66,6 +80,14 @@ const companySchema = mongoose.Schema(
     // pendingPlanId / pendingBilling — plan the customer chose to auto-bill into.
     razorpayCustomerId:    { type: String,  default: null },
     razorpayTokenId:       { type: String,  default: null, select: false },
+
+    // ── Client-side encryption — per-company key ───────────────────────────────
+    // Generated once at company creation. Encrypted with SYSTEM_MASTER_KEY.
+    // select:false ensures it is never accidentally included in API responses.
+    encryptedCompanyKey: { type: String, default: null, select: false },
+    // HMAC of the raw companyKey — used to verify a recovery key without
+    // decrypting it. select:false — internal use only.
+    recoveryKeyHash:     { type: String, default: null, select: false },
     paymentMethodProvided: { type: Boolean, default: false },
     trialPlan:             { type: String,  default: "pro" },
     trialStartedAt:        { type: Date,    default: null },
