@@ -593,7 +593,7 @@ const companySchema = mongoose.Schema(
 const Company = mongoose.model("Company", companySchema);
 
 companySchema.plugin(encryptedFieldsPlugin, {
-  fields: ["brevoApiKey", "msg91EmailApiKey", "razorpayTokenId"],
+  fields: ["brevoApiKey", "msg91EmailApiKey", "razorpayTokenId", "cloudinaryConfig.apiKey", "cloudinaryConfig.apiSecret"],
 });
 
 module.exports = Company;

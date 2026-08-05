@@ -1,5 +1,6 @@
 // controllers/websiteWebhookController.js
 const WebsiteConfig      = require("../models/WebsiteConfig");
+const { hmac }           = require("../utils/fieldCrypto");
 const Lead               = require("../models/Leads");
 const User               = require("../models/Users");
 const { normalizePhone } = require("../utils/normalizePhone");
@@ -50,13 +51,25 @@ const receiveWebsiteWebhook = async (req, res) => {
     // Accept the current secret, or one still inside its rotation window.
     // Using a retired secret is logged loudly so you can tell exactly when the
     // GTM tag has finished switching over and the old value can be removed.
+    // Look up by deterministic hash (the stored secret is encrypted, so it
+    // can't be matched by equality). The two plaintext branches keep any rows
+    // not yet migrated working — they stop matching automatically once the
+    // migration encrypts webhookSecret, at which point the hash branches win.
+    const secretHash = hmac(webhook_secret);
     const config = await WebsiteConfig.findOne({
       $or: [
-        { webhookSecret: webhook_secret },
-        { previousSecrets: webhook_secret },
+        { webhookSecretHash: secretHash },
+        { previousSecretHashes: secretHash },
+        { webhookSecret: webhook_secret },   // legacy, pre-migration
+        { previousSecrets: webhook_secret },  // legacy, pre-migration
       ],
     });
-    if (config && config.webhookSecret !== webhook_secret) {
+    // Matched via the CURRENT secret? (webhookSecret is decrypted to plaintext
+    // on read, so the equality check still holds post-migration.)
+    const matchedCurrent =
+      (config && config.webhookSecretHash && config.webhookSecretHash === secretHash) ||
+      (config && config.webhookSecret && config.webhookSecret === webhook_secret);
+    if (config && !matchedCurrent) {
       console.warn(
         `[SECRET-ROTATION] Lead accepted using a RETIRED secret for campaign ` +
         `"${config.sourceName || config.campaignName || config._id}". ` +

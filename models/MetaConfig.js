@@ -123,7 +123,7 @@ metaConfigSchema.index(
 );
 
 metaConfigSchema.plugin(encryptedFieldsPlugin, {
-  fields: ["pageAccessToken", "appSecret", "verifyToken", "capiAccessToken"],
+  fields: ["pageAccessToken", "appSecret", "verifyToken", "capiAccessToken", "adsToken"],
 });
 
 module.exports = mongoose.model("MetaConfig", metaConfigSchema);
