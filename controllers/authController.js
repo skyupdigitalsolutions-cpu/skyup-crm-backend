@@ -213,6 +213,9 @@ const loginUnified = async (req, res) => {
     // NOTE: this intentionally reveals whether an email is registered (account
     // enumeration). For an internal CRM that's an accepted UX tradeoff; if you
     // want to hide it, revert to a single generic 401 message.
+    // ── ISO A.8.15: log every failed authentication attempt ──────────────────
+    // These logs are visible in Render and should feed into your monitoring
+    // alerts for brute-force / credential-stuffing detection.
     const emailExists =
       !!dev ||
       !!admin ||
@@ -222,6 +225,9 @@ const loginUnified = async (req, res) => {
       !!(await User.findOne({ email }).select("_id").lean());
 
     if (!emailExists) {
+      console.warn(
+        `[AUTH-FAIL] email_not_found email=${email} ip=${req.ip} ua=${String(req.headers["user-agent"] || "").slice(0,80)}`
+      );
       return res.status(401).json({
         message: "No account found with this email.",
         code: "EMAIL_NOT_FOUND",
@@ -229,6 +235,9 @@ const loginUnified = async (req, res) => {
       });
     }
 
+    console.warn(
+      `[AUTH-FAIL] wrong_password email=${email} ip=${req.ip} ua=${String(req.headers["user-agent"] || "").slice(0,80)}`
+    );
     return res.status(401).json({
       message: "Incorrect password. Please try again.",
       code: "WRONG_PASSWORD",
