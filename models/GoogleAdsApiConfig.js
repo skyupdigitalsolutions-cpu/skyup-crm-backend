@@ -10,7 +10,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const mongoose = require("mongoose");
-const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 
 const googleAdsApiConfigSchema = new mongoose.Schema(
   {
@@ -45,9 +44,5 @@ const googleAdsApiConfigSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-
-googleAdsApiConfigSchema.plugin(encryptedFieldsPlugin, {
-  fields: ["oauthClientSecret", "developerToken", "refreshToken", "accessToken"],
-});
 
 module.exports = mongoose.model("GoogleAdsApiConfig", googleAdsApiConfigSchema);

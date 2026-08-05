@@ -36,17 +36,11 @@ const TARGETS = [
   {
     modelPath: "../models/Company",
     fields: ["brevoApiKey", "msg91EmailApiKey", "razorpayTokenId"],
-    // razorpayTokenId has select:false — must be explicitly selected
     selectExtra: "+razorpayTokenId +brevoApiKey +msg91EmailApiKey",
   },
-  {
-    modelPath: "../models/GoogleAdsApiConfig",
-    fields: ["oauthClientSecret", "developerToken", "refreshToken", "accessToken"],
-  },
-  {
-    modelPath: "../models/GoogleAnalyticsConfig",
-    fields: ["oauthClientSecret", "refreshToken", "accessToken"],
-  },
+  // NOTE: GoogleAdsApiConfig and GoogleAnalyticsConfig are already encrypted
+  // by tokenCrypto.js (GA_TOKEN_ENCRYPTION_KEY) in their controllers.
+  // DO NOT add them here — it would cause a key conflict.
 ];
 
 async function migrateCollection({ modelPath, fields, selectExtra }) {
