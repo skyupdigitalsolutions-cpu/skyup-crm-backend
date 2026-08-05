@@ -324,15 +324,32 @@ async function transcribeMobileRecording(relativeUrl, options = {}) {
     return { transcript: text, durationSec: durationSec || 0 };
   }
 
-  const clean      = (relativeUrl || '').replace(/^\/+/, '');
-  const candidate1 = path.join(__dirname, '..', 'uploads', clean);
-  const candidate2 = path.join(__dirname, '..', clean);
+  // ── Directory-traversal guard ──────────────────────────────────────────────
+  // Strip leading slashes, then normalise. After path.join, check that the
+  // resolved path still sits inside the allowed directory. An attacker-crafted
+  // URL like "../../etc/passwd" would escape the uploads folder without this.
+  const clean = (relativeUrl || '').replace(/^\/+/, '');
+  const uploadsRoot = path.resolve(__dirname, '..', 'uploads');
+  const fallbackRoot = path.resolve(__dirname, '..');
+
+  const candidate1 = path.join(uploadsRoot, clean);
+  const candidate2 = path.join(fallbackRoot, clean);
+
+  // Resolved path MUST start with the allowed root — no escape via ../
+  const safeCandidate1 = path.resolve(candidate1);
+  const safeCandidate2 = path.resolve(candidate2);
+
+  if (!safeCandidate1.startsWith(uploadsRoot + path.sep) &&
+      !safeCandidate1.startsWith(uploadsRoot)) {
+    throw new Error(`[Security] Directory traversal attempt blocked: "${relativeUrl}"`);
+  }
 
   let filePath;
-  if (fs.existsSync(candidate1))      filePath = candidate1;
-  else if (fs.existsSync(candidate2)) filePath = candidate2;
+  if (fs.existsSync(safeCandidate1))      filePath = safeCandidate1;
+  else if (fs.existsSync(safeCandidate2) &&
+           safeCandidate2.startsWith(fallbackRoot + path.sep)) filePath = safeCandidate2;
   else throw new Error(
-    `Recording file not found.\n  Tried: ${candidate1}\n  Tried: ${candidate2}\n  URL stored: ${relativeUrl}`
+    `Recording file not found.\n  Tried: ${safeCandidate1}\n  Tried: ${safeCandidate2}\n  URL stored: ${relativeUrl}`
   );
 
   const { text, durationSec } = await transcribeAudio(filePath, audioLang);

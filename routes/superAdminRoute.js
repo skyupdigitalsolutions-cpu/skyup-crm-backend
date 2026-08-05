@@ -4,6 +4,7 @@
 // All existing routes are UNCHANGED.
 
 const express = require("express");
+const { validateObjectId } = require("../middlewares/validateObjectId");
 const router  = express.Router();
 
 const {
@@ -77,10 +78,10 @@ router.get("/companies/:id/entitlements",
 // ── Company management ────────────────────────────────────────────────────────
 router.get("/companies",        protectSuperAdmin, getCompanies);
 router.post("/companies",       protectSuperAdmin, createCompany);
-router.get("/companies/:id",    protectSuperAdmin, getCompany);
-router.put("/companies/:id",    protectSuperAdmin, toggleCompany);
-router.put("/companies/:id/call-log-sync", protectSuperAdmin, toggleCallLogSync);
-router.delete("/companies/:id", protectSuperAdmin, deleteCompany);
+router.get("/companies/:id",    protectSuperAdmin, validateObjectId("id"), getCompany);
+router.put("/companies/:id",    protectSuperAdmin, validateObjectId("id"), toggleCompany);
+router.put("/companies/:id/call-log-sync", protectSuperAdmin, validateObjectId("id"), toggleCallLogSync);
+router.delete("/companies/:id", protectSuperAdmin, validateObjectId("id"), deleteCompany);
 
 // ── Custom financial reports ──────────────────────────────────────────────────
 // Per-company, free-form fields, generic analytics + AI suggestions.

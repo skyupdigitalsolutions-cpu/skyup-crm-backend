@@ -124,7 +124,9 @@ app.set('trust proxy', 1);
 //
 // crossOriginResourcePolicy stays 'cross-origin' so the separately-hosted
 // frontend can keep loading recordings and logos.
-const helmet = require('helmet');
+const helmet         = require('helmet');
+const mongoSanitize  = require('express-mongo-sanitize');
+const hpp            = require('hpp');
 app.use(helmet({
   contentSecurityPolicy:
     String(process.env.ENABLE_CSP || '').toLowerCase() === 'true'
@@ -148,6 +150,26 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
   crossOriginEmbedderPolicy: false,
   crossOriginOpenerPolicy: false,
+}));
+
+// ── NoSQL Injection guard ────────────────────────────────────────────────────
+// Strips MongoDB operator keys ($gt, $where, …) from req.body, req.query,
+// and req.params before any controller sees them. Prevents bypass attacks like
+// { "email": { "$gt": "" } } which would match every document.
+app.use(mongoSanitize({
+  replaceWith: '_',           // replace '$' with '_' so the key survives (no silent data loss)
+  onSanitize: ({ req, key }) => {
+    console.warn(`[Security] NoSQL injection attempt sanitized — key="${key}" ip=${req.ip}`);
+  },
+}));
+
+// ── HTTP Parameter Pollution guard ───────────────────────────────────────────
+// If a request sends ?status=New&status[$gt]='' an attacker can smuggle
+// operators past the above sanitizer via the array form. hpp flattens
+// duplicate query params to the LAST value only, closing this bypass.
+// whitelist: params that are legitimately arrays in your API.
+app.use(hpp({
+  whitelist: ['campaign', 'status', 'source', 'industry', 'ids'],
 }));
 
 const server = http.createServer(app);

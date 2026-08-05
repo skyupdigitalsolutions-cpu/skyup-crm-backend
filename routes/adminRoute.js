@@ -63,6 +63,7 @@ const {
   logoutAdmin,
 } = require("../controllers/adminAuthController");
 const { protectAdmin, requireCompanySuperAdmin } = require("../middlewares/adminAuthMiddleware");
+const { validateObjectId } = require("../middlewares/validateObjectId");
 const { protectAny } = require("../middlewares/authMiddleware");
 const { authLimiter }  = require("../middlewares/rateLimiter");
 const { checkLimit }   = require("../middlewares/entitlementMiddleware");
@@ -125,8 +126,8 @@ router.put(
 
 router.get("/company/leads",     protectAdmin, getCompanyLeads);
 router.get("/leads/languages",   protectAdmin, getDistinctLeadLanguages);
-router.patch("/leads/:id/language", protectAdmin, updateLeadLanguage);
-router.put("/users/:id/languages",  protectAdmin, updateUserLanguages);
+router.patch("/leads/:id/language", protectAdmin, validateObjectId("id"), updateLeadLanguage);
+router.put("/users/:id/languages",  protectAdmin, validateObjectId("id"), updateUserLanguages);
 router.get("/dashboard-stats",   protectAdmin, getDashboardStats);
 router.get("/marketing-dashboard", protectAdmin, getMarketingDashboard);
 router.get("/company/auto-template", protectAdmin, getAutoTemplateSettings);
@@ -169,7 +170,7 @@ router.put("/company/telegram/admins/:adminId",           protectAdmin, requireC
 router.post("/company/telegram/admins/:adminId/test",     protectAdmin, requireCompanySuperAdmin, testAdminTelegramConfig);
 
 // ── Employee personal Telegram chat ID (admin sets for any employee) ──────────
-router.put("/user/:id/telegram", protectAdmin, updateUserTelegram);
+router.put("/user/:id/telegram", protectAdmin, validateObjectId("id"), updateUserTelegram);
 
 // ── Clock-in location restriction settings ────────────────────────────────────
 router.get("/company/clock-in-location", protectAdmin, getClockInLocation);
@@ -184,7 +185,7 @@ router.get("/company/attendance-config", protectAdmin, getAttendanceConfig);
 router.put("/company/attendance-config", protectAdmin, requireCompanySuperAdmin, saveAttendanceConfig);
 
 // ── Client meeting remote clock-in permission (per employee) ──────────────────
-router.put("/user/:id/meeting-permission", protectAdmin, updateMeetingPermission);
+router.put("/user/:id/meeting-permission", protectAdmin, validateObjectId("id"), updateMeetingPermission);
 
 // ── Legacy brevo-status (kept for backward compat) ───────────────────────────
 // router.get("/company/brevo-status",  protectAdmin, getBrevoStatus);
@@ -212,15 +213,15 @@ router.post(
   }),
   createCompanyUser
 );
-router.delete("/user/:id", protectAdmin, deleteCompanyUser);
+router.delete("/user/:id", protectAdmin, validateObjectId("id"), deleteCompanyUser);
 
 // SECURITY FIX replacement feature — see controllers/adminController.js.
 // Reset (not view) a password: generates a brand-new one, returned once.
-router.patch("/:id/reset-password",      protectAdmin, requireCompanySuperAdmin, resetAdminPassword);
-router.patch("/user/:id/reset-password", protectAdmin, resetUserPassword);
+router.patch("/:id/reset-password",      protectAdmin, validateObjectId("id"), requireCompanySuperAdmin, resetAdminPassword);
+router.patch("/user/:id/reset-password", protectAdmin, validateObjectId("id"), resetUserPassword);
 
-router.get("/:id",    protectAdmin, getAdmin);
-router.delete("/:id", protectAdmin, requireCompanySuperAdmin, deleteAdmin);
-router.put("/:id",    protectAdmin, requireCompanySuperAdmin, updateAdmin);
+router.get("/:id",    protectAdmin, validateObjectId("id"), getAdmin);
+router.delete("/:id", protectAdmin, validateObjectId("id"), requireCompanySuperAdmin, deleteAdmin);
+router.put("/:id",    protectAdmin, validateObjectId("id"), requireCompanySuperAdmin, updateAdmin);
 
 module.exports = router;
