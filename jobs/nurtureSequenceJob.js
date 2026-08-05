@@ -30,6 +30,7 @@ const Lead        = require("../models/Leads");
 const Company     = require("../models/Company");
 const NurtureRule = require("../models/NurtureRule");
 const { sendAutoWhatsApp } = require("../services/autoTemplateService");
+const { resolveForLead, canResolve } = require("../utils/templateNameResolver");
 
 const IST_TIMEZONE = "Asia/Kolkata";
 
@@ -91,8 +92,59 @@ function isManualOrImported(lead) {
 // Resets to index 0 (V1) when the lead's current status doesn't match
 // the stage the rule last fired for — meaning the lead moved to a new stage.
 
+// Shared variation bookkeeping — used by BOTH the auto-resolve mode and the
+// manual templateVariations list. Returns the 0-based index of the next
+// variation to send, cycling V1→V2→…→V{count}→V1 and resetting to V1 whenever
+// the lead has moved to a different status stage since this rule last fired.
+function nextVariationIndex(rule, lead, count) {
+  const ruleId = String(rule._id);
+  const sentMap = lead.nurtureSent instanceof Map
+    ? lead.nurtureSent
+    : new Map(Object.entries(lead.nurtureSent || {}));
+
+  const entry = sentMap.get(ruleId);
+
+  let lastIndex = -1;
+  let lastStage = null;
+  if (entry && typeof entry === "object") {
+    lastIndex = typeof entry.lastVariationIndex === "number" ? entry.lastVariationIndex : -1;
+    lastStage = entry.stage || null;
+  }
+
+  const currentStage = lead.status || "";
+  const ruleStage    = rule.action?.whatsapp?.statusStage || "";
+  if (lastStage && ruleStage && lastStage !== currentStage) {
+    lastIndex = -1; // lead moved stage → restart at V1
+  }
+
+  return (lastIndex + 1) % Math.max(1, count);
+}
+
 function resolveNextVariation(rule, lead) {
-  const variations = rule.action?.whatsapp?.templateVariations;
+  const wa = rule.action?.whatsapp || {};
+
+  // ── AUTO-RESOLVE MODE (1,760-template library) ──────────────────────────
+  // Build the template name from the lead's own industry + service instead of
+  // reading a hardcoded list. Still cycles V1→V5 and resets on stage change,
+  // so the variation bookkeeping below is shared by both modes.
+  const autoMode = !!wa.autoResolveTemplate && !!wa.funnelStage;
+  if (autoMode) {
+    if (!canResolve(lead)) {
+      // Lead has no industry/service — do NOT guess a vertical. Fall through
+      // to the manual list so the rule can still use a generic template.
+      console.warn(
+        `[NurtureJob] lead ${lead._id} missing industry/service — ` +
+        `cannot auto-resolve "${wa.funnelStage}" template; using manual fallback`
+      );
+    } else {
+      const count = Math.max(1, Number(wa.variationCount) || 5);
+      const idx   = nextVariationIndex(rule, lead, count);
+      const templateName = resolveForLead(lead, wa.funnelStage, idx + 1);
+      return { templateName, nextIndex: idx };
+    }
+  }
+
+  const variations = wa.templateVariations;
   if (!Array.isArray(variations) || variations.length === 0) {
     // Fall back to single templateName
     return { templateName: rule.action?.whatsapp?.templateName || "", nextIndex: 0 };
@@ -146,6 +198,17 @@ function ruleMatchesStatus(rule, lead) {
   // Additional trigger filters
   if (Array.isArray(t.statuses) && t.statuses.length && !t.statuses.includes(lead.status)) return false;
   if (Array.isArray(t.temperatures) && t.temperatures.length && !t.temperatures.includes(lead.temperature)) return false;
+
+  // ── Domain-wise industry filter ─────────────────────────────────────────
+  // Empty list = fire for any industry (including untagged leads).
+  // Compared case-insensitively so "real estate" from the app still matches
+  // the canonical "Real Estate" chip stored on the rule.
+  if (Array.isArray(t.industries) && t.industries.length) {
+    const leadIndustry = String(lead.industry || "").trim().toLowerCase();
+    if (!leadIndustry) return false; // rule targets specific industries; untagged lead can't match
+    const wanted = t.industries.map((x) => String(x || "").trim().toLowerCase());
+    if (!wanted.includes(leadIndustry)) return false;
+  }
 
   return true;
 }
@@ -285,7 +348,7 @@ async function runNurtureSequenceCheck() {
     status:     { $nin: ["Not Interested"] },
     mergedInto: null,
   })
-    .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user")
+    .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user industry service businessName")
     .lean();
 
   let totalSent = 0;
@@ -321,7 +384,7 @@ async function triggerNurtureForLead(leadId, newStatus) {
     isClosed:   { $ne: true },
     mergedInto: null,
   })
-    .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user")
+    .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user industry service businessName")
     .lean();
 
   if (!lead) return; // not this company's lead, or not found

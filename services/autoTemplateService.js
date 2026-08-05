@@ -195,6 +195,19 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         type:  "text",
         value: (lead.name || "").trim() || "there",
       },
+      // ── {{2}} = the lead's BUSINESS name ────────────────────────────────
+      // Every nurture template in the approved library declares two body
+      // variables: {{1}} contact name, {{2}} business name
+      // ("is {{2}} getting enough new patients?").
+      //
+      // Meta/MSG91 REJECTS a template send when a declared variable is
+      // missing, so this must always be present — even when we don't know the
+      // business name. Falling back to "your business" keeps the sentence
+      // reading naturally and guarantees the send succeeds.
+      body_2: {
+        type:  "text",
+        value: (lead.businessName || "").trim() || "your business",
+      },
     };
 
     const templateBlock = {

@@ -118,6 +118,28 @@ const leadSchema = mongoose.Schema(
     // manually). Empty string = unknown. Used to route/filter leads to employees
     // who can communicate in that language.
     language:  { type: String, default: "", trim: true, index: true },
+
+    // ── Nurture targeting (drives the 1,760-template WhatsApp sequences) ──────
+    // The approved MSG91 template name is derived at send time as:
+    //   slug(industry)_slug(service)_<stage>_v<n>
+    //   e.g. "interior_designers_social_media_marketing_desire_v2"
+    // Both must be set for a lead to receive an industry-specific nurture
+    // message. If either is empty, jobs/nurtureSequenceJob.js falls back to the
+    // rule's manual template list and never guesses — sending a Healthcare
+    // template to a Real Estate lead is worse than sending nothing.
+    //
+    // Values must match utils/templateNameResolver.js INDUSTRIES / SERVICES
+    // exactly, because their slug becomes part of the approved template name.
+    industry: { type: String, default: "", trim: true, index: true },
+    service:  { type: String, default: "", trim: true, index: true },
+
+    // The lead's own business name — used for the {{2}} body variable in every
+    // nurture template ("is {{2}} getting enough new patients?"). Distinct from
+    // `name` (the contact person) and `company` (the CRM tenant that owns this
+    // lead). When empty the sender falls back to a neutral phrase so the send
+    // still succeeds — Meta rejects a template send with a missing variable.
+    businessName: { type: String, default: "", trim: true },
+
     status:    { type: String, required: true, trim: true },
     date:      { type: Date, required: true },
     remark:    { type: String, required: true, trim: true },

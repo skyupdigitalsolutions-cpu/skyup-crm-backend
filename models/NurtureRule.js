@@ -54,6 +54,17 @@ const nurtureRuleSchema = new mongoose.Schema(
       // added / CSV-imported leads aren't spammed by default).
       sources: { type: [String], default: [] },
       includeManualOrImported: { type: Boolean, default: false },
+
+      // ── Domain-wise filter ────────────────────────────────────────────────
+      // Only fire for leads whose Lead.industry is in this list. Empty = any
+      // industry (including leads with no industry tag at all).
+      // Values must match utils/templateNameResolver.js INDUSTRIES.
+      //
+      // NOTE: this field previously existed only in the admin UI — the schema
+      // was missing it, so Mongoose silently discarded whatever the frontend
+      // sent and the filter never actually applied. Adding it here makes the
+      // chips in the nurture builder take effect.
+      industries: { type: [String], default: [] },
     },
 
     // ── Action ────────────────────────────────────────────────────────────
@@ -73,6 +84,29 @@ const nurtureRuleSchema = new mongoose.Schema(
         // when a lead has moved to a new stage so the variation index resets.
         // e.g. "New" for Awareness, "In Progress" for Interest, etc.
         statusStage: { type: String, default: "" },
+
+        // ── Auto-resolved templates (the 1,760-template library) ────────────
+        // When true, templateVariations is IGNORED and the template name is
+        // computed per-lead at send time from the lead's own industry+service:
+        //   slug(industry)_slug(service)_<funnelStage>_v<n>
+        // This is what makes 1,760 templates usable with 4 rules per company
+        // instead of 352. See utils/templateNameResolver.js.
+        //
+        // If a lead is missing industry or service, the job falls back to
+        // templateVariations / templateName rather than guessing a vertical.
+        autoResolveTemplate: { type: Boolean, default: false },
+
+        // Which funnel stage this rule represents — becomes part of the
+        // resolved template name. Only used when autoResolveTemplate is true.
+        funnelStage: {
+          type: String,
+          enum: ["", "awareness", "interest", "desire", "action"],
+          default: "",
+        },
+
+        // How many variations exist per stage in the approved library (V1–V5).
+        // The job cycles V1→V2→…→V{n}→V1 and resets to V1 on stage change.
+        variationCount: { type: Number, default: 5, min: 1, max: 10 },
 
         // Per-status overrides — kept for backward compatibility.
         templatesByStatus: { type: Map, of: String, default: () => ({}) },
