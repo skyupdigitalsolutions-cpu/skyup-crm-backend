@@ -21,6 +21,7 @@
 const axios = require("axios");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 const WhatsAppConfig   = require("../models/WhatsAppConfig");
+const { encrypt, hmac } = require("../utils/fieldCrypto");
 const { STAGES }       = require("../utils/templateNameResolver");
 
 const STAGE_SET = new Set(STAGES);
@@ -340,6 +341,14 @@ async function syncTemplatesForCompany(companyId) {
 
   const { url, templates } = await fetchFromMsg91({ authKey, integratedNumber: number });
 
+  // PERF/SECURITY NOTE: Model.bulkWrite() below bypasses ALL Mongoose schema
+  // middleware — the encryptedFieldsPlugin's encrypt hook and the
+  // integratedNumberHash-computing hook on WhatsAppTemplate never fire for it.
+  // So this service is responsible for computing the hash and encrypting the
+  // value itself. `number` is the same WhatsApp sender number for every
+  // template in this sync call, so the hash is computed once here.
+  const numberHash = hmac(number);
+
   let nurture = 0;
   let other   = 0;
   const ops = [];
@@ -363,12 +372,13 @@ async function syncTemplatesForCompany(companyId) {
 
     ops.push({
       updateOne: {
-        filter: { company: companyId, name, integratedNumber: number },
+        filter: { company: companyId, name, integratedNumberHash: numberHash },
         update: {
           $set: {
             company: companyId,
             name,
-            integratedNumber: number,
+            integratedNumber: encrypt(number),
+            integratedNumberHash: numberHash,
             language: String(t.language || t.language_code || t.languageCode || "en").trim(),
             category: String(t.category || "").trim().toUpperCase(),
             // MSG91 field naming varies by account/endpoint. Check every

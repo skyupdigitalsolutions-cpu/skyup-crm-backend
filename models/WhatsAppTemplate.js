@@ -18,6 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const mongoose = require("mongoose");
+const { encryptedFieldsPlugin, hmac } = require("../utils/fieldCrypto");
 
 const whatsAppTemplateSchema = new mongoose.Schema(
   {
@@ -33,6 +34,16 @@ const whatsAppTemplateSchema = new mongoose.Schema(
 
     // The WhatsApp sender this template belongs to (MSG91 integrated number).
     integratedNumber: { type: String, default: "", trim: true },
+    // Deterministic HMAC of integratedNumber — used for the sync upsert filter
+    // and any future lookup by value, now that integratedNumber itself is
+    // encrypted at rest with a random IV (so the same number never produces
+    // the same ciphertext twice and can't be matched by equality directly).
+    // Computed automatically from plaintext by the hooks below. The sync path
+    // (services/msg91TemplateService.js) uses Model.bulkWrite(), which bypasses
+    // Mongoose middleware entirely — so that service also sets this field (and
+    // encrypts integratedNumber) explicitly; the hooks here are a safety net
+    // for any other write path (e.g. a future admin edit endpoint).
+    integratedNumberHash: { type: String, default: null, index: true },
 
     language: { type: String, default: "en", trim: true },
     category: { type: String, default: "", trim: true }, // MARKETING | UTILITY | AUTHENTICATION
@@ -64,12 +75,46 @@ const whatsAppTemplateSchema = new mongoose.Schema(
 );
 
 // One row per template name per company per sender number.
+// Uniqueness now lives on integratedNumberHash instead of the plaintext
+// integratedNumber — see the field comment above for why.
 whatsAppTemplateSchema.index(
-  { company: 1, name: 1, integratedNumber: 1 },
+  { company: 1, name: 1, integratedNumberHash: 1 },
   { unique: true }
 );
 
 // Fast lookup for the nurture job: "does this exact template exist & approved?"
 whatsAppTemplateSchema.index({ company: 1, isNurtureTemplate: 1, funnelStage: 1 });
+
+// ── Compute integratedNumberHash BEFORE encryption runs ───────────────────────
+// Registered before encryptedFieldsPlugin below so it always sees the
+// PLAINTEXT value — hook order follows registration order in Mongoose.
+// NOTE: this does NOT fire for Model.bulkWrite() (the sync path uses it) —
+// bulkWrite bypasses all schema middleware. msg91TemplateService.js computes
+// the hash and encrypts the value itself for that reason.
+whatsAppTemplateSchema.pre("save", function (next) {
+  if (this.isModified("integratedNumber") && this.integratedNumber) {
+    this.integratedNumberHash = hmac(this.integratedNumber);
+  }
+  next();
+});
+
+function computeIntegratedNumberHashOnUpdate() {
+  const update = this.getUpdate();
+  if (!update) return;
+  const val = (update.$set && update.$set.integratedNumber !== undefined)
+    ? update.$set.integratedNumber
+    : update.integratedNumber;
+  if (val) {
+    if (!update.$set) update.$set = {};
+    update.$set.integratedNumberHash = hmac(val);
+  }
+}
+whatsAppTemplateSchema.pre("findOneAndUpdate", computeIntegratedNumberHashOnUpdate);
+whatsAppTemplateSchema.pre("updateOne",        computeIntegratedNumberHashOnUpdate);
+whatsAppTemplateSchema.pre("updateMany",       computeIntegratedNumberHashOnUpdate);
+
+// Encrypt integratedNumber at rest (random IV) — display-only, decrypted on
+// read. Registered AFTER the hash-computing hooks above so they see plaintext.
+whatsAppTemplateSchema.plugin(encryptedFieldsPlugin, { fields: ["integratedNumber"] });
 
 module.exports = mongoose.model("WhatsAppTemplate", whatsAppTemplateSchema);

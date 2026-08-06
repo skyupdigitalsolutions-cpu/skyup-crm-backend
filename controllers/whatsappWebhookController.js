@@ -8,6 +8,7 @@ const WhatsAppMessage        = require("../models/WhatsAppMessage");
 const Lead                   = require("../models/Leads");
 const User                   = require("../models/Users");
 const { acquireWaDedupLock } = require("../middlewares/rateLimiter"); // ✅ Redis dedup
+const { hmac } = require("../utils/fieldCrypto");
 const { processMSG91Payload, looksLikeMsg91Payload } = require("./msg91WebhookController");
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,8 +133,11 @@ async function handleInboundMessage(msg, value, config) {
   const contactName = value.contacts?.[0]?.profile?.name || "";
 
   // ── Find or create conversation ───────────────────────────────────────────
+  // waPhone is now encrypted at rest with a random IV, so it must be matched
+  // via waPhoneHash (deterministic HMAC of the same plaintext) instead of
+  // direct equality — see models/WhatsAppConversation.js.
   let conversation = await WhatsAppConversation.findOne({
-    waPhone,
+    waPhoneHash: hmac(waPhone),
     company: config.company,
   });
 

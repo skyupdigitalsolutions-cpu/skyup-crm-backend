@@ -26,6 +26,7 @@
 
 const WhatsAppConversation = require("../models/WhatsAppConversation");
 const WhatsAppMessage      = require("../models/WhatsAppMessage");
+const { hmac } = require("./fieldCrypto");
 
 /**
  * Find every WhatsAppConversation document that could plausibly represent the
@@ -47,7 +48,11 @@ async function resolveCanonicalConversation({ leadId, phoneVariants = [], compan
 
   const or = [];
   if (leadId) or.push({ lead: leadId });
-  if (phoneVariants.length) or.push({ waPhone: { $in: phoneVariants } });
+  // waPhone is now encrypted at rest with a random IV, so it can no longer be
+  // matched by equality/$in directly — waPhoneHash is the deterministic HMAC
+  // of the same plaintext values, so this preserves identical matching
+  // semantics to the old `{ waPhone: { $in: phoneVariants } }` query.
+  if (phoneVariants.length) or.push({ waPhoneHash: { $in: phoneVariants.map(hmac) } });
   if (!or.length) return null;
 
   const candidates = await WhatsAppConversation.find({

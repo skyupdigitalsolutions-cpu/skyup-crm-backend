@@ -9,6 +9,7 @@ const WhatsAppMessage = require("../models/WhatsAppMessage");
 const Lead = require("../models/Leads");
 const { normalizePhone: _sharedNormalizePhone } = require("../utils/normalizePhone");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
+const { hmac } = require("../utils/fieldCrypto");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // normalizePhone — WA-safe wrapper around the shared normaliser.
@@ -1275,9 +1276,14 @@ const getLeadsForWhatsApp = async (req, res) => {
       return out;
     });
 
+    // waPhone is now encrypted at rest with a random IV, so the $in lookup
+    // must go through waPhoneHash (deterministic HMAC of the same plaintext)
+    // instead of direct equality — see models/WhatsAppConversation.js. waPhone
+    // is still selected below (decrypted automatically on read) since the
+    // grouping-by-phone logic right after this needs the plaintext value.
     const existingConvs = await WhatsAppConversation.find({
       company: companyId,
-      waPhone: { $in: phones },
+      waPhoneHash: { $in: phones.map(hmac) },
     })
       .select("waPhone _id status")
       .lean();

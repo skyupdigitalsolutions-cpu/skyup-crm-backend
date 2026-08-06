@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { encryptedFieldsPlugin, hmac } = require("../utils/fieldCrypto");
 
 // One document = one WhatsApp thread with one lead/contact
 // A conversation is created when a lead sends their first WA message
@@ -18,6 +19,17 @@ const whatsAppConversationSchema = new mongoose.Schema(
       type: String,
       required: true,
       trim: true,
+    },
+
+    // Deterministic HMAC of waPhone — used for every equality/$in lookup now
+    // that waPhone itself is encrypted at rest with a random IV (the same
+    // phone number never produces the same ciphertext twice, so it can no
+    // longer be matched by plain equality). Computed automatically from the
+    // plaintext value by the hooks below — never set this directly.
+    waPhoneHash: {
+      type: String,
+      default: null,
+      index: true,
     },
 
     // Display name from WhatsApp profile (if available)
@@ -76,7 +88,38 @@ const whatsAppConversationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Index for fast lookups by phone + company
-whatsAppConversationSchema.index({ waPhone: 1, company: 1 }, { unique: true });
+// Index for fast lookups by phone + company. Uniqueness now lives on
+// waPhoneHash instead of the plaintext waPhone — see the field comment above.
+whatsAppConversationSchema.index({ waPhoneHash: 1, company: 1 }, { unique: true });
+
+// ── Compute waPhoneHash BEFORE encryption runs ────────────────────────────────
+// Registered before encryptedFieldsPlugin below so it always sees the
+// PLAINTEXT waPhone — hook order follows registration order in Mongoose.
+whatsAppConversationSchema.pre("save", function (next) {
+  if (this.isModified("waPhone") && this.waPhone) {
+    this.waPhoneHash = hmac(this.waPhone);
+  }
+  next();
+});
+
+function computeWaPhoneHashOnUpdate() {
+  const update = this.getUpdate();
+  if (!update) return;
+  const val = (update.$set && update.$set.waPhone !== undefined)
+    ? update.$set.waPhone
+    : update.waPhone;
+  if (val) {
+    if (!update.$set) update.$set = {};
+    update.$set.waPhoneHash = hmac(val);
+  }
+}
+whatsAppConversationSchema.pre("findOneAndUpdate", computeWaPhoneHashOnUpdate);
+whatsAppConversationSchema.pre("updateOne",        computeWaPhoneHashOnUpdate);
+whatsAppConversationSchema.pre("updateMany",       computeWaPhoneHashOnUpdate);
+
+// Encrypt waPhone at rest (random IV) — display-only, decrypted automatically
+// on read. Registered AFTER the hash-computing hooks above so they see
+// plaintext first.
+whatsAppConversationSchema.plugin(encryptedFieldsPlugin, { fields: ["waPhone"] });
 
 module.exports = mongoose.model("WhatsAppConversation", whatsAppConversationSchema);
