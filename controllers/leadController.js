@@ -2009,15 +2009,40 @@ const adminGetAllLeads = async (req, res) => {
     if (!companyId)
       return res.status(400).json({ message: "Company not found in token." });
 
+    // PERF FIX: this previously called Lead.find(query) with NO .limit()/.skip()
+    // at all — it silently ignored the `page`/`limit` query params the frontend
+    // was already sending (?page=1&limit=500) and fetched EVERY lead in the
+    // company, with every embedded array (callHistory, meetingRemarks,
+    // activityTimeline, templateHistory, qualificationBreakdown, reveal logs,
+    // etc.) plus 2 populates, on every single load of the Lead Management page.
+    // That unbounded fetch — not the field-encryption work — is what made this
+    // page take 5-6 seconds: as the leads collection grows, so does the payload
+    // size and the client-side JSON parse/render cost.
+    //
+    // This now honours page/limit the same way getMyLeads already does, capped
+    // at 500 per page to keep each request small and fast. Response shape is
+    // unchanged from the frontend's point of view: AdminLeadsPage.fetchLeads
+    // already reads `leadsRes.data?.leads` first (with an array fallback for
+    // backward compatibility), so no frontend change is required for this fix.
+    const page  = Math.max(1, parseInt(req.query.page  || "1",   10));
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit || "500", 10)));
+    const skip  = (page - 1) * limit;
+
     // Per-admin isolation: admins see only their own leads; super_admin sees all.
     const scope = await getAdminLeadScope(req, companyId);
     const query = mergeLeadScope({ company: companyId, mergedInto: null }, scope);
 
-    const leads = await Lead.find(query)
-      .sort({ createdAt: -1 })
-      .populate("user", "name email")
-      .populate("previousAgents", "name email");
-    res.status(200).json(leads);
+    const [leads, total] = await Promise.all([
+      Lead.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("user", "name email")
+        .populate("previousAgents", "name email"),
+      Lead.countDocuments(query),
+    ]);
+
+    res.status(200).json({ leads, total, page, limit, pages: Math.ceil(total / limit) || 1 });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

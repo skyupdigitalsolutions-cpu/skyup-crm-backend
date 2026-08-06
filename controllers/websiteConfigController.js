@@ -1,11 +1,26 @@
 const WebsiteConfig = require("../models/WebsiteConfig");
+const Lead = require("../models/Leads");
 const { getAdminConfigScope, resolveAdminId } = require("../utils/adminLeadScope");
 
+// PERF FIX: same fix as googleAdsConfigController.getConfigs — compute lead
+// counts server-side with cheap countDocuments() instead of leaving the
+// frontend to fetch a full Lead.find()+populate per website source on every
+// page load. See the comment there for the full explanation.
 const getConfigs = async (req, res) => {
   try {
     const companyId = req.admin.company._id || req.admin.company;
-    const configs = await WebsiteConfig.find({ company: companyId, ...getAdminConfigScope(req) }).populate("createdBy", "name").lean();
-    res.json({ data: configs });
+    const configs = await WebsiteConfig.find({ company: companyId, ...getAdminConfigScope(req) })
+      .populate("createdBy", "name")
+      .lean();
+
+    const enriched = await Promise.all(
+      configs.map(async (cfg) => {
+        const leads = await Lead.countDocuments({ company: companyId, campaign: cfg.sourceName });
+        return { ...cfg, leads };
+      })
+    );
+
+    res.json({ data: enriched });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 

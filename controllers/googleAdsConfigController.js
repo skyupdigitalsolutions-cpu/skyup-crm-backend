@@ -1,12 +1,38 @@
 const GoogleAdsConfig = require("../models/GoogleAdsConfig");
+const Lead = require("../models/Leads");
 const { getAdminConfigScope, resolveAdminId } = require("../utils/adminLeadScope");
 
 // GET all configs for the logged-in company
+//
+// PERF FIX: previously returned bare configs with no lead/converted counts.
+// The Campaigns page frontend compensated by firing one extra
+// GET /lead/by-campaign (a FULL Lead.find() + 2 populates) PER Google config,
+// on every page load, just to read the array length. With N Google campaigns
+// that's N extra round trips + N extra full-document Mongo queries, on top of
+// the identical pattern already happening for Meta and Website configs — the
+// real cause of the multi-second Campaigns page load. MetaConfig already
+// avoided this by computing counts server-side with cheap countDocuments()
+// calls (see metaConfigController.getAllConfigs); this brings Google in line
+// with that pattern so the frontend can read cfg.leads/cfg.converted directly
+// and skip the extra fetch entirely.
 const getConfigs = async (req, res) => {
   try {
     const companyId = req.admin.company._id || req.admin.company;
-    const configs = await GoogleAdsConfig.find({ company: companyId, ...getAdminConfigScope(req) }).populate("createdBy", "name").lean();
-    res.json({ data: configs });
+    const configs = await GoogleAdsConfig.find({ company: companyId, ...getAdminConfigScope(req) })
+      .populate("createdBy", "name")
+      .lean();
+
+    const enriched = await Promise.all(
+      configs.map(async (cfg) => {
+        const [leads, converted] = await Promise.all([
+          Lead.countDocuments({ company: companyId, campaign: cfg.campaignName }),
+          Lead.countDocuments({ company: companyId, campaign: cfg.campaignName, status: "Converted" }),
+        ]);
+        return { ...cfg, leads, converted };
+      })
+    );
+
+    res.json({ data: enriched });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
