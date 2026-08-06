@@ -33,6 +33,16 @@ const STAGE_SET = new Set(STAGES);
 // form — and MSG91's own send endpoint is
 // .../whatsapp/whatsapp-outbound-message/bulk/ (trailing slash), so the
 // redirect target is almost certainly the slashed variant.
+// Request shapes to try against each candidate. HTTP 400 from
+// get-template/{number}/ proved the ROUTE exists but rejected our request, so
+// the variable is no longer the path — it is the method and the payload.
+const ATTEMPTS = [
+  { method: "get",  body: null },
+  { method: "post", body: {} },
+  { method: "post", body: { integrated_number: "{number}" } },
+  { method: "post", body: { integrated_number: "{number}", template_status: "APPROVED" } },
+];
+
 const CANDIDATES = [
   "https://control.msg91.com/api/v5/whatsapp/get-template/{number}/",
   "https://api.msg91.com/api/v5/whatsapp/get-template/{number}/",
@@ -61,13 +71,20 @@ function buildUrl(tpl, number) {
  * hand also lets us REPORT the redirect target, which is how we discover the
  * real path MSG91 wants.
  */
-async function getFollowing(url, authKey, maxHops = 4) {
+async function getFollowing(url, authKey, maxHops = 4, method = "get", body = null) {
   let current = url;
   const hops = [];
 
   for (let i = 0; i <= maxHops; i++) {
-    const res = await axios.get(current, {
-      headers: { authkey: authKey, accept: "application/json" },
+    const res = await axios.request({
+      url: current,
+      method,
+      data: body || undefined,
+      headers: {
+        authkey: authKey,
+        accept: "application/json",
+        ...(body ? { "content-type": "application/json" } : {}),
+      },
       timeout: 20000,
       maxRedirects: 0,             // we handle them ourselves
       validateStatus: () => true,  // never throw; inspect below
@@ -166,26 +183,45 @@ async function fetchFromMsg91({ authKey, integratedNumber }) {
 
   for (const candidate of list) {
     const url = buildUrl(candidate, integratedNumber);
-    try {
-      const { status, data, finalUrl, hops } = await getFollowing(url, authKey);
-      const via = hops.length ? ` (redirected → ${finalUrl})` : "";
 
-      const templates = extractTemplates(data);
-      if (templates && templates.length) {
-        console.log(`[msg91Templates] ✅ ${templates.length} templates from ${finalUrl}`);
-        return { url: finalUrl, templates };
-      }
+    for (const attempt of ATTEMPTS) {
+      const body = attempt.body
+        ? JSON.parse(JSON.stringify(attempt.body).replace(/\{number\}/g, integratedNumber))
+        : null;
+      const label = `${attempt.method.toUpperCase()} ${url}${body ? ` body=${JSON.stringify(body)}` : ""}`;
 
-      if (status >= 200 && status < 300) {
-        errors.push(`${url}${via} → HTTP ${status} but no template array. Keys: ${
-          data && typeof data === "object" ? Object.keys(data).join(",") : typeof data
-        }`);
-      } else {
-        const m = (data && (data.message || data.msg)) || `HTTP ${status}`;
-        errors.push(`${url}${via} → ${String(m).slice(0, 140)}`);
+      try {
+        const { status, data, finalUrl, hops } = await getFollowing(
+          url, authKey, 4, attempt.method, body
+        );
+        const via = hops.length ? ` (→ ${finalUrl})` : "";
+
+        const templates = extractTemplates(data);
+        if (templates && templates.length) {
+          console.log(`[msg91Templates] ✅ ${templates.length} templates via ${label}`);
+          return { url: finalUrl, templates, method: attempt.method, body };
+        }
+
+        // 404 = wrong path, not worth trying other shapes on this candidate.
+        const notFound = /not found on the server/i.test(
+          String(data?.message || data?.msg || "")
+        );
+        if (notFound) {
+          errors.push(`${label}${via} → route does not exist`);
+          break; // skip remaining ATTEMPTS for this URL
+        }
+
+        // Anything else: dump the WHOLE body. When MSG91 answers 400 it is
+        // telling us exactly which parameter it wants — that message is the
+        // single most useful thing for finding the right call.
+        const dump = (() => {
+          try { return JSON.stringify(data).slice(0, 400); }
+          catch { return String(data).slice(0, 400); }
+        })();
+        errors.push(`${label}${via} → HTTP ${status} ${dump}`);
+      } catch (e) {
+        errors.push(`${label} → ${(e.message || "request failed").slice(0, 140)}`);
       }
-    } catch (e) {
-      errors.push(`${url} → ${(e.message || "request failed").slice(0, 140)}`);
     }
   }
   throw new Error(
@@ -210,10 +246,18 @@ async function probeTemplateEndpoints(companyId) {
   const results = [];
   for (const candidate of CANDIDATES) {
     const url = buildUrl(candidate, number);
+    for (const attempt of ATTEMPTS) {
+    const body = attempt.body
+      ? JSON.parse(JSON.stringify(attempt.body).replace(/\{number\}/g, number))
+      : null;
     try {
-      const { status, data, finalUrl, hops } = await getFollowing(url, authKey);
+      const { status, data, finalUrl, hops } = await getFollowing(url, authKey, 4, attempt.method, body);
       const templates = extractTemplates(data);
       results.push({
+        method: attempt.method.toUpperCase(),
+        requestBody: body || undefined,
+        // FULL response body — this is where MSG91 explains a 400
+        responseBody: (() => { try { return JSON.stringify(data).slice(0, 500); } catch { return String(data).slice(0, 500); } })(),
         url,
         finalUrl: finalUrl !== url ? finalUrl : undefined,
         redirectedTo: hops.length ? hops : undefined,
@@ -226,7 +270,8 @@ async function probeTemplateEndpoints(companyId) {
         message: templates ? undefined : String(data?.message || data?.msg || "").slice(0, 160),
       });
     } catch (e) {
-      results.push({ url, works: false, message: (e.message || "").slice(0, 160) });
+      results.push({ url, method: attempt.method.toUpperCase(), works: false, message: (e.message || "").slice(0, 160) });
+    }
     }
   }
   return results;
