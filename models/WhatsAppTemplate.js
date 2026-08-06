@@ -38,6 +38,10 @@ const whatsAppTemplateSchema = new mongoose.Schema(
     category: { type: String, default: "", trim: true }, // MARKETING | UTILITY | AUTHENTICATION
     status:   { type: String, default: "", trim: true }, // APPROVED | PENDING | REJECTED
 
+    // Exactly what MSG91 sent for status, e.g. "status=Enabled" — shown in the
+    // UI so you can see the source value, not just our interpretation of it.
+    rawStatusField: { type: String, default: "", trim: true },
+
     // How many {{n}} body variables this template declares. Critical: Meta
     // rejects a send whose parameter count doesn't match, so the sender uses
     // this to decide whether to attach body_2.

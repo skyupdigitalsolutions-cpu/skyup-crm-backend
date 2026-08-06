@@ -134,7 +134,7 @@ const listTemplates = async (req, res) => {
     }
 
     const templates = await WhatsAppTemplate.find(q)
-      .select("name language category status bodyVariableCount isNurtureTemplate funnelStage variation lastSyncedAt")
+      .select("name language category status rawStatusField bodyVariableCount isNurtureTemplate funnelStage variation lastSyncedAt")
       .sort({ name: 1 })
       .limit(3000)
       .lean();

@@ -363,7 +363,27 @@ async function syncTemplatesForCompany(companyId) {
             integratedNumber: number,
             language: String(t.language || t.language_code || t.languageCode || "en").trim(),
             category: String(t.category || "").trim().toUpperCase(),
-            status:   normalizeStatus(t.status || t.template_status || t.template_quality_score || ""),
+            // MSG91 field naming varies by account/endpoint. Check every
+            // plausible field before giving up. If the API returns NO status
+            // field at all, we treat the template as APPROVED — MSG91's
+            // get-template endpoint only returns live/enabled templates, and
+            // the dashboard confirms they show as "Enabled".
+            status: normalizeStatus(
+              t.status ?? t.template_status ?? t.status_name ?? t.approval_status ??
+              t.state ?? t.template_state ?? t.templateStatus ?? t.approvalStatus ??
+              // boolean/numeric forms some APIs use
+              (t.is_active === true || t.active === true || t.enabled === true ? "ENABLED" : undefined) ??
+              (t.is_active === false || t.active === false || t.enabled === false ? "DISABLED" : undefined) ??
+              // Nothing returned → the API only lists live templates
+              "APPROVED"
+            ),
+            // Keep whatever the API actually sent so the UI can show the truth
+            rawStatusField: (() => {
+              for (const k of ["status","template_status","status_name","approval_status","state","template_state","templateStatus","approvalStatus","is_active","active","enabled"]) {
+                if (t[k] !== undefined) return `${k}=${String(t[k])}`;
+              }
+              return "(no status field in MSG91 response)";
+            })(),
             bodyVariableCount: countBodyVariables(t),
             isNurtureTemplate: !!parsed,
             industrySlug: parsed ? parsed.prefix : "",
