@@ -12,7 +12,9 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
 
-const TARGET_LEAD_ID = "6a66e3d8c0d24a71800e1f0a"; // srinivas
+// Accept lead ID from --lead=xxx argument, fallback to srinivas
+const leadArg      = process.argv.find((a) => a.startsWith("--lead="));
+const TARGET_LEAD_ID = leadArg ? leadArg.split("=")[1] : "6a66e3d8c0d24a71800e1f0a";
 const SEND           = process.argv.includes("--send");
 const DELAY_MS       = 5000; // 5 seconds between each
 
@@ -26,7 +28,7 @@ async function run() {
 
   await mongoose.connect(uri);
   console.log(`\n🚀 V1–V5 Variation Test`);
-  console.log(`   Lead  : ${TARGET_LEAD_ID} (srinivas · 9538281101)`);
+  console.log(`   Lead  : ${TARGET_LEAD_ID}`);
   console.log(`   Mode  : ${SEND ? "SEND — all 5 variations, 5s gap each" : "DRY-RUN — no sends"}`);
   console.log(`   Stage : awareness\n`);
 
