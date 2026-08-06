@@ -164,6 +164,12 @@ function encryptedFieldsPlugin(schema, options = {}) {
       if (update.$set && update.$set[field] !== undefined) {
         update.$set[field] = encrypt(update.$set[field]);
       }
+      // $setOnInsert form (upsert-only writes, e.g. TermsAcceptance.ipAddress
+      // written via updateOne(..., { $setOnInsert: { ipAddress } }, { upsert:true })).
+      // Without this branch such values are stored UNENCRYPTED on insert.
+      if (update.$setOnInsert && update.$setOnInsert[field] !== undefined) {
+        update.$setOnInsert[field] = encrypt(update.$setOnInsert[field]);
+      }
       // Nested-object form: { cloudinaryConfig: { apiSecret: val } }
       if (field.includes(".")) {
         const nestedTop = getPath(update, field);

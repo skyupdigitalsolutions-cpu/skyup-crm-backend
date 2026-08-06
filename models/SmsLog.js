@@ -2,6 +2,7 @@
 // Tracks every SMS sent via MSG91 (bulk, single, or CSV)
 
 const mongoose = require("mongoose");
+const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 
 const smsLogSchema = new mongoose.Schema(
   {
@@ -63,5 +64,11 @@ const smsLogSchema = new mongoose.Schema(
 
 smsLogSchema.index({ company: 1, sentAt: -1 });
 smsLogSchema.index({ company: 1, campaignId: 1 });
+
+// ── Encrypt the recipient phone number at rest ───────────────────────────────
+// Written via SmsLog.create() → pre('save') encrypts. Decrypted on read.
+// `to` is only listed/displayed, never queried by value and not indexed, so the
+// random-IV scheme is safe here.
+smsLogSchema.plugin(encryptedFieldsPlugin, { fields: ["to"] });
 
 module.exports = mongoose.model("SmsLog", smsLogSchema);

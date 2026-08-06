@@ -590,10 +590,17 @@ const companySchema = mongoose.Schema(
   { timestamps: true }
 );
 
-const Company = mongoose.model("Company", companySchema);
-
+// Apply the encrypted-fields plugin BEFORE compiling the model so the pre('save')
+// document hook is reliably attached (a plugin added after mongoose.model() may
+// not register document middleware). Added "phone" to the existing list — the
+// company contact number is now encrypted at rest. `phone` is only ever read
+// for display (invoices / company detail) and never queried by value, so the
+// random-IV scheme is safe here. encrypt() is idempotent, so the already-
+// encrypted config secrets are untouched.
 companySchema.plugin(encryptedFieldsPlugin, {
-  fields: ["brevoApiKey", "msg91EmailApiKey", "razorpayTokenId", "cloudinaryConfig.apiKey", "cloudinaryConfig.apiSecret"],
+  fields: ["phone", "brevoApiKey", "msg91EmailApiKey", "razorpayTokenId", "cloudinaryConfig.apiKey", "cloudinaryConfig.apiSecret"],
 });
+
+const Company = mongoose.model("Company", companySchema);
 
 module.exports = Company;

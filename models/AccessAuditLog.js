@@ -17,6 +17,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const mongoose = require("mongoose");
+const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 
 // Retention for audit records. Keep at least 12 months for audit usefulness.
 const RETENTION_DAYS = Number(process.env.AUDIT_LOG_RETENTION_DAYS) || 400;
@@ -94,5 +95,12 @@ const blockWrite = function () {
 accessAuditLogSchema.pre("save", function () {
   if (!this.isNew) throw new Error("AccessAuditLog records are immutable.");
 });
+
+// ── Encrypt the requester IP at rest (personal data under GDPR/DPDP) ─────────
+// Written via AccessAuditLog.create() → pre('save') encrypts on insert.
+// Decrypted automatically on read (post-find). Safe here: `ip` is never queried
+// by value and backs no index, so the random-IV scheme causes no lookup issues.
+// Applied BEFORE model compilation so both the save and find hooks attach.
+accessAuditLogSchema.plugin(encryptedFieldsPlugin, { fields: ["ip"] });
 
 module.exports = mongoose.model("AccessAuditLog", accessAuditLogSchema);

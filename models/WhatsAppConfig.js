@@ -100,8 +100,15 @@ const whatsAppConfigSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Added "phoneNumber" (the common display field). NOTE: this field is empty in
+// practice — the actual WhatsApp sender number you see exposed is
+// `msg91IntegratedNumber`, which is used as a lookup key by the template sync
+// (services/msg91TemplateService.js) and set via findOneAndUpdate, so it CANNOT
+// be encrypted with this random-IV plugin without breaking template sync. To
+// hide it you need the deterministic-HMAC approach (encrypt for display + an
+// integratedNumberHash for lookups) — left out here on purpose.
 whatsAppConfigSchema.plugin(encryptedFieldsPlugin, {
-  fields: ["msg91AuthKey", "accessToken", "verifyToken"],
+  fields: ["msg91AuthKey", "accessToken", "verifyToken", "phoneNumber"],
 });
 
 module.exports = mongoose.model("WhatsAppConfig", whatsAppConfigSchema);

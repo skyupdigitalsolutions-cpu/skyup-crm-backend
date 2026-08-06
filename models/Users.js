@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
+const { encryptedFieldsPlugin } = require("../utils/fieldCrypto");
 // SECURITY (A.8.24): work factor raised from 10 to 12.
 const BCRYPT_COST = Number(process.env.BCRYPT_COST) || 12;
 
@@ -50,6 +51,11 @@ const userSchema = mongoose.Schema(
 
     // ✅ FIX: added ipAddress field — was missing so it was silently dropped
     ipAddress:   { type: String, default: null },
+    // Legacy field present in existing documents but previously absent from the
+    // schema (so Mongoose ignored/dropped it). Declared here only so the
+    // encrypted-fields plugin can manage and DECRYPT it on read. No code writes
+    // it anymore; the migration script encrypts the existing values in place.
+    lastIpAddress: { type: String, default: null },
     // ✅ FIX: track last login time so frontend "Last Login" column works
     lastLoginAt: { type: Date,   default: null },
 
@@ -140,6 +146,17 @@ userSchema.methods.matchPassword = async function (enteredPassword) {
 // ── Performance indexes ───────────────────────────────────────────────────────
 userSchema.index({ email: 1 }, { unique: true });
 userSchema.index({ company: 1 });
+
+// ── Encrypt device IPs at rest ───────────────────────────────────────────────
+// ipAddress is written on login/clock-in via User.findByIdAndUpdate(_, { $set })
+// → the plugin's findOneAndUpdate hook encrypts it. Decrypted on find/findOne.
+// Neither field is queried by value or indexed → random-IV scheme is safe.
+// CAVEAT: when the User is read through .populate() elsewhere (e.g. the admin
+// attendance view), Mongoose may not run this model's post-find decrypt hook,
+// so ipAddress can appear as ciphertext there. If that view needs plaintext,
+// decrypt it explicitly in that controller — data at rest is encrypted either
+// way. Applied before model compilation so save + find hooks attach reliably.
+userSchema.plugin(encryptedFieldsPlugin, { fields: ["ipAddress", "lastIpAddress"] });
 
 const User = mongoose.model("User", userSchema);
 
