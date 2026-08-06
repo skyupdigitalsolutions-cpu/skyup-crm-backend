@@ -13,7 +13,7 @@
 
 const NurtureRule = require("../models/NurtureRule");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
-const { syncTemplatesForCompany, probeTemplateEndpoints } = require("../services/msg91TemplateService");
+const { syncTemplatesForCompany, probeTemplateEndpoints, fetchRaw } = require("../services/msg91TemplateService");
 const { escapeRegex } = require("../utils/escapeRegex");
 
 function resolveCompany(req) {
@@ -160,6 +160,20 @@ const listTemplates = async (req, res) => {
 // Diagnostic only — tries every candidate MSG91 endpoint and reports which
 // responds with a template list. Run once, then pin the winner in Render as
 // MSG91_TEMPLATES_API_URL so future syncs skip the probing.
+// ── GET /api/nurture/templates/raw ────────────────────────────────────────────
+// Returns the complete raw MSG91 response so we can see the exact shape and
+// tune the parser. Remove or gate behind isDev after the shape is confirmed.
+const rawTemplates = async (req, res) => {
+  try {
+    const company = resolveCompany(req);
+    if (!company) return res.status(400).json({ message: "Company not resolved" });
+    const result = await fetchRaw(company);
+    res.json({ success: true, result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 const probeTemplates = async (req, res) => {
   try {
     const company = resolveCompany(req);
@@ -181,4 +195,4 @@ const probeTemplates = async (req, res) => {
   }
 };
 
-module.exports = { listRules, createRule, updateRule, deleteRule, syncTemplates, listTemplates, probeTemplates };
+module.exports = { listRules, createRule, updateRule, deleteRule, syncTemplates, listTemplates, probeTemplates, rawTemplates };

@@ -110,16 +110,38 @@ async function getFollowing(url, authKey, maxHops = 4, method = "get", body = nu
 function extractTemplates(data) {
   if (!data) return null;
   if (Array.isArray(data)) return data;
-  for (const key of ["data", "templates", "result", "response", "template"]) {
+
+  // Try every key at every level of nesting — MSG91 response shapes vary
+  // between accounts. Known shapes observed:
+  //  { data: [...] }
+  //  { data: { templates: [...] } }
+  //  { templates: [...] }
+  //  { response: [...] }
+  //  { result: { data: [...] } }
+  //  { status:"success", data:[...] }
+  const tryKeys = ["data","templates","result","response","template",
+                   "list","items","records","payload","content","body"];
+  for (const key of tryKeys) {
     const v = data[key];
-    if (Array.isArray(v)) return v;
-    // sometimes nested one more level: { data: { templates: [...] } }
+    if (Array.isArray(v) && v.length > 0) return v;
     if (v && typeof v === "object") {
-      for (const k2 of ["data", "templates", "result"]) {
-        if (Array.isArray(v[k2])) return v[k2];
+      for (const k2 of tryKeys) {
+        if (Array.isArray(v[k2]) && v[k2].length > 0) return v[k2];
+        if (v[k2] && typeof v[k2] === "object") {
+          for (const k3 of tryKeys) {
+            if (Array.isArray(v[k2][k3]) && v[k2][k3].length > 0) return v[k2][k3];
+          }
+        }
       }
     }
   }
+
+  // Last resort: find any top-level key whose value is a non-empty array
+  // (catches unusual wrappers like { TEMPLATES: [...] })
+  for (const key of Object.keys(data)) {
+    if (Array.isArray(data[key]) && data[key].length > 0) return data[key];
+  }
+
   return null;
 }
 
@@ -347,6 +369,49 @@ async function syncTemplatesForCompany(companyId) {
 }
 
 /**
+ * Fetch the raw MSG91 response for the working endpoint — returns it as-is so
+ * you can see exactly what shape MSG91 sends and tune extractTemplates if needed.
+ */
+async function fetchRaw(companyId) {
+  const config = await WhatsAppConfig.findOne({ company: companyId }).lean();
+  if (!config) throw new Error("No WhatsAppConfig for this company");
+
+  const authKey = config.msg91AuthKey || "";
+  const rawNum  = String(config.msg91IntegratedNumber || "").replace(/\D/g, "");
+  if (!authKey) throw new Error("msg91AuthKey empty");
+  if (!rawNum)  throw new Error("msg91IntegratedNumber empty");
+  const number  = rawNum.length === 10 ? `91${rawNum}` : rawNum;
+
+  // Only try the two candidates that returned non-404 previously
+  const urls = [
+    `https://control.msg91.com/api/v5/whatsapp/get-template/${number}/`,
+    `https://api.msg91.com/api/v5/whatsapp/get-template/${number}/`,
+  ];
+  const results = [];
+  for (const url of urls) {
+    for (const attempt of ATTEMPTS) {
+      const body = attempt.body
+        ? JSON.parse(JSON.stringify(attempt.body).replace(/\{number\}/g, number))
+        : null;
+      try {
+        const { status, data, finalUrl } = await getFollowing(url, authKey, 4, attempt.method, body);
+        results.push({
+          url, finalUrl, method: attempt.method.toUpperCase(),
+          requestBody: body, httpStatus: status,
+          // FULL raw response — this is what we need to see to tune the parser
+          rawResponse: data,
+          templateCount: extractTemplates(data)?.length ?? "null (not found by parser)",
+        });
+        if (extractTemplates(data)?.length > 0) return results; // found them, stop early
+      } catch (e) {
+        results.push({ url, method: attempt.method.toUpperCase(), error: e.message });
+      }
+    }
+  }
+  return results;
+}
+
+/**
  * Does this exact template exist (and is it approved) for this company?
  * Used by the nurture job to avoid sending a name Meta will reject.
  * Returns the cached doc, or null.
@@ -359,6 +424,7 @@ async function findTemplate(companyId, name) {
 module.exports = {
   syncTemplatesForCompany,
   probeTemplateEndpoints,
+  fetchRaw,
   findTemplate,
   parseNurtureName,
   countBodyVariables,
