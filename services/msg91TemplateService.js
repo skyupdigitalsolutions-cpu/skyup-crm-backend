@@ -240,8 +240,9 @@ async function probeTemplateEndpoints(companyId) {
   if (!config) throw new Error("No WhatsAppConfig for this company");
 
   const authKey = config.msg91AuthKey || "";
-  const number  = String(config.msg91IntegratedNumber || "").replace(/\D/g, "");
-  if (!authKey || !number) throw new Error("WhatsAppConfig missing msg91AuthKey or msg91IntegratedNumber");
+  const rawNum  = String(config.msg91IntegratedNumber || "").replace(/\D/g, "");
+  if (!authKey || !rawNum) throw new Error("WhatsAppConfig missing msg91AuthKey or msg91IntegratedNumber");
+  const number  = rawNum.length === 10 ? `91${rawNum}` : rawNum;
 
   const results = [];
   for (const candidate of CANDIDATES) {
@@ -286,9 +287,14 @@ async function syncTemplatesForCompany(companyId) {
   if (!config) throw new Error("No WhatsAppConfig for this company");
 
   const authKey = config.msg91AuthKey || "";
-  const number  = String(config.msg91IntegratedNumber || "").replace(/\D/g, "");
+  const rawNum  = String(config.msg91IntegratedNumber || "").replace(/\D/g, "");
   if (!authKey) throw new Error("WhatsAppConfig.msg91AuthKey is empty");
-  if (!number)  throw new Error("WhatsAppConfig.msg91IntegratedNumber is empty");
+  if (!rawNum)  throw new Error("WhatsAppConfig.msg91IntegratedNumber is empty");
+
+  // MSG91 requires the INTERNATIONAL format (country code prefix).
+  // The DB may store "9591327778" (10-digit) or "919591327778" (12-digit).
+  // Normalise to 12-digit for India: prefix 91 if exactly 10 digits.
+  const number = rawNum.length === 10 ? `91${rawNum}` : rawNum;
 
   const { url, templates } = await fetchFromMsg91({ authKey, integratedNumber: number });
 
