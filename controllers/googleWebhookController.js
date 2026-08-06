@@ -39,18 +39,25 @@ const receiveGoogleWebhook = async (req, res) => {
     // Google sends this ONLY if you added ?google_key=xxx to the webhook URL
     // in Google Ads UI → Lead Form → Webhook Settings.
     const googleKey =
-      body.google_key   ||
-      body.googleKey    ||
-      req.query.google_key ||
-      req.query.key;
+      body.google_key          ||
+      body.googleKey           ||
+      req.query.google_key     ||
+      req.query.key            ||
+      req.headers["x-webhook-key"];   // pricing-site / custom integrations send key here
 
     let config = null;
 
     if (googleKey) {
-      config = await GoogleAdsConfig.findOne({ googleKey, isActive: true });
+      // googleKey is stored AES-256-GCM encrypted (random IV) in MongoDB, so
+      // findOne({ googleKey }) never matches — the same plaintext encrypts to a
+      // different ciphertext on every save.  The encryptedFieldsPlugin decrypts
+      // fields automatically on every find(), so fetching all active configs and
+      // comparing the decrypted value in JS is the correct approach.
+      const allActive = await GoogleAdsConfig.find({ isActive: true });
+      config = allActive.find((c) => c.googleKey === googleKey) || null;
       if (!config) {
         console.error(`❌ No active GoogleAdsConfig found for googleKey: "${googleKey}"`);
-        console.error("   Make sure the key in your Google Ads webhook URL matches exactly what is stored in GoogleAdsConfig.googleKey");
+        console.error("   Make sure the key matches exactly what was entered when connecting the campaign.");
       }
     } else {
       console.warn("⚠️  No google_key found in body or query params.");
@@ -105,23 +112,37 @@ const receiveGoogleWebhook = async (req, res) => {
     }
 
     // ── Parse lead fields ────────────────────────────────────────────────────
-    // Google sends: body.user_column_data = [{ column_name, string_value }, ...]
+    // Google Ads sends: body.user_column_data = [{ column_name, string_value }, ...]
+    // Custom integrations (e.g. pricing site) send flat: { name, phone, email, message }
     const userColumnData = body.user_column_data || [];
     const parsedFields   = parseGoogleLeadData(userColumnData);
+
+    // Flat-body fallback — inject pricing-site / custom fields into parsedFields
+    // so the rest of the pipeline (mapGoogleLeadToSchema) works unchanged.
+    if (!parsedFields["full_name"] && !parsedFields["first_name"]) {
+      const flatName = body.name || body.full_name || body.fullName || "";
+      if (flatName) parsedFields["full_name"] = flatName;
+    }
+    if (!parsedFields["phone_number"] && !parsedFields["phone"]) {
+      const flatPhone = body.phone || body.mobile || body.phone_number || "";
+      if (flatPhone) parsedFields["phone_number"] = flatPhone;
+    }
+    if (!parsedFields["email"]) {
+      const flatEmail = body.email || "";
+      if (flatEmail) parsedFields["email"] = flatEmail;
+    }
 
     console.log("   parsedFields:", JSON.stringify(parsedFields));
     console.log("   Available column names:", userColumnData.map(c => c.column_name));
 
-    // Guard: must have at least a name or phone
-    // Guard: after parseGoogleLeadData, keys are column_id lowercased (e.g. full_name, phone_number)
     const hasName  = parsedFields["full_name"] || parsedFields["first_name"] || parsedFields["full name"];
     const hasPhone = parsedFields["phone_number"] || parsedFields["phone"];
 
     if (!hasName && !hasPhone) {
-      console.warn("⚠️  No recognisable lead fields (name/phone) found in user_column_data.");
-      console.warn("   Check that your Google Lead Form fields match expected column names:");
-      console.warn("   Expected: first_name, last_name, full_name, phone_number, phone, email");
-      console.warn("   Received column names:", userColumnData.map(c => c.column_name));
+      console.warn("⚠️  No recognisable lead fields (name/phone) found.");
+      console.warn("   For Google Ads: check column names match full_name / phone_number / email.");
+      console.warn("   For custom sources: send { name, phone, email } in the request body.");
+      console.warn("   Received body keys:", Object.keys(body).join(", "));
       return;
     }
 
