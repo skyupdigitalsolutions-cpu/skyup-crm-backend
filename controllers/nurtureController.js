@@ -139,11 +139,17 @@ const listTemplates = async (req, res) => {
       .limit(3000)
       .lean();
 
+    const nurtureTpls = templates.filter((t) => t.isNurtureTemplate);
     const stats = {
-      total: templates.length,
-      nurture: templates.filter((t) => t.isNurtureTemplate).length,
-      byStage: templates.reduce((acc, t) => {
-        if (t.funnelStage) acc[t.funnelStage] = (acc[t.funnelStage] || 0) + 1;
+      total:    templates.length,
+      nurture:  nurtureTpls.length,
+      approved: nurtureTpls.filter((t) => t.status === "APPROVED").length,
+      pending:  nurtureTpls.filter((t) => t.status === "PENDING").length,
+      rejected: nurtureTpls.filter((t) => t.status === "REJECTED").length,
+      paused:   nurtureTpls.filter((t) => t.status === "PAUSED").length,
+      // byStage counts ONLY approved templates — pending/rejected can't send
+      byStage: nurtureTpls.reduce((acc, t) => {
+        if (t.funnelStage && t.status === "APPROVED") acc[t.funnelStage] = (acc[t.funnelStage] || 0) + 1;
         return acc;
       }, {}),
       lastSyncedAt: templates[0]?.lastSyncedAt || null,

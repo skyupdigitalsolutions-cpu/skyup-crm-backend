@@ -146,6 +146,26 @@ function extractTemplates(data) {
 }
 
 /**
+ * Normalize MSG91 status strings to a consistent set.
+ * MSG91 dashboard shows "Enabled" / "Pending" / "Rejected" / "Disabled".
+ * Some API responses may use different casing or alternate spellings.
+ * We store a canonical value so the frontend and job can do simple equality checks.
+ *   "APPROVED" = live and sendable
+ *   "PENDING"  = awaiting Meta review
+ *   "REJECTED" = refused by Meta
+ *   "PAUSED"   = temporarily disabled
+ *   ""         = unknown / not returned
+ */
+function normalizeStatus(raw) {
+  const v = String(raw || "").trim().toUpperCase();
+  if (["ENABLED", "APPROVED", "ACTIVE", "LIVE"].includes(v)) return "APPROVED";
+  if (["PENDING", "IN_APPEAL", "PENDING_DELETION", "PENDING_REVIEW", "SUBMITTED"].includes(v)) return "PENDING";
+  if (["REJECTED", "REJECTED_BY_META", "REFUSED", "FLAGGED", "DISABLED_BY_META"].includes(v)) return "REJECTED";
+  if (["PAUSED", "DISABLED", "INACTIVE", "ARCHIVED"].includes(v)) return "PAUSED";
+  return v; // keep as-is for anything unknown
+}
+
+/**
  * Count {{n}} placeholders in a template's BODY component.
  * Falls back to scanning any string field for {{n}} when the shape is unknown.
  */
@@ -343,7 +363,7 @@ async function syncTemplatesForCompany(companyId) {
             integratedNumber: number,
             language: String(t.language || t.language_code || t.languageCode || "en").trim(),
             category: String(t.category || "").trim().toUpperCase(),
-            status:   String(t.status || t.template_status || "").trim().toUpperCase(),
+            status:   normalizeStatus(t.status || t.template_status || t.template_quality_score || ""),
             bodyVariableCount: countBodyVariables(t),
             isNurtureTemplate: !!parsed,
             industrySlug: parsed ? parsed.prefix : "",
