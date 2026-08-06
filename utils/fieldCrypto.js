@@ -141,14 +141,16 @@ function encryptedFieldsPlugin(schema, options = {}) {
 
   // Encrypt before save (covers .save() and pre-save hooks).
   // this.get / this.set / this.isModified all understand dot-paths natively.
-  schema.pre("save", function (next) {
+  // NOTE: async style (no next param) is required for Mongoose 9 — callback-style
+  // hooks (function(next)) are unreliable in Mongoose 9 / kareem 2.6+ because
+  // next may not be passed, throwing "next is not a function" at runtime.
+  schema.pre("save", async function () {
     for (const field of fields) {
       if (this.isModified(field)) {
         const val = this.get(field);
         if (val) this.set(field, encrypt(val));
       }
     }
-    next();
   });
 
   // Encrypt before findOneAndUpdate / updateOne / updateMany.

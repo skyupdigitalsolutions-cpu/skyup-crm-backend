@@ -95,11 +95,15 @@ whatsAppConversationSchema.index({ waPhoneHash: 1, company: 1 }, { unique: true 
 // ── Compute waPhoneHash BEFORE encryption runs ────────────────────────────────
 // Registered before encryptedFieldsPlugin below so it always sees the
 // PLAINTEXT waPhone — hook order follows registration order in Mongoose.
-whatsAppConversationSchema.pre("save", function (next) {
+// NOTE: zero-arity (no `next` param) is deliberate — see models/AccessAuditLog.js
+// for why: a callback-style `function (next) { ...; next(); }` pre-save hook can
+// silently fail with "next is not a function" on this Mongoose 9 setup, which
+// would mean waPhoneHash never gets computed on create() with no visible error.
+// Zero-arity hooks are treated as promise-based and don't have that failure mode.
+whatsAppConversationSchema.pre("save", function () {
   if (this.isModified("waPhone") && this.waPhone) {
     this.waPhoneHash = hmac(this.waPhone);
   }
-  next();
 });
 
 function computeWaPhoneHashOnUpdate() {

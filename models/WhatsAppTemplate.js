@@ -91,11 +91,13 @@ whatsAppTemplateSchema.index({ company: 1, isNurtureTemplate: 1, funnelStage: 1 
 // NOTE: this does NOT fire for Model.bulkWrite() (the sync path uses it) —
 // bulkWrite bypasses all schema middleware. msg91TemplateService.js computes
 // the hash and encrypts the value itself for that reason.
-whatsAppTemplateSchema.pre("save", function (next) {
+// Zero-arity (no `next` param) is deliberate — see models/AccessAuditLog.js:
+// a callback-style `function (next) { ...; next(); }` pre-save hook can
+// silently fail with "next is not a function" on this Mongoose 9 setup.
+whatsAppTemplateSchema.pre("save", function () {
   if (this.isModified("integratedNumber") && this.integratedNumber) {
     this.integratedNumberHash = hmac(this.integratedNumber);
   }
-  next();
 });
 
 function computeIntegratedNumberHashOnUpdate() {
