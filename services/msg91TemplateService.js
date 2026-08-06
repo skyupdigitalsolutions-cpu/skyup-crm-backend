@@ -344,6 +344,14 @@ async function syncTemplatesForCompany(companyId) {
   let other   = 0;
   const ops = [];
 
+  // Capture the ACTUAL field names MSG91 returned, so we can see whether a
+  // status field exists under a name we have not checked yet. Surfaced in the
+  // sync response and logged — this is how we stop guessing.
+  const sampleKeys = templates[0] ? Object.keys(templates[0]) : [];
+  const sampleRow  = templates[0] ? JSON.stringify(templates[0]).slice(0, 600) : "";
+  console.log("[msg91Templates] fields returned by MSG91:", sampleKeys.join(", "));
+  console.log("[msg91Templates] first template raw:", sampleRow);
+
   for (const t of templates) {
     const name = String(
       t.template_name || t.name || t.templateName || t.elementName || ""
@@ -374,8 +382,10 @@ async function syncTemplatesForCompany(companyId) {
               // boolean/numeric forms some APIs use
               (t.is_active === true || t.active === true || t.enabled === true ? "ENABLED" : undefined) ??
               (t.is_active === false || t.active === false || t.enabled === false ? "DISABLED" : undefined) ??
-              // Nothing returned → the API only lists live templates
-              "APPROVED"
+              // Nothing returned → we genuinely do not know. Do NOT claim
+              // "Approved" — an inaccurate green badge is worse than an honest
+              // "Unknown", because it hides pending templates that will fail.
+              "UNKNOWN"
             ),
             // Keep whatever the API actually sent so the UI can show the truth
             rawStatusField: (() => {
@@ -405,7 +415,7 @@ async function syncTemplatesForCompany(companyId) {
     `[msg91Templates] synced ${ops.length} template(s) — ` +
     `${nurture} nurture-library, ${other} other — via ${url}`
   );
-  return { total: ops.length, nurture, other, endpoint: url };
+  return { total: ops.length, nurture, other, endpoint: url, sampleKeys, sampleRow };
 }
 
 /**
