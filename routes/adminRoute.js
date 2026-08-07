@@ -65,14 +65,14 @@ const {
 const { protectAdmin, requireCompanySuperAdmin } = require("../middlewares/adminAuthMiddleware");
 const { validateObjectId } = require("../middlewares/validateObjectId");
 const { protectAny } = require("../middlewares/authMiddleware");
-const { authLimiter }  = require("../middlewares/rateLimiter");
+const { authLimiter, ipFloodLimiter } = require("../middlewares/rateLimiter");
 const { checkLimit }   = require("../middlewares/entitlementMiddleware");
 const User             = require("../models/Users");
 const Admin            = require("../models/Admin");
 
 // ── Auth (public) ─────────────────────────────────────────────────────────────
-router.post("/register", authLimiter, registerAdmin);
-router.post("/login",    authLimiter, loginAdmin);
+router.post("/register", ipFloodLimiter, authLimiter, registerAdmin);
+router.post("/login",    ipFloodLimiter, authLimiter, loginAdmin);
 router.post("/logout",   protectAdmin, logoutAdmin);
 
 // ── Company-specific routes (must be before /:id to avoid conflict) ───────────

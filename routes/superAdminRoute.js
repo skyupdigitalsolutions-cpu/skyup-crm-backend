@@ -33,7 +33,7 @@ const {
 const { protectUnified, authorizeRoles } = require("../middlewares/authMiddleware");
 const { protectSuperAdmin }              = require("../middlewares/superAdminMiddleware");
 const companyIsolation                   = require("../middlewares/companyIsolation");
-const { authLimiter }                    = require("../middlewares/rateLimiter");
+const { authLimiter, ipFloodLimiter } = require("../middlewares/rateLimiter");
 
 // Custom financial reports (per company, free-form fields, AI analysis).
 const {
@@ -48,10 +48,10 @@ const {
 } = require("../controllers/customReportController");
 
 // ── Auth (public) ─────────────────────────────────────────────────────────────
-router.post("/register",   authLimiter, registerSuperAdmin);
-router.post("/login",      authLimiter, loginSuperAdmin);
-router.post("/verify-otp", authLimiter, verifySuperAdminOtp);
-router.post("/resend-otp", authLimiter, resendSuperAdminOtp);
+router.post("/register",   ipFloodLimiter, authLimiter, registerSuperAdmin);
+router.post("/login",      ipFloodLimiter, authLimiter, loginSuperAdmin);
+router.post("/verify-otp", ipFloodLimiter, authLimiter, verifySuperAdminOtp);
+router.post("/resend-otp", ipFloodLimiter, authLimiter, resendSuperAdminOtp);
 
 // ── Protected routes — unified middleware stack ───────────────────────────────
 router.get("/dashboard",
