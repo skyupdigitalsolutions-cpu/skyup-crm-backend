@@ -73,16 +73,54 @@ const generalLimiter = rateLimit({
 });
 
 // ── Auth rate limiter (login / register endpoints) ────────────────────────────
+// PERF/PRODUCTION FIX: this was keyed by IP ALONE — `auth:${ip}` — with max: 30
+// per 15 minutes shared by EVERY request from that IP. For a field team of
+// 50-100 mobile agents this is a real outage waiting to happen: anyone behind
+// the same office WiFi, or the same mobile carrier's NAT gateway (very common
+// in India — many subscribers share one public IP), shares that same bucket.
+// A normal morning login rush of even 10-15 agents from the same network
+// exhausts it in minutes, and every agent after that gets "Too many
+// authentication attempts" trying to log into THEIR OWN separate account.
+//
+// Fix: key by IP + the account identifier (email) being attempted, so the
+// limit is effectively PER ACCOUNT — this still fully stops someone hammering
+// one specific account (brute force), but two different employees logging
+// into two different accounts from the same IP no longer share a bucket.
+// A second, much higher, IP-only limiter behind it (ipFloodLimiter below)
+// remains as a blunt anti-flood backstop against a single IP hitting the auth
+// endpoints with an unreasonable number of DIFFERENT accounts.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 30,
+  max: 10, // per ACCOUNT, not per IP — was 30 shared across everyone on the IP
   standardHeaders: true,
   legacyHeaders: false,
   store: makeStore("auth"),
-  keyGenerator: (req) => `auth:${ipKeyGenerator(req.ip)}`,
+  keyGenerator: (req) => {
+    const identifier = (req.body?.email || "").toLowerCase().trim();
+    return identifier
+      ? `auth:${ipKeyGenerator(req.ip)}:${identifier}`
+      : `auth:${ipKeyGenerator(req.ip)}`; // no identifier in body — fall back to IP-only
+  },
   message: {
     success: false,
     message: "Too many authentication attempts, please try again after 15 minutes.",
+  },
+});
+
+// Blunt per-IP backstop so one IP can't hammer many DIFFERENT accounts to get
+// around the per-account limiter above. Set high enough that a legitimate
+// 50-100 person office/field team logging in from a shared network in a
+// short window is never affected — this exists only to catch genuine abuse.
+const ipFloodLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: makeStore("auth-ip"),
+  keyGenerator: (req) => `authip:${ipKeyGenerator(req.ip)}`,
+  message: {
+    success: false,
+    message: "Too many authentication attempts from this network, please try again after 15 minutes.",
   },
 });
 
@@ -156,6 +194,7 @@ module.exports = {
   redisClient,
   generalLimiter,
   authLimiter,
+  ipFloodLimiter,
   blacklistToken,
   isTokenBlacklisted,
   acquireWaDedupLock,
