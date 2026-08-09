@@ -97,16 +97,30 @@ const receiveGoogleWebhook = async (req, res) => {
     console.log(`✅ Config matched — campaign: "${config.campaignName}" | company: ${config.company}`);
 
     // ── Deduplication ────────────────────────────────────────────────────────
+    // googleLeadId sources (in priority order):
+    //   1. body.lead_id / body.leadId / body.google_lead_id  — real Google Ads lead IDs
+    //   2. body._id — MongoDB _id from the ads backend (Railway), used as surrogate key
+    //      to prevent duplicate forwarding when Railway restarts mid-request.
     const googleLeadId =
       body.lead_id        ||
       body.leadId         ||
       body.google_lead_id ||
+      (typeof body._id === 'string' && body._id.length >= 12 ? body._id : null) ||
       null;
 
     if (googleLeadId) {
-      const duplicate = await Lead.findOne({ leadgenId: googleLeadId });
+      // IMPORTANT: dedup is company-scoped — same leadgenId is valid across companies.
+      // The old code used findOne({ leadgenId }) without company filter which would
+      // incorrectly block a lead from company B if company A already had that leadgenId.
+      const duplicate = await Lead.findOne({
+        company:   config.company,
+        leadgenId: googleLeadId,
+      });
       if (duplicate) {
-        console.log(`⏭ Duplicate — leadId "${googleLeadId}" already exists in DB`);
+        console.log(
+          `⏭ Duplicate — leadId "${googleLeadId}" already exists for company ${config.company}`,
+          `| matched lead: ${duplicate._id} | phone: ${duplicate.mobile}`
+        );
         return;
       }
     }
@@ -157,17 +171,52 @@ const receiveGoogleWebhook = async (req, res) => {
       if (lang) leadPayload.language = lang;
     } catch (e) { /* language is optional — ignore detection errors */ }
 
-    // Phone-based dedup — no findOne, rely solely on the unique compound index
-    // { company, normalizedPhone } with partialFilterExpression: { $type: string }.
-    // The pre-validate hook in Leads.js sets normalizedPhone from mobile automatically.
-    // Lead.create is atomic — E11000 fires instantly if the phone already exists.
-    // This eliminates the findOne→create race window that caused duplicate forwarding.
+    // ── Phone-based dedup ────────────────────────────────────────────────────
+    // Strategy: attempt Lead.create directly.
+    // The pre-validate hook sets normalizedPhone from mobile automatically.
+    // The unique compound index { company, normalizedPhone } (partialFilterExpression:
+    // { $type: string }) rejects any duplicate atomically — no findOne race window.
+    //
+    // E11000 error codes and their meaning:
+    //   company_normalizedPhone_unique     → same primary phone already exists
+    //   company_normalizedSecondaryPhone_unique → same secondary phone already exists
+    //   company_leadgenId_unique           → same Google leadgenId already exists
+    //
+    // All three are safe to skip — they mean we already have this lead.
+    const normPhoneForLog = normalizePhone(leadPayload.mobile);
+    console.log(
+      `   [dedup-check] company: ${config.company}`,
+      `| leadgenId: ${googleLeadId || 'none'}`,
+      `| normalizedPhone: ${normPhoneForLog || 'null (invalid/short number)'}`
+    );
+
     let newLead;
     try {
       newLead = await Lead.create(leadPayload);
     } catch (createErr) {
       if (createErr.code === 11000) {
-        console.log(`   ⏭ Duplicate phone ${leadPayload.mobile} — skipping`);
+        // Identify which index caused the duplicate for clear logging
+        const keyPattern = createErr.keyPattern || {};
+        let dupReason = 'unknown field';
+        if (keyPattern.normalizedPhone)          dupReason = `primary phone (${normPhoneForLog})`;
+        else if (keyPattern.normalizedSecondaryPhone) dupReason = 'secondary phone';
+        else if (keyPattern.leadgenId)           dupReason = `leadgenId (${googleLeadId})`;
+
+        // Find the matched lead for logging
+        const matchedLead = await Lead.findOne(
+          createErr.keyValue?.normalizedPhone
+            ? { company: config.company, normalizedPhone: createErr.keyValue.normalizedPhone }
+            : createErr.keyValue?.leadgenId
+            ? { company: config.company, leadgenId: createErr.keyValue.leadgenId }
+            : { company: config.company, mobile: leadPayload.mobile }
+        ).select('_id name mobile').lean();
+
+        console.log(
+          `   ⏭ Duplicate — reason: ${dupReason}`,
+          `| company: ${config.company}`,
+          `| matched lead: ${matchedLead?._id || 'not found'}`,
+          `| matched name: ${matchedLead?.name || 'unknown'}`
+        );
         return;
       }
       throw createErr;
