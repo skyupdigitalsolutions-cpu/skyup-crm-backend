@@ -157,18 +157,25 @@ const receiveGoogleWebhook = async (req, res) => {
       if (lang) leadPayload.language = lang;
     } catch (e) { /* language is optional — ignore detection errors */ }
 
-    // Phone-based dedup — set normalizedPhone on payload before insert so the
-    // unique compound index { company, normalizedPhone } rejects any duplicate
-    // atomically. No findOne needed — E11000 is the dedup signal.
+    // Phone-based dedup
     const normPhone = normalizePhone(leadPayload.mobile);
-    if (normPhone) leadPayload.normalizedPhone = normPhone;
+    if (normPhone) {
+      const phoneDup = await Lead.findOne(
+        { company: config.company, normalizedPhone: normPhone },
+        { _id: 1, name: 1 }
+      ).lean();
+      if (phoneDup) {
+        console.log(`   ⏭ Phone duplicate — ${leadPayload.mobile} → ${normPhone}, exists as "${phoneDup.name}"`);
+        return;
+      }
+    }
 
     let newLead;
     try {
       newLead = await Lead.create(leadPayload);
     } catch (createErr) {
       if (createErr.code === 11000) {
-        console.log(`   ⏭ Duplicate phone ${leadPayload.mobile} — skipping`);
+        console.log(`   ⚠ Race-condition duplicate for ${leadPayload.mobile} — skipping`);
         return;
       }
       throw createErr;
