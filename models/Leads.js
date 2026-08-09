@@ -64,7 +64,11 @@ const meetingRemarkSchema = new mongoose.Schema(
 
 const leadSchema = mongoose.Schema(
   {
-    leadgenId: { type: String, unique: true, sparse: true },
+    // leadgenId is scoped to company via a compound partial index below.
+    // Do NOT add unique:true here — that would create a global unique index
+    // which incorrectly blocks two different companies from having the same
+    // Google Ads leadgenId (which is valid and expected in multi-tenant setups).
+    leadgenId: { type: String, default: null },
     name:      { type: String, required: true, trim: true },
     mobile:    { type: String, required: true },
     email:     { type: String, default: "", trim: true },
@@ -580,6 +584,21 @@ leadSchema.index(
   }
 );
 leadSchema.index({ normalizedSecondaryPhone: 1 }, { sparse: true });
+
+// ── LEADGEN DEDUP: Company-scoped partial index on leadgenId ──────────────────
+// Replaces the old global unique:true sparse index on the field itself.
+// This correctly scopes dedup to within a single company (multi-tenant safe).
+// partialFilterExpression ensures null/missing leadgenId values are excluded.
+leadSchema.index(
+  { company: 1, leadgenId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      leadgenId: { $type: 'string', $exists: true },
+    },
+    name: 'company_leadgenId_unique',
+  }
+);
 
 
 
