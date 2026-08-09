@@ -157,11 +157,11 @@ const receiveGoogleWebhook = async (req, res) => {
       if (lang) leadPayload.language = lang;
     } catch (e) { /* language is optional — ignore detection errors */ }
 
-    // Phone-based dedup — rely solely on the unique compound index
-    // { company, normalizedPhone } with partialFilterExpression.
-    // The pre-validate hook sets normalizedPhone from mobile automatically.
-    // Attempting Lead.create directly is atomic — no findOne race window.
-    // E11000 = duplicate phone → skip cleanly.
+    // Phone-based dedup — no findOne, rely solely on the unique compound index
+    // { company, normalizedPhone } with partialFilterExpression: { $type: string }.
+    // The pre-validate hook in Leads.js sets normalizedPhone from mobile automatically.
+    // Lead.create is atomic — E11000 fires instantly if the phone already exists.
+    // This eliminates the findOne→create race window that caused duplicate forwarding.
     let newLead;
     try {
       newLead = await Lead.create(leadPayload);
