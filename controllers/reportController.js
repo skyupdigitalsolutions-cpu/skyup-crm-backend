@@ -49,6 +49,10 @@ const dailyReport = async (req, res) => {
         mobile: maskPhone(f.mobile),
         email:  maskEmail(f.email),
       }));
+      report.missingFollowUps = report.missingFollowUps.map(f => ({
+        ...f,
+        mobile: maskPhone(f.mobile),
+      }));
     }
 
     res.json({ success: true, ...report });
