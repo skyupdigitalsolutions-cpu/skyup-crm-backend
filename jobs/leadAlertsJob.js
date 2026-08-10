@@ -28,6 +28,14 @@
 //     Trigger: scheduledCall with done=false and scheduledAt <= today.
 //     Recipients: assignedAdmin only (scoped to their own leads).
 //
+//  5. MISSING FOLLOW-UP DATE ALERT
+//     Fires: every 15 minutes
+//     Trigger: lead is 24h+ old, has ZERO scheduledCalls entries ever (no
+//              follow-up date ever set), status not 'Not Interested' or
+//              'Converted', not closed/merged. Re-fires every 24h until the
+//              employee finally schedules one.
+//     Recipients: the lead's assigned EMPLOYEE (User, not Admin).
+//
 //  HOW TO ACTIVATE — already wired in server.js:
 //    const { startLeadAlertsJob } = require('./jobs/leadAlertsJob');
 //    startLeadAlertsJob();
@@ -36,7 +44,8 @@
 const cron  = require('node-cron');
 const Lead  = require('../models/Leads');
 const Admin = require('../models/Admin');
-const { sendNoActionAlert, sendFollowUpAlert, sendEscalationAlert } = require('../services/fcmService');
+const User  = require('../models/Users');
+const { sendNoActionAlert, sendFollowUpAlert, sendEscalationAlert, sendNoFollowUpAlert } = require('../services/fcmService');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -285,11 +294,82 @@ async function runFollowUpAlerts() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  JOB 5 — Missing Follow-Up Date Alert (runs every 15 minutes)
+//
+//  Trigger: lead created 24h+ ago, has NEVER had a single scheduledCalls entry
+//           (of any type) added — i.e. the employee never picked a follow-up
+//           date — AND status is not 'Not Interested' or 'Converted', AND the
+//           lead isn't closed/merged.
+//  Recipient: the lead's assigned EMPLOYEE (User, not Admin) via FCM push +
+//             socket (room `agent:<userId>`) — reuses sendNewLeadNotification's
+//             delivery pattern.
+//  Re-fires every 24h per lead (via noFollowUpAlertLastSentAt) until the
+//  employee finally schedules a follow-up, at which point the query naturally
+//  stops matching that lead.
+// ─────────────────────────────────────────────────────────────────────────────
+async function runNoFollowUpDateCheck() {
+  try {
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const leads = await Lead.find({
+      user:       { $ne: null },
+      mergedInto: null,
+      isClosed:   { $ne: true },
+      status:     { $nin: ['Not Interested', 'Converted'] },
+      date:       { $lte: twentyFourHoursAgo },
+      // Never had ANY scheduledCalls entry at all — "no follow-up date ever set"
+      'scheduledCalls.0': { $exists: false },
+      // Re-fire every 24h: never alerted, or last alert was 24h+ ago
+      $or: [
+        { noFollowUpAlertLastSentAt: null },
+        { noFollowUpAlertLastSentAt: { $lte: twentyFourHoursAgo } },
+      ],
+    })
+      .select('_id name mobile company user status date')
+      .lean();
+
+    if (!leads.length) {
+      console.log('[LeadAlertsJob] No-follow-up-date check: 0 lead(s) due.');
+      return;
+    }
+
+    // Group by assigned employee so each gets ONE notification, not one per lead
+    const byUser = new Map();
+    for (const lead of leads) {
+      const uid = String(lead.user);
+      if (!byUser.has(uid)) byUser.set(uid, []);
+      byUser.get(uid).push(lead);
+    }
+
+    console.log(`[LeadAlertsJob] No-follow-up-date: ${leads.length} lead(s) across ${byUser.size} employee(s).`);
+
+    for (const [userId, userLeads] of byUser) {
+      const user = await User.findById(userId).select('_id name fcmToken').lean();
+      if (!user) continue;
+
+      await sendNoFollowUpAlert(user, userLeads);
+
+      await Lead.updateMany(
+        { _id: { $in: userLeads.map(l => l._id) } },
+        { $set: { noFollowUpAlertLastSentAt: new Date() } }
+      );
+    }
+  } catch (err) {
+    console.error('[LeadAlertsJob] runNoFollowUpDateCheck error:', err.message);
+  }
+}
+
 // ── Scheduler ─────────────────────────────────────────────────────────────────
 function startLeadAlertsJob() {
   // No-action + escalation check — every 15 minutes
   cron.schedule('*/15 * * * *', () => {
     runNewLeadNoActionCheck();
+  });
+
+  // Missing follow-up date check (employee nudge) — every 15 minutes
+  cron.schedule('*/15 * * * *', () => {
+    runNoFollowUpDateCheck();
   });
 
   // Follow-up due alerts — once a day at 9:00 AM
@@ -300,7 +380,13 @@ function startLeadAlertsJob() {
 
   console.log('[LeadAlertsJob] ✅ Lead alert jobs started');
   console.log('  → No-action (admin 1h + 2h, super_admin 3h escalation): every 15 min');
+  console.log('  → Missing follow-up date (employee, 24h+, re-fires 24h): every 15 min');
   console.log('  → Follow-up due (admin only):                            daily at 9:00 AM');
 }
 
-module.exports = { startLeadAlertsJob, runFollowUpAlerts, runNewLeadNoActionCheck };
+module.exports = {
+  startLeadAlertsJob,
+  runFollowUpAlerts,
+  runNewLeadNoActionCheck,
+  runNoFollowUpDateCheck,
+};
