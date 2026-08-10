@@ -85,7 +85,7 @@ dailyReportConfigSchema.methods.getDecryptedToken = function () {
   return decrypt(this.telegramBotToken);
 };
 
-// ── Index ─────────────────────────────────────────────────────────────────────
-dailyReportConfigSchema.index({ company: 1 }, { unique: true });
+// Note: unique index on company is handled by { unique: true } on the schema field above.
+// No separate .index() call needed — that would create a duplicate index warning.
 
 module.exports = mongoose.model('DailyReportConfig', dailyReportConfigSchema);
