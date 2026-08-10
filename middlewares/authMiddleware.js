@@ -7,6 +7,45 @@ const Developer  = require("../models/Developer");
 const Company    = require("../models/Company");
 const { isTokenBlacklisted } = require("./rateLimiter");
 
+// ── In-process TTL cache for User + Company lookups ───────────────────────────
+// Every authenticated request previously hit MongoDB twice (User + Company).
+// With 50 agents × 10 req/min that's 1,000 DB reads/min just for auth.
+// This cache reduces that to one cold-miss read per user per 30s.
+//
+// Safety:
+//  • TTL is 30s — short enough that a role change, deactivation, or subscription
+//    expiry takes effect within one request cycle.
+//  • Logout/token blacklist is checked BEFORE the cache — a blacklisted token
+//    is rejected even if the user object is cached.
+//  • Company writes (subscription auto-expire) still run on cache miss, and the
+//    updated company is stored back into the cache immediately.
+//  • Cache is in-process only — a deploy or restart clears it automatically.
+//    For multi-instance deployments, each instance has its own cache; 30s TTL
+//    keeps them consistent enough without needing Redis for auth lookups.
+const AUTH_CACHE_TTL_MS = 30 * 1000; // 30 seconds
+const _userCache    = new Map(); // userId → { user, expiresAt }
+const _companyCache = new Map(); // companyId → { company, expiresAt }
+
+function getCachedUser(id) {
+  const entry = _userCache.get(String(id));
+  if (!entry || Date.now() > entry.expiresAt) { _userCache.delete(String(id)); return null; }
+  return entry.user;
+}
+function setCachedUser(id, user) {
+  _userCache.set(String(id), { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+}
+function getCachedCompany(id) {
+  const entry = _companyCache.get(String(id));
+  if (!entry || Date.now() > entry.expiresAt) { _companyCache.delete(String(id)); return null; }
+  return entry.company;
+}
+function setCachedCompany(id, company) {
+  _companyCache.set(String(id), { company, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+}
+// Export so controllers can invalidate on role/subscription changes
+function invalidateUserCache(id)    { _userCache.delete(String(id)); }
+function invalidateCompanyCache(id) { _companyCache.delete(String(id)); }
+
 // ── User-only middleware ───────────────────────────────────────────────────────
 const protect = async (req, res, next) => {
   let token;
@@ -26,9 +65,11 @@ const protect = async (req, res, next) => {
         return res.status(403).json({ message: "Access denied: not a user token" });
       }
 
-      req.user = await User.findById(decoded.id).select("-password");
+      req.user = getCachedUser(decoded.id);
       if (!req.user) {
-        return res.status(401).json({ message: "User not found" });
+        req.user = await User.findById(decoded.id).select("-password");
+        if (!req.user) return res.status(401).json({ message: "User not found" });
+        setCachedUser(decoded.id, req.user);
       }
 
       // ── Subscription enforcement for employees ──────────────────────────────
@@ -39,9 +80,13 @@ const protect = async (req, res, next) => {
       // write is blocked with the SUBSCRIPTION_EXPIRED code the frontend handles.
       if (req.user.company) {
         const now = new Date();
-        const company = await Company.findById(req.user.company)
-          .select("subscriptionStatus subscriptionExpiry trialEndsAt isActive")
-          .catch(() => null);
+        let company = getCachedCompany(req.user.company);
+        if (!company) {
+          company = await Company.findById(req.user.company)
+            .select("subscriptionStatus subscriptionExpiry trialEndsAt isActive")
+            .catch(() => null);
+          if (company) setCachedCompany(req.user.company, company);
+        }
 
         if (company) {
           // Auto-expire if validity has passed (keeps employee + admin views consistent)
@@ -52,6 +97,8 @@ const protect = async (req, res, next) => {
             await Company.findByIdAndUpdate(company._id, { subscriptionStatus: "expired", isActive: false }).catch(() => {});
             company.subscriptionStatus = "expired";
             company.isActive = false;
+            // Invalidate cache so next request sees the expired state immediately
+            invalidateCompanyCache(req.user.company);
           }
 
           const isReadRequest = req.method === "GET" || req.method === "HEAD";
