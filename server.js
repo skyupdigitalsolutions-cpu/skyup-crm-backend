@@ -90,6 +90,7 @@ const { startMeetingReminderJob }     = require('./jobs/meetingReminderJob');
 const { startFollowUpReminderJob }    = require('./jobs/followUpReminderJob');
 const { startNurtureSequenceJob }     = require('./jobs/nurtureSequenceJob'); // NOT started yet — see note below, kept off until templates are reviewed
 const { startMetaAutoSyncJob }        = require('./jobs/metaAutoSyncJob'); // NEW — auto-syncs new Meta ad sets & forms
+const { startDailyReportJob }         = require('./jobs/dailyReportJob');
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute         = require('./routes/smsCampaign');
@@ -97,7 +98,8 @@ const smsCampaignEmployeeRoute = require('./routes/smsCampaignEmployee');
 const smsHistoryRoute  = require('./routes/smsHistory');
 
 // ── Saanvi Voicebot Proxy ─────────────────────────────────────────────────────
-const saanviProxyRoute = require('./routes/saanviProxy');
+const saanviProxyRoute    = require('./routes/saanviProxy');
+const dailyReportRoute    = require('./routes/dailyReportRoute');
 
 // ── WhatsApp Routes (MSG91 + Meta) ────────────────────────────────────────────
 const whatsappRoutes    = require('./routes/whatsappRoutes');
@@ -323,6 +325,7 @@ app.use('/api/google-ads-config',   googleAdsConfigRoute);
 app.use('/api/google-analytics',    googleAnalyticsRoute);
 app.use('/api/google-ads-api',      googleAdsApiRoute);
 app.use('/',                        googleWebhookRoute);
+app.use('/daily-report',            dailyReportRoute);
 app.use('/api/website-config',      websiteConfigRoute);
 app.use('/api/chat',                chatRoutes);
 app.use('/api/email-campaign',      emailCampaignRoute);
@@ -475,7 +478,8 @@ connectDB().then(() => {
     // the line below once rules + templates are reviewed and you're ready
     // to go live for the one enabled company:
     startNurtureSequenceJob();   // 11:00 AM IST daily, company 6a22662b7aea6e4034f44aae
-    startMetaAutoSyncJob();         // NEW — every 30 min: auto-sync new Meta ad sets & lead forms into MetaConfig
+    startMetaAutoSyncJob();
+    startDailyReportJob();         // Sends daily Telegram performance report at each company's configured time
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();
