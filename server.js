@@ -346,6 +346,8 @@ app.use('/api/reports',             require('./routes/reportRoutes'));
 app.use('/api/nurture',             require('./routes/nurtureRoute'));
 app.use('/api/call-logs',           require('./routes/mobileCallLog'));
 app.use('/api/transcription',       require('./routes/transcription'));
+// Employee Excel / Google Sheet integration (independent of Daily Report/Telegram)
+app.use('/api/sheet-integration',   require('./routes/sheetIntegration'));
 
 // ── APK Download Routes ───────────────────────────────────────────────────────
 app.get('/download', (req, res) => {
