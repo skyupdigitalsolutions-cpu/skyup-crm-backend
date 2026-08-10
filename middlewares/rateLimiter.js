@@ -14,10 +14,14 @@ const { createClient }              = require("redis");
 const redisClient = createClient({
   url: process.env.REDIS_URL,
   socket: {
-    reconnectStrategy: (retries) => {
-      if (retries > 10) return new Error("Redis: too many reconnect attempts");
-      return Math.min(retries * 100, 3000);
-    },
+    // Reconnect FOREVER with a capped backoff. Previously this returned an
+    // Error once retries passed 10, which made node-redis PERMANENTLY give up.
+    // A brief Redis blip then left the client "closed" for good — and because
+    // the rate-limiter store threw "The client is closed" on every request, the
+    // ENTIRE API returned 500s until a manual redeploy. Never stop retrying:
+    // when Redis comes back the client reconnects on its own and limiting
+    // resumes automatically. Backoff caps at 5s so we don't hammer the server.
+    reconnectStrategy: (retries) => Math.min(retries * 200, 5000),
   },
 });
 
@@ -29,6 +33,34 @@ redisClient.connect().catch((err) => {
 redisClient.on("connect",      () => console.log("✅ Redis connected"));
 redisClient.on("error",        (err) => console.error("Redis error:", err.message));
 redisClient.on("reconnecting", () => console.log("🔄 Redis reconnecting..."));
+
+// ── Resilience helpers ────────────────────────────────────────────────────────
+// The rate limiters use Redis as their store. If Redis is unreachable we must
+// DEGRADE (skip limiting), not take the whole API down. The Redis helper
+// functions further below already fail open with `if (!redisClient.isReady)`;
+// these two apply the same policy to the rate-limit middleware.
+
+// True when the shared client is not currently usable (down / reconnecting).
+const redisDown = () => !redisClient.isReady;
+
+// Wrap a rate-limit middleware so that if its store errors (e.g. Redis drops
+// mid-request), the request is ALLOWED through instead of 500ing. When the
+// limit is genuinely exceeded, express-rate-limit sends its own 429 and never
+// calls our callback, so real limiting still works — we only intercept errors.
+function failOpen(limiter) {
+  return (req, res, next) => {
+    limiter(req, res, (err) => {
+      if (err) {
+        console.error(
+          "⚠️  Rate limiter store error — failing open (request allowed):",
+          err.message,
+        );
+        return next(); // serve the request rather than crash it
+      }
+      next();
+    });
+  };
+}
 
 // ── Each limiter gets its OWN store instance with a unique prefix ─────────────
 function makeStore(prefix) {
@@ -52,6 +84,9 @@ const generalLimiter = rateLimit({
     return ipKeyGenerator(req.ip);
   },
   skip: (req) => {
+    // Redis unavailable → skip limiting entirely rather than let the store
+    // throw "The client is closed" on every request (which 500'd the whole API).
+    if (redisDown()) return true;
     const p = req.path || "";
     return (
       p.startsWith("/socket.io")       ||
@@ -95,6 +130,7 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   store: makeStore("auth"),
+  skip: () => redisDown(), // Redis down → don't block logins on it
   keyGenerator: (req) => {
     const identifier = (req.body?.email || "").toLowerCase().trim();
     return identifier
@@ -117,6 +153,7 @@ const ipFloodLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   store: makeStore("auth-ip"),
+  skip: () => redisDown(),
   keyGenerator: (req) => `authip:${ipKeyGenerator(req.ip)}`,
   message: {
     success: false,
@@ -192,9 +229,10 @@ async function acquireWaDedupLock(waMessageId) {
 
 module.exports = {
   redisClient,
-  generalLimiter,
-  authLimiter,
-  ipFloodLimiter,
+  // Wrapped so a Redis outage degrades to "no limiting" instead of a 500 storm.
+  generalLimiter: failOpen(generalLimiter),
+  authLimiter:    failOpen(authLimiter),
+  ipFloodLimiter: failOpen(ipFloodLimiter),
   blacklistToken,
   isTokenBlacklisted,
   acquireWaDedupLock,
