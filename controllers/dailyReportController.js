@@ -1,8 +1,12 @@
 // controllers/dailyReportController.js
 // ─────────────────────────────────────────────────────────────────────────────
 // REST API for Daily Telegram Report admin settings.
-// All endpoints require protectAdmin (company admin or super_admin).
-// Company isolation: every query includes the caller's companyId.
+//
+// Company ID resolution (in priority order):
+//   1. req.params.companyId  — developer route (/developer/companies/:companyId/daily-report/*)
+//   2. req.admin.company     — admin token (protectAdmin)
+//   3. x-company-id header   — developer panel fallback
+//
 // Telegram bot tokens are NEVER returned in API responses — masked only.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -13,23 +17,21 @@ const DailyReportConfig  = require('../models/DailyReportConfig');
 const DailyReportHistory = require('../models/DailyReportHistory');
 const {
   generateAndSend,
-  buildReport,
-  formatTelegramMessages,
-  sendTelegramMessage,
 } = require('../services/dailyReportService');
 
-// ── Resolve company ID from admin token ──────────────────────────────────────
+// ── Resolve company ID from request ──────────────────────────────────────────
 function getCompanyId(req) {
   return (
-    req.companyId ||
-    req.admin?.company?._id ||
-    req.admin?.company ||
+    req.params?.companyId                    ||  // developer route param
+    req.companyId                            ||  // set by some middlewares
+    req.admin?.company?._id                  ||  // admin token (populated)
+    req.admin?.company                       ||  // admin token (raw id)
+    req.headers?.['x-company-id']            ||  // explicit header (developer panel)
     null
   );
 }
 
 // ── GET /daily-report/settings ────────────────────────────────────────────────
-// Returns config with bot token MASKED. Never exposes the real token.
 const getSettings = async (req, res) => {
   try {
     const companyId = getCompanyId(req);
@@ -38,26 +40,20 @@ const getSettings = async (req, res) => {
     const config = await DailyReportConfig.findOne({ company: companyId }).lean();
 
     if (!config) {
-      // Return defaults — no config yet
       return res.json({
-        enabled:         false,
-        telegramBotToken:'',
-        telegramChatId:  '',
-        reportTime:      '19:00',
-        timezone:        'Asia/Kolkata',
-        sendEmptyReport: false,
-        configured:      false,
+        enabled: false, telegramBotToken: '', telegramChatId: '',
+        reportTime: '19:00', timezone: 'Asia/Kolkata', sendEmptyReport: false,
+        configured: false,
       });
     }
 
     res.json({
       enabled:          config.enabled,
-      // Never return real token — mask it
       telegramBotToken: config.telegramBotToken ? '••••••••••••••••' : '',
-      telegramChatId:   config.telegramChatId || '',
-      reportTime:       config.reportTime || '19:00',
-      timezone:         config.timezone   || 'Asia/Kolkata',
-      sendEmptyReport:  config.sendEmptyReport || false,
+      telegramChatId:   config.telegramChatId   || '',
+      reportTime:       config.reportTime        || '19:00',
+      timezone:         config.timezone          || 'Asia/Kolkata',
+      sendEmptyReport:  config.sendEmptyReport   || false,
       configured:       !!(config.telegramBotToken && config.telegramChatId),
     });
   } catch (err) {
@@ -67,8 +63,6 @@ const getSettings = async (req, res) => {
 };
 
 // ── PUT /daily-report/settings ────────────────────────────────────────────────
-// Saves config. If bot token field is "••••••••••••••••" (masked placeholder),
-// leave the existing token unchanged — only update it when a real value is sent.
 const saveSettings = async (req, res) => {
   try {
     const companyId = getCompanyId(req);
@@ -79,18 +73,14 @@ const saveSettings = async (req, res) => {
       reportTime, timezone, sendEmptyReport,
     } = req.body;
 
-    // Validate reportTime format "HH:MM"
     if (reportTime && !/^\d{2}:\d{2}$/.test(reportTime)) {
       return res.status(400).json({ message: 'reportTime must be HH:MM (e.g. "19:00")' });
     }
-
-    // Validate timezone
     if (timezone) {
       try { new Intl.DateTimeFormat('en', { timeZone: timezone }); }
       catch { return res.status(400).json({ message: `Invalid timezone: ${timezone}` }); }
     }
 
-    // Build update — only update token if a real value (not masked placeholder) was sent
     const update = {};
     if (enabled         !== undefined) update.enabled         = !!enabled;
     if (telegramChatId  !== undefined) update.telegramChatId  = String(telegramChatId).trim();
@@ -98,8 +88,7 @@ const saveSettings = async (req, res) => {
     if (timezone        !== undefined) update.timezone        = timezone;
     if (sendEmptyReport !== undefined) update.sendEmptyReport = !!sendEmptyReport;
 
-    const isMasked = typeof telegramBotToken === 'string' &&
-      telegramBotToken.includes('•');
+    const isMasked = typeof telegramBotToken === 'string' && telegramBotToken.includes('•');
     if (telegramBotToken && !isMasked) {
       update.telegramBotToken = telegramBotToken.trim();
     }
@@ -110,7 +99,10 @@ const saveSettings = async (req, res) => {
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
     );
 
-    res.json({ message: 'Settings saved successfully', configured: !!(config.telegramBotToken && config.telegramChatId) });
+    res.json({
+      message:    'Settings saved successfully',
+      configured: !!(config.telegramBotToken && config.telegramChatId),
+    });
   } catch (err) {
     console.error('[DailyReport] saveSettings error:', err.message);
     res.status(500).json({ message: 'Failed to save settings' });
@@ -118,16 +110,13 @@ const saveSettings = async (req, res) => {
 };
 
 // ── POST /daily-report/test ───────────────────────────────────────────────────
-// Validates token + chatId, generates current report, sends it.
-// Rate-limited by a simple in-memory cooldown (1 per company per 30s).
-const _testCooldown = new Map(); // companyId → timestamp
+const _testCooldown = new Map();
 
 const sendTest = async (req, res) => {
   try {
     const companyId = getCompanyId(req);
     if (!companyId) return res.status(400).json({ message: 'Company context required' });
 
-    // Cooldown: prevent repeated clicks
     const last = _testCooldown.get(String(companyId));
     if (last && Date.now() - last < 30000) {
       return res.status(429).json({ message: 'Please wait 30 seconds before sending another test' });
@@ -154,8 +143,6 @@ const sendTest = async (req, res) => {
 };
 
 // ── POST /daily-report/send-now ───────────────────────────────────────────────
-// Immediately generates and sends today's report.
-// Cooldown: 1 per company per 5 minutes.
 const _sendNowCooldown = new Map();
 
 const sendNow = async (req, res) => {
@@ -195,7 +182,6 @@ const sendNow = async (req, res) => {
 };
 
 // ── GET /daily-report/history ─────────────────────────────────────────────────
-// Returns last 30 report execution records for this company.
 const getHistory = async (req, res) => {
   try {
     const companyId = getCompanyId(req);
@@ -204,7 +190,7 @@ const getHistory = async (req, res) => {
     const history = await DailyReportHistory.find({ company: companyId })
       .sort({ generatedAt: -1 })
       .limit(30)
-      .select('-telegramMessageIds') // no need to expose these
+      .select('-telegramMessageIds')
       .lean();
 
     res.json({ history });
