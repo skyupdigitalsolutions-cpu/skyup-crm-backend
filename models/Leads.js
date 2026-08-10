@@ -403,6 +403,14 @@ const leadSchema = mongoose.Schema(
     // excluded from the follow-up reminder job (other automations still fire).
     followUpReminderOptOut:       { type: Boolean, default: false },
 
+    // ── "No follow-up date set" alert tracking (push notification to EMPLOYEE) ─
+    // leadAlertsJob's runNoFollowUpDateCheck() nudges the assigned employee when
+    // a lead has gone 24h+ since creation with NO scheduledCalls entry at all
+    // (i.e. the employee never picked a follow-up date). Re-fires every 24h
+    // until a follow-up is finally scheduled — this field just tracks the last
+    // time we pinged them so we don't spam every 15-min tick.
+    noFollowUpAlertLastSentAt:    { type: Date, default: null },
+
     // ── Per-outcome automation dedupe (WhatsApp + Email to the LEAD) ──────────
     // Maps an outcome key (e.g. "answered", "notAnswered", "busy", "switchOff",
     // "callBackLater", "notInterested") → the IST calendar-day key ("YYYY-M-D")
@@ -543,6 +551,10 @@ leadSchema.index({ company: 1, user: 1, date: -1 });
 leadSchema.index({ company: 1, phoneRevealCount: 1 });
 // isClosed: used by employee report excludeClosed filter
 leadSchema.index({ company: 1, isClosed: 1 });
+// no-follow-up-date alert: leadAlertsJob's runNoFollowUpDateCheck() scans
+// { company, isClosed:{$ne:true}, status:{$nin}, date:{$lte}, ... } every
+// 15 minutes — this covers the company+date prefix used by that scan.
+leadSchema.index({ company: 1, date: 1, noFollowUpAlertLastSentAt: 1 });
 
 // PERF FIX: covers GET /lead/my-leads — the single most-hit mobile endpoint
 // (every screen open, pull-to-refresh, and background poll). Its query is
