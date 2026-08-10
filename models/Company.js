@@ -580,6 +580,32 @@ const companySchema = mongoose.Schema(
     // global one. Leave disabled/empty to use the platform's global Cloudinary
     // (CLOUDINARY_* env vars). apiSecret is sensitive — never return it to the
     // client (the controller selects it out).
+    // ── Employee Excel / Google Sheet Integration (company-level control) ─────
+    // COMPLETELY INDEPENDENT of Daily Reports and Telegram. This is the
+    // Company-Admin layer of the two-tier gate:
+    //
+    //   Layer 1 (availability)  — Developer/Super Admin turns the feature ON for
+    //     this company via devOverrides.featureToggles.googleSheetIntegration
+    //     (surfaces as ent.googleSheetIntegration). Without it, the admin never
+    //     even sees these settings.
+    //   Layer 2 (enablement)    — the fields below. The Company Admin flips
+    //     `enabled` ON so employees actually see the "Excel / Google Sheet"
+    //     panel option and the backend accepts their requests.
+    //
+    // Effective employee visibility = availability AND enabled (computed in
+    // services/entitlementService.js as ent.googleSheetIntegrationEnabled).
+    //
+    // The allow* sub-permissions are OPTIONAL fine-grained controls (Section 9
+    // of the spec). All default true so enabling the feature "just works", but
+    // an admin can revoke individual capabilities per company.
+    employeeSheetIntegration: {
+      enabled:         { type: Boolean, default: false }, // spec §1: default OFF
+      allowConnect:    { type: Boolean, default: true },
+      allowEdit:       { type: Boolean, default: true },
+      allowDisconnect: { type: Boolean, default: true },
+      allowManualSync: { type: Boolean, default: true },
+    },
+
     cloudinaryConfig: {
       enabled:   { type: Boolean, default: false },
       cloudName: { type: String,  default: "", trim: true },
