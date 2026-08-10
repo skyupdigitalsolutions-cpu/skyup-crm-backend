@@ -326,6 +326,7 @@ app.use('/api/google-analytics',    googleAnalyticsRoute);
 app.use('/api/google-ads-api',      googleAdsApiRoute);
 app.use('/',                        googleWebhookRoute);
 app.use('/daily-report',            dailyReportRoute);
+app.use('/developer/companies/:companyId/daily-report', dailyReportRoute); // developer access
 app.use('/api/website-config',      websiteConfigRoute);
 app.use('/api/chat',                chatRoutes);
 app.use('/api/email-campaign',      emailCampaignRoute);
