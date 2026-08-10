@@ -246,6 +246,33 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
     return new Date(a.scheduledAt) - new Date(b.scheduledAt);
   });
 
+  // ── Missing follow-up date (24h+ old, NEVER had a scheduledCalls entry) ────
+  // Scoped to leads created on the viewed date (same `todayLeads` set as the
+  // rest of this report) so admins can flip through past dates and see, for
+  // that day's leads, who never got a follow-up scheduled within 24h.
+  // Excludes 'Not Interested' (per business rule) and 'Converted' (already won).
+  const missingFollowUpCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const missingFollowUps = todayLeads
+    .filter(l =>
+      !l.mergedInto &&
+      !l.isClosed &&
+      l.status !== 'Not Interested' &&
+      l.status !== 'Converted' &&
+      new Date(l.date) <= missingFollowUpCutoff &&
+      !(l.scheduledCalls || []).length
+    )
+    .map(l => ({
+      _id:          l._id,
+      name:         l.name,
+      mobile:       l.mobile,
+      status:       l.status,
+      assignedUser: l.assignedUserName || 'Unassigned',
+      userId:       l.user || null,
+      createdAt:    l.date,
+      hoursSinceCreated: Math.floor((Date.now() - new Date(l.date).getTime()) / 3600000),
+    }))
+    .sort((a, b) => b.hoursSinceCreated - a.hoursSinceCreated);
+
   return {
     date:          date || new Date().toISOString().slice(0, 10),
     timezone:      'Asia/Kolkata',
@@ -258,11 +285,13 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
       callsMadeToday: callsMadeToday.length,
       merged,   // virtual: leads with mergedInto set
       closed,   // virtual: leads with isClosed=true and no mergedInto
+      missingFollowUpCount: missingFollowUps.length,
     },
     leads:      todayLeads,
     sources,
     employees,
     followUps,
+    missingFollowUps,
     conversions: todayLeads.filter(l => l.status === 'Converted'),
   };
 }
