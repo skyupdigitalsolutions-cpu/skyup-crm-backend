@@ -122,14 +122,18 @@ const userSchema = mongoose.Schema(
 // by isModified("password") so existing users saving other fields are never
 // re-validated (and their already-hashed passwords are never re-checked).
 const { validatePassword } = require("../utils/passwordPolicy");
-userSchema.pre("validate", function (next) {
-  if (!this.isModified("password")) return next();
+userSchema.pre("validate", function () {
+  // Mongoose 9: pre hooks are called with NO arguments — declaring a `next`
+  // parameter and calling it throws "next is not a function". This hook is
+  // now promise-style: no `next` param, no `next()` call. Marking the path
+  // invalid via this.invalidate() is enough; Mongoose surfaces it as a
+  // normal ValidationError once this function returns.
+  if (!this.isModified("password")) return;
   const { valid, errors } = validatePassword(this.password, { email: this.email, name: this.name });
   // invalidate() attaches a proper Mongoose ValidationError on the "password"
   // path with our human-readable message — surfaces as a validation error the
   // controllers already handle, not a raw 500.
   if (!valid) this.invalidate("password", errors[0]);
-  next();
 });
 
 // Hashing the password before saving

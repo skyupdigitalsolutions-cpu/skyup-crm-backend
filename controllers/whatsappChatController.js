@@ -1525,32 +1525,79 @@ const getUnreadCounts = async (req, res) => {
     if (!companyId) return res.json({ success: true, byLead: {}, byPhone: {} });
     const isAdmin = role === "admin" || role === "super_admin";
 
-    const query = { company: companyId, unreadCount: { $gt: 0 } };
+    // FEATURE: this endpoint used to only fetch conversations WITH an unread
+    // count (unreadCount > 0), because it existed purely to drive the red
+    // badge. The employee Communications list also needs, for EVERY lead
+    // (read or not): when the last activity happened (so the list can sort by
+    // recency instead of only pinning unread ones) and a short preview of
+    // what was last sent (so an agent can see at a glance whether a template
+    // already went to this lead before deciding to re-engage). Both of those
+    // already live on the conversation document (lastMessage/lastMessageAt),
+    // so this is one extra field on an already-cheap, already-scoped query —
+    // not a second round-trip.
+    const scopeQuery = { company: companyId };
     if (!isAdmin) {
       // Employees only see counts for their own leads / conversations.
       const myLeads = await Lead.find({ company: companyId, user: userId }).select("_id").lean();
       const leadIds = myLeads.map((l) => l._id);
-      query.$or = [{ assignedAgent: userId }, { lead: { $in: leadIds } }];
+      scopeQuery.$or = [{ assignedAgent: userId }, { lead: { $in: leadIds } }];
     }
 
-    const convs = await WhatsAppConversation.find(query)
-      .select("lead waPhone unreadCount")
+    const convs = await WhatsAppConversation.find(scopeQuery)
+      .select("lead waPhone unreadCount lastMessage lastMessageAt")
       .lean();
 
     const byLead = {};
     const byPhone = {};
+    // NEW — additive, does not change byLead/byPhone shape or meaning, so the
+    // mobile app and admin panel (which also call this endpoint) are unaffected.
+    const lastMessageAtByLead   = {};
+    const lastMessageAtByPhone  = {};
+    const lastMessagePreviewByLead  = {};
+    const lastMessagePreviewByPhone = {};
+
     for (const c of convs) {
       const n = c.unreadCount || 0;
-      if (n <= 0) continue;
+      if (n > 0) {
+        if (c.lead) {
+          const k = String(c.lead);
+          byLead[k] = (byLead[k] || 0) + n;
+        }
+        const last10ForBadge = String(c.waPhone || "").replace(/\D/g, "").slice(-10);
+        if (last10ForBadge) byPhone[last10ForBadge] = (byPhone[last10ForBadge] || 0) + n;
+      }
+
+      if (!c.lastMessageAt) continue;
+      const preview = String(c.lastMessage || "").slice(0, 120);
+      const last10 = String(c.waPhone || "").replace(/\D/g, "").slice(-10);
+
+      // Multiple conversation records can map to the same lead/phone (a merged
+      // pair, or a duplicate created before resolveCanonicalConversation
+      // existed) — keep whichever is most recent.
       if (c.lead) {
         const k = String(c.lead);
-        byLead[k] = (byLead[k] || 0) + n;
+        if (!lastMessageAtByLead[k] || new Date(c.lastMessageAt) > new Date(lastMessageAtByLead[k])) {
+          lastMessageAtByLead[k] = c.lastMessageAt;
+          lastMessagePreviewByLead[k] = preview;
+        }
       }
-      const last10 = String(c.waPhone || "").replace(/\D/g, "").slice(-10);
-      if (last10) byPhone[last10] = (byPhone[last10] || 0) + n;
+      if (last10) {
+        if (!lastMessageAtByPhone[last10] || new Date(c.lastMessageAt) > new Date(lastMessageAtByPhone[last10])) {
+          lastMessageAtByPhone[last10] = c.lastMessageAt;
+          lastMessagePreviewByPhone[last10] = preview;
+        }
+      }
     }
 
-    res.json({ success: true, byLead, byPhone });
+    res.json({
+      success: true,
+      byLead,
+      byPhone,
+      lastMessageAtByLead,
+      lastMessageAtByPhone,
+      lastMessagePreviewByLead,
+      lastMessagePreviewByPhone,
+    });
   } catch (err) {
     console.error("getUnreadCounts error:", err.message);
     res.status(500).json({ error: err.message });

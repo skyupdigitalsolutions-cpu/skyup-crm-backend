@@ -5,6 +5,7 @@ const Company = require("../models/Company");
 const generateToken   = require("../utils/generateToken");
 const { blacklistToken } = require("../middlewares/rateLimiter");
 const { decryptCompanyKey } = require("../utils/companyKeyCrypto");
+const { logAuditEvent } = require("../utils/auditLogger");
 
 // ── Register Admin (used when creating a new company) ─────────────────────────
 const registerAdmin = async (req, res) => {
@@ -31,6 +32,14 @@ const registerAdmin = async (req, res) => {
     const role = existingCount === 0 ? "super_admin" : "admin";
 
     const admin = await Admin.create({ name, email, password, company: companyId, role });
+
+    logAuditEvent({
+      action: "create", resourceType: "Admin", req,
+      actorId: admin._id, actorModel: "Admin", actorEmail: admin.email,
+      actorRole: role, company: companyId,
+      resourceId: admin._id, statusCode: 201,
+      metadata: { createdEmail: admin.email, createdRole: role, note: "registration on new company" },
+    });
 
     res.status(201).json({
       _id:     admin._id,

@@ -91,11 +91,15 @@ const adminSchema = mongoose.Schema(
 // super-admin creation path can bypass it. Runs before the hash hook (sees
 // plaintext) and is guarded by isModified so unrelated saves are untouched.
 const { validatePassword } = require("../utils/passwordPolicy");
-adminSchema.pre("validate", function (next) {
-  if (!this.isModified("password")) return next();
+adminSchema.pre("validate", function () {
+  // Mongoose 9: pre hooks are called with NO arguments — declaring a `next`
+  // parameter and calling it throws "next is not a function". This hook is
+  // now promise-style: no `next` param, no `next()` call. Marking the path
+  // invalid via this.invalidate() is enough; Mongoose surfaces it as a
+  // normal ValidationError once this function returns.
+  if (!this.isModified("password")) return;
   const { valid, errors } = validatePassword(this.password, { email: this.email, name: this.name });
   if (!valid) this.invalidate("password", errors[0]);
-  next();
 });
 
 // Hashing the password before saving

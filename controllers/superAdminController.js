@@ -19,6 +19,7 @@ const CompanyUsage        = require("../models/CompanyUsage");
 const EntitlementAuditLog = require("../models/EntitlementAuditLog");
 const { getCompanyEntitlements, getRemainingUsage } = require("../services/entitlementService");
 const { calcDaysRemaining } = require("./subscriptionController");
+const { logAuditEvent } = require("../utils/auditLogger");
 
 // ── OTP config ─────────────────────────────────────────────────────────────────
 const OTP_EXPIRY_MIN = 10;
@@ -39,6 +40,12 @@ const registerSuperAdmin = async (req, res) => {
     if (exists) return res.status(400).json({ message: "SuperAdmin already exists" });
     const { name, email, password } = req.body;
     const superAdmin = await SuperAdmin.create({ name, email, password });
+    logAuditEvent({
+      action: "create", resourceType: "SuperAdmin", req,
+      actorId: superAdmin._id, actorModel: "SuperAdmin", actorEmail: superAdmin.email,
+      actorRole: "super_admin", resourceId: superAdmin._id, statusCode: 201,
+      metadata: { createdEmail: superAdmin.email, createdRole: "super_admin", note: "one-time platform bootstrap" },
+    });
     res.status(201).json({
       _id: superAdmin._id, name: superAdmin.name, email: superAdmin.email,
       role: "super_admin",
@@ -240,6 +247,12 @@ const createCompany = async (req, res) => {
           };
 
     const company = await Company.create(companyData);
+    logAuditEvent({
+      action: "create", resourceType: "Company", req,
+      actorId: req.superAdmin?._id, actorModel: "SuperAdmin", actorEmail: req.superAdmin?.email,
+      actorRole: "super_admin", resourceId: company._id, statusCode: 201,
+      metadata: { createdCompanyName: company.name, plan: company.plan },
+    });
     res.status(201).json(company);
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
@@ -277,6 +290,14 @@ const deleteCompany = async (req, res) => {
   try {
     const company = await Company.findByIdAndDelete(req.params.id);
     if (!company) return res.status(404).json({ message: "Company not found" });
+
+    logAuditEvent({
+      action: "delete", resourceType: "Company", req,
+      actorId: req.superAdmin?._id, actorModel: "SuperAdmin", actorEmail: req.superAdmin?.email,
+      actorRole: "super_admin", resourceId: company._id, statusCode: 200,
+      metadata: { deletedCompanyName: company.name },
+    });
+
     res.json({ message: "Company deleted" });
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
@@ -313,6 +334,13 @@ const createAdmin = async (req, res) => {
     const existing = await Admin.findOne({ email });
     if (existing) return res.status(400).json({ message: "An admin with this email already exists" });
     const admin = await Admin.create({ name, email, password, department, role: "admin", company: companyId });
+    logAuditEvent({
+      action: "create", resourceType: "Admin", req,
+      actorId: req.user?._id, actorModel: "Admin", actorEmail: req.user?.email,
+      actorRole: req.user?.role, company: companyId,
+      resourceId: admin._id, statusCode: 201,
+      metadata: { createdEmail: admin.email, createdRole: "admin", via: "superadmin_panel" },
+    });
     res.status(201).json({ _id: admin._id, name: admin.name, email: admin.email, role: admin.role, department: admin.department });
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
@@ -474,6 +502,13 @@ const createMarketingUser = async (req, res) => {
       marketingAccess: true,
       isActive:        true,
     });
+    logAuditEvent({
+      action: "create", resourceType: "Admin", req,
+      actorId: req.user?._id, actorModel: "Admin", actorEmail: req.user?.email,
+      actorRole: req.user?.role, company: companyId,
+      resourceId: admin._id, statusCode: 201,
+      metadata: { createdEmail: admin.email, createdRole: "marketing_user" },
+    });
     res.status(201).json({ _id: admin._id, name: admin.name, email: admin.email, marketingAccess: admin.marketingAccess, isActive: admin.isActive, createdAt: admin.createdAt });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
@@ -501,8 +536,22 @@ const toggleMarketingAccess = async (req, res) => {
     const companyId = req.companyId;
     const admin = await Admin.findOne({ _id: req.params.id, company: companyId });
     if (!admin) return res.status(404).json({ message: "User not found" });
+
+    const previousValue = admin.marketingAccess;
     admin.marketingAccess = !admin.marketingAccess;
     await admin.save();
+
+    logAuditEvent({
+      action: "role_changed", resourceType: "Admin", req,
+      actorId: req.user?._id, actorModel: "Admin", actorEmail: req.user?.email,
+      actorRole: req.user?.role, company: companyId,
+      resourceId: admin._id, statusCode: 200,
+      metadata: {
+        targetEmail: admin.email, changeType: "marketingAccess",
+        previousValue, newValue: admin.marketingAccess,
+      },
+    });
+
     res.json({ _id: admin._id, marketingAccess: admin.marketingAccess });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
@@ -514,6 +563,15 @@ const deleteMarketingUser = async (req, res) => {
     if (!admin) return res.status(404).json({ message: "Marketing user not found" });
     if (admin.role === "super_admin") return res.status(403).json({ message: "Cannot delete super admin." });
     await Admin.deleteOne({ _id: admin._id });
+
+    logAuditEvent({
+      action: "delete", resourceType: "Admin", req,
+      actorId: req.user?._id, actorModel: "Admin", actorEmail: req.user?.email,
+      actorRole: req.user?.role, company: companyId,
+      resourceId: admin._id, statusCode: 200,
+      metadata: { deletedEmail: admin.email, deletedRole: "marketing_user" },
+    });
+
     res.json({ deleted: true });
   } catch (err) { res.status(500).json({ message: err.message }); }
 };

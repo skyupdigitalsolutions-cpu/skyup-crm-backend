@@ -10,6 +10,7 @@ const Admin   = require("../models/Admin");
 const User    = require("../models/Users");
 const { sendPasswordResetOtp } = require("../utils/brevoMailer");
 const { validatePassword } = require("../utils/passwordPolicy");
+const { logAuditEvent } = require("../utils/auditLogger");
 
 const OTP_EXPIRY_MINUTES = 10;
 const MAX_ATTEMPTS       = 5;
@@ -39,6 +40,11 @@ const requestOtp = async (req, res) => {
 
     // Always respond with the same success message to prevent email enumeration
     if (!doc) {
+      logAuditEvent({
+        action: "password_reset_requested", resourceType: "Auth", req,
+        actorEmail: email, statusCode: 200,
+        metadata: { reason: "email_not_found" },
+      });
       return res.status(200).json({
         message: "If an account with that email exists, an OTP has been sent.",
       });
@@ -54,6 +60,7 @@ const requestOtp = async (req, res) => {
     await doc.save();
 
     // Send email — fire and forget; don't reveal delivery failures to caller
+    let emailDelivered = true;
     try {
       await sendPasswordResetOtp({
         toEmail: doc.email,
@@ -62,8 +69,19 @@ const requestOtp = async (req, res) => {
         role: doc.role || "user",
       });
     } catch (mailErr) {
+      emailDelivered = false;
       console.error("[ForgotPassword] Email delivery failed:", mailErr.message);
     }
+
+    // The OTP value itself is NEVER included here — only whether delivery
+    // succeeded, which is operationally relevant without being a secret.
+    logAuditEvent({
+      action: "password_reset_requested", resourceType: "Auth", req,
+      actorId: doc._id, actorModel: kind === "admin" ? "Admin" : "User",
+      actorEmail: doc.email, actorRole: doc.role || kind,
+      company: doc.company || null, resourceId: doc._id, statusCode: 200,
+      metadata: { reason: "otp_sent", emailDelivered },
+    });
 
     return res.status(200).json({
       message: "If an account with that email exists, an OTP has been sent.",
@@ -103,11 +121,23 @@ const verifyOtpAndReset = async (req, res) => {
     }
 
     if (!doc) {
+      logAuditEvent({
+        action: "password_reset_failed", resourceType: "Auth", req,
+        actorEmail: email, statusCode: 400,
+        metadata: { reason: "account_not_found" },
+      });
       return res.status(400).json({ message: "Invalid or expired OTP." });
     }
 
     // Check for missing/expired OTP
     if (!doc.resetOtp || !doc.resetOtpExpiry) {
+      logAuditEvent({
+        action: "password_reset_failed", resourceType: "Auth", req,
+        actorId: doc._id, actorModel: kind === "admin" ? "Admin" : "User",
+        actorEmail: doc.email, actorRole: doc.role || kind,
+        company: doc.company || null, resourceId: doc._id, statusCode: 400,
+        metadata: { reason: "no_otp_requested" },
+      });
       return res.status(400).json({ message: "No OTP request found. Please request a new OTP." });
     }
 
@@ -117,11 +147,25 @@ const verifyOtpAndReset = async (req, res) => {
       doc.resetOtpExpiry   = null;
       doc.resetOtpAttempts = 0;
       await doc.save();
+      logAuditEvent({
+        action: "password_reset_failed", resourceType: "Auth", req,
+        actorId: doc._id, actorModel: kind === "admin" ? "Admin" : "User",
+        actorEmail: doc.email, actorRole: doc.role || kind,
+        company: doc.company || null, resourceId: doc._id, statusCode: 400,
+        metadata: { reason: "otp_expired" },
+      });
       return res.status(400).json({ message: "OTP has expired. Please request a new one." });
     }
 
     // Throttle brute-force attempts
     if (doc.resetOtpAttempts >= MAX_ATTEMPTS) {
+      logAuditEvent({
+        action: "password_reset_failed", resourceType: "Auth", req,
+        actorId: doc._id, actorModel: kind === "admin" ? "Admin" : "User",
+        actorEmail: doc.email, actorRole: doc.role || kind,
+        company: doc.company || null, resourceId: doc._id, statusCode: 429,
+        metadata: { reason: "too_many_attempts" },
+      });
       return res.status(429).json({
         message: "Too many incorrect attempts. Please request a new OTP.",
       });
@@ -132,6 +176,15 @@ const verifyOtpAndReset = async (req, res) => {
       doc.resetOtpAttempts = (doc.resetOtpAttempts || 0) + 1;
       await doc.save();
       const remaining = MAX_ATTEMPTS - doc.resetOtpAttempts;
+      // The OTP VALUE is never included — only that an attempt was wrong and
+      // how many attempts remain. Never log secrets, even in metadata.
+      logAuditEvent({
+        action: "password_reset_failed", resourceType: "Auth", req,
+        actorId: doc._id, actorModel: kind === "admin" ? "Admin" : "User",
+        actorEmail: doc.email, actorRole: doc.role || kind,
+        company: doc.company || null, resourceId: doc._id, statusCode: 400,
+        metadata: { reason: "wrong_otp", attemptsRemaining: Math.max(0, remaining) },
+      });
       return res.status(400).json({
         message: `Incorrect OTP. ${remaining > 0 ? `${remaining} attempt${remaining !== 1 ? "s" : ""} remaining.` : "No attempts remaining. Please request a new OTP."}`,
       });
@@ -148,6 +201,14 @@ const verifyOtpAndReset = async (req, res) => {
     doc.resetOtpExpiry   = null;
     doc.resetOtpAttempts = 0;
     await doc.save();
+
+    // Success event — the new password itself is NEVER included here.
+    logAuditEvent({
+      action: "password_reset", resourceType: "Auth", req,
+      actorId: doc._id, actorModel: kind === "admin" ? "Admin" : "User",
+      actorEmail: doc.email, actorRole: doc.role || kind,
+      company: doc.company || null, resourceId: doc._id, statusCode: 200,
+    });
 
     return res.status(200).json({ message: "Password reset successfully. You can now log in." });
   } catch (err) {

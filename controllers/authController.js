@@ -7,6 +7,7 @@ const Company = require("../models/Company");
 const generateToken = require("../utils/generateToken");
 const { blacklistToken } = require("../middlewares/rateLimiter");
 const { decryptCompanyKey } = require("../utils/companyKeyCrypto");
+const { logAuditEvent } = require("../utils/auditLogger");
 
 // ── Register ───────────────────────────────────────────────────────────────────
 const register = async (req, res) => {
@@ -45,6 +46,14 @@ const register = async (req, res) => {
       role: "employee",
     });
 
+    logAuditEvent({
+      action: "create", resourceType: "User", req,
+      actorId: user._id, actorModel: "User", actorEmail: user.email,
+      actorRole: "employee", company: companyId,
+      resourceId: user._id, statusCode: 201,
+      metadata: { createdEmail: user.email, createdRole: "employee", note: "self-registration" },
+    });
+
     res.status(201).json({
       _id: user._id,
       name: user.name,
@@ -77,6 +86,12 @@ const login = async (req, res) => {
     const user = await User.findOne({ email }).populate("company");
     if (user && (await user.matchPassword(password))) {
       if (!user.company.isActive) {
+        logAuditEvent({
+          action: "login_failed", resourceType: "Auth", req,
+          actorId: user._id, actorModel: "User", actorEmail: user.email,
+          actorRole: user.role || "employee", company: user.company?._id, statusCode: 403,
+          metadata: { reason: "company_deactivated" },
+        });
         return res.status(403).json({ message: "Your company is deactivated" });
       }
 
@@ -90,6 +105,12 @@ const login = async (req, res) => {
       if (Object.keys(deviceUpdate).length > 0) {
         await User.findByIdAndUpdate(user._id, { $set: deviceUpdate });
       }
+
+      logAuditEvent({
+        action: "login", resourceType: "Auth", req,
+        actorId: user._id, actorModel: "User", actorEmail: user.email,
+        actorRole: user.role || "employee", company: user.company?._id, statusCode: 200,
+      });
 
       res.json({
         _id:       user._id,
@@ -105,12 +126,23 @@ const login = async (req, res) => {
     } else {
       // Specific reason so the UI can highlight the right field.
       if (!user) {
+        logAuditEvent({
+          action: "login_failed", resourceType: "Auth", req,
+          actorEmail: email, statusCode: 401,
+          metadata: { reason: "email_not_found" },
+        });
         return res.status(401).json({
           message: "No account found with this email.",
           code: "EMAIL_NOT_FOUND",
           field: "email",
         });
       }
+      logAuditEvent({
+        action: "login_failed", resourceType: "Auth", req,
+        actorId: user._id, actorEmail: email, actorModel: "User",
+        actorRole: user.role || "employee", company: user.company?._id, statusCode: 401,
+        metadata: { reason: "wrong_password" },
+      });
       return res.status(401).json({
         message: "Incorrect password. Please try again.",
         code: "WRONG_PASSWORD",
@@ -143,6 +175,11 @@ const loginUnified = async (req, res) => {
     // 1) Check Developer
     const dev = await Developer.findOne({ email });
     if (dev && (await dev.matchPassword(password))) {
+      logAuditEvent({
+        action: "login", resourceType: "Auth", req,
+        actorId: dev._id, actorModel: "Developer", actorEmail: dev.email,
+        actorRole: "developer", statusCode: 200,
+      });
       return res.json({
         _id: dev._id, name: dev.name, email: dev.email,
         role: "developer",
@@ -155,22 +192,47 @@ const loginUnified = async (req, res) => {
     if (admin && (await admin.matchPassword(password))) {
       // super_admin must always use /superadmin/login (which has OTP verification)
       if (admin.role === "super_admin" || admin.role === "superadmin") {
+        logAuditEvent({
+          action: "login_failed", resourceType: "Auth", req,
+          actorId: admin._id, actorModel: "Admin", actorEmail: admin.email,
+          actorRole: admin.role, company: admin.company?._id, statusCode: 403,
+          metadata: { reason: "super_admin_wrong_endpoint" },
+        });
         return res.status(403).json({
           message: "Super Admin accounts require secure login. Please use the Super Admin login page.",
           redirectTo: "/superadmin/login",
         });
       }
-      if (!admin.company?.isActive)
+      if (!admin.company?.isActive) {
+        logAuditEvent({
+          action: "login_failed", resourceType: "Auth", req,
+          actorId: admin._id, actorModel: "Admin", actorEmail: admin.email,
+          actorRole: admin.role, company: admin.company?._id, statusCode: 403,
+          metadata: { reason: "company_suspended" },
+        });
         return res.status(403).json({ message: "Company is suspended" });
+      }
 
       // marketing_user role = marketing-panel-only account, cannot use main CRM
       if (admin.role === "marketing_user" || admin.marketingAccess) {
+        logAuditEvent({
+          action: "login_failed", resourceType: "Auth", req,
+          actorId: admin._id, actorModel: "Admin", actorEmail: admin.email,
+          actorRole: admin.role, company: admin.company?._id, statusCode: 403,
+          metadata: { reason: "marketing_only_account" },
+        });
         return res.status(403).json({
           message: "This account is for the Performance Marketing Dashboard. Please log in at skyupcrm.com/marketing/login",
           redirectTo: "/marketing/login",
           marketingOnly: true,
         });
       }
+
+      logAuditEvent({
+        action: "login", resourceType: "Auth", req,
+        actorId: admin._id, actorModel: "Admin", actorEmail: admin.email,
+        actorRole: admin.role, company: admin.company?._id, statusCode: 200,
+      });
 
       return res.json({
         _id: admin._id, name: admin.name, email: admin.email,
@@ -186,8 +248,15 @@ const loginUnified = async (req, res) => {
     // 3) Check Employee
     const user = await User.findOne({ email }).populate("company");
     if (user && (await user.matchPassword(password))) {
-      if (user.company && !user.company.isActive)
+      if (user.company && !user.company.isActive) {
+        logAuditEvent({
+          action: "login_failed", resourceType: "Auth", req,
+          actorId: user._id, actorModel: "User", actorEmail: user.email,
+          actorRole: user.role || "employee", company: user.company?._id, statusCode: 403,
+          metadata: { reason: "company_suspended" },
+        });
         return res.status(403).json({ message: "Company is suspended" });
+      }
 
       // Update device info if provided
       const deviceUpdate = { lastLoginAt: new Date() };
@@ -195,6 +264,12 @@ const loginUnified = async (req, res) => {
         if (req.body[f] !== undefined && req.body[f] !== null) deviceUpdate[f] = req.body[f];
       });
       await User.findByIdAndUpdate(user._id, { $set: deviceUpdate });
+
+      logAuditEvent({
+        action: "login", resourceType: "Auth", req,
+        actorId: user._id, actorModel: "User", actorEmail: user.email,
+        actorRole: user.role || "employee", company: user.company?._id, statusCode: 200,
+      });
 
       return res.json({
         _id: user._id, name: user.name, email: user.email,
@@ -228,6 +303,11 @@ const loginUnified = async (req, res) => {
       console.warn(
         `[AUTH-FAIL] email_not_found email=${email} ip=${req.ip} ua=${String(req.headers["user-agent"] || "").slice(0,80)}`
       );
+      logAuditEvent({
+        action: "login_failed", resourceType: "Auth", req,
+        actorEmail: email, statusCode: 401,
+        metadata: { reason: "email_not_found" },
+      });
       return res.status(401).json({
         message: "No account found with this email.",
         code: "EMAIL_NOT_FOUND",
@@ -238,6 +318,26 @@ const loginUnified = async (req, res) => {
     console.warn(
       `[AUTH-FAIL] wrong_password email=${email} ip=${req.ip} ua=${String(req.headers["user-agent"] || "").slice(0,80)}`
     );
+    // The email matched a real account (emailExists is true here) — identify
+    // WHICH one so the audit entry records the real actor, not a null identity.
+    // dev/admin/user are already in scope from the checks above; at most one
+    // of them is truthy for a given email.
+    const matchedEntity =
+      dev   ? { id: dev._id,   model: "Developer", role: "developer" } :
+      admin ? { id: admin._id, model: "Admin",      role: admin.role, company: admin.company?._id } :
+      user  ? { id: user._id,  model: "User",       role: user.role || "employee", company: user.company?._id } :
+      null;
+
+    logAuditEvent({
+      action: "login_failed", resourceType: "Auth", req,
+      actorId: matchedEntity?.id || null,
+      actorModel: matchedEntity?.model || "System",
+      actorEmail: email,
+      actorRole: matchedEntity?.role || "",
+      company: matchedEntity?.company || null,
+      statusCode: 401,
+      metadata: { reason: "wrong_password" },
+    });
     return res.status(401).json({
       message: "Incorrect password. Please try again.",
       code: "WRONG_PASSWORD",

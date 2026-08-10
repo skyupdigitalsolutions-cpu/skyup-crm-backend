@@ -40,7 +40,15 @@ const accessAuditLogSchema = new mongoose.Schema(
     action: {
       type: String,
       required: true,
-      enum: ["view", "list", "export", "create", "update", "delete", "login", "denied"],
+      enum: [
+        "view", "list", "export", "create", "update", "delete", "login", "denied",
+        // Added for Event 2 — Failed Login Audit Logging (ISO Phase 4).
+        "login_failed",
+        // Added for Event 3 — Password Reset Audit Logging (ISO Phase 4).
+        "password_reset_requested", "password_reset", "password_reset_failed",
+        // Added for Event 6 — Role Change Audit Logging (ISO Phase 4).
+        "role_changed",
+      ],
       index: true,
     },
     resourceType: { type: String, default: "Lead", index: true },

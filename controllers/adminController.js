@@ -5,6 +5,7 @@ const User    = require("../models/Users");
 const Lead    = require("../models/Leads");
 const Company = require("../models/Company");
 const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
+const { logAuditEvent } = require("../utils/auditLogger");
 const multer  = require("multer");
 const path    = require("path");
 const fs      = require("fs");
@@ -104,6 +105,14 @@ const createAdmin = async (req, res) => {
     // since the caller already has it. It is never persisted anywhere.
     const admin = await Admin.create({ name, email, password, company: companyId });
 
+    logAuditEvent({
+      action: "create", resourceType: "Admin", req,
+      actorId: req.admin?._id, actorModel: "Admin", actorEmail: req.admin?.email,
+      actorRole: req.admin?.role, company: companyId,
+      resourceId: admin._id, statusCode: 201,
+      metadata: { createdEmail: admin.email, createdRole: "admin" },
+    });
+
     res.status(201).json({
       _id:           admin._id,
       name:          admin.name,
@@ -135,6 +144,15 @@ const deleteAdmin = async (req, res) => {
     }
 
     await Admin.findByIdAndDelete(req.params.id);
+
+    logAuditEvent({
+      action: "delete", resourceType: "Admin", req,
+      actorId: req.admin?._id, actorModel: "Admin", actorEmail: req.admin?.email,
+      actorRole: req.admin?.role, company: req.admin?.company?._id,
+      resourceId: admin._id, statusCode: 200,
+      metadata: { deletedEmail: admin.email, deletedRole: admin.role },
+    });
+
     res.status(200).json({ message: "Admin deleted successfully" });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -162,7 +180,46 @@ const updateAdmin = async (req, res) => {
       }
     }
 
+    // Captured BEFORE the update, from the same document already fetched
+    // above — needed to detect a GENUINE change, not just a field being
+    // present in the request body.
+    const previousRole = admin.role;
+    const previousMarketingAccess = admin.marketingAccess;
+
     const updated = await Admin.findByIdAndUpdate(req.params.id, req.body, { new: true }).select("-password");
+
+    // Only a genuine ROLE change is logged — a request that includes `role`
+    // but sets it to the SAME value, or omits it entirely to only edit
+    // unrelated fields (name, department, etc.), is not a privilege event.
+    if (req.body.role !== undefined && req.body.role !== previousRole) {
+      logAuditEvent({
+        action: "role_changed", resourceType: "Admin", req,
+        actorId: req.admin?._id, actorModel: "Admin", actorEmail: req.admin?.email,
+        actorRole: req.admin?.role, company: req.admin?.company?._id,
+        resourceId: updated._id, statusCode: 200,
+        metadata: {
+          targetEmail: updated.email, changeType: "role",
+          previousRole, newRole: req.body.role,
+        },
+      });
+    }
+
+    // marketingAccess is a distinct privilege flag that this same generic
+    // patch can also touch — logged as its own role_changed event (with
+    // changeType distinguishing it in metadata) only when it genuinely flips.
+    if (req.body.marketingAccess !== undefined && req.body.marketingAccess !== previousMarketingAccess) {
+      logAuditEvent({
+        action: "role_changed", resourceType: "Admin", req,
+        actorId: req.admin?._id, actorModel: "Admin", actorEmail: req.admin?.email,
+        actorRole: req.admin?.role, company: req.admin?.company?._id,
+        resourceId: updated._id, statusCode: 200,
+        metadata: {
+          targetEmail: updated.email, changeType: "marketingAccess",
+          previousValue: previousMarketingAccess, newValue: req.body.marketingAccess,
+        },
+      });
+    }
+
     res.status(200).json(updated);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -209,6 +266,15 @@ const createCompanyUser = async (req, res) => {
     // stored. `password` is the plaintext value the caller just typed into
     // the create-user form; echoing it back once here is not a new
     // disclosure and is never persisted.
+
+    logAuditEvent({
+      action: "create", resourceType: "User", req,
+      actorId: req.admin?._id, actorModel: "Admin", actorEmail: req.admin?.email,
+      actorRole: req.admin?.role, company: companyId,
+      resourceId: user._id, statusCode: 201,
+      metadata: { createdEmail: user.email, createdRole: user.role },
+    });
+
     res.status(201).json({
       _id: user._id, name: user.name, email: user.email,
       company: user.company, role: user.role,
@@ -347,6 +413,15 @@ const deleteCompanyUser = async (req, res) => {
     const user = await User.findOne(query);
     if (!user) return res.status(404).json({ message: "User not found" });
     await User.findByIdAndDelete(req.params.id);
+
+    logAuditEvent({
+      action: "delete", resourceType: "User", req,
+      actorId: req.admin?._id, actorModel: "Admin", actorEmail: req.admin?.email,
+      actorRole: req.admin?.role, company: req.admin?.company?._id,
+      resourceId: user._id, statusCode: 200,
+      metadata: { deletedEmail: user.email, deletedRole: user.role },
+    });
+
     res.status(200).json({ message: "User deleted successfully" });
   } catch (error) {
     res.status(500).json({ message: error.message });

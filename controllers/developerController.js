@@ -4,6 +4,7 @@
 // All existing functions are UNCHANGED.
 
 const path          = require("path");
+const { logAuditEvent } = require("../utils/auditLogger");
 const fs            = require("fs");
 const multer        = require("multer");
 const cloudinary             = require("cloudinary").v2;
@@ -180,6 +181,16 @@ const _createCompanyHandler = async (req, res) => {
 
     const company = await Company.create(companyData);
 
+    // Audit the creation itself, BEFORE any encryption-key generation below.
+    // NEVER include rawCompanyKey, encryptedCompanyKey, or recoveryKeyHash in
+    // metadata — this is the actual PII encryption secret for the tenant.
+    logAuditEvent({
+      action: "create", resourceType: "Company", req,
+      actorId: req.user?._id, actorModel: "Developer", actorEmail: req.user?.email,
+      actorRole: req.user?.role || "developer", resourceId: company._id, statusCode: 201,
+      metadata: { createdCompanyName: company.name, plan: company.plan },
+    });
+
     // ── Generate per-company encryption key ────────────────────────────────────
     // The frontend uses this key to encrypt lead PII (mobile, remark, call notes)
     // before sending to the backend. The backend stores only ciphertext.
@@ -258,10 +269,28 @@ const createCompanySuperAdmin = async (req, res) => {
         // Orphaned admin (its company is gone) → safe to remove and reclaim email
         await Admin.deleteOne({ _id: clash._id });
         console.log(`[createCompanySuperAdmin] Reclaimed orphaned admin email "${email}" (company no longer exists)`);
+
+        // This is a real account deletion, even though it happens as a
+        // side-effect of a create operation rather than a standalone
+        // "delete" request — still auditable per ISO A.5.16/8.2.
+        logAuditEvent({
+          action: "delete", resourceType: "Admin", req,
+          actorId: req.user?._id, actorModel: "Developer", actorEmail: req.user?.email,
+          actorRole: req.user?.role || "developer", resourceId: clash._id, statusCode: 200,
+          metadata: { deletedEmail: clash.email, deletedRole: clash.role, reason: "orphaned_admin_reclaimed_during_creation" },
+        });
       }
     }
 
     const superAdmin = await Admin.create({ name, email, password, role: "super_admin", company: companyId });
+
+    logAuditEvent({
+      action: "create", resourceType: "Admin", req,
+      actorId: req.user?._id, actorModel: "Developer", actorEmail: req.user?.email,
+      actorRole: req.user?.role || "developer", company: companyId,
+      resourceId: superAdmin._id, statusCode: 201,
+      metadata: { createdEmail: superAdmin.email, createdRole: "super_admin", via: "developer_panel" },
+    });
 
     res.status(201).json({ _id: superAdmin._id, name: superAdmin.name, email: superAdmin.email, role: superAdmin.role });
   } catch (error) {
@@ -350,6 +379,13 @@ const deleteCompany = async (req, res) => {
 
     // Finally remove the company itself.
     await Company.findByIdAndDelete(companyId);
+
+    logAuditEvent({
+      action: "delete", resourceType: "Company", req,
+      actorId: req.user?._id, actorModel: "Developer", actorEmail: req.user?.email,
+      actorRole: req.user?.role || "developer", resourceId: company._id, statusCode: 200,
+      metadata: { deletedCompanyName: company.name, cascadeSummary: summary },
+    });
 
     console.log(`[deleteCompany] Deleted company ${companyId} (${company.name}) + related:`, summary);
     res.json({
