@@ -562,6 +562,72 @@ async function sendEscalationAlert(superAdmin, adminBreakdown, totalCount) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  sendNoFollowUpAlert(user, leads)
+//
+//  Notifies the ASSIGNED EMPLOYEE (User model, not Admin) that one or more of
+//  their leads have gone 24h+ since creation with no follow-up date ever set.
+//  Called by leadAlertsJob.runNoFollowUpDateCheck() every 15 minutes; re-fires
+//  every 24h per lead until the employee finally adds a follow-up.
+//
+//  user  — User document with _id, name, fcmToken
+//  leads — array of lead docs { _id, name, mobile, status, date }
+// ─────────────────────────────────────────────────────────────────────────────
+async function sendNoFollowUpAlert(user, leads) {
+  if (!user?._id || !leads?.length) return;
+
+  try {
+    const count = leads.length;
+    const title = `🔔 ${count} Lead${count > 1 ? 's' : ''} — No Follow-Up Date Set`;
+    const body  = count === 1
+      ? `"${leads[0].name}" has had no follow-up scheduled for 24+ hours.`
+      : `${count} of your leads have no follow-up date set (24+ hours old).`;
+
+    // ── Socket — employee's personal room, same one used for new_lead_assigned ─
+    const _io = global._io;
+    if (_io) {
+      _io.to(`agent:${user._id}`).emit('no_followup_alert', {
+        count,
+        leads: leads.map(l => ({ leadId: String(l._id), leadName: l.name, mobile: l.mobile || '' })),
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // ── FCM ───────────────────────────────────────────────────────────────────
+    const messaging = getMessaging();
+    if (!messaging) {
+      if (_initFailed) console.warn('[FCM] sendNoFollowUpAlert skipped — FCM not initialised:', _initError);
+      return;
+    }
+    if (!user.fcmToken) return; // not registered — socket event above still fires
+
+    await messaging.send({
+      token: user.fcmToken,
+      notification: { title, body },
+      data: {
+        type:    'no_followup_alert',
+        count:   String(count),
+        leadIds: leads.map(l => String(l._id)).join(','),
+      },
+      android: {
+        priority: 'high',
+        notification: { channelId: 'new_lead_channel_v2', priority: 'max', defaultSound: true, defaultVibrateTimings: true },
+      },
+      apns: {
+        payload: { aps: { alert: { title, body }, sound: 'default', badge: count, 'content-available': 1 } },
+        headers: { 'apns-priority': '10' },
+      },
+    });
+    console.log(`[FCM] ✅ No-follow-up alert sent to "${user.name}" — ${count} lead(s)`);
+  } catch (err) {
+    if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
+      await clearStaleToken(user._id);
+    } else {
+      console.error('[FCM] sendNoFollowUpAlert error:', err.message);
+    }
+  }
+}
+
 module.exports = {
   sendNewLeadNotification,
   sendReassignedLeadNotification,
@@ -569,5 +635,6 @@ module.exports = {
   sendNoActionAlert,
   sendFollowUpAlert,
   sendEscalationAlert,   // BUG 1 FIX — was missing, crashed leadAlertsJob every tick
+  sendNoFollowUpAlert,
   checkFCMHealth,
 };
