@@ -388,6 +388,11 @@ async function getCompanyEntitlements(companyId) {
     leadNurtureSequence: false,
     callOutcomesReport:  false,
     metaConversionSync:  false,
+    // Employee Excel / Google Sheet integration — AVAILABILITY flag. Turned ON
+    // per-company by the Developer panel (devOverrides.featureToggles). This is
+    // Layer 1 of the two-tier gate; Layer 2 is company.employeeSheetIntegration
+    // .enabled, combined below into ent.googleSheetIntegrationEnabled.
+    googleSheetIntegration: false,
 
     // Recording / retention meta
     recordingEnabled:  planLimits.recordingEnabled,
@@ -514,6 +519,20 @@ async function getCompanyEntitlements(companyId) {
       ent[key] = !!value;
     }
   }
+
+  // ── Effective employee-facing Google Sheet flag ───────────────────────────
+  // Layer 1 (availability): ent.googleSheetIntegration — set from the Developer
+  //   panel featureToggles above (default false).
+  // Layer 2 (enablement):   company.employeeSheetIntegration.enabled — the
+  //   Company Admin toggle. Only when BOTH are true does the employee see the
+  //   "Excel / Google Sheet" panel option. This single derived key is what the
+  //   frontend sidebar/route gates on, so it never appears when the developer
+  //   hasn't made it available OR the admin hasn't enabled it.
+  ent.googleSheetIntegrationEnabled = !!(
+    ent.googleSheetIntegration &&
+    company.employeeSheetIntegration &&
+    company.employeeSheetIntegration.enabled
+  );
 
   // Re-derive readOnly after all overrides (devOverride cannot change subscriptionStatus directly)
   ent.readOnly = !["active", "trial"].includes(ent.subscriptionStatus);
