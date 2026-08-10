@@ -49,22 +49,34 @@ async function runMarkIdle() {
 
     if (stale.length === 0) return;
 
-    const io = global._io;   // set by server.js: global._io = io;
+    const io  = global._io;
+    const now = new Date();
 
-    for (const rec of stale) {
-      // Open an auto-idle break entry
-      rec.breaks.push({
-        startTime: new Date(),
-        reason:    'Auto Idle',
-      });
-      rec.activeBreakIndex  = rec.breaks.length - 1;
-      rec.status            = 'idle';
-      rec.totalBreakMinutes = calcBreakMinutes(rec.breaks);
-      await rec.save();
+    // ── Build bulkWrite ops — one write per idle record instead of N awaited saves
+    const ops = stale.map(rec => {
+      const newBreak = { startTime: now, reason: 'Auto Idle' };
+      const updatedBreaks = [...rec.breaks, newBreak];
+      return {
+        updateOne: {
+          filter: { _id: rec._id },
+          update: {
+            $set: {
+              status:            'idle',
+              activeBreakIndex:  updatedBreaks.length - 1,
+              totalBreakMinutes: calcBreakMinutes(updatedBreaks),
+            },
+            $push: { breaks: newBreak },
+          },
+        },
+      };
+    });
 
-      // Push update to the user's socket room so the widget flips immediately
-      if (io) {
-        io.to(`att:${rec.user}`).emit('attendance:updated', rec);
+    await Attendance.bulkWrite(ops, { ordered: false });
+
+    // Emit socket events after the batch write completes
+    if (io) {
+      for (const rec of stale) {
+        io.to(`att:${rec.user}`).emit('attendance:updated', { ...rec.toObject(), status: 'idle' });
       }
     }
 
