@@ -997,50 +997,100 @@ const adminDeleteLead = async (req, res) => {
   }
 };
 
+// ── Projection for mobile list — only the fields formatLead() needs ──────────
+// Excludes heavy arrays (callHistory, scheduledCalls, meetingRemarks,
+// previousAgents content, templateHistory, activityLog, nurtureSent, projects)
+// that the list screen never renders. Full lead is fetched by GET /lead/:id.
+// KEEP IN SYNC with formatLead() in src/api/leadsApi.js.
+const MOBILE_LIST_PROJECTION = {
+  name:              1,
+  mobile:            1,
+  primaryPhone:      1,
+  secondaryPhone:    1,
+  email:             1,
+  source:            1,
+  campaign:          1,
+  industry:          1,
+  status:            1,
+  remark:            1,
+  initialRemark:     1,
+  followUpDate:      1,
+  temperature:       1,
+  Quality:           1,
+  company:           1,
+  reassignCount:     1,
+  invalidStage:      1,
+  isClosed:          1,
+  date:              1,
+  createdAt:         1,
+  updatedAt:         1,
+  // callHistory: only the LAST entry for lastOutcome/lastCalledAt/remark detection.
+  // $slice: -1 returns just the last element — avoids sending full history array.
+  "callHistory":     { $slice: -3 },
+  // scheduledCalls: only need to know if any exist (count check in formatLead).
+  // $slice: 0 returns the array length metadata only — not the entries themselves.
+  "scheduledCalls":  { $slice: 0 },
+  // user: populated below — only name needed for list row.
+  user:              1,
+};
+
 const getMyLeads = async (req, res) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page || "1", 10));
-    const limit = Math.min(
-      500,
-      Math.max(1, parseInt(req.query.limit || "200", 10)),
-    );
-    const skip = (page - 1) * limit;
+    const page  = Math.max(1, parseInt(req.query.page  || "1",   10));
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit || "200", 10)));
+    const skip  = (page - 1) * limit;
 
-    const query = { company: getCompanyId(req), user: req.user._id, mergedInto: null, isClosed: { $ne: true } };
+    const query = {
+      company:   getCompanyId(req),
+      user:      req.user._id,
+      mergedInto: null,
+      isClosed:  { $ne: true },
+    };
 
     // ── Delta fetch: ?since=<ISO timestamp> ──────────────────────────────────
     // Mobile app sends this on stale-check refreshes (every 5 min tab focus).
-    // Returns only leads whose updatedAt > since — no pagination, no limit —
-    // so the app can upsert just the changed leads instead of re-downloading
-    // the full list. Eliminates the full 200-lead download on every tab switch.
+    // Returns only leads whose updatedAt > since so the app can upsert just the
+    // changed leads. Bounded at DELTA_LIMIT to prevent unbounded responses when
+    // many leads changed simultaneously (e.g. bulk reassign).
+    // hasMore=true signals the app to fall back to a full refetch.
     if (req.query.since) {
       const since = new Date(req.query.since);
       if (!isNaN(since.getTime())) {
-        const leads = await Lead.find({ ...query, updatedAt: { $gt: since } })
+        const DELTA_LIMIT = 100;
+        const changed = await Lead.find({ ...query, updatedAt: { $gt: since } })
           .sort({ updatedAt: -1 })
+          .limit(DELTA_LIMIT + 1)          // fetch one extra to detect overflow
+          .select(MOBILE_LIST_PROJECTION)
           .populate("user", "name email")
-          .populate("previousAgents", "name email")
-          .populate("projects", "name color");
-        return res.status(200).json({ leads, delta: true });
+          .lean();
+
+        const hasMore = changed.length > DELTA_LIMIT;
+        const leads   = hasMore ? changed.slice(0, DELTA_LIMIT) : changed;
+        return res.status(200).json({ leads, delta: true, hasMore });
       }
     }
 
-    const [leads, total] = await Promise.all([
-      Lead.find(query)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .populate("user", "name email")
-        .populate("previousAgents", "name email")
-        .populate("projects", "name color"),
-      Lead.countDocuments(query),
-    ]);
+    // ── Normal paginated fetch ────────────────────────────────────────────────
+    // No countDocuments() — use the one-extra trick to compute hasMore.
+    // Eliminates a full index scan on every mobile request.
+    const raw = await Lead.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit + 1)                    // fetch one extra to detect next page
+      .select(MOBILE_LIST_PROJECTION)
+      .populate("user", "name email")
+      .lean();
+
+    const hasMore = raw.length > limit;
+    const leads   = hasMore ? raw.slice(0, limit) : raw;
 
     res.status(200).json({
       leads,
-      total,
       page,
-      pages: Math.ceil(total / limit),
+      limit,
+      hasMore,
+      // total and pages removed — not computed to avoid countDocuments().
+      // Frontend uses hasMore to decide whether to show "load more".
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
