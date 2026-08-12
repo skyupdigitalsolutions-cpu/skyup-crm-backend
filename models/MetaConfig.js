@@ -97,6 +97,19 @@ const metaConfigSchema = new mongoose.Schema(
     pausedByMeta:       { type: Boolean, default: false },
     metaStatusSyncedAt: { type: Date, default: null },
 
+    // ── Token health (surfaces expired/invalid tokens IN THE CRM, not just logs) ─
+    // Meta access tokens (adsToken, pageAccessToken) are plain pasted strings with
+    // no OAuth refresh loop — a 60-day long-lived user token WILL expire, and
+    // until now that failure only ever showed up as a console.warn in server logs
+    // that nobody watches day-to-day (metaAutoSyncJob / metaSyncService set these).
+    //   tokenExpired       true once Meta returns an "invalid_grant"/session-expired
+    //                      error for this config's token (code 190 / OAuthException)
+    //   tokenErrorMessage  Meta's raw error message, shown to the admin as-is
+    //   tokenErrorAt       when we first saw this specific failure
+    tokenExpired:       { type: Boolean, default: false },
+    tokenErrorMessage:  { type: String,  default: "" },
+    tokenErrorAt:       { type: Date,    default: null },
+
     // ── Conversions API (CAPI) — send-back, NOT pull ─────────────────────────
     // Lets the CRM tell Meta which leads actually converted (status changes),
     // so ad delivery optimizes toward real customers instead of raw form
