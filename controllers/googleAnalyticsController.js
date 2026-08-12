@@ -210,7 +210,15 @@ const listProperties = async (req, res) => {
     const props = await ga4.listProperties(token);
     res.json({ properties: props });
   } catch (err) {
-    const apiMsg = err && err.response && err.response.data && err.response.data.error ? err.response.data.error.message : null;
+    if (err.code === "RECONNECT_REQUIRED" || err.code === "NOT_CONNECTED") {
+      return res.status(400).json({ message: err.message, code: err.code });
+    }
+    console.error("[GA4] listProperties error:", err);
+    const fbData = err && err.response && err.response.data;
+    const fbErr  = fbData && fbData.error;
+    const apiMsg = typeof fbErr === "string"
+      ? (fbData.error_description || fbErr)
+      : (fbErr && fbErr.message) || null;
     res.status(500).json({ message: apiMsg || err.message });
   }
 };
@@ -269,8 +277,20 @@ const getDashboard = async (req, res) => {
     res.json(dash);
   } catch (err) {
     const code = err.code;
-    if (code === "NOT_CONNECTED" || code === "NO_PROPERTY") return res.status(400).json({ message: err.message, code });
-    const apiMsg = err && err.response && err.response.data && err.response.data.error ? err.response.data.error.message : null;
+    if (code === "NOT_CONNECTED" || code === "NO_PROPERTY" || code === "RECONNECT_REQUIRED") {
+      return res.status(400).json({ message: err.message, code });
+    }
+    // Log the FULL stack server-side — without this, a 500 here only ever
+    // shows up in the browser as a generic message with no way to trace it
+    // back to the actual failing line from EB/CloudWatch logs.
+    console.error("[GA4] getDashboard error:", err);
+    const fbData = err && err.response && err.response.data;
+    const fbErr  = fbData && fbData.error;
+    // Handle BOTH shapes: Analytics API → { error: { message } }; OAuth token
+    // endpoint → { error: "string", error_description: "..." }.
+    const apiMsg = typeof fbErr === "string"
+      ? (fbData.error_description || fbErr)
+      : (fbErr && fbErr.message) || null;
     res.status(500).json({ message: apiMsg || err.message });
   }
 };
