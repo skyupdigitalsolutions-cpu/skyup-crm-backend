@@ -29,6 +29,23 @@ const SheetConnection = require("../models/SheetConnection");
 const { normalizePhone } = require("../utils/normalizePhone");
 const { invalidateEntitlementCache } = require("../services/entitlementService");
 
+// ── Normalize a pasted Google Sheet URL down to just the Sheet ID ─────────────
+// The field is labeled/placeholder'd as "just the ID" (e.g. "1AbC…xyz"), but
+// pasting the FULL sheet URL is an extremely easy mistake to make — and the
+// bug it causes is nasty: the Apps Script call itself succeeds (secret's fine,
+// JSON comes back fine), it just can't resolve that ID to a real sheet, so it
+// silently returns "Found 0 columns and 0 rows" with NO error at all. This
+// strips a full URL down to the ID so that mistake can't happen, no matter
+// whether it's pasted into the connect form, the edit form, or already sitting
+// wrong in an existing SheetConnection document.
+function extractSheetId(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return raw;
+  // Matches .../spreadsheets/d/<ID>/... in any Google Sheets URL variant
+  const m = raw.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  return m ? m[1] : raw;
+}
+
 // ── Mappable CRM fields (Section 6) — mirrors the CSV import field set ─────────
 const CRM_FIELDS = [
   { key: "name",           label: "Full Name",       aliases: ["name", "full name", "fullname", "customer name", "lead name", "contact name"] },
@@ -64,7 +81,10 @@ async function callAppsScript({ appsScriptUrl, secretKey, googleSheetId, sheetNa
   if (!appsScriptUrl || !/^https:\/\//i.test(appsScriptUrl)) {
     throw new Error("A valid https Apps Script Web App URL is required.");
   }
-  const payload = { secret: secretKey, sheetId: googleSheetId || "", sheetName: sheetName || "", action };
+  // Defense in depth: normalize here too, so a Sheet ID saved wrong BEFORE this
+  // fix shipped (like a full URL sitting in an existing SheetConnection) self-
+  // heals on the very next test/sync — no re-save required from the employee.
+  const payload = { secret: secretKey, sheetId: extractSheetId(googleSheetId), sheetName: sheetName || "", action };
 
   let data;
   try {
@@ -203,7 +223,8 @@ const getMyConnection = async (req, res) => {
 // If secretKey omitted and a connection exists, reuse the stored (decrypted) one.
 const testConnection = async (req, res) => {
   try {
-    const { sheetName = "", googleSheetId = "", appsScriptUrl = "" } = req.body || {};
+    const { sheetName = "", googleSheetId: rawSheetId = "", appsScriptUrl = "" } = req.body || {};
+    const googleSheetId = extractSheetId(rawSheetId);
     let secretKey = req.body?.secretKey || "";
 
     if (!secretKey) {
@@ -244,9 +265,10 @@ const testConnection = async (req, res) => {
 const saveConnection = async (req, res) => {
   try {
     const {
-      sheetName = "", googleSheetId = "", appsScriptUrl = "",
+      sheetName = "", googleSheetId: rawSheetId = "", appsScriptUrl = "",
       columnMapping, defaultStatus, defaultRemark,
     } = req.body || {};
+    const googleSheetId = extractSheetId(rawSheetId);
     const secretKey = req.body?.secretKey || "";
 
     const existing = await SheetConnection.findOne({
