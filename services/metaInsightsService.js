@@ -329,10 +329,33 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
     return accountInsightsCache[cacheKey];
   };
 
-  for (const cfg of configs) {
-    const insights = await getAccountInsights(cfg);
-    const leadCount = await leadCountForConfig(cfg, fromD, toD);
-    const convertedCount = await convertedCountForConfig(cfg, fromD, toD);
+  // ── Fetch phase: run ALL configs' network calls CONCURRENTLY ────────────────
+  // PERFORMANCE FIX: this used to be `for (const cfg of configs) { await ...; await ...; await ...; }`
+  // — every config's Facebook Graph API call + 2 DB lead-count queries ran one
+  // at a time, in sequence. With more than a handful of Meta configs (multiple
+  // clients/ad sets), total wall time could climb past 30-60s, right into the
+  // territory of frontend axios timeouts and reverse-proxy/load-balancer
+  // timeouts — which surface to the browser as an opaque failed request.
+  // Batching in groups of 6 gets the same data with the same account-level
+  // caching, just concurrently, so total time scales with the SLOWEST config
+  // instead of the SUM of every config.
+  const FETCH_CONCURRENCY = 6;
+  const fetched = new Array(configs.length);
+  for (let i = 0; i < configs.length; i += FETCH_CONCURRENCY) {
+    const batch = configs.slice(i, i + FETCH_CONCURRENCY);
+    const results = await Promise.all(batch.map(async (cfg) => {
+      const [insights, leadCount, convertedCount] = await Promise.all([
+        getAccountInsights(cfg),
+        leadCountForConfig(cfg, fromD, toD),
+        convertedCountForConfig(cfg, fromD, toD),
+      ]);
+      return { cfg, insights, leadCount, convertedCount };
+    }));
+    for (let j = 0; j < results.length; j++) fetched[i + j] = results[j];
+  }
+
+  // ── Build phase: same dedup/totals logic as before, now purely synchronous ──
+  for (const { cfg, insights, leadCount, convertedCount } of fetched) {
 
     // ── Account/campaign scope: one card PER AD SET ───────────────────────────
     // fetchInsightsForConfig returns an `adsets` array for these. We emit a
@@ -516,7 +539,7 @@ async function getMetaInsightsReport({ company, from, to, withAI = true }) {
         });
       }
     } catch (e) {
-      result.aiAnalysisError = e.code === "GROQ_PAYLOAD_TOO_LARGE"
+      result.aiAnalysisError = e.code === "GROK_PAYLOAD_TOO_LARGE"
         ? "Too much data to analyse at once — narrow the date range."
         : (e?.response?.status === 429
             ? "AI is busy right now (rate limited). Please try again in a moment."
