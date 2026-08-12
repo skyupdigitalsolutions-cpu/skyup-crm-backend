@@ -78,7 +78,7 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
   const followUpMatch = { company: new mongoose.Types.ObjectId(company) };
   if (userId) followUpMatch.user = new mongoose.Types.ObjectId(userId);
 
-  const [todayLeads, prevLeads, followUpLeads] = await Promise.all([
+  const [todayLeads, prevLeads, followUpLeads, missingFollowUpLeads] = await Promise.all([
     // Today's leads
     Lead.aggregate([
       { $match: mergeLeadScope(baseMatch, leadScope) },
@@ -139,6 +139,42 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
         },
       },
       { $sort: { scheduledAt: 1 } },
+      { $limit: 200 },
+    ]),
+
+    // ── Missing follow-up date (24h+, never had a scheduledCalls entry) ────────
+    // BUG FIX: this used to be derived from `todayLeads` (leads created ON the
+    // viewed date) filtered to age >= 24h — which meant viewing "Today" (the
+    // page's default) always showed 0, since a lead created today can never be
+    // 24h old yet. Same fix as followUpMatch above: scope by company/user only,
+    // NOT by the viewed date, and query it live — this is a current STATE
+    // ("who's still missing a follow-up right now"), not a historical count
+    // for one day.
+    Lead.aggregate([
+      { $match: mergeLeadScope({
+          ...followUpMatch,
+          isClosed:   { $ne: true },
+          mergedInto: null,
+          status:     { $nin: ['Not Interested', 'Converted'] },
+          date:       { $lte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+          'scheduledCalls.0': { $exists: false },
+        }, leadScope) },
+      {
+        $lookup: {
+          from:         'users',
+          localField:   'user',
+          foreignField: '_id',
+          as:           'userInfo',
+        },
+      },
+      {
+        $project: {
+          _id: 1, name: 1, mobile: 1, status: 1, date: 1,
+          assignedUser: { $arrayElemAt: ['$userInfo.name', 0] },
+          userId:       '$user',
+        },
+      },
+      { $sort: { date: 1 } },
       { $limit: 200 },
     ]),
   ]);
@@ -246,32 +282,20 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
     return new Date(a.scheduledAt) - new Date(b.scheduledAt);
   });
 
-  // ── Missing follow-up date (24h+ old, NEVER had a scheduledCalls entry) ────
-  // Scoped to leads created on the viewed date (same `todayLeads` set as the
-  // rest of this report) so admins can flip through past dates and see, for
-  // that day's leads, who never got a follow-up scheduled within 24h.
-  // Excludes 'Not Interested' (per business rule) and 'Converted' (already won).
-  const missingFollowUpCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const missingFollowUps = todayLeads
-    .filter(l =>
-      !l.mergedInto &&
-      !l.isClosed &&
-      l.status !== 'Not Interested' &&
-      l.status !== 'Converted' &&
-      new Date(l.date) <= missingFollowUpCutoff &&
-      !(l.scheduledCalls || []).length
-    )
-    .map(l => ({
-      _id:          l._id,
-      name:         l.name,
-      mobile:       l.mobile,
-      status:       l.status,
-      assignedUser: l.assignedUserName || 'Unassigned',
-      userId:       l.user || null,
-      createdAt:    l.date,
-      hoursSinceCreated: Math.floor((Date.now() - new Date(l.date).getTime()) / 3600000),
-    }))
-    .sort((a, b) => b.hoursSinceCreated - a.hoursSinceCreated);
+  // ── Missing follow-up date (24h+, NEVER had a scheduledCalls entry) ────────
+  // Now a live, date-independent query (see missingFollowUpLeads above) —
+  // shows every currently-overdue lead regardless of which date is selected,
+  // instead of only leads created on that exact day.
+  const missingFollowUps = missingFollowUpLeads.map(l => ({
+    _id:          l._id,
+    name:         l.name,
+    mobile:       l.mobile,
+    status:       l.status,
+    assignedUser: l.assignedUser || 'Unassigned',
+    userId:       l.userId || null,
+    createdAt:    l.date,
+    hoursSinceCreated: Math.floor((Date.now() - new Date(l.date).getTime()) / 3600000),
+  }));
 
   return {
     date:          date || new Date().toISOString().slice(0, 10),
