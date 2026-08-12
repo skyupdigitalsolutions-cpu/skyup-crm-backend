@@ -298,7 +298,7 @@ async function getSourcePerformanceReport({
         });
       }
     } catch (e) {
-      result.aiAnalysisError = e?.code === "GROQ_PAYLOAD_TOO_LARGE"
+      result.aiAnalysisError = e?.code === "GROK_PAYLOAD_TOO_LARGE"
         ? "Too much data to analyse at once — narrow the date range."
         : (e?.response?.status === 429
             ? "AI is busy right now (rate limited). Please try again in a moment."
