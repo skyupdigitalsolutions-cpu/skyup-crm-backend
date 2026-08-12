@@ -64,10 +64,32 @@ const runMetaAutoSync = async () => {
       if (created > 0) {
         console.log(`[MetaAutoSyncJob] page ${page.pageId} (company ${page.companyId}): +${created} new, ${skipped} existing`);
       }
+      // Sync succeeded — clear any previously-flagged token error for this page
+      // so a fixed/replaced token doesn't keep showing a stale "expired" banner.
+      await MetaConfig.updateMany(
+        { company: page.companyId, pageId: page.pageId, tokenExpired: true },
+        { $set: { tokenExpired: false, tokenErrorMessage: "", tokenErrorAt: null } }
+      );
     } catch (err) {
       // Expired token, permission error, rate limit, etc. — log and continue.
-      const metaError = err?.response?.data?.error?.message || err.message;
+      const fbError  = err?.response?.data?.error;
+      const metaError = fbError?.message || err.message;
       console.warn(`[MetaAutoSyncJob] ⚠️  page ${page.pageId} (company ${page.companyId}) skipped: ${metaError}`);
+
+      // ── Surface expired/invalid tokens IN THE CRM, not just this log line ────
+      // Meta error code 190 (OAuthException) covers expired session, revoked
+      // token, and invalid token — all "the admin needs to paste a new token"
+      // situations. Flag every MetaConfig sharing this page's credentials so
+      // the Campaigns page can show a banner instead of this failing silently
+      // for weeks (which is exactly what happened before this fix).
+      if (fbError?.code === 190) {
+        try {
+          await MetaConfig.updateMany(
+            { company: page.companyId, pageId: page.pageId },
+            { $set: { tokenExpired: true, tokenErrorMessage: metaError, tokenErrorAt: new Date() } }
+          );
+        } catch (_) { /* best effort — don't let this break the sweep */ }
+      }
     }
   }
 
