@@ -253,6 +253,10 @@ const getInsights = async (req, res) => {
     });
     res.json(report);
   } catch (err) {
+    // Was previously swallowed with NO server-side log — a 500 here left no
+    // trace anywhere except the generic message in the browser. Log the full
+    // stack so the next occurrence is traceable from EB/CloudWatch logs.
+    console.error("[Meta Insights] getInsights error:", err);
     res.status(500).json({ message: err.message });
   }
 };
