@@ -184,9 +184,28 @@ async function reconcileMetaStatusesForCompany(companyId) {
       for (const [k, v] of maps.adsetByName)    merged.adsetByName.set(k, v);
       for (const [k, v] of maps.campaignById)   merged.campaignById.set(k, v);
       for (const [k, v] of maps.campaignByName) merged.campaignByName.set(k, v);
+      // Lookup succeeded — clear any previously-flagged token error for configs
+      // using this ad account's token.
+      await MetaConfig.updateMany(
+        { company: companyId, adAccountId: acct, tokenExpired: true },
+        { $set: { tokenExpired: false, tokenErrorMessage: "", tokenErrorAt: null } }
+      );
     } catch (err) {
-      const metaError = err?.response?.data?.error?.message || err.message;
+      const fbError  = err?.response?.data?.error;
+      const metaError = fbError?.message || err.message;
       console.warn(`[MetaStatusSync] ⚠️  account ${acct} (company ${companyId}) failed: ${metaError}`);
+
+      // Surface expired/invalid tokens IN THE CRM (see metaAutoSyncJob.js —
+      // same fix, same reasoning: error code 190 = OAuthException, covers
+      // expired session / revoked token / invalid token).
+      if (fbError?.code === 190) {
+        try {
+          await MetaConfig.updateMany(
+            { company: companyId, adAccountId: acct },
+            { $set: { tokenExpired: true, tokenErrorMessage: metaError, tokenErrorAt: new Date() } }
+          );
+        } catch (_) { /* best effort */ }
+      }
     }
   }
 
