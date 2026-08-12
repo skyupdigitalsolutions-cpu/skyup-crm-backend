@@ -141,7 +141,35 @@ async function getValidAccessToken(config) {
     throw e;
   }
   const creds = resolveCreds(config);
-  const tok = await refreshAccessToken(refresh, creds);
+
+  let tok;
+  try {
+    tok = await refreshAccessToken(refresh, creds);
+  } catch (err) {
+    // Google's OAuth token endpoint returns { error: "invalid_grant", error_description: "..." }
+    // — note `error` is a STRING here (unlike the Analytics API, where it's an
+    // object with .message). invalid_grant means the refresh token is expired
+    // or was revoked — most commonly because the OAuth consent screen in Google
+    // Cloud Console is still in "Testing" mode, where refresh tokens expire
+    // after 7 days. Treat this as "needs reconnect", not a generic 500.
+    const fbData  = err && err.response && err.response.data;
+    const fbError = fbData && fbData.error;
+    const isInvalidGrant =
+      fbError === "invalid_grant" ||
+      (err && err.response && err.response.status === 400);
+
+    if (isInvalidGrant) {
+      // Mark disconnected so GET /status correctly shows "not connected" and
+      // the UI can prompt reconnect instead of silently retrying a dead token.
+      try { config.connected = false; await config.save(); } catch (_) { /* best effort */ }
+
+      const e = new Error("Google Analytics access has expired or was revoked. Please reconnect Google Analytics.");
+      e.code = "RECONNECT_REQUIRED";
+      throw e;
+    }
+    throw err;
+  }
+
   config.accessToken       = encryptToken(tok.access_token);
   config.accessTokenExpiry = new Date(now + (tok.expires_in || 3600) * 1000);
   await config.save();
