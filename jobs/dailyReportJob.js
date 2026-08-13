@@ -26,7 +26,25 @@ const DailyReportConfig  = require('../models/DailyReportConfig');
 const { generateAndSend, getTodayInTimezone } = require('../services/dailyReportService');
 
 // ── Check if a company should receive its report right now ────────────────────
-// Compares the current HH:MM in the company's timezone to config.reportTime.
+// FIX: previously this required an EXACT "HH:MM" string match, checked once
+// per minute. If the process was mid-restart, redeploying, or waking up from
+// a Render free-tier cold start during that exact minute, the tick was
+// missed entirely — and since there was no fallback, that company silently
+// got NO report for the whole day, with no error anywhere in the History tab.
+//
+// Fix: fire any time we're at-or-just-past the target minute, within a small
+// grace window. This is safe because generateAndSend() already has a hard
+// idempotency guard (DailyReportHistory unique index on
+// {company, reportDate, triggeredBy}) — so even if this returns true on
+// several consecutive ticks inside the window, only the first one actually
+// sends; the rest short-circuit via "Already sent ... skipping".
+const GRACE_MINUTES = 5;
+
+function toMinutes(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
 function shouldSendNow(config) {
   try {
     const tz  = config.timezone || 'Asia/Kolkata';
@@ -35,9 +53,16 @@ function shouldSendNow(config) {
       hour:  '2-digit',
       minute:'2-digit',
       hour12: false,
-    }).format(new Date());
-    // now = "HH:MM", config.reportTime = "HH:MM"
-    return now === config.reportTime;
+    }).format(new Date()); // "HH:MM"
+
+    const nowMin    = toMinutes(now);
+    const targetMin = toMinutes(config.reportTime);
+
+    // Minutes elapsed since target, wrapping around midnight (handles
+    // targets like 23:58 correctly instead of going negative).
+    const elapsed = (nowMin - targetMin + 1440) % 1440;
+
+    return elapsed >= 0 && elapsed <= GRACE_MINUTES;
   } catch {
     return false;
   }
