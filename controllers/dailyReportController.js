@@ -63,6 +63,11 @@ const getSettings = async (req, res) => {
 };
 
 // ── PUT /daily-report/settings ────────────────────────────────────────────────
+// IMPORTANT: this must go through a Mongoose *document* (load + .save()),
+// NOT findOneAndUpdate(). The model's pre('save') hook is what encrypts
+// telegramBotToken at rest — findOneAndUpdate() bypasses document middleware
+// entirely, so tokens saved that way were being written to Mongo in PLAIN
+// TEXT. Loading the doc first and calling .save() restores encryption.
 const saveSettings = async (req, res) => {
   try {
     const companyId = getCompanyId(req);
@@ -81,23 +86,27 @@ const saveSettings = async (req, res) => {
       catch { return res.status(400).json({ message: `Invalid timezone: ${timezone}` }); }
     }
 
-    const update = {};
-    if (enabled         !== undefined) update.enabled         = !!enabled;
-    if (telegramChatId  !== undefined) update.telegramChatId  = String(telegramChatId).trim();
-    if (reportTime      !== undefined) update.reportTime      = reportTime;
-    if (timezone        !== undefined) update.timezone        = timezone;
-    if (sendEmptyReport !== undefined) update.sendEmptyReport = !!sendEmptyReport;
+    // ── Load existing doc, or build a new one (upsert semantics) ──────────────
+    let config = await DailyReportConfig.findOne({ company: companyId });
+    if (!config) {
+      config = new DailyReportConfig({ company: companyId });
+    }
+
+    if (enabled         !== undefined) config.enabled         = !!enabled;
+    if (telegramChatId  !== undefined) config.telegramChatId  = String(telegramChatId).trim();
+    if (reportTime      !== undefined) config.reportTime      = reportTime;
+    if (timezone        !== undefined) config.timezone        = timezone;
+    if (sendEmptyReport !== undefined) config.sendEmptyReport = !!sendEmptyReport;
 
     const isMasked = typeof telegramBotToken === 'string' && telegramBotToken.includes('•');
     if (telegramBotToken && !isMasked) {
-      update.telegramBotToken = telegramBotToken.trim();
+      // Setting this field marks it "modified" so the pre('save') hook
+      // below will re-encrypt it. Plain findOneAndUpdate() never triggered
+      // that hook at all.
+      config.telegramBotToken = telegramBotToken.trim();
     }
 
-    const config = await DailyReportConfig.findOneAndUpdate(
-      { company: companyId },
-      { $set: update },
-      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
-    );
+    await config.save();
 
     res.json({
       message:    'Settings saved successfully',
