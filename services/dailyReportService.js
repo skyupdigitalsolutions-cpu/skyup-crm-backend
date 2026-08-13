@@ -296,7 +296,13 @@ async function aggregateCallStats(companyId, dayStart, dayEnd) {
           $sum: {
             $cond: [{
               $and: [
-                { $nin: ['$callType', ['missed', 'rejected', 'blocked']] },
+                // FIX: '$nin' is a query-language operator (valid in find()/
+                // $match) — it does NOT exist in the aggregation expression
+                // language, only '$in' does. Using it here threw
+                // "Unrecognized expression '$nin'" on every run, which
+                // crashed buildReport() and killed both the scheduled
+                // report and any manual "Send Now"/"Test" attempt.
+                { $not: [{ $in: ['$callType', ['missed', 'rejected', 'blocked']] }] },
                 { $gt:  ['$duration', 0] },
               ],
             }, 1, 0],
