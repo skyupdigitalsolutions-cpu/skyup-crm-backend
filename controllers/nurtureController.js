@@ -1,4 +1,4 @@
-// controllers/nurtureController.js — NEW FILE
+// controllers/nurtureController.js
 // ─────────────────────────────────────────────────────────────────────────────
 // Admin CRUD for NurtureRule. Every query/write is scoped to req.admin's own
 // company — there is no cross-company listing here, by design (mirrors the
@@ -9,12 +9,17 @@
 // Company.devOverrides.featureToggles.leadNurtureSequence = true, set from
 // the Developer > Company Details panel. This keeps the "only one company"
 // requirement enforced in one place (the entitlement, not the rule data).
+//
+// MANUAL TRIGGER ENDPOINTS (for testing without waiting for the 11 AM cron):
+//   POST /api/nurture/run              — runs the full cron check right now
+//   POST /api/nurture/trigger/:leadId  — fires rules for one specific lead
 // ─────────────────────────────────────────────────────────────────────────────
 
 const NurtureRule = require("../models/NurtureRule");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 const { syncTemplatesForCompany, probeTemplateEndpoints, fetchRaw } = require("../services/msg91TemplateService");
 const { escapeRegex } = require("../utils/escapeRegex");
+const { runNurtureSequenceCheck, triggerNurtureForLead } = require("../jobs/nurtureSequenceJob");
 
 function resolveCompany(req) {
   return req.callerCompany || req.admin?.company?._id || req.admin?.company;
@@ -201,4 +206,53 @@ const probeTemplates = async (req, res) => {
   }
 };
 
-module.exports = { listRules, createRule, updateRule, deleteRule, syncTemplates, listTemplates, probeTemplates, rawTemplates };
+// ── POST /api/nurture/run ─────────────────────────────────────────────────────
+// Manually runs the full nurture cron check right now — useful for testing
+// without waiting until 11:00 AM IST. Only works for the enabled company
+// (6a22662b7aea6e4034f44aae); all others are silently no-ops inside the job.
+const runNow = async (req, res) => {
+  try {
+    const result = await runNurtureSequenceCheck();
+    res.json({ success: true, sent: result.sent });
+  } catch (err) {
+    console.error("[nurtureController.runNow]", err.message);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── POST /api/nurture/trigger/:leadId ─────────────────────────────────────────
+// Fires the immediate nurture trigger for one specific lead at the lead's
+// current status. Useful for debugging leads that didn't get nurtured after a
+// status change. Body: { status } — override the status to test (optional;
+// defaults to the lead's current status in the DB).
+const triggerForLead = async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    const Lead = require("../models/Leads");
+
+    const lead = await Lead.findById(leadId).select("status").lean();
+    if (!lead) return res.status(404).json({ message: "Lead not found" });
+
+    const status = req.body.status || lead.status;
+    if (!status) return res.status(400).json({ message: "Lead has no status; pass status in body" });
+
+    await triggerNurtureForLead(String(leadId), status);
+    res.json({ success: true, leadId, status });
+  } catch (err) {
+    console.error("[nurtureController.triggerForLead]", err.message);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+module.exports = {
+  listRules,
+  createRule,
+  updateRule,
+  deleteRule,
+  syncTemplates,
+  listTemplates,
+  probeTemplates,
+  rawTemplates,
+  runNow,
+  triggerForLead,
+};
