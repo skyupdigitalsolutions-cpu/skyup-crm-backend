@@ -75,6 +75,11 @@ mobileCallLogSchema.index({ user: 1, timestamp: -1 });
 mobileCallLogSchema.index({ user: 1, phoneNumber: 1, timestamp: 1, callType: 1 }, { unique: true });
 // Fast lead-matching by normalizedPhone
 mobileCallLogSchema.index({ company: 1, normalizedPhone: 1 }, { sparse: true });
+// NEW: services/dailyReportService.js aggregateCallStats() matches by
+// { company, timestamp: {$gte,$lte} } for every report send (scheduled +
+// manual + test) — without this index that query has no company-scoped
+// index to use and falls back to scanning every call log for the company.
+mobileCallLogSchema.index({ company: 1, timestamp: -1 });
 
 // Auto-compute normalizedPhone before save
 mobileCallLogSchema.pre('validate', function () {
