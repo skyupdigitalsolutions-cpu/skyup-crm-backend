@@ -181,19 +181,47 @@ const syncCallLogs = async (req, res) => {
       });
     }
 
+    // ── Push new call-history entries onto matched leads ──────────────────────
+    // FIX: this used to be `for (const [leadId, entries] of leadUpdates) { await
+    // Lead.findById(...); await Lead.findByIdAndUpdate(...); }` — 2 sequential
+    // DB round trips PER DISTINCT LEAD in the sync batch. This endpoint is hit
+    // by every field agent's device on every call-log sync; a batch touching
+    // 30 distinct leads meant 60 serial round trips on a single request.
+    // Fixed to 1 batched read + 1 bulkWrite, regardless of how many leads are
+    // touched.
+    const leadIds = [...leadUpdates.keys()];
     let callHistoryPushCount = 0;
-    for (const [leadId, entries] of leadUpdates) {
-      try {
-        const lead = await Lead.findById(leadId).lean();
+
+    if (leadIds.length) {
+      const existingLeads = await Lead.find(
+        { _id: { $in: leadIds } },
+        { callHistory: 1 },
+      ).lean();
+      const existingMap = new Map(existingLeads.map(l => [String(l._id), l]));
+
+      const bulkOps = [];
+      for (const [leadId, entries] of leadUpdates) {
+        const lead = existingMap.get(leadId);
         if (!lead) continue;
         const existing = new Set((lead.callHistory || []).map(h => new Date(h.calledAt).getTime()));
         const newEntries = entries.filter(e => !existing.has(new Date(e.calledAt).getTime()));
         if (newEntries.length > 0) {
-          await Lead.findByIdAndUpdate(leadId, { $push: { callHistory: { $each: newEntries } } });
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: leadId },
+              update: { $push: { callHistory: { $each: newEntries } } },
+            },
+          });
           callHistoryPushCount += newEntries.length;
         }
-      } catch (e) {
-        console.error('callHistory push error for lead', leadId, e.message);
+      }
+
+      if (bulkOps.length) {
+        try {
+          await Lead.bulkWrite(bulkOps);
+        } catch (e) {
+          console.error('callHistory bulk push error:', e.message);
+        }
       }
     }
 
