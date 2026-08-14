@@ -387,20 +387,31 @@ async function syncTemplatesForCompany(companyId) {
             // get-template endpoint only returns live/enabled templates, and
             // the dashboard confirms they show as "Enabled".
             status: normalizeStatus(
+              // Top-level status fields (some MSG91 endpoints)
               t.status ?? t.template_status ?? t.status_name ?? t.approval_status ??
               t.state ?? t.template_state ?? t.templateStatus ?? t.approvalStatus ??
+              // MSG91 get-template endpoint returns status INSIDE languages[].status
+              // e.g. languages: [{ status: "approved", ... }]
+              (Array.isArray(t.languages) && t.languages.length > 0
+                ? (t.languages[0].status ?? t.languages[0].template_status ?? t.languages[0].approval_status)
+                : undefined) ??
               // boolean/numeric forms some APIs use
               (t.is_active === true || t.active === true || t.enabled === true ? "ENABLED" : undefined) ??
               (t.is_active === false || t.active === false || t.enabled === false ? "DISABLED" : undefined) ??
-              // Nothing returned → we genuinely do not know. Do NOT claim
-              // "Approved" — an inaccurate green badge is worse than an honest
-              // "Unknown", because it hides pending templates that will fail.
+              // Nothing returned → we genuinely do not know.
               "UNKNOWN"
             ),
             // Keep whatever the API actually sent so the UI can show the truth
             rawStatusField: (() => {
               for (const k of ["status","template_status","status_name","approval_status","state","template_state","templateStatus","approvalStatus","is_active","active","enabled"]) {
                 if (t[k] !== undefined) return `${k}=${String(t[k])}`;
+              }
+              // Also check inside languages[0]
+              if (Array.isArray(t.languages) && t.languages.length > 0) {
+                const lang = t.languages[0];
+                for (const k of ["status","template_status","approval_status"]) {
+                  if (lang[k] !== undefined) return `languages[0].${k}=${String(lang[k])}`;
+                }
               }
               return "(no status field in MSG91 response)";
             })(),
