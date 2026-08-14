@@ -39,11 +39,10 @@ const IST_TIMEZONE = "Asia/Kolkata";
 // ── Single company gate ───────────────────────────────────────────────────────
 const ENABLED_COMPANY_ID = "6a22662b7aea6e4034f44aae";
 
-// Statuses that should never receive nurture messages
-const SKIP_STATUSES = new Set(["Not Interested", "Converted"]);
-// Note: Converted status can still receive Action stage messages, so it's
-// handled per-rule via statusStage matching, not skipped globally.
-// Only "Not Interested" is hard-skipped.
+// "Not Interested" leads are hard-skipped globally — never receive nurture messages.
+// "Converted" is NOT skipped here; it can still receive Action-stage messages
+// when a rule's statusStage = "Converted". The per-rule statusStage filter
+// in ruleMatchesStatus() handles the finer gating.
 const HARD_SKIP_STATUSES = new Set(["Not Interested"]);
 
 // Sources that never receive nurture messages
@@ -132,12 +131,15 @@ function resolveNextVariation(rule, lead) {
   const autoMode = !!wa.autoResolveTemplate && !!wa.funnelStage;
   if (autoMode) {
     if (!canResolve(lead)) {
-      // Lead has no industry/service — do NOT guess a vertical. Fall through
-      // to the manual list so the rule can still use a generic template.
+      // Lead has no industry/service — cannot auto-resolve. Try templateVariations
+      // first, then fall back to the single templateName on the rule. Auto-resolve
+      // rules typically have an empty templateVariations, so the single templateName
+      // acts as the last-resort generic fallback for untagged leads.
       console.warn(
         `[NurtureJob] lead ${lead._id} missing industry/service — ` +
-        `cannot auto-resolve "${wa.funnelStage}" template; using manual fallback`
+        `cannot auto-resolve "${wa.funnelStage}" template; falling back to templateVariations/templateName`
       );
+      // fall through to the variation / single-template block below
     } else {
       const count = Math.max(1, Number(wa.variationCount) || 5);
       const idx   = nextVariationIndex(rule, lead, count);
@@ -148,8 +150,11 @@ function resolveNextVariation(rule, lead) {
 
   const variations = wa.templateVariations;
   if (!Array.isArray(variations) || variations.length === 0) {
-    // Fall back to single templateName
-    return { templateName: rule.action?.whatsapp?.templateName || "", nextIndex: 0 };
+    // No variation list — use the single fallback templateName on the rule.
+    // For auto-resolve rules with untagged leads this is the last resort;
+    // set action.whatsapp.templateName on the rule to a generic template
+    // (e.g. "generic_awareness_v1") so these leads still get nurtured.
+    return { templateName: wa.templateName || "", nextIndex: 0 };
   }
 
   const ruleId = String(rule._id);
