@@ -24,6 +24,14 @@ const cron               = require('node-cron');
 const Company            = require('../models/Company');
 const DailyReportConfig  = require('../models/DailyReportConfig');
 const { generateAndSend, getTodayInTimezone } = require('../services/dailyReportService');
+const { invalidateCache } = require('../utils/cacheService');
+
+// Note: company names are intentionally NOT read through the per-company
+// getCachedCompanyName() cache here — this job already fetches all due
+// companies' names in ONE batched query (below), which is more efficient
+// than N separate cache round trips. The per-company cache helper exists for
+// call sites (controllers) that only ever need one company at a time.
+const historyCacheKey = (companyId) => `dailyReport:history:${companyId}`;
 
 // ── Check if a company should receive its report right now ────────────────────
 // FIX: previously this required an EXACT "HH:MM" string match, checked once
@@ -97,6 +105,9 @@ async function runDailyReportTick() {
         const companyName = nameMap.get(String(config.company)) || 'Unknown';
         try {
           await generateAndSend(config, companyName, null, 'scheduler');
+          // So the History tab shows this run immediately instead of
+          // serving a cached pre-send list for up to 30s.
+          await invalidateCache(historyCacheKey(config.company));
         } catch (err) {
           console.error(`[DailyReportJob] Error for company ${config.company}:`, err.message);
         }
