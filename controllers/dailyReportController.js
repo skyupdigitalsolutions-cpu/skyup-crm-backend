@@ -12,12 +12,25 @@
 
 'use strict';
 
-const Company            = require('../models/Company');
 const DailyReportConfig  = require('../models/DailyReportConfig');
 const DailyReportHistory = require('../models/DailyReportHistory');
 const {
   generateAndSend,
 } = require('../services/dailyReportService');
+const { getCachedCompanyName } = require('../utils/companyCache');
+const { getOrSetCache, invalidateCache } = require('../utils/cacheService');
+
+// ── Redis cache keys for this feature ─────────────────────────────────────────
+// Short TTLs (30s) because this data is genuinely user-editable — unlike the
+// company name cache, a stale read here would show the admin outdated
+// settings/history right after they changed something. 30s is enough to kill
+// the repeat round trip from the frontend re-fetching on every popover open
+// (SettingsTab/HistoryTab both GET on every mount) while staying invisible to
+// the user in practice.
+const CONFIG_TTL_SECONDS  = 30;
+const HISTORY_TTL_SECONDS = 30;
+const configCacheKey  = (companyId) => `dailyReport:config:${companyId}`;
+const historyCacheKey = (companyId) => `dailyReport:history:${companyId}`;
 
 // ── Resolve company ID from request ──────────────────────────────────────────
 function getCompanyId(req) {
@@ -37,7 +50,9 @@ const getSettings = async (req, res) => {
     const companyId = getCompanyId(req);
     if (!companyId) return res.status(400).json({ message: 'Company context required' });
 
-    const config = await DailyReportConfig.findOne({ company: companyId }).lean();
+    const config = await getOrSetCache(configCacheKey(companyId), CONFIG_TTL_SECONDS, () =>
+      DailyReportConfig.findOne({ company: companyId }).lean(),
+    );
 
     if (!config) {
       return res.json({
@@ -108,6 +123,10 @@ const saveSettings = async (req, res) => {
 
     await config.save();
 
+    // Invalidate the cached settings so the very next GET reflects this
+    // change instead of serving the pre-save version for up to 30s.
+    await invalidateCache(configCacheKey(companyId));
+
     res.json({
       message:    'Settings saved successfully',
       configured: !!(config.telegramBotToken && config.telegramChatId),
@@ -137,8 +156,12 @@ const sendTest = async (req, res) => {
       return res.status(400).json({ message: 'Configure Bot Token and Chat ID first' });
     }
 
-    const company = await Company.findById(companyId).select('name').lean();
-    const result  = await generateAndSend(config, company?.name || 'Company', null, 'test');
+    const companyName = await getCachedCompanyName(companyId);
+    const result       = await generateAndSend(config, companyName, null, 'test');
+
+    // A new history record was just written — don't let a stale cached list
+    // hide it from the History tab until TTL expires.
+    await invalidateCache(historyCacheKey(companyId));
 
     if (result.error) {
       return res.status(502).json({ message: `Telegram error: ${result.error}` });
@@ -173,8 +196,12 @@ const sendNow = async (req, res) => {
       return res.status(400).json({ message: 'Configure Bot Token and Chat ID first' });
     }
 
-    const company = await Company.findById(companyId).select('name').lean();
-    const result  = await generateAndSend(config, company?.name || 'Company', null, 'manual');
+    const companyName = await getCachedCompanyName(companyId);
+    const result       = await generateAndSend(config, companyName, null, 'manual');
+
+    // A new history record was just written (or a 'skipped' one already
+    // existed) — invalidate either way so History reflects it immediately.
+    await invalidateCache(historyCacheKey(companyId));
 
     if (result.skipped) {
       return res.json({ message: 'Report already sent for today', skipped: true });
@@ -196,11 +223,13 @@ const getHistory = async (req, res) => {
     const companyId = getCompanyId(req);
     if (!companyId) return res.status(400).json({ message: 'Company context required' });
 
-    const history = await DailyReportHistory.find({ company: companyId })
-      .sort({ generatedAt: -1 })
-      .limit(30)
-      .select('-telegramMessageIds')
-      .lean();
+    const history = await getOrSetCache(historyCacheKey(companyId), HISTORY_TTL_SECONDS, () =>
+      DailyReportHistory.find({ company: companyId })
+        .sort({ generatedAt: -1 })
+        .limit(30)
+        .select('-telegramMessageIds')
+        .lean(),
+    );
 
     res.json({ history });
   } catch (err) {
