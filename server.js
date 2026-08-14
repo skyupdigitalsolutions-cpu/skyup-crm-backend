@@ -88,7 +88,7 @@ const { startLimitOverrideExpiryJob } = require('./jobs/limitOverrideExpiryJob')
 const { startAddonExpiryJob }         = require('./jobs/addonExpiryJob');
 const { startMeetingReminderJob }     = require('./jobs/meetingReminderJob');
 const { startFollowUpReminderJob }    = require('./jobs/followUpReminderJob');
-const { startNurtureSequenceJob }     = require('./jobs/nurtureSequenceJob'); // NOT started yet — see note below, kept off until templates are reviewed
+const { startNurtureSequenceJob }     = require('./jobs/nurtureSequenceJob');
 const { startMetaAutoSyncJob }        = require('./jobs/metaAutoSyncJob'); // NEW — auto-syncs new Meta ad sets & forms
 const { startDailyReportJob }         = require('./jobs/dailyReportJob');
 
@@ -473,14 +473,12 @@ connectDB().then(() => {
     startMeetingReminderJob();      // NEW — day-before + meeting-day WhatsApp/email reminders
     startFollowUpReminderJob();     // NEW — WhatsApp/email reminders to leads with due follow-ups (9:30 AM & 8:30 PM IST)
 
-    // ── Lead Nurture Sequence — INTENTIONALLY NOT STARTED YET ────────────────
-    // jobs/nurtureSequenceJob.js exists and works, and NurtureRule CRUD
-    // (/api/nurture/rules) is live so rules can be built/reviewed in the
-    // admin UI — but the cron itself is left OFF so no WhatsApp/Email
-    // template automation actually fires from the backend yet. Uncomment
-    // the line below once rules + templates are reviewed and you're ready
-    // to go live for the one enabled company:
-    startNurtureSequenceJob();   // 11:00 AM IST daily, company 6a22662b7aea6e4034f44aae
+    // ── Lead Nurture Sequence ─────────────────────────────────────────────────
+    // Cron fires at 11:00 AM IST daily. Immediate trigger fires on every lead
+    // status change via triggerNurtureForLead() in leadController.js.
+    // Gated to company 6a22662b7aea6e4034f44aae + leadNurtureSequence feature
+    // toggle. Enable the toggle from Developer > Company Details panel.
+    startNurtureSequenceJob();   // 11:00 AM IST daily
     startMetaAutoSyncJob();
     startDailyReportJob();         // Sends daily Telegram performance report at each company's configured time
     // MSG91 inbound: webhook-only mode — no polling needed
