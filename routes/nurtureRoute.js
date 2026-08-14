@@ -13,6 +13,8 @@ const {
   listTemplates,
   probeTemplates,
   rawTemplates,
+  runNow,
+  triggerForLead,
 } = require("../controllers/nurtureController");
 
 // Admin-only, and gated by the same company-scoped entitlement the cron job
@@ -30,7 +32,14 @@ router.delete("/rules/:id", protectAdmin, requireFeature("leadNurtureSequence"),
 // GET  /templates/probe  → diagnostic: find which MSG91 endpoint works
 router.get("/templates",        protectAdmin, requireFeature("leadNurtureSequence"), listTemplates);
 router.post("/templates/sync",  protectAdmin, requireFeature("leadNurtureSequence"), syncTemplates);
-router.get("/templates/raw",   protectAdmin, requireFeature("leadNurtureSequence"), rawTemplates);
+router.get("/templates/raw",    protectAdmin, requireFeature("leadNurtureSequence"), rawTemplates);
 router.get("/templates/probe",  protectAdmin, requireFeature("leadNurtureSequence"), probeTemplates);
+
+// ── Manual triggers (admin-only, for testing without waiting for the 11 AM cron)
+// POST /run                 → runs the full daily cron check immediately
+// POST /trigger/:leadId     → fires rules for one lead at its current status
+//                             body: { status } — optional override
+router.post("/run",                protectAdmin, requireFeature("leadNurtureSequence"), runNow);
+router.post("/trigger/:leadId",    protectAdmin, requireFeature("leadNurtureSequence"), triggerForLead);
 
 module.exports = router;
