@@ -101,10 +101,17 @@ async function notifySuperAdminEscalation(leads) {
   // Group by company first so we find the right super_admin per company
   const companyIds = distinctCompanies(leads);
 
+  // FIX: previously `await Admin.findOne(...)` INSIDE the for-loop — one
+  // round trip per company with an escalation this tick. Batch-fetch every
+  // company's super_admin in one query instead.
+  const superAdmins = await Admin.find(
+    { company: { $in: companyIds }, role: 'super_admin' },
+    { name: 1, fcmToken: 1, role: 1, company: 1 },
+  ).lean();
+  const superAdminMap = new Map(superAdmins.map(a => [String(a.company), a]));
+
   for (const companyId of companyIds) {
-    const superAdmin = await Admin.findOne({ company: companyId, role: 'super_admin' })
-      .select('_id name fcmToken role')
-      .lean();
+    const superAdmin = superAdminMap.get(companyId);
     if (!superAdmin) continue;
 
     const companyLeads = leads.filter(l => String(l.company) === companyId);
@@ -344,8 +351,17 @@ async function runNoFollowUpDateCheck() {
 
     console.log(`[LeadAlertsJob] No-follow-up-date: ${leads.length} lead(s) across ${byUser.size} employee(s).`);
 
+    // FIX: this used to do `await User.findById(userId)` INSIDE the loop —
+    // one DB round trip per employee with an overdue lead, every time this
+    // job runs. Batch-fetch every employee in the group in one query instead.
+    const users = await User.find(
+      { _id: { $in: [...byUser.keys()] } },
+      { name: 1, fcmToken: 1 },
+    ).lean();
+    const userMap = new Map(users.map(u => [String(u._id), u]));
+
     for (const [userId, userLeads] of byUser) {
-      const user = await User.findById(userId).select('_id name fcmToken').lean();
+      const user = userMap.get(userId);
       if (!user) continue;
 
       await sendNoFollowUpAlert(user, userLeads);
