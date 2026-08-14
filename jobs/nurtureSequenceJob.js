@@ -458,7 +458,7 @@ async function triggerNurtureForLead(leadId, newStatus) {
 function startNurtureSequenceJob() {
   // 11:00 AM IST daily — after morning follow-up reminder (9:30 AM)
   cron.schedule(
-    "0 11 * * *",
+    "* * * * *",
     () => {
       runNurtureSequenceCheck().catch((e) =>
         console.error("[nurtureSequence] job error:", e.message)
