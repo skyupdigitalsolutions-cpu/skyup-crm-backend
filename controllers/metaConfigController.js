@@ -143,6 +143,11 @@ const addConfig = async (req, res) => {
       adSetName:       req.body.adSetName?.trim() || "",
       parentCampaignName: req.body.parentCampaignName?.trim() || "",
       category:        req.body.category?.trim() || "",
+      // ── Lead Nurture tags ─────────────────────────────────────────────────
+      // Set industry/service so every lead from this campaign is auto-tagged.
+      // Values must match templateNameResolver.js canonical list exactly.
+      industry:        req.body.industry?.trim() || "",
+      service:         req.body.service?.trim()  || "",
       company:         companyId,
       createdBy:       req.admin._id || req.admin.id || null,
       roundRobinIndex: 0,
