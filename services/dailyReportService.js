@@ -31,6 +31,7 @@ const Lead             = require('../models/Leads');
 const MobileCallLog    = require('../models/MobileCallLog');
 const User             = require('../models/Users');
 const DailyReportHistory = require('../models/DailyReportHistory');
+const NurtureRule      = require('../models/NurtureRule');
 
 // ── Timezone-aware day bounds ─────────────────────────────────────────────────
 /**
@@ -554,17 +555,19 @@ function buildSummaryBlock(totals, date) {
  * Splits a long report into multiple ≤4000-char Telegram messages.
  * Returns an array of HTML strings.
  */
-function formatTelegramMessages(report, companyName) {
+function formatTelegramMessages(report, companyName, nurtureStats) {
   const header =
     `📊 <b>SKYUP CRM — DAILY SALES REPORT</b>\n` +
     `📅 ${formatDate(report.reportDate)}\n` +
     `🏢 ${escapeHtml(companyName)}\n`;
 
   if (!report.hasActivity) {
+    const nurtureBlock = buildNurtureBlock(nurtureStats);
     return [
       header +
       `\n<i>No activity recorded today.</i>\n\n` +
-      `• New Leads: 0\n• Calls: 0\n• Answered: 0\n• Conversions: 0`,
+      `• New Leads: 0\n• Calls: 0\n• Answered: 0\n• Conversions: 0` +
+      (nurtureBlock ? `\n${nurtureBlock}` : ''),
     ];
   }
 
@@ -587,6 +590,17 @@ function formatTelegramMessages(report, companyName) {
     current = summary;
   } else {
     current += summary;
+  }
+
+  // ── Nurture section — appended after summary ──────────────────────────────
+  const nurtureBlock = buildNurtureBlock(nurtureStats);
+  if (nurtureBlock) {
+    if ((current + nurtureBlock).length > MAX_MSG_LEN) {
+      messages.push(current);
+      current = nurtureBlock;
+    } else {
+      current += nurtureBlock;
+    }
   }
 
   messages.push(current);
@@ -638,7 +652,101 @@ async function sendReport(decryptedToken, chatId, messages) {
   return messageIds;
 }
 
-// ── Main: generate and send report for one company ───────────────────────────
+// ── Nurture sequence stats for today ─────────────────────────────────────────
+// Scans nurtureSent on all leads for this company and counts how many were
+// fired today per rule. Returns an array of { ruleName, stage, sent } sorted
+// by stage then ruleName.
+async function getNurtureStats(companyId, localDate) {
+  try {
+    // Load enabled rules so we can map ruleId → name + stage
+    const rules = await NurtureRule.find({
+      company: mongoose.Types.ObjectId(companyId),
+      enabled: true,
+    }).select('name action.whatsapp.statusStage action.whatsapp.funnelStage').lean();
+
+    if (!rules.length) return { rows: [], total: 0 };
+
+    const ruleMap = new Map(rules.map(r => [
+      String(r._id),
+      {
+        name:  r.name,
+        stage: r.action?.whatsapp?.funnelStage || r.action?.whatsapp?.statusStage || '—',
+      },
+    ]));
+
+    // Count leads where nurtureSent[ruleId].lastFiredDate === localDate
+    // nurtureSent is a Map stored as a plain object in MongoDB
+    const leads = await Lead.find({
+      company: mongoose.Types.ObjectId(companyId),
+      nurtureSent: { $exists: true, $ne: {} },
+    }).select('nurtureSent').lean();
+
+    const counts = new Map(); // ruleId → count
+
+    for (const lead of leads) {
+      const ns = lead.nurtureSent;
+      if (!ns) continue;
+      for (const [ruleId, entry] of Object.entries(ns)) {
+        if (!entry || entry.lastFiredDate !== localDate) continue;
+        counts.set(ruleId, (counts.get(ruleId) || 0) + 1);
+      }
+    }
+
+    if (!counts.size) return { rows: [], total: 0 };
+
+    const stageOrder = { awareness: 1, interest: 2, desire: 3, action: 4 };
+    const rows = [];
+    let total = 0;
+
+    for (const [ruleId, sent] of counts.entries()) {
+      const info = ruleMap.get(ruleId);
+      if (!info) continue;
+      rows.push({ ruleName: info.name, stage: info.stage, sent });
+      total += sent;
+    }
+
+    rows.sort((a, b) => {
+      const so = (stageOrder[a.stage] || 9) - (stageOrder[b.stage] || 9);
+      return so !== 0 ? so : a.ruleName.localeCompare(b.ruleName);
+    });
+
+    return { rows, total };
+  } catch (err) {
+    console.warn('[DailyReport] getNurtureStats error:', err.message);
+    return { rows: [], total: 0 };
+  }
+}
+
+// ── Build nurture section string for Telegram ─────────────────────────────────
+function buildNurtureBlock(nurtureStats) {
+  if (!nurtureStats || !nurtureStats.total) return '';
+
+  const stageEmoji = { awareness: '🌱', interest: '🔍', desire: '💡', action: '🎯' };
+
+  let block = `\n📲 <b>NURTURE SEQUENCE</b>\n`;
+  block += `• Total Messages Sent: <b>${nurtureStats.total}</b>\n`;
+
+  // Group by stage
+  const byStage = {};
+  for (const row of nurtureStats.rows) {
+    if (!byStage[row.stage]) byStage[row.stage] = [];
+    byStage[row.stage].push(row);
+  }
+
+  for (const [stage, rows] of Object.entries(byStage)) {
+    const emoji = stageEmoji[stage] || '📌';
+    const stageTotal = rows.reduce((s, r) => s + r.sent, 0);
+    block += `\n${emoji} ${stage.charAt(0).toUpperCase() + stage.slice(1)} Stage: ${stageTotal}\n`;
+    for (const row of rows) {
+      block += `  · ${escapeHtml(row.ruleName)}: ${row.sent}\n`;
+    }
+  }
+
+  block += `\n────────────────────\n`;
+  return block;
+}
+
+
 /**
  * Generates the daily report for a company and sends it to Telegram.
  * Creates a DailyReportHistory record to prevent duplicate sends.
@@ -694,6 +802,9 @@ async function generateAndSend(config, companyName, reportDate, triggeredBy = 's
     // ── Generate report ───────────────────────────────────────────────────
     const report = await buildReport(companyId, config, localDate);
 
+    // ── Nurture stats (today's sends) ─────────────────────────────────────
+    const nurtureStats = await getNurtureStats(companyId, localDate);
+
     // ── Empty report check ────────────────────────────────────────────────
     if (!report.hasActivity && !config.sendEmptyReport) {
       await DailyReportHistory.findByIdAndUpdate(historyDoc._id, {
@@ -705,7 +816,7 @@ async function generateAndSend(config, companyName, reportDate, triggeredBy = 's
     }
 
     // ── Format messages ───────────────────────────────────────────────────
-    const messages = formatTelegramMessages(report, companyName);
+    const messages = formatTelegramMessages(report, companyName, nurtureStats);
 
     // ── Decrypt token ─────────────────────────────────────────────────────
     const decryptedToken = config.getDecryptedToken();
