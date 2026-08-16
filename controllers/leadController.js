@@ -1103,12 +1103,23 @@ const patchLead = async (req, res) => {
     const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
-    const { status, remark, outcome, followUpDate, temperature, Quality } =
+    const { status, remark, outcome, followUpDate, temperature, Quality, industry, service } =
       req.body;
     const update = {};
 
     if (status !== undefined) update.status = status;
     if (remark !== undefined) update.remark = remark;
+
+    // industry and service are saved only when the lead's company has the
+    // leadNurtureSequence feature enabled (checked via entitlement).
+    // For all other companies these fields are silently ignored.
+    const companyIdStr = String(lead.company?._id || lead.company || "");
+    const ents = await getCompanyEntitlements(companyIdStr).catch(() => null);
+    const nurtureEnabled = !!ents?.features?.leadNurtureSequence;
+    if (nurtureEnabled) {
+      if (industry !== undefined && industry !== "") update.industry = industry;
+      if (service  !== undefined && service  !== "") update.service  = service;
+    }
 
     const temp = temperature || Quality;
     if (temp && ["Hot", "Warm", "Cold"].includes(temp))
@@ -1284,20 +1295,10 @@ const patchLead = async (req, res) => {
     // Fires V1 (or next sequential variation) instantly when a lead's status
     // changes. Company-gated inside triggerNurtureForLead — no-op for all
     // other companies. Fire-and-forget, never blocks the response.
-    // NOTE: Only fires when the incoming status differs from the DB value at
-    // read time. Leads stuck in the same status are handled by the 11 AM cron.
-    if (updatedLead && status !== undefined) {
-      if (status !== lead.status) {
-        triggerNurtureForLead(String(updatedLead._id), status).catch((err) =>
-          console.error("[nurtureSequence] patchLead trigger error:", err.message)
-        );
-      } else {
-        // Same status — no immediate trigger. The 11 AM cron will pick up
-        // leads that have been idle in this status beyond repeatEveryDays.
-        console.log(
-          `[nurtureSequence] patchLead: status unchanged ("${status}") for lead ${updatedLead._id} — cron will handle repeat`
-        );
-      }
+    if (updatedLead && status !== undefined && status !== lead.status) {
+      triggerNurtureForLead(String(updatedLead._id), status).catch((err) =>
+        console.error("[nurtureSequence] patchLead trigger error:", err.message)
+      );
     }
 
     return res.status(200).json(updatedLead);
