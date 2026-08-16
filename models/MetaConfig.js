@@ -79,6 +79,26 @@ const metaConfigSchema = new mongoose.Schema(
       trim: true,
     },
 
+    // ── Lead Nurture — industry + service tags ────────────────────────────────
+    // Set these on the campaign config so every lead from this campaign is
+    // automatically tagged with the correct industry and service for nurture
+    // template resolution (e.g. "Real Estate" + "CRM" → real_estate_crm_awareness_v1).
+    // The webhook also checks the lead's own form field data for an explicit
+    // industry/service answer and uses that as a higher-priority override.
+    // Values must match templateNameResolver.js exactly.
+    industry: {
+      type: String,
+      default: "",
+      trim: true,
+      // e.g. "Real Estate", "Healthcare", "Digital Marketing"
+    },
+    service: {
+      type: String,
+      default: "",
+      trim: true,
+      // e.g. "CRM", "SEO", "Paid Ads", "Website Design & Development"
+    },
+
     // ── Meta-side live status (auto-synced) ───────────────────────────────────
     // Mirrors the real ACTIVE/PAUSED/ARCHIVED state of the ad set + lead form on
     // Meta. The auto-sync job updates these so the CRM shows a config as inactive
