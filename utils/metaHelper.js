@@ -182,6 +182,12 @@ const mapToLeadSchema = (parsedFields, config, leadgenId, assignedUserId) => {
     temperature,
     user:        assignedUserId,
     company:     config.company,
+    // ── Lead Nurture tags — from campaign config (default) ────────────────────
+    // The webhook controller overrides these with form field answers if present.
+    // If neither config nor form provides a value, the field is omitted so the
+    // agent can set it manually from the CRM lead edit / mobile remark modal.
+    ...(config.industry ? { industry: config.industry } : {}),
+    ...(config.service  ? { service:  config.service  } : {}),
   };
 };
 
