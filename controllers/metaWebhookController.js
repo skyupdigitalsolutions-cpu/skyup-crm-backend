@@ -290,6 +290,60 @@ const receiveWebhook = async (req, res) => {
           }
         }
 
+        // ── Lead Nurture — industry/service from form field answers ──────────
+        // Priority order (highest → lowest):
+        //   1. Lead form field answer (what the lead typed in the Meta form)
+        //   2. Campaign config (industry/service set by admin on the config)
+        //   3. Agent manually sets it later from CRM / mobile app
+        //
+        // Check if the Meta form had an explicit industry or service answer.
+        // Common field names used in Meta lead forms are matched below.
+        const INDUSTRY_FIELD_KEYS = [
+          "industry", "business_type", "business_category", "sector",
+          "what_is_your_business_type", "your_industry", "company_type",
+        ];
+        const SERVICE_FIELD_KEYS = [
+          "service", "service_needed", "services_required", "interested_service",
+          "what_service_are_you_looking_for", "service_interest", "requirement",
+        ];
+        // Valid canonical industry/service values — must match templateNameResolver.js
+        const VALID_INDUSTRIES = new Set([
+          "Healthcare", "Education", "Real Estate", "Logistics", "Finance",
+          "IT Solutions", "Digital Marketing", "Construction", "Local Business",
+          "Interior Designers", "Professional Services",
+        ]);
+        const VALID_SERVICES = new Set([
+          "SEO", "Paid Ads", "Website Design & Development", "AI Automation",
+          "CRM", "Video Editing", "Graphic Design", "Social Media Marketing",
+        ]);
+
+        // Try to extract industry from form fields
+        for (const key of INDUSTRY_FIELD_KEYS) {
+          const val = parsedFields[key];
+          if (val && VALID_INDUSTRIES.has(val)) {
+            leadPayload.industry = val;
+            console.log(`   🏷  Industry from form field "${key}": "${val}"`);
+            break;
+          }
+        }
+
+        // Try to extract service from form fields
+        for (const key of SERVICE_FIELD_KEYS) {
+          const val = parsedFields[key];
+          if (val && VALID_SERVICES.has(val)) {
+            leadPayload.service = val;
+            console.log(`   🏷  Service from form field "${key}": "${val}"`);
+            break;
+          }
+        }
+
+        // Log final nurture tags
+        if (leadPayload.industry || leadPayload.service) {
+          console.log(`   🎯 Nurture tags — industry: "${leadPayload.industry || "—"}", service: "${leadPayload.service || "—"}"`);
+        } else {
+          console.log(`   ℹ️  No nurture tags — agent can set industry/service manually`);
+        }
+
         let newLead;
         try {
           newLead = await Lead.create({ ...leadPayload, primaryPhone: leadPayload.mobile });
