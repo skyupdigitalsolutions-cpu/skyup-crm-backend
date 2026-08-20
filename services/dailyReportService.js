@@ -349,6 +349,71 @@ async function aggregateCallStats(companyId, dayStart, dayEnd) {
   }));
 }
 
+// ── Outcome stats from Lead.callHistory ──────────────────────────────────────
+// Counts outcomes logged today across all leads for the company.
+async function getOutcomeStats(companyId, dayStart, dayEnd) {
+  try {
+    const pipeline = [
+      {
+        $match: {
+          company:    new mongoose.Types.ObjectId(String(companyId)),
+          mergedInto: null,
+        },
+      },
+      { $unwind: '$callHistory' },
+      {
+        $match: {
+          'callHistory.calledAt': { $gte: dayStart, $lte: dayEnd },
+          'callHistory.outcome':  { $exists: true, $ne: '' },
+        },
+      },
+      {
+        $group: {
+          _id:   '$callHistory.outcome',
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { count: -1 } },
+    ];
+
+    const rows = await Lead.aggregate(pipeline).allowDiskUse(false);
+    return rows.map(r => ({ outcome: r._id, count: r.count }));
+  } catch (err) {
+    console.warn('[DailyReport] getOutcomeStats error:', err.message);
+    return [];
+  }
+}
+
+// ── Status stats from all leads for the company ───────────────────────────────
+// Counts current status of ALL leads (not just today's) — gives a snapshot
+// of where the pipeline stands.
+async function getStatusSnapshot(companyId) {
+  try {
+    const pipeline = [
+      {
+        $match: {
+          company:    new mongoose.Types.ObjectId(String(companyId)),
+          mergedInto: null,
+          isClosed:   { $ne: true },
+        },
+      },
+      {
+        $group: {
+          _id:   '$status',
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { count: -1 } },
+    ];
+
+    const rows = await Lead.aggregate(pipeline).allowDiskUse(false);
+    return rows.map(r => ({ status: r._id, count: r.count }));
+  } catch (err) {
+    console.warn('[DailyReport] getStatusSnapshot error:', err.message);
+    return [];
+  }
+}
+
 // ── Duration formatter ────────────────────────────────────────────────────────
 function fmtDuration(sec) {
   if (!sec || sec <= 0) return '0s';
@@ -556,7 +621,7 @@ function buildSummaryBlock(totals, date) {
  * Splits a long report into multiple ≤4000-char Telegram messages.
  * Returns an array of HTML strings.
  */
-function formatTelegramMessages(report, companyName, nurtureStats, waStats) {
+function formatTelegramMessages(report, companyName, nurtureStats, waStats, outcomeStats, statusSnap) {
   const header =
     `📊 <b>SKYUP CRM — DAILY SALES REPORT</b>\n` +
     `📅 ${formatDate(report.reportDate)}\n` +
@@ -596,7 +661,54 @@ function formatTelegramMessages(report, companyName, nurtureStats, waStats) {
     current += summary;
   }
 
-  // WhatsApp stats — appended after summary
+  // ── Outcomes block ─────────────────────────────────────────────────────────
+  if (outcomeStats && outcomeStats.length > 0) {
+    let outBlock = `\n📋 <b>TODAY'S CALL OUTCOMES</b>\n`;
+    const outcomeEmoji = {
+      'Answered':       '✅',
+      'Not Answered':   '📵',
+      'Busy':           '📳',
+      'Switch Off':     '🔕',
+      'Call Back Later':'🔁',
+      'Interested':     '🌟',
+      'Not Interested': '❌',
+      'Invalid':        '🚫',
+      'Client Meeting': '🤝',
+    };
+    for (const { outcome, count } of outcomeStats) {
+      const emoji = outcomeEmoji[outcome] || '•';
+      outBlock += `${emoji} ${escapeHtml(outcome)}: ${count}\n`;
+    }
+    outBlock += `\n────────────────────\n`;
+    if ((current + outBlock).length > MAX_MSG_LEN) {
+      messages.push(current); current = outBlock;
+    } else { current += outBlock; }
+  }
+
+  // ── Status snapshot block ────────────────────────────────────────────────────
+  if (statusSnap && statusSnap.length > 0) {
+    let snapBlock = `\n📊 <b>PIPELINE STATUS (All Leads)</b>\n`;
+    const statusEmoji = {
+      'New':            '🆕',
+      'In Progress':    '⏳',
+      'Interested':     '🌟',
+      'Converted':      '💰',
+      'Not Interested': '❌',
+    };
+    let snapTotal = 0;
+    for (const { status, count } of statusSnap) {
+      const emoji = statusEmoji[status] || '•';
+      snapBlock += `${emoji} ${escapeHtml(status)}: ${count}\n`;
+      snapTotal += count;
+    }
+    snapBlock += `• Total Open: ${snapTotal}\n`;
+    snapBlock += `\n────────────────────\n`;
+    if ((current + snapBlock).length > MAX_MSG_LEN) {
+      messages.push(current); current = snapBlock;
+    } else { current += snapBlock; }
+  }
+
+  // WhatsApp stats — appended after outcome/status
   if (waBlock) {
     if ((current + waBlock).length > MAX_MSG_LEN) {
       messages.push(current);
@@ -910,6 +1022,8 @@ async function generateAndSend(config, companyName, reportDate, triggeredBy = 's
     // ── Generate report ───────────────────────────────────────────────────
     const report       = await buildReport(companyId, config, localDate);
     const nurtureStats  = await getNurtureStats(companyId, localDate);
+    const outcomeStats  = await getOutcomeStats(companyId, dayStart, dayEnd);
+    const statusSnap    = await getStatusSnapshot(companyId);
 
     // Get day bounds for WhatsApp query (needs UTC range like other aggregations)
     const { dayStart, dayEnd } = getCompanyDayBounds(config.timezone || 'Asia/Kolkata', localDate);
@@ -926,7 +1040,7 @@ async function generateAndSend(config, companyName, reportDate, triggeredBy = 's
     }
 
     // ── Format messages ───────────────────────────────────────────────────
-    const messages = formatTelegramMessages(report, companyName, nurtureStats, waStats);
+    const messages = formatTelegramMessages(report, companyName, nurtureStats, waStats, outcomeStats, statusSnap);
 
     // ── Decrypt token ─────────────────────────────────────────────────────
     const decryptedToken = config.getDecryptedToken();
