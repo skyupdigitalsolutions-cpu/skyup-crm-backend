@@ -31,7 +31,8 @@ const Lead             = require('../models/Leads');
 const MobileCallLog    = require('../models/MobileCallLog');
 const User             = require('../models/Users');
 const DailyReportHistory = require('../models/DailyReportHistory');
-const NurtureRule      = require('../models/NurtureRule');
+const NurtureRule        = require('../models/NurtureRule');
+const WhatsAppMessage    = require('../models/WhatsAppMessage');
 
 // ── Timezone-aware day bounds ─────────────────────────────────────────────────
 /**
@@ -555,18 +556,21 @@ function buildSummaryBlock(totals, date) {
  * Splits a long report into multiple ≤4000-char Telegram messages.
  * Returns an array of HTML strings.
  */
-function formatTelegramMessages(report, companyName, nurtureStats) {
+function formatTelegramMessages(report, companyName, nurtureStats, waStats) {
   const header =
     `📊 <b>SKYUP CRM — DAILY SALES REPORT</b>\n` +
     `📅 ${formatDate(report.reportDate)}\n` +
     `🏢 ${escapeHtml(companyName)}\n`;
 
+  const nurtureBlock = buildNurtureBlock(nurtureStats);
+  const waBlock      = buildWhatsAppBlock(waStats, nurtureStats?.total || 0);
+
   if (!report.hasActivity) {
-    const nurtureBlock = buildNurtureBlock(nurtureStats);
     return [
       header +
       `\n<i>No activity recorded today.</i>\n\n` +
       `• New Leads: 0\n• Calls: 0\n• Answered: 0\n• Conversions: 0` +
+      (waBlock      ? `\n${waBlock}`      : '') +
       (nurtureBlock ? `\n${nurtureBlock}` : ''),
     ];
   }
@@ -592,8 +596,17 @@ function formatTelegramMessages(report, companyName, nurtureStats) {
     current += summary;
   }
 
-  // ── Nurture section — appended after summary ──────────────────────────────
-  const nurtureBlock = buildNurtureBlock(nurtureStats);
+  // WhatsApp stats — appended after summary
+  if (waBlock) {
+    if ((current + waBlock).length > MAX_MSG_LEN) {
+      messages.push(current);
+      current = waBlock;
+    } else {
+      current += waBlock;
+    }
+  }
+
+  // Nurture section — appended after WA stats
   if (nurtureBlock) {
     if ((current + nurtureBlock).length > MAX_MSG_LEN) {
       messages.push(current);
@@ -652,17 +665,119 @@ async function sendReport(decryptedToken, chatId, messages) {
   return messageIds;
 }
 
-// ── Nurture sequence stats for today ─────────────────────────────────────────
-// Scans nurtureSent on all leads for this company and counts how many were
-// fired today per rule. Returns an array of { ruleName, stage, sent } sorted
-// by stage then ruleName.
+// ── Main: generate and send report for one company ───────────────────────────
+/**
+ * Generates the daily report for a company and sends it to Telegram.
+ * Creates a DailyReportHistory record to prevent duplicate sends.
+ *
+ * @param {Object}  config      - DailyReportConfig document
+ * @param {string}  companyName - Company display name
+ * @param {string}  [reportDate]- "YYYY-MM-DD" override; defaults to today in company TZ
+ * @param {string}  [triggeredBy] - 'scheduler' | 'manual' | 'test'
+ * @returns {Object} { sent, skipped, error, messageIds }
+ */
+// ── WhatsApp sent stats for today ────────────────────────────────────────────
+// Counts all outbound WhatsApp messages sent today for the company, broken
+// down by: total, template vs free-text, nurture vs auto-template vs manual,
+// and inbound replies received.
+async function getWhatsAppStats(companyId, dayStart, dayEnd) {
+  try {
+    // Get all conversations for this company
+    const WhatsAppConversation = require('../models/WhatsAppConversation');
+    const convIds = await WhatsAppConversation.find(
+      { company: new mongoose.Types.ObjectId(String(companyId)) },
+      { _id: 1 }
+    ).lean().then(docs => docs.map(d => d._id));
+
+    if (!convIds.length) return null;
+
+    const [outbound, inbound] = await Promise.all([
+      WhatsAppMessage.aggregate([
+        {
+          $match: {
+            conversation: { $in: convIds },
+            direction:    'outbound',
+            // Only count successfully sent messages — exclude failed and pending
+            status:       { $in: ['sent', 'delivered', 'read'] },
+            createdAt:    { $gte: dayStart, $lte: dayEnd },
+          },
+        },
+        {
+          $group: {
+            _id:           null,
+            total:         { $sum: 1 },
+            templates:     { $sum: { $cond: [{ $eq: ['$isTemplate', true] }, 1, 0] } },
+            freeText:      { $sum: { $cond: [{ $eq: ['$isTemplate', false] }, 1, 0] } },
+            delivered:     { $sum: { $cond: [{ $in: ['$status', ['delivered', 'read']] }, 1, 0] } },
+            read:          { $sum: { $cond: [{ $eq: ['$status', 'read'] }, 1, 0] } },
+            failed:        { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+            // Nurture messages have no sentBy (system-sent)
+            nurture:       { $sum: { $cond: [{ $and: [{ $eq: ['$isTemplate', true] }, { $eq: ['$sentBy', null] }] }, 1, 0] } },
+            // Agent-sent templates
+            agentTemplate: { $sum: { $cond: [{ $and: [{ $eq: ['$isTemplate', true] }, { $ne: ['$sentBy', null] }] }, 1, 0] } },
+            // Unique template names used
+            templateNames: { $addToSet: '$templateName' },
+          },
+        },
+      ]),
+      WhatsAppMessage.countDocuments({
+        conversation: { $in: convIds },
+        direction:    'inbound',
+        createdAt:    { $gte: dayStart, $lte: dayEnd },
+      }),
+    ]);
+
+    const o = outbound[0] || {};
+    return {
+      outTotal:      o.total         || 0,
+      templates:     o.templates     || 0,
+      freeText:      o.freeText      || 0,
+      delivered:     o.delivered     || 0,
+      read:          o.read          || 0,
+      failed:        o.failed        || 0,
+      nurture:       o.nurture       || 0,
+      agentTemplate: o.agentTemplate || 0,
+      inbound:       inbound         || 0,
+      templateNames: (o.templateNames || []).filter(Boolean).sort(),
+    };
+  } catch (err) {
+    console.warn('[DailyReport] getWhatsAppStats error:', err.message);
+    return null;
+  }
+}
+
+// ── Build WhatsApp stats block ─────────────────────────────────────────────────
+// Only counts SUCCESSFULLY sent messages (status: sent/delivered/read).
+// Nurture messages are tracked via nurtureSent on leads (not WhatsAppMessage
+// collection) — every nurture send that reaches this point was MSG91 success.
+function buildWhatsAppBlock(wa, nurtureTotal) {
+  const agentTotal = wa?.outTotal  || 0;
+  const grand      = agentTotal + (nurtureTotal || 0);
+  if (grand === 0) return '';
+
+  let block = `\n💬 <b>WHATSAPP SENT (Successfully)</b>\n`;
+  block    += `• Grand Total:         ${grand}\n`;
+  block    += `\n<b>Nurture (Auto):</b>    ${nurtureTotal || 0}\n`;
+  if (agentTotal > 0) {
+    block  += `<b>Agent Messages:</b>   ${agentTotal}\n`;
+    block  += `  · Templates:         ${wa.templates}\n`;
+    block  += `  · Free Text:         ${wa.freeText}\n`;
+    block  += `  · Delivered:         ${wa.delivered}\n`;
+    block  += `  · Read:              ${wa.read}\n`;
+    block  += `  · Inbound Replies:   ${wa.inbound}\n`;
+  }
+  block    += `\n────────────────────\n`;
+  return block;
+}
+
+// ── Nurture stats for today ───────────────────────────────────────────────────
+// Counts nurtureSent[ruleId].lastFiredDate === localDate for each enabled rule.
 async function getNurtureStats(companyId, localDate) {
   try {
-    // Load enabled rules so we can map ruleId → name + stage
     const rules = await NurtureRule.find({
-      company: mongoose.Types.ObjectId(companyId),
+      company: new mongoose.Types.ObjectId(String(companyId)),
       enabled: true,
-    }).select('name action.whatsapp.statusStage action.whatsapp.funnelStage').lean();
+    }).select('name action').lean();
 
     if (!rules.length) return { rows: [], total: 0 };
 
@@ -674,19 +789,15 @@ async function getNurtureStats(companyId, localDate) {
       },
     ]));
 
-    // Count leads where nurtureSent[ruleId].lastFiredDate === localDate
-    // nurtureSent is a Map stored as a plain object in MongoDB
     const leads = await Lead.find({
-      company: mongoose.Types.ObjectId(companyId),
+      company: new mongoose.Types.ObjectId(String(companyId)),
       nurtureSent: { $exists: true, $ne: {} },
     }).select('nurtureSent').lean();
 
-    const counts = new Map(); // ruleId → count
-
+    const counts = new Map();
     for (const lead of leads) {
-      const ns = lead.nurtureSent;
-      if (!ns) continue;
-      for (const [ruleId, entry] of Object.entries(ns)) {
+      if (!lead.nurtureSent) continue;
+      for (const [ruleId, entry] of Object.entries(lead.nurtureSent)) {
         if (!entry || entry.lastFiredDate !== localDate) continue;
         counts.set(ruleId, (counts.get(ruleId) || 0) + 1);
       }
@@ -696,7 +807,7 @@ async function getNurtureStats(companyId, localDate) {
 
     const stageOrder = { awareness: 1, interest: 2, desire: 3, action: 4 };
     const rows = [];
-    let total = 0;
+    let total  = 0;
 
     for (const [ruleId, sent] of counts.entries()) {
       const info = ruleMap.get(ruleId);
@@ -717,16 +828,18 @@ async function getNurtureStats(companyId, localDate) {
   }
 }
 
-// ── Build nurture section string for Telegram ─────────────────────────────────
+// ── Build nurture block string ─────────────────────────────────────────────────
 function buildNurtureBlock(nurtureStats) {
   if (!nurtureStats || !nurtureStats.total) return '';
 
   const stageEmoji = { awareness: '🌱', interest: '🔍', desire: '💡', action: '🎯' };
 
-  let block = `\n📲 <b>NURTURE SEQUENCE</b>\n`;
-  block += `• Total Messages Sent: <b>${nurtureStats.total}</b>\n`;
+  let block = `
+📲 <b>NURTURE SEQUENCE</b>
+`;
+  block    += `• Total Sent Today: <b>${nurtureStats.total}</b>
+`;
 
-  // Group by stage
   const byStage = {};
   for (const row of nurtureStats.rows) {
     if (!byStage[row.stage]) byStage[row.stage] = [];
@@ -734,29 +847,24 @@ function buildNurtureBlock(nurtureStats) {
   }
 
   for (const [stage, rows] of Object.entries(byStage)) {
-    const emoji = stageEmoji[stage] || '📌';
+    const emoji      = stageEmoji[stage] || '📌';
     const stageTotal = rows.reduce((s, r) => s + r.sent, 0);
-    block += `\n${emoji} ${stage.charAt(0).toUpperCase() + stage.slice(1)} Stage: ${stageTotal}\n`;
+    const stageName  = stage.charAt(0).toUpperCase() + stage.slice(1);
+    block += `
+${emoji} ${stageName}: ${stageTotal}
+`;
     for (const row of rows) {
-      block += `  · ${escapeHtml(row.ruleName)}: ${row.sent}\n`;
+      block += `  · ${escapeHtml(row.ruleName)}: ${row.sent}
+`;
     }
   }
 
-  block += `\n────────────────────\n`;
+  block += `
+────────────────────
+`;
   return block;
 }
 
-
-/**
- * Generates the daily report for a company and sends it to Telegram.
- * Creates a DailyReportHistory record to prevent duplicate sends.
- *
- * @param {Object}  config      - DailyReportConfig document
- * @param {string}  companyName - Company display name
- * @param {string}  [reportDate]- "YYYY-MM-DD" override; defaults to today in company TZ
- * @param {string}  [triggeredBy] - 'scheduler' | 'manual' | 'test'
- * @returns {Object} { sent, skipped, error, messageIds }
- */
 async function generateAndSend(config, companyName, reportDate, triggeredBy = 'scheduler') {
   const tz          = config.timezone || 'Asia/Kolkata';
   const localDate   = reportDate || getTodayInTimezone(tz);
@@ -800,10 +908,12 @@ async function generateAndSend(config, companyName, reportDate, triggeredBy = 's
 
   try {
     // ── Generate report ───────────────────────────────────────────────────
-    const report = await buildReport(companyId, config, localDate);
+    const report       = await buildReport(companyId, config, localDate);
+    const nurtureStats  = await getNurtureStats(companyId, localDate);
 
-    // ── Nurture stats (today's sends) ─────────────────────────────────────
-    const nurtureStats = await getNurtureStats(companyId, localDate);
+    // Get day bounds for WhatsApp query (needs UTC range like other aggregations)
+    const { dayStart, dayEnd } = getCompanyDayBounds(config.timezone || 'Asia/Kolkata', localDate);
+    const waStats           = await getWhatsAppStats(companyId, dayStart, dayEnd);
 
     // ── Empty report check ────────────────────────────────────────────────
     if (!report.hasActivity && !config.sendEmptyReport) {
@@ -816,7 +926,7 @@ async function generateAndSend(config, companyName, reportDate, triggeredBy = 's
     }
 
     // ── Format messages ───────────────────────────────────────────────────
-    const messages = formatTelegramMessages(report, companyName, nurtureStats);
+    const messages = formatTelegramMessages(report, companyName, nurtureStats, waStats);
 
     // ── Decrypt token ─────────────────────────────────────────────────────
     const decryptedToken = config.getDecryptedToken();
