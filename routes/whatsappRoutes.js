@@ -24,6 +24,7 @@ const {
   editMessage,
   refreshMedia,
   markConversationRead,
+  getSendLogReport,
 } = require("../controllers/whatsappChatController");
 const { makeCompanyUploadMiddleware } = require("../services/cloudinaryService");
 
@@ -93,5 +94,10 @@ router.get("/leads", protectAny, getLeadsForWhatsApp);
 
 // ─── Employee WhatsApp blast — only their own assigned leads — whatsappBlast feature required ──
 router.post("/employee-bulk-send", protect, requireFeature("whatsappBlast"), employeeBulkSend);
+
+// ─── Sent-template report (blast + CSV blast + employee blast + nurture) ─────
+// protectAny — admin/super_admin see the whole company; employees see only
+// their own employee-blast sends (scoped inside the controller).
+router.get("/send-log", protectAny, getSendLogReport);
 
 module.exports = router;
