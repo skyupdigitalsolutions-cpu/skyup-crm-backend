@@ -26,8 +26,18 @@ const axios = require('axios');
 // without a code change:
 //   AI_SUMMARY_API_KEY / GROQ_API_KEY / GROK_API_KEY  — first one set wins
 //   AI_SUMMARY_API_URL  (default: Groq chat completions)
-//   AI_SUMMARY_MODEL    (default: llama-3.3-70b-versatile)
+//   AI_SUMMARY_MODEL    (default: openai/gpt-oss-120b)
 // Legacy GROK_* names are still honoured so nothing else breaks.
+//
+// FIX: the previous default, llama-3.3-70b-versatile, was deprecated by Groq
+// on 2026-06-17 and now returns 404 on every call — see Groq's own
+// deprecation notice (console.groq.com/docs/deprecations), which explicitly
+// recommends migrating to openai/gpt-oss-120b (or qwen/qwen3.6-27b) as the
+// replacement for this exact model. Every AI feature in the app shares this
+// one config (action summary, non-conversion analysis, custom reports), so
+// this single change fixes all of them. If you'd rather not redeploy to pick
+// up a future model change, set AI_SUMMARY_MODEL in the environment instead —
+// that env var always wins over this default.
 const AI_SUMMARY_API_KEY =
   process.env.AI_SUMMARY_API_KEY ||
   process.env.GROQ_API_KEY ||
@@ -42,7 +52,7 @@ const GROK_API_URL =
 const GROK_MODEL =
   process.env.AI_SUMMARY_MODEL ||
   process.env.GROK_MODEL ||
-  'llama-3.3-70b-versatile';
+  'openai/gpt-oss-120b';
 
 // ── Low-level chat call (OpenAI-compatible: works for Groq or xAI Grok) ───────
 async function callGrok(systemPrompt, userContent, maxTokens = 700) {
