@@ -74,29 +74,36 @@ async function getLeadInsights({
   const now = new Date();
 
   const baseFilter = mergeLeadScope({ company, mergedInto: null }, leadScope);
-  if (agentId) baseFilter.user = agentId;
-  if (source) baseFilter.$or = [{ source }, { campaign: source }];
-  if (temperature) baseFilter.$or = [...(baseFilter.$or || []), { temperature }, { leadCategory: temperature }];
+  const extraFilters = [];
+  if (agentId) extraFilters.push({ user: agentId });
+  if (source) extraFilters.push({ $or: [{ source }, { campaign: source }] });
+  if (temperature) extraFilters.push({ $or: [{ temperature }, { leadCategory: temperature }] });
 
   // "Of the day" — created, called, followed-up, or closed on this IST day.
-  const dayFilter = {
-    ...baseFilter,
-    $and: [
-      {
-        $or: [
-          { createdAt: { $gte: dayStart, $lte: dayEnd } },
-          { closedAt:  { $gte: dayStart, $lte: dayEnd } },
-          { "callHistory.calledAt":      { $gte: dayStart, $lte: dayEnd } },
-          { "scheduledCalls.scheduledAt": { $gte: dayStart, $lte: dayEnd } },
-        ],
-      },
+  const dayCondition = {
+    $or: [
+      { createdAt: { $gte: dayStart, $lte: dayEnd } },
+      { closedAt:  { $gte: dayStart, $lte: dayEnd } },
+      { "callHistory.calledAt":      { $gte: dayStart, $lte: dayEnd } },
+      { "scheduledCalls.scheduledAt": { $gte: dayStart, $lte: dayEnd } },
     ],
   };
 
   if (search && search.trim()) {
     const re = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    dayFilter.$and.push({ $or: [{ name: re }, { mobile: re }, { primaryPhone: re }, { email: re }] });
+    extraFilters.push({ $or: [{ name: re }, { mobile: re }, { primaryPhone: re }, { email: re }] });
   }
+
+  // FIX: this used to spread `...baseFilter` and then set its OWN `$and` key
+  // on the same object literal. baseFilter is itself `{ $and: [...] }` for
+  // any plain "admin" caller (mergeLeadScope wraps it that way to combine the
+  // company/mergedInto filter with the per-admin lead-visibility scope) — so
+  // the spread's `$and` key got silently overwritten by the one set right
+  // after it (later keys win in object literals), discarding the company
+  // filter entirely for that role. Building the combined filter as a single
+  // $and ARRAY instead means no key can ever collide, regardless of what
+  // shape mergeLeadScope() or the caller's own filters happen to be.
+  const dayFilter = { $and: [baseFilter, dayCondition, ...extraFilters] };
 
   const allLeads = await Lead.find(dayFilter)
     .select(LEAD_SELECT)
