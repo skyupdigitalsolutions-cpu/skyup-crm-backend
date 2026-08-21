@@ -29,6 +29,7 @@ const cron        = require("node-cron");
 const Lead        = require("../models/Leads");
 const Company     = require("../models/Company");
 const NurtureRule = require("../models/NurtureRule");
+const WhatsAppSendLog = require("../models/WhatsAppSendLog");
 const { sendAutoWhatsApp } = require("../services/autoTemplateService");
 const { resolveForLead, canResolve } = require("../utils/templateNameResolver");
 const { findTemplate } = require("../services/msg91TemplateService");
@@ -261,6 +262,30 @@ function eligibleForRepeat(rule, lead, todayKey) {
 
 // ── Fire a rule for a lead ────────────────────────────────────────────────────
 
+// Persist the outcome so the "sent template report" (WhatsApp send-log) shows
+// nurture sends alongside manual blasts — previously this only ever produced
+// a console.log line that vanished into server logs.
+async function _logNurtureResult(lead, rule, result) {
+  try {
+    await WhatsAppSendLog.create({
+      company: lead.company,
+      lead: lead._id,
+      phone: lead.mobile || "",
+      name: lead.name || "",
+      templateName: result.templateName || "",
+      languageCode: "en",
+      channel: "nurture",
+      status: result.status === "sent" ? "sent" : result.status === "skipped" ? "skipped" : "failed",
+      reason: result.detail || "",
+      sentByName: "Nurture automation",
+      ruleId: rule._id,
+      ruleName: rule.name || "",
+    });
+  } catch (err) {
+    console.error("[nurtureSequence] failed to write send-log entry:", err.message);
+  }
+}
+
 async function fireRule(rule, lead, company, todayKey) {
   if (!lead.mobile) {
     return { status: "skipped", detail: "Lead has no mobile number" };
@@ -400,6 +425,7 @@ async function runNurtureSequenceCheck() {
       if (alreadyFiredToday(rule, lead, todayKey))  continue;
 
       const result = await fireRule(rule, lead, company, todayKey);
+      _logNurtureResult(lead, rule, result); // fire-and-forget, never blocks the cron loop
       if (result.status === "sent") totalSent++;
     }
   }
@@ -444,6 +470,7 @@ async function triggerNurtureForLead(leadId, newStatus) {
     if (alreadyFiredToday(rule, leadWithNewStatus, todayKey)) continue;
 
     const result = await fireRule(rule, leadWithNewStatus, company, todayKey);
+    _logNurtureResult(leadWithNewStatus, rule, result); // fire-and-forget
     if (result.status === "sent") {
       console.log(
         `[nurtureSequence] Immediate trigger — lead ${leadId} status→"${newStatus}" ` +
