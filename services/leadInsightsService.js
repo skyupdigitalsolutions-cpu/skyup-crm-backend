@@ -56,7 +56,10 @@ function normalizeMobileTail(v) {
 /**
  * @param {object} opts
  * @param {string|ObjectId} opts.company
- * @param {string} [opts.date]        ISO date, defaults to today (IST)
+ * @param {string} [opts.date]        Back-compat single-day mode — ISO date
+ * @param {string} [opts.dateFrom]    Range mode — ISO date, inclusive
+ * @param {string} [opts.dateTo]      Range mode — ISO date, inclusive (defaults to dateFrom)
+ * @param {boolean} [opts.allTime]    Skip date filtering entirely — every lead
  * @param {string|ObjectId} [opts.agentId]
  * @param {string} [opts.source]
  * @param {string} [opts.status]      "new" | "followups" | "overdue" | "converted" | "notConverted" | "pending" | "" (all)
@@ -67,11 +70,32 @@ function normalizeMobileTail(v) {
  * @param {object} [opts.leadScope={}]
  */
 async function getLeadInsights({
-  company, date, agentId, source, status = "", temperature, search,
+  company, date, dateFrom, dateTo, allTime = false,
+  agentId, source, status = "", temperature, search,
   page = 1, limit = 25, leadScope = {},
 } = {}) {
-  const { dayStart, dayEnd } = getISTDayBounds(date);
   const now = new Date();
+
+  // FIX: this used to be hardcoded to a single IST day (getISTDayBounds(date))
+  // with no way to widen it — every lead not touched on that exact day was
+  // invisible, and there was no way to just browse the full lead list. Now
+  // supports three modes:
+  //   allTime               → no date bound at all, every lead in scope
+  //   dateFrom + dateTo     → inclusive range, each end resolved to its own
+  //                           IST day boundary so "21 Aug – 25 Aug" behaves
+  //                           the same way a single day always has
+  //   date (or nothing)     → back-compat single-day mode, unchanged behavior
+  let rangeStart = null, rangeEnd = null;
+  if (!allTime) {
+    if (dateFrom) {
+      rangeStart = getISTDayBounds(dateFrom).dayStart;
+      rangeEnd   = getISTDayBounds(dateTo || dateFrom).dayEnd;
+    } else {
+      const bounds = getISTDayBounds(date);
+      rangeStart = bounds.dayStart;
+      rangeEnd   = bounds.dayEnd;
+    }
+  }
 
   const baseFilter = mergeLeadScope({ company, mergedInto: null }, leadScope);
   const extraFilters = [];
@@ -79,13 +103,15 @@ async function getLeadInsights({
   if (source) extraFilters.push({ $or: [{ source }, { campaign: source }] });
   if (temperature) extraFilters.push({ $or: [{ temperature }, { leadCategory: temperature }] });
 
-  // "Of the day" — created, called, followed-up, or closed on this IST day.
-  const dayCondition = {
+  // "Of the range" — created, called, followed-up, or closed within it.
+  // In allTime mode this is simply omitted below, so every lead in scope
+  // matches regardless of any date on it.
+  const rangeCondition = rangeStart && {
     $or: [
-      { createdAt: { $gte: dayStart, $lte: dayEnd } },
-      { closedAt:  { $gte: dayStart, $lte: dayEnd } },
-      { "callHistory.calledAt":      { $gte: dayStart, $lte: dayEnd } },
-      { "scheduledCalls.scheduledAt": { $gte: dayStart, $lte: dayEnd } },
+      { createdAt: { $gte: rangeStart, $lte: rangeEnd } },
+      { closedAt:  { $gte: rangeStart, $lte: rangeEnd } },
+      { "callHistory.calledAt":      { $gte: rangeStart, $lte: rangeEnd } },
+      { "scheduledCalls.scheduledAt": { $gte: rangeStart, $lte: rangeEnd } },
     ],
   };
 
@@ -93,6 +119,7 @@ async function getLeadInsights({
     const re = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     extraFilters.push({ $or: [{ name: re }, { mobile: re }, { primaryPhone: re }, { email: re }] });
   }
+
 
   // FIX: this used to spread `...baseFilter` and then set its OWN `$and` key
   // on the same object literal. baseFilter is itself `{ $and: [...] }` for
@@ -103,27 +130,34 @@ async function getLeadInsights({
   // filter entirely for that role. Building the combined filter as a single
   // $and ARRAY instead means no key can ever collide, regardless of what
   // shape mergeLeadScope() or the caller's own filters happen to be.
-  const dayFilter = { $and: [baseFilter, dayCondition, ...extraFilters] };
+  const dayFilter = { $and: [baseFilter, ...(rangeCondition ? [rangeCondition] : []), ...extraFilters] };
 
   const allLeads = await Lead.find(dayFilter)
     .select(LEAD_SELECT)
     .populate("user", "name")
     .lean();
 
-  // ── Per-lead derived fields, all scoped to THIS day (not the whole history) ──
+  // Helper — true when no range bound is set (allTime) or the value falls
+  // within [rangeStart, rangeEnd]. Centralizes the allTime-vs-bounded check
+  // so every per-lead calculation below reads the same way regardless of mode.
+  const inRange = (val) => {
+    if (!val) return false;
+    if (!rangeStart) return true; // allTime — everything counts
+    const d = new Date(val);
+    return d >= rangeStart && d <= rangeEnd;
+  };
+
+  // ── Per-lead derived fields, scoped to the selected range (a day, a custom
+  // range, or — in allTime mode — the lead's entire history) ────────────────
   const withDayData = allLeads.map((l) => {
     const callHistory = Array.isArray(l.callHistory) ? l.callHistory : [];
     const scheduledCalls = Array.isArray(l.scheduledCalls) ? l.scheduledCalls : [];
 
-    const callsToday = callHistory.filter(
-      (c) => c.calledAt && new Date(c.calledAt) >= dayStart && new Date(c.calledAt) <= dayEnd
-    );
+    const callsToday = callHistory.filter((c) => inRange(c.calledAt));
     const connectedToday = callsToday.filter(
       (c) => /connect|answer|interested|follow/i.test(c.outcome || "") && !/not\s*answer|missed|reject|busy|unreach/i.test(c.outcome || "")
     );
-    const followUpsToday = scheduledCalls.filter(
-      (f) => f.scheduledAt && new Date(f.scheduledAt) >= dayStart && new Date(f.scheduledAt) <= dayEnd
-    );
+    const followUpsToday = scheduledCalls.filter((f) => inRange(f.scheduledAt));
     const overdueFollowUps = scheduledCalls.filter(
       (f) => !f.done && f.scheduledAt && new Date(f.scheduledAt) < now
     );
@@ -132,8 +166,8 @@ async function getLeadInsights({
       .sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt))[0] || null;
     const lastCall = [...callHistory].sort((a, b) => new Date(b.calledAt || 0) - new Date(a.calledAt || 0))[0] || null;
 
-    const createdToday = new Date(l.createdAt) >= dayStart && new Date(l.createdAt) <= dayEnd;
-    const closedToday  = l.closedAt && new Date(l.closedAt) >= dayStart && new Date(l.closedAt) <= dayEnd;
+    const createdToday = inRange(l.createdAt);
+    const closedToday  = inRange(l.closedAt);
     const converted    = isConverted(l.status);
     const closedLost   = isClosedLost(l.status, l.isClosed);
 
@@ -223,17 +257,16 @@ async function getLeadInsights({
   const start = (Math.max(page, 1) - 1) * limit;
   const pageLeads = filtered.slice(start, start + limit);
 
-  // ── Today's Follow-ups (independent of the table's own pagination/tab) ─────
+  // ── Follow-ups within the selected range (independent of the table's own
+  // pagination/tab) ───────────────────────────────────────────────────────────
   const followUps = withDayData
     .filter((l) => {
       const scheduledCalls = Array.isArray(l.scheduledCalls) ? l.scheduledCalls : [];
-      return scheduledCalls.some(
-        (f) => f.scheduledAt && new Date(f.scheduledAt) >= dayStart && new Date(f.scheduledAt) <= dayEnd
-      );
+      return scheduledCalls.some((f) => inRange(f.scheduledAt));
     })
     .map((l) => {
       const f = (l.scheduledCalls || [])
-        .filter((sc) => sc.scheduledAt && new Date(sc.scheduledAt) >= dayStart && new Date(sc.scheduledAt) <= dayEnd)
+        .filter((sc) => inRange(sc.scheduledAt))
         .sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt))[0];
       const lastCall = [...(l.callHistory || [])].sort((a, b) => new Date(b.calledAt || 0) - new Date(a.calledAt || 0))[0];
       return {
@@ -247,24 +280,24 @@ async function getLeadInsights({
       };
     });
 
-  // ── Daily Activity Timeline ──────────────────────────────────────────────────
+  // ── Activity Timeline ────────────────────────────────────────────────────────
+  // In allTime/wide-range mode this can get very large across thousands of
+  // leads — capped below to the most recent TIMELINE_CAP events so it stays
+  // useful (a scrollable feed) instead of dumping an entire company's history.
+  const TIMELINE_CAP = 300;
   const timeline = [];
   for (const l of withDayData) {
     if (l._createdToday) {
       timeline.push({ time: l.createdAt, type: "New Lead", leadName: l.name, detail: null });
     }
     for (const c of l.callHistory || []) {
-      if (c.calledAt && new Date(c.calledAt) >= dayStart && new Date(c.calledAt) <= dayEnd) {
+      if (inRange(c.calledAt)) {
         timeline.push({ time: c.calledAt, type: "Call", leadName: l.name, detail: c.outcome || c.remark || null });
-      }
-      if (c.calledAt && c.remark && new Date(c.calledAt) >= dayStart && new Date(c.calledAt) <= dayEnd) {
-        timeline.push({ time: c.calledAt, type: "Remark", leadName: l.name, detail: c.remark });
+        if (c.remark) timeline.push({ time: c.calledAt, type: "Remark", leadName: l.name, detail: c.remark });
       }
     }
     for (const f of l.scheduledCalls || []) {
-      // Scheduling itself has no separate timestamp field on this schema —
-      // use scheduledAt for "follow-up due today" entries only.
-      if (f.scheduledAt && new Date(f.scheduledAt) >= dayStart && new Date(f.scheduledAt) <= dayEnd) {
+      if (inRange(f.scheduledAt)) {
         timeline.push({ time: f.scheduledAt, type: "Follow-up Scheduled", leadName: l.name, detail: f.note || null });
       }
     }
@@ -277,7 +310,9 @@ async function getLeadInsights({
       });
     }
   }
-  timeline.sort((a, b) => new Date(a.time || 0) - new Date(b.time || 0));
+  timeline.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0)); // newest first when capping
+  const timelineTruncated = timeline.length > TIMELINE_CAP;
+  const cappedTimeline = timeline.slice(0, TIMELINE_CAP).sort((a, b) => new Date(a.time || 0) - new Date(b.time || 0));
 
   // ── Conversion Analysis (fast keyword pass only — no AI here) ──────────────
   const closedLostToday = withDayData.filter((l) => l._bucket === "notConverted");
@@ -304,12 +339,15 @@ async function getLeadInsights({
   };
 
   return {
-    date: dayStart.toISOString().slice(0, 10),
+    mode: allTime ? "all" : (dateFrom ? "range" : "day"),
+    dateFrom: rangeStart ? rangeStart.toISOString().slice(0, 10) : null,
+    dateTo:   rangeEnd   ? rangeEnd.toISOString().slice(0, 10)   : null,
     summary,
     leads: pageLeads,
     pagination: { page: Math.max(page, 1), limit, total, totalPages: Math.max(Math.ceil(total / limit), 1) },
     followUps,
-    timeline,
+    timeline: cappedTimeline,
+    timelineTruncated,
     conversionAnalysis,
   };
 }
