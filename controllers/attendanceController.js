@@ -122,14 +122,14 @@ function calcManualBreakMinutes(breaks) {
 }
 
 /** Determine CRM attendance status from a raw record.*  Present / Late / Half-day / Absent / Leave  */
-function deriveCrmStatus(rec) {
+function deriveCrmStatus(rec, shiftCfg) {
   if (!rec || !rec.loginTime) return "absent";
   // FIX (clock/timezone bug): .getHours()/.getMinutes() read the SERVER
   // PROCESS's local timezone (often UTC on cloud hosts like Render), not
-  // IST. That made the 9:30 AM "late" cutoff below fire at the wrong wall-
-  // clock time whenever the server's TZ wasn't Asia/Kolkata. Use the IST-
-  // shifted timestamp and its UTC getters instead, so this is correct
-  // regardless of the host machine's configured timezone.
+  // IST. That made the late cutoff below fire at the wrong wall-clock time
+  // whenever the server's TZ wasn't Asia/Kolkata. Use the IST-shifted
+  // timestamp and its UTC getters instead, so this is correct regardless of
+  // the host machine's configured timezone.
   const istLogin      = toIST(rec.loginTime);
   const loginHour     = istLogin.getUTCHours();
   const loginMin      = istLogin.getUTCMinutes();
@@ -138,8 +138,20 @@ function deriveCrmStatus(rec) {
 
   if (rec.crmStatus) return rec.crmStatus; // manual override wins
 
-  // Late threshold: 9:30 AM = 570 minutes
-  if (totalMinutes > 570) return "late";
+  // FIX: this was hardcoded to 9:30 AM (570 minutes) regardless of company
+  // settings. Company.attendanceConfig.lateLoginHour/lateLoginMinute already
+  // exists specifically for this — there's a full admin UI for it on the
+  // Attendance Settings page (AttendancePage.jsx "Mark Late After") — but
+  // nothing actually read it back here, so changing that setting had no
+  // effect on which employees got marked "late". Falls back to 9:30 (the old
+  // hardcoded default) when no config is passed, so this stays correct even
+  // from call sites that haven't been updated to fetch it.
+  const lateThresholdMinutes =
+    shiftCfg?.lateLoginHour != null
+      ? shiftCfg.lateLoginHour * 60 + (shiftCfg.lateLoginMinute || 0)
+      : 570;
+
+  if (totalMinutes > lateThresholdMinutes) return "late";
   if (workMins > 0 && workMins < 240) return "half_day";
   return "present";
 }
@@ -424,7 +436,12 @@ const startBreak = async (req, res) => {
       return res.status(200).json(record);
     }
 
-    record.breaks.push({ startTime: new Date(), reason });
+    record.breaks.push({
+      startTime: new Date(),
+      reason,
+      // New auto-idle breaks start pending a remark; manual breaks don't need one.
+      remarkStatus: reason === "Auto Idle" ? "pending" : "not_required",
+    });
     record.activeBreakIndex = record.breaks.length - 1;
     record.status = reason === "Auto Idle" ? "idle" : "on_break";
     await record.save();
@@ -463,7 +480,8 @@ const pingActivity = async (req, res) => {
       return res.status(200).json({ ok: true });
 
     record.lastActivity = new Date();
-    if (record.status === "idle") {
+    const wasIdle = record.status === "idle";
+    if (wasIdle) {
       if (record.activeBreakIndex !== null) {
         const br = record.breaks[record.activeBreakIndex];
         if (br && !br.endTime) {
@@ -476,7 +494,61 @@ const pingActivity = async (req, res) => {
       record.totalBreakMinutes = calcBreakMinutes(record.breaks);
     }
     await record.save();
+
+    // FIX: this endpoint used to save the idle→active transition and just
+    // return it in the HTTP response — but the periodic 60s background ping
+    // on both web and mobile fires-and-forgets this call without reading the
+    // response, and neither client re-fetches afterwards. So the backend
+    // would correctly flip the employee back to "active", while their own
+    // widget kept showing "Idle" — with no visible "Resume" button left to
+    // fix it (that banner was already dismissed locally on the first mouse
+    // move / tap), until a full page reload or app restart. UserDashboard.jsx
+    // and the mobile AttendanceWidget both already have a live socket
+    // listener for "attendance:updated" (used by clockIn/clockOut/startBreak/
+    // endBreak) — this was simply the one mutating endpoint that never emitted
+    // it. Only emit when something actually changed, to avoid a socket burst
+    // on every idle heartbeat from every active employee.
+    if (wasIdle) emitAttendanceUpdate(req, record);
+
     res.status(200).json({ ok: true, status: record.status });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
+// ── USER: Save/skip an idle remark ────────────────────────────────────────────
+// Called by the web + mobile idle popup, both while still idle (repeated
+// every 5 min) and once on resume. Targets the CURRENTLY active idle break by
+// default, but can also target an earlier one via `breakIndex` — the popup
+// carries forward any still-"pending" remarks from earlier idle periods today
+// so the employee can fill them in later without losing track of them, per
+// spec: skipping just leaves it pending, it doesn't block anything, and it
+// stays visible next time the popup shows.
+// Body: { remark, breakIndex? }  — empty/missing remark = explicit skip
+// (re-affirms "pending" rather than leaving it in whatever state it was).
+const saveIdleRemark = async (req, res) => {
+  try {
+    const { remark, breakIndex } = req.body || {};
+    const date   = todayStr();
+    const record = await Attendance.findOne({ user: req.user._id, date });
+    if (!record) return res.status(404).json({ message: "No attendance record for today." });
+
+    const idx = breakIndex !== undefined && breakIndex !== null
+      ? Number(breakIndex)
+      : record.activeBreakIndex;
+
+    if (idx === null || idx === undefined || !record.breaks[idx])
+      return res.status(400).json({ message: "No matching idle period found." });
+
+    const br = record.breaks[idx];
+    if (br.reason !== "Auto Idle")
+      return res.status(400).json({ message: "Remarks can only be added to auto-idle periods." });
+
+    const trimmed = String(remark || "").trim().slice(0, 300);
+    br.remark       = trimmed;
+    br.remarkStatus = trimmed ? "filled" : "pending"; // empty = explicit skip, stays pending
+
+    await record.save();
+    emitAttendanceUpdate(req, record);
+    res.status(200).json(record);
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
@@ -492,26 +564,30 @@ const getMyToday = async (req, res) => {
 // ── Save ideal working time + reason for today (employee, from mobile app) ────
 // Upserts today's attendance record (a user may set their ideal time before
 // clocking in), and returns the full updated record so the app can refresh.
-const saveIdealTime = async (req, res) => {
+// ── "Ideal Time" retired as a per-employee free-text field ───────────────────
+// It used to be something each employee typed in daily, which made it drift
+// into meaning "what I actually worked" rather than a fixed shift window.
+// Replaced by getShiftConfig below — a single company-wide shift window the
+// admin sets once (Attendance Settings page), which every employee just reads.
+
+// ── Get the company's fixed shift window (read-only, any employee) ───────────
+// "Ideal Time" is now this — the admin-configured shift window that applies
+// to everyone, NOT something derived from any individual's clock-in/clock-out
+// times and NOT something an employee can edit. Backed by the same
+// Company.attendanceConfig that already powers the "late" threshold and the
+// Attendance Settings admin page (adminController.js getAttendanceConfig) —
+// this just exposes the shift-window portion of it to non-admin callers.
+const getShiftConfig = async (req, res) => {
   try {
-    const { idealTime = "", idealRemark = "" } = req.body || {};
-    const userId    = req.user._id;
     const companyId = req.user.company;
-    const date      = todayStr();
-
-    const record = await Attendance.findOneAndUpdate(
-      { user: userId, date },
-      {
-        $set: {
-          idealTime:   String(idealTime).trim().slice(0, 120),
-          idealRemark: String(idealRemark).trim().slice(0, 500),
-        },
-        $setOnInsert: { user: userId, company: companyId, date },
-      },
-      { new: true, upsert: true, setDefaultsOnInsert: true },
-    );
-
-    res.status(200).json(record);
+    const company = await Company.findById(companyId).select("attendanceConfig").lean();
+    const cfg = company?.attendanceConfig || {};
+    res.status(200).json({
+      shiftStartHour:   cfg.shiftStartHour   ?? 9,
+      shiftStartMinute: cfg.shiftStartMinute ?? 0,
+      shiftEndHour:      cfg.shiftEndHour     ?? 18,
+      shiftEndMinute:    cfg.shiftEndMinute   ?? 0,
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -531,7 +607,7 @@ const markIdleUsers = async (req, res) => {
 
     let marked = 0;
     for (const rec of active) {
-      rec.breaks.push({ startTime: new Date(), reason: "Auto Idle" });
+      rec.breaks.push({ startTime: new Date(), reason: "Auto Idle", remarkStatus: "pending" });
       rec.activeBreakIndex = rec.breaks.length - 1;
       rec.status = "idle";
       await rec.save();
@@ -622,7 +698,7 @@ const getAttendanceReport = async (req, res) => {
     }
 
     // Fetch records
-    const [records, total] = await Promise.all([
+    const [records, total, companyCfg] = await Promise.all([
       Attendance.find(query)
         .populate("user", "name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory callLogSyncEnabled")
         .sort({ date: -1, createdAt: -1 })
@@ -630,12 +706,14 @@ const getAttendanceReport = async (req, res) => {
         .limit(Number(limit))
         .lean(),
       Attendance.countDocuments(query),
+      Company.findById(companyId).select("attendanceConfig").lean(),
     ]);
+    const shiftCfg = companyCfg?.attendanceConfig || null;
 
     // Enrich each record with CRM status
     const enriched = records.map(rec => ({
       ...rec,
-      derivedCrmStatus : deriveCrmStatus(rec),
+      derivedCrmStatus : deriveCrmStatus(rec, shiftCfg),
       workingHours     : formatWorkHours(rec.totalWorkMinutes),
       idleMinutes      : calcIdleMinutes(rec.breaks),
       // FIX: idleTime must NEVER fall back to rec.idealTime. "Idle Time" is
@@ -653,6 +731,13 @@ const getAttendanceReport = async (req, res) => {
         return idle > 0 ? formatWorkHours(idle) : "—";
       })(),
       manualBreakMinutes : calcManualBreakMinutes(rec.breaks),
+      // Idle periods the employee skipped without a reason — surfaced to
+      // admins so it's visible at a glance which idle gaps still need
+      // following up on, instead of only being visible to the employee
+      // themself the next time they go idle.
+      pendingIdleRemarks : (rec.breaks || []).filter(
+        b => b.reason === "Auto Idle" && b.remarkStatus === "pending"
+      ).length,
     }));
 
     // Filter by crmStatus after derivation (can't do in DB query for derived field)
@@ -810,10 +895,14 @@ const exportAttendance = async (req, res) => {
       query.user = { $in: exportAllowedIds };
     }
 
-    const records = await Attendance.find(query)
-      .populate("user", "name email ipAddress")
-      .sort({ date: -1 })
-      .lean();
+    const [records, companyCfg2] = await Promise.all([
+      Attendance.find(query)
+        .populate("user", "name email ipAddress")
+        .sort({ date: -1 })
+        .lean(),
+      Company.findById(companyId).select("attendanceConfig").lean(),
+    ]);
+    const exportShiftCfg = companyCfg2?.attendanceConfig || null;
 
     let enriched = records.map(rec => ({
       employeeName : rec.user?.name || "Unknown",
@@ -837,7 +926,7 @@ const exportAttendance = async (req, res) => {
         const idle = calcIdleMinutes(rec.breaks);
         return idle > 0 ? formatWorkHours(idle) : "—";
       })(),
-      status       : deriveCrmStatus(rec),
+      status       : deriveCrmStatus(rec, exportShiftCfg),
       remarks      : rec.remarks || "",
       idealTime    : rec.idealTime || "",
       idealRemark  : rec.idealRemark || "",
@@ -1153,7 +1242,8 @@ const getClockLocationHistory = async (req, res) => {
 
 module.exports = {
   clockIn, clockOut, startBreak, endBreak, pingActivity, getMyToday,
-  saveIdealTime,
+  getShiftConfig,
+  saveIdleRemark,
   getCompanyAttendance, markIdleUsers,
   adminUpsertAttendance,
   getAttendanceReport, editAttendance, deleteAttendance, exportAttendance,
