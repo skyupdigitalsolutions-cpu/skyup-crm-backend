@@ -431,11 +431,25 @@ async function processMSG91Payload(rawBody, opts = {}) {
         if (updated) {
           const io = global._io;
           if (io) {
-            io.to("wa_admin").emit("wa_message_status", {
+            const payload = {
               waMessageId:    msgId,
               status:         newStatus,
               conversationId: updated.conversation?.toString(),
-            });
+            };
+            io.to("wa_admin").emit("wa_message_status", payload); // legacy — no one joins this room anymore
+            // FIX: this only ever emitted to "wa_admin", which the frontend
+            // stopped joining a while back (company-scoping security fix —
+            // see the matching comment in whatsappChatController.js). That
+            // meant delivery/read ticks never updated live for ANYONE —
+            // admin, super admin, or employee — regardless of the message
+            // list fix above. Look up the conversation's company and emit
+            // to the same wa_company_<id> room the rest of the app uses.
+            if (updated.conversation) {
+              const conv = await WhatsAppConversation.findById(updated.conversation).select("company").lean();
+              if (conv?.company) {
+                io.to(`wa_company_${conv.company.toString()}`).emit("wa_message_status", payload);
+              }
+            }
           }
           console.log(`✅ Status updated: ${msgId} → ${newStatus}`);
         }
