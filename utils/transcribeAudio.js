@@ -19,7 +19,11 @@ const GROQ_STT_URL       = 'https://api.groq.com/openai/v1/audio/transcriptions'
 const GROQ_CHAT_URL      = 'https://api.groq.com/openai/v1/chat/completions';
 const ELEVENLABS_STT_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
 const WHISPER_MODEL      = 'whisper-large-v3';
-const ROMANIZE_MODEL     = 'llama-3.1-8b-instant'; // fast + free on Groq
+// FIX: llama-3.1-8b-instant was deprecated by Groq on 2026-06-17 (same
+// deprecation batch as leadActionSummary.js's default model) and now 404s on
+// every call — see console.groq.com/docs/deprecations. Groq's own migration
+// guidance for this exact model is openai/gpt-oss-20b.
+const ROMANIZE_MODEL     = process.env.ROMANIZE_MODEL || 'openai/gpt-oss-20b';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Utilities
@@ -56,8 +60,14 @@ async function romanizeTranscript(transcript) {
     return transcript;
   }
 
-  // Quick check: if no non-ASCII characters exist, nothing to romanize
-  if (!/[^-]/.test(transcript)) {
+  // Quick check: if no non-ASCII characters exist, nothing to romanize.
+  // FIX: this was `/[^-\x7F]/` (a stray literal DEL byte had ended up in the
+  // character class) -- effectively "any character that is not a hyphen",
+  // which is true for virtually any non-empty string, so this skip-check
+  // never actually skipped anything -- every transcript, including pure
+  // English ones, went through the romanization call regardless. The correct
+  // check is for the presence of any non-ASCII character.
+  if (!/[^\x00-\x7F]/.test(transcript)) {
     console.log('[Romanize] No native script detected — skipping');
     return transcript;
   }
