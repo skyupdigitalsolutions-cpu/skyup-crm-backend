@@ -6,6 +6,7 @@ const WhatsAppConfig = require("../models/WhatsAppConfig");
 const WhatsAppConversation = require("../models/WhatsAppConversation");
 const crypto = require("crypto");
 const WhatsAppMessage = require("../models/WhatsAppMessage");
+const WhatsAppSendLog = require("../models/WhatsAppSendLog");
 const Lead = require("../models/Leads");
 const { normalizePhone: _sharedNormalizePhone } = require("../utils/normalizePhone");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
@@ -153,7 +154,15 @@ const getConversations = async (req, res) => {
   try {
     const { companyId, userId, role } = callerCtx(req);
     const filter = { company: companyId };
-    if (role !== "admin") filter.assignedAgent = userId;
+    // FIX: this used to check `role !== "admin"` only, which also caught
+    // "super_admin" — the Admin model's role enum is ["super_admin", "admin",
+    // "marketing_user"], so a super admin's list was wrongly scoped down to
+    // only conversations assigned to their own super-admin user id, making
+    // it look like customer replies "weren't visible" for that role. Every
+    // other admin-scope check in this file already treats admin + super_admin
+    // the same way — this was the one that was missed.
+    const isCompanyWideViewer = role === "admin" || role === "super_admin" || role === "superadmin";
+    if (!isCompanyWideViewer) filter.assignedAgent = userId;
 
     const conversations = await WhatsAppConversation.find(filter)
       .populate("lead", "name mobile email status")
@@ -199,23 +208,51 @@ const getMessages = async (req, res) => {
       }
     }
 
-    const messages = await WhatsAppMessage.find({
+    // FIX: this used to fetch the ENTIRE message history with no limit, on
+    // every single call — and the frontend was polling this endpoint every
+    // 1.5s for the open conversation. A long-running chat (hundreds of
+    // messages) meant re-fetching + re-populating the whole thing every
+    // couple seconds. Default to the most recent MAX_MESSAGES (override with
+    // ?limit=, capped at MAX_MESSAGES) and let the client ask for older
+    // messages separately if it ever adds a "load more" control.
+    const MAX_MESSAGES = 300;
+    const requestedLimit = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
+      ? Math.min(requestedLimit, MAX_MESSAGES)
+      : 150;
+
+    const recentDesc = await WhatsAppMessage.find({
       conversation: conversationId,
     })
       .populate("sentBy", "name")
-      // Oldest first, newest last — same as the WhatsApp app.
+      // Newest first so .limit() keeps the RECENT tail, not the oldest
+      // messages — then we reverse back to chronological order below.
       // _id is the TIE-BREAKER: MSG91 timestamps are only second-accurate, so
       // several messages can share the exact same waTimestamp. Sorting on
-      // timestamp alone leaves those in an arbitrary order that can even change
-      // between page loads. ObjectIds increase monotonically, so adding _id
-      // guarantees true insertion order.
-      .sort({ waTimestamp: 1, _id: 1 });
+      // timestamp alone leaves those in an arbitrary order that can even
+      // change between page loads. ObjectIds increase monotonically, so
+      // adding _id guarantees true insertion order.
+      .sort({ waTimestamp: -1, _id: -1 })
+      .limit(limit);
 
-    await WhatsAppConversation.findByIdAndUpdate(conversationId, {
-      unreadCount: 0,
-    });
+    // Oldest first, newest last — same as the WhatsApp app.
+    const messages = recentDesc.reverse();
 
-    res.json({ success: true, messages, conversation });
+    // FIX: this used to write unreadCount:0 unconditionally on every call —
+    // combined with the old 1.5s poll, that was a DB write roughly 40
+    // times/minute per open chat, for every agent with a chat open, even
+    // when there was nothing to clear. Only write when it's actually != 0.
+    if (conversation.unreadCount) {
+      await WhatsAppConversation.findByIdAndUpdate(conversationId, {
+        unreadCount: 0,
+      });
+      // Keep the object we're about to return in sync with the write above —
+      // the original code left this stale (still showing the pre-clear
+      // count) since `conversation` was read before the update.
+      conversation.unreadCount = 0;
+    }
+
+    res.json({ success: true, messages, conversation, hasMore: recentDesc.length === limit });
   } catch (err) {
     console.error("getMessages error:", err.message);
     res.status(500).json({ error: err.message });
@@ -983,6 +1020,37 @@ const _sendTemplateToPhone = async ({
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// _logWaSendBatch — writes one WhatsAppSendLog row per result, in a single
+// insertMany. Used by every bulk-send path (admin blast, CSV blast, employee
+// blast) so "what did we send" has one shared, queryable source of truth
+// instead of each result only ever existing in the HTTP response.
+// Fire-and-forget — a logging failure must never fail the actual send response.
+// ─────────────────────────────────────────────────────────────────────────────
+async function _logWaSendBatch({ companyId, channel, templateName, languageCode, sentByAdmin, sentByUser, sentByName, campaign, results }) {
+  try {
+    if (!results?.length) return;
+    const docs = results.map((r) => ({
+      company: companyId,
+      lead: r.leadId || null,
+      phone: r.phone || "",
+      name: r.name || "",
+      templateName,
+      languageCode,
+      channel,
+      status: r.status === "sent" ? "sent" : r.status === "skipped" ? "skipped" : "failed",
+      reason: r.reason || "",
+      sentByAdmin: sentByAdmin || null,
+      sentByUser: sentByUser || null,
+      sentByName: sentByName || "",
+      campaign: campaign || "",
+    }));
+    await WhatsAppSendLog.insertMany(docs, { ordered: false });
+  } catch (err) {
+    console.error("_logWaSendBatch error:", err.message);
+  }
+}
+
 const _saveConversationAndMessage = async ({
   cleanPhone,
   contactName,
@@ -1145,6 +1213,19 @@ const bulkSendToLeads = async (req, res) => {
       await new Promise((r) => setTimeout(r, 150));
     }
 
+    // Persist a queryable record of this blast — previously `results` only
+    // ever lived in this HTTP response and vanished once the modal closed.
+    _logWaSendBatch({
+      companyId,
+      channel: "blast",
+      templateName,
+      languageCode,
+      sentByAdmin: userId,
+      sentByName: req.admin?.name || "",
+      campaign: campaign || "",
+      results,
+    });
+
     res.json({ success: true, sent, failed, total: leads.length, results });
   } catch (err) {
     console.error("bulkSendToLeads error:", err.message);
@@ -1230,6 +1311,16 @@ const bulkSendCSV = async (req, res) => {
       }
       await new Promise((r) => setTimeout(r, 150));
     }
+
+    _logWaSendBatch({
+      companyId,
+      channel: "blast-csv",
+      templateName,
+      languageCode,
+      sentByAdmin: userId,
+      sentByName: req.admin?.name || "",
+      results,
+    });
 
     res.json({
       success: true,
@@ -1392,7 +1483,15 @@ const getConversationByLead = async (req, res) => {
 const employeeBulkSend = async (req, res) => {
   try {
     const { templateName, languageCode = "en_US" } = req.body;
-    const { _id: userId, company: companyId } = callerCtx(req);
+    // FIX: this was destructuring `{ _id, company }` off callerCtx's return
+    // value, but callerCtx returns `{ companyId, userId, role }` — neither
+    // `_id` nor `company` exist on it, so both ended up undefined here. With
+    // companyId undefined, every query below silently dropped its company
+    // filter (Mongoose ignores undefined query values), so this endpoint
+    // could pick ANY company's WhatsApp config and blast EVERY company's
+    // leads with a mobile number — a cross-tenant leak. See callerCtx's
+    // comment above for the matching fallback fix.
+    const { companyId, userId } = callerCtx(req);
 
     if (!templateName?.trim())
       return res.status(400).json({ error: "templateName is required" });
@@ -1487,6 +1586,16 @@ const employeeBulkSend = async (req, res) => {
       await new Promise((r) => setTimeout(r, 150));
     }
 
+    _logWaSendBatch({
+      companyId,
+      channel: "employee-blast",
+      templateName,
+      languageCode,
+      sentByUser: userId,
+      sentByName: req.user?.name || "",
+      results,
+    });
+
     res.json({ success: true, sent, failed, total: leads.length, results });
   } catch (err) {
     console.error("employeeBulkSend error:", err.message);
@@ -1504,7 +1613,16 @@ function callerCtx(req) {
   const u = req.user || {};
   const adminCompany = req.admin && (req.admin.company?._id || req.admin.company);
   return {
-    companyId: u.companyId || req.callerCompany || adminCompany || null,
+    // FIX: routes using the plain `protect` middleware (e.g. /employee-bulk-send)
+    // set req.user to the RAW Mongoose User document — it has `.company`, not
+    // `.companyId`. Only `protectAny` normalizes it to `.companyId`. Without
+    // this fallback, companyId silently resolved to null for those routes,
+    // which meant queries like `Lead.find({ company: companyId, ... })` had
+    // the company filter silently dropped by Mongoose — matching leads
+    // across EVERY company instead of just the caller's own. Same for
+    // WhatsAppConfig.findOne({ company: companyId }), which would return
+    // whichever company's config Mongo happened to return first.
+    companyId: u.companyId || u.company?._id || u.company || req.callerCompany || adminCompany || null,
     userId:    u.userId || u.id || u._id || (req.admin && req.admin._id) || null,
     role:      u.role || (req.admin && req.admin.role) || "user",
   };
@@ -1990,6 +2108,73 @@ const markConversationRead = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/whatsapp/send-log
+// The "sent template report" — reads from WhatsAppSendLog, which every send
+// path (admin blast, CSV blast, employee blast, nurture cron) now writes to.
+// Admin/super_admin see the whole company's history; employees only see
+// their own sends (channel "employee-blast" where sentByUser === them).
+// Query params: page, limit, channel, status, dateFrom, dateTo, search
+// ─────────────────────────────────────────────────────────────────────────────
+const getSendLogReport = async (req, res) => {
+  try {
+    const { companyId, userId, role } = callerCtx(req);
+    if (!companyId) return res.status(401).json({ error: "No company context" });
+    const isCompanyWideViewer = role === "admin" || role === "super_admin" || role === "superadmin";
+
+    const page  = Math.max(parseInt(req.query.page, 10)  || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
+
+    const filter = { company: companyId };
+    if (!isCompanyWideViewer) filter.sentByUser = userId; // employees see only their own sends
+    if (req.query.channel) filter.channel = req.query.channel;
+    if (req.query.status)  filter.status  = req.query.status;
+    if (req.query.dateFrom || req.query.dateTo) {
+      filter.createdAt = {};
+      if (req.query.dateFrom) filter.createdAt.$gte = new Date(req.query.dateFrom);
+      if (req.query.dateTo) {
+        const end = new Date(req.query.dateTo);
+        end.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = end;
+      }
+    }
+    if (req.query.search) {
+      const s = req.query.search.trim();
+      filter.$or = [
+        { name: { $regex: s, $options: "i" } },
+        { phone: { $regex: s, $options: "i" } },
+        { templateName: { $regex: s, $options: "i" } },
+      ];
+    }
+
+    const [rows, total, summaryAgg] = await Promise.all([
+      WhatsAppSendLog.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      WhatsAppSendLog.countDocuments(filter),
+      WhatsAppSendLog.aggregate([
+        { $match: filter },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const summary = { sent: 0, failed: 0, skipped: 0 };
+    summaryAgg.forEach((s) => { if (s._id in summary) summary[s._id] = s.count; });
+
+    res.json({
+      success: true,
+      rows,
+      summary,
+      pagination: { page, limit, total, totalPages: Math.max(Math.ceil(total / limit), 1) },
+    });
+  } catch (err) {
+    console.error("getSendLogReport error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getConversations,
   getMessages,
@@ -2011,4 +2196,5 @@ module.exports = {
   employeeBulkSend,
   getConversationByLead,
   getUnreadCounts,
+  getSendLogReport,
 };
