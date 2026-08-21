@@ -92,6 +92,28 @@ async function callGrok(systemPrompt, userContent, maxTokens = 700) {
         err.code = 'GROK_PAYLOAD_TOO_LARGE';
         throw err;
       }
+      // FIX: every failure that wasn't a 413 used to fall through to a single
+      // generic re-throw, which the caller then labeled "AI summary service
+      // is busy" NO MATTER what actually went wrong — an expired/revoked API
+      // key, a decommissioned model name, a malformed request, a genuine rate
+      // limit, or a network timeout all looked identical to the user and to
+      // whoever was trying to diagnose it from a bug report, since only
+      // e.message (not the upstream response body) was ever logged. Classify
+      // each case explicitly and log the real upstream response, so this is
+      // actually diagnosable next time instead of always reading "please try
+      // again" regardless of cause.
+      if (status === 401 || status === 403) {
+        console.error("[callGrok] auth failed:", JSON.stringify(e?.response?.data));
+        const err = new Error("AI provider rejected the API key (401/403). Check GROQ_API_KEY is valid and not revoked/expired.");
+        err.code = "GROK_AUTH_FAILED";
+        throw err;
+      }
+      if (status === 400 || status === 404) {
+        console.error("[callGrok] bad request:", GROK_MODEL, JSON.stringify(e?.response?.data));
+        const err = new Error(`AI provider rejected the request (${status}). Likely cause: model "${GROK_MODEL}" is no longer available — check GROQ_MODEL/AI_SUMMARY_MODEL against Groq's current model list.`);
+        err.code = "GROK_BAD_REQUEST";
+        throw err;
+      }
       // Transient rate limit → wait and retry.
       if (status === 429 && attempt < MAX_RETRIES) {
         const retryAfter = Number(e?.response?.headers?.['retry-after']);
@@ -102,6 +124,20 @@ async function callGrok(systemPrompt, userContent, maxTokens = 700) {
         attempt++;
         continue;
       }
+      if (status === 429) {
+        console.error("[callGrok] rate limited after retries exhausted:", JSON.stringify(e?.response?.data));
+        const err = new Error("AI provider is rate-limiting this account right now. Genuinely transient — retry in a minute.");
+        err.code = "GROK_RATE_LIMITED";
+        throw err;
+      }
+      if (!e?.response) {
+        // No response at all = network/DNS/timeout, not a provider error.
+        console.error("[callGrok] network/timeout error:", e.message, "URL:", GROK_API_URL);
+        const err = new Error(`Could not reach the AI provider (${e.code || e.message}). Check network egress to ${GROK_API_URL} and that AI_SUMMARY_API_URL is correct.`);
+        err.code = "GROK_NETWORK_ERROR";
+        throw err;
+      }
+      console.error("[callGrok] unexpected error:", status, JSON.stringify(e?.response?.data));
       throw e;
     }
   }
