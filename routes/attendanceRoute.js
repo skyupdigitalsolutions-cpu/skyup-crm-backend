@@ -7,7 +7,8 @@ const router  = express.Router();
 
 const {
   clockIn, clockOut, startBreak, endBreak, pingActivity, getMyToday,
-  saveIdealTime,
+  getShiftConfig,
+  saveIdleRemark,
   getCompanyAttendance, markIdleUsers,
   getAttendanceReport, editAttendance, deleteAttendance, exportAttendance,
   adminUpsertAttendance,
@@ -32,7 +33,14 @@ router.post("/break/start", protect, requireFeature("attendance"), startBreak);
 router.post("/break/end",   protect, requireFeature("attendance"), endBreak);
 router.post("/ping",        protect, requireFeature("attendance"), pingActivity);
 router.get("/my-today",     protect, requireFeature("attendance"), getMyToday);
- router.post("/ideal-time",  protect, requireFeature("attendance"), saveIdealTime);
+// FIX: "Ideal Time" retired as a per-day, per-employee free-text field the
+// employee typed in themselves — it drifted into meaning "what I actually
+// worked" instead of a fixed shift window. Replaced with a read-only endpoint
+// backed by the company-wide shift config the admin already sets on the
+// Attendance Settings page (adminController.js get/saveAttendanceConfig) —
+// employees can only read it now, not edit it. POST /ideal-time removed.
+router.get("/shift-config", protect, requireFeature("attendance"), getShiftConfig);
+router.post("/idle-remark", protect, requireFeature("attendance"), saveIdleRemark);
 
 // ── Meeting permission request ────────────────────────────────────────────────
 router.post("/request-meeting-permission", protect, requireFeature("attendance"), requestMeetingPermission);
@@ -50,24 +58,6 @@ router.get("/live-locations", protectAdmin, requireFeature("attendance"), getLiv
 router.get("/meeting-tracking",  protectAdmin, getMeetingTrackingConfig);
 router.put("/meeting-tracking",  protectAdmin, saveMeetingTrackingConfig);
 
-router.get("/report",       protectAdmin, requireFeature("attendance"), getAttendanceReport);
-router.get("/export",       protectAdmin, requireFeature("attendance"), exportAttendance);
-router.get("/users",        protectAdmin, requireFeature("attendance"), getCompanyUsers);
-router.post("/admin-upsert", protectAdmin, requireFeature("attendance"), adminUpsertAttendance);
-router.put("/:id",          protectAdmin, requireFeature("attendance"), editAttendance);
-router.delete("/:id",       protectAdmin, requireFeature("attendance"), deleteAttendance);
-router.post("/clock-out",   protect, requireFeature("attendance"), clockOut);
-router.post("/break/start", protect, requireFeature("attendance"), startBreak);
-router.post("/break/end",   protect, requireFeature("attendance"), endBreak);
-router.post("/ping",        protect, requireFeature("attendance"), pingActivity);
-router.get("/my-today",     protect, requireFeature("attendance"), getMyToday);
- router.post("/ideal-time",  protect, requireFeature("attendance"), saveIdealTime);
-
-// ── Admin routes — Live dashboard ─────────────────────────────────────────────
-router.get("/company",      protectAdmin, requireFeature("attendance"), getCompanyAttendance);
-router.post("/mark-idle",   protectAdmin, requireFeature("attendance"), markIdleUsers);
-
-// ── Admin routes — Attendance Management ─────────────────────────────────────
 router.get("/report",       protectAdmin, requireFeature("attendance"), getAttendanceReport);
 router.get("/export",       protectAdmin, requireFeature("attendance"), exportAttendance);
 router.get("/users",        protectAdmin, requireFeature("attendance"), getCompanyUsers);
