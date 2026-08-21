@@ -79,6 +79,9 @@ const leadInsights = async (req, res) => {
     const report = await getLeadInsights({
       company,
       date:        req.query.date || null,
+      dateFrom:    req.query.dateFrom || null,
+      dateTo:      req.query.dateTo || null,
+      allTime:     req.query.allTime === 'true' || req.query.allTime === '1',
       agentId:     isAdmin ? (req.query.agentId || null) : String(req.user._id),
       source:      req.query.source || null,
       status:      req.query.status || '',
