@@ -14,6 +14,7 @@ const {
   getDailyOutcomesReport,
 } = require('../services/reportService');
 const { getNonConversionReport } = require('../services/nonConversionService');
+const { getLeadInsights } = require('../services/leadInsightsService');
 const { getAdminLeadScope } = require('../utils/adminLeadScope');
 
 // ── GET /api/reports/daily ────────────────────────────────────────────────────
@@ -58,6 +59,48 @@ const dailyReport = async (req, res) => {
     res.json({ success: true, ...report });
   } catch (err) {
     console.error('[reportController.dailyReport]', err.message);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── GET /api/reports/lead-insights ────────────────────────────────────────────
+// Daily Report → Lead Insights. Works for both admin and user tokens, same
+// caller-resolution pattern as dailyReport above. Employees get the same
+// per-admin/own-leads scoping as every other lead-list endpoint via
+// getAdminLeadScope — nothing new is exposed that the caller couldn't already
+// see through the existing Leads page.
+const leadInsights = async (req, res) => {
+  try {
+    const isAdmin = !!req.admin;
+    const company = req.callerCompany || req.admin?.company?._id || req.user?.company;
+    if (!company) return res.status(400).json({ message: 'Company not resolved from token' });
+
+    const leadScope = await getAdminLeadScope(req, company);
+    const report = await getLeadInsights({
+      company,
+      date:        req.query.date || null,
+      agentId:     isAdmin ? (req.query.agentId || null) : String(req.user._id),
+      source:      req.query.source || null,
+      status:      req.query.status || '',
+      temperature: req.query.temperature || null,
+      search:      req.query.search || null,
+      page:        req.query.page  ? Number(req.query.page)  : 1,
+      limit:       req.query.limit ? Number(req.query.limit) : 25,
+      leadScope,
+    });
+
+    // NOTE: deliberately NOT masking phone/email here, unlike dailyReport
+    // above. Row clicks open LeadJourneyDrawer (reused as-is from
+    // AdminLeadsPage), which does its OWN masking internally based on
+    // isSuperAdmin and expects the RAW value — pre-masking here would get
+    // masked twice, corrupting the display. Masking for the table itself
+    // (rows the user isn't drilling into) happens client-side in
+    // LeadInsights.jsx, the same way AdminLeadsPage already masks its own
+    // table — consistent with the pattern LeadJourneyDrawer was built for.
+
+    res.json({ success: true, ...report });
+  } catch (err) {
+    console.error('[reportController.leadInsights]', err.message);
     res.status(500).json({ message: err.message });
   }
 };
@@ -185,4 +228,4 @@ const dailyOutcomesReport = async (req, res) => {
   }
 };
 
-module.exports = { dailyReport, employeeReport, campaignReport, nonConversionReport, dailyOutcomesReport };
+module.exports = { dailyReport, employeeReport, campaignReport, nonConversionReport, dailyOutcomesReport, leadInsights };
