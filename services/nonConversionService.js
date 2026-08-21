@@ -433,4 +433,4 @@ async function runPerLeadAnalysis(leadDetails) {
   }
 }
 
-module.exports = { getNonConversionReport };
+module.exports = { getNonConversionReport, REASON_RULES, categorise, pickReasonText, defaultAccountability };
