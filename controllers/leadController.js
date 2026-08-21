@@ -1002,6 +1002,13 @@ const adminDeleteLead = async (req, res) => {
 // previousAgents content, templateHistory, activityLog, nurtureSent, projects)
 // that the list screen never renders. Full lead is fetched by GET /lead/:id.
 // KEEP IN SYNC with formatLead() in src/api/leadsApi.js.
+//
+// FIX: `service` was missing from this projection — `industry` was listed but
+// `service` was not, so even for companies with leadNurtureSequence enabled
+// (where the field genuinely saves via patchLead), the mobile list's
+// stale-check refresh (getMyLeads below) would strip `service` right back out
+// of every lead on the very next pull. `industry` survived that refresh
+// because it WAS in this list; `service` never was.
 const MOBILE_LIST_PROJECTION = {
   name:              1,
   mobile:            1,
@@ -1011,6 +1018,7 @@ const MOBILE_LIST_PROJECTION = {
   source:            1,
   campaign:          1,
   industry:          1,
+  service:           1,
   status:            1,
   remark:            1,
   initialRemark:     1,
