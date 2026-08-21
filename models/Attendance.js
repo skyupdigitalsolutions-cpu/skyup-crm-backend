@@ -5,6 +5,17 @@ const breakSchema = new mongoose.Schema({
   endTime:   { type: Date, default: null },
   reason:    { type: String, default: "Manual Break" },
   durationMinutes: { type: Number, default: null },
+
+  // ── Idle remark (employee-entered reason for an "Auto Idle" gap) ──────────
+  // Prompted every 5 minutes while idle, and again on resume. Only meaningful
+  // for reason === "Auto Idle" — manual breaks already capture their reason
+  // at start time via the `reason` field above.
+  //   "not_required" → manual break, no remark expected
+  //   "pending"      → auto-idle break, employee hasn't filled it in yet
+  //                    (either hasn't been prompted, or skipped the prompt)
+  //   "filled"       → employee entered a remark
+  remark:       { type: String, default: "" },
+  remarkStatus: { type: String, enum: ["pending", "filled", "not_required"], default: "not_required" },
 }, { _id: false });
 
 const attendanceSchema = new mongoose.Schema({
