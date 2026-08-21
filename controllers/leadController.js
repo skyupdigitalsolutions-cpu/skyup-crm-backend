@@ -2819,13 +2819,33 @@ const getLeadActionSummary = async (req, res) => {
     try {
       result = await generateLeadActionSummary(lead, { includeTranscripts });
     } catch (e) {
+      // FIX: this used to collapse every non-"not configured" error into one
+      // generic "busy, try again" message — an expired API key, a
+      // decommissioned model, and an actual rate limit all looked identical.
+      // callGrok() (utils/leadActionSummary.js) now classifies these
+      // properly; pass that through instead of flattening it back down.
+      console.error("[actionSummary] generation error:", e.code || "UNKNOWN", e.message);
       if (e.code === "GROK_NOT_CONFIGURED") {
         return res.status(503).json({
           message: "AI summary is not configured. Set GROQ_API_KEY on the server.",
           code: "GROK_NOT_CONFIGURED",
         });
       }
-      console.error("[actionSummary] generation error:", e.message);
+      if (e.code === "GROK_AUTH_FAILED") {
+        return res.status(502).json({ message: e.message, code: "GROK_AUTH_FAILED" });
+      }
+      if (e.code === "GROK_BAD_REQUEST") {
+        return res.status(502).json({ message: e.message, code: "GROK_BAD_REQUEST" });
+      }
+      if (e.code === "GROK_RATE_LIMITED") {
+        return res.status(429).json({ message: e.message, code: "GROK_RATE_LIMITED" });
+      }
+      if (e.code === "GROK_NETWORK_ERROR") {
+        return res.status(502).json({ message: e.message, code: "GROK_NETWORK_ERROR" });
+      }
+      if (e.code === "GROK_PAYLOAD_TOO_LARGE") {
+        return res.status(413).json({ message: e.message, code: "GROK_PAYLOAD_TOO_LARGE" });
+      }
       return res.status(502).json({
         message: "AI summary service is unavailable right now. Please try again shortly.",
         code: "GROK_UNAVAILABLE",
