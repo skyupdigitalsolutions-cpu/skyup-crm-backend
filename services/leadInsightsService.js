@@ -144,6 +144,36 @@ async function getLeadInsights({
     else if (followUpsToday.length > 0) bucket = "followups";
     else if (createdToday) bucket = "new";
 
+    // ── Status reason — a human-readable "why is this lead in this state" ────
+    // Previously the categorise()/pickReasonText() logic only fed the
+    // aggregate top-reasons chart and was discarded per-lead. Attaching it
+    // here means every lead carries its own explanation, visible in the
+    // table without opening anything.
+    const totalCalls = callHistory.length;
+    const totalConnected = callHistory.filter(
+      (c) => /connect|answer|interested|follow/i.test(c.outcome || "") && !/not\s*answer|missed|reject|busy|unreach/i.test(c.outcome || "")
+    ).length;
+    const pendingFollowUps = scheduledCalls.filter((f) => !f.done).length;
+    const completedFollowUps = scheduledCalls.filter((f) => f.done).length;
+
+    let statusReason;
+    if (converted) {
+      statusReason = `Converted after ${totalCalls} call${totalCalls === 1 ? "" : "s"} (${totalConnected} connected)` +
+        (lastCall?.remark ? ` — last note: "${lastCall.remark}"` : "");
+    } else if (closedLost) {
+      const text = pickReasonText(l, lastCall?.remark || lastCall?.outcome || "");
+      const reason = categorise(text, l.status);
+      statusReason = `Not converted — ${reason}` + (lastCall?.remark ? ` ("${lastCall.remark}")` : "");
+    } else if (totalCalls === 0) {
+      statusReason = "No calls made yet";
+    } else if (overdueFollowUps.length > 0) {
+      statusReason = `${overdueFollowUps.length} overdue follow-up${overdueFollowUps.length === 1 ? "" : "s"} — last contacted ${lastCall?.calledAt ? new Date(lastCall.calledAt).toLocaleDateString("en-IN") : "unknown"}`;
+    } else if (pendingFollowUps > 0) {
+      statusReason = `In progress — ${totalCalls} call${totalCalls === 1 ? "" : "s"} so far, ${pendingFollowUps} follow-up${pendingFollowUps === 1 ? "" : "s"} scheduled`;
+    } else {
+      statusReason = `${totalCalls} call${totalCalls === 1 ? "" : "s"} made, ${totalConnected} connected — no follow-up scheduled`;
+    }
+
     return {
       ...l,
       _callsToday: callsToday.length,
@@ -156,6 +186,12 @@ async function getLeadInsights({
       _closedToday: closedToday,
       _overdueCount: overdueFollowUps.length,
       _bucket: bucket,
+      _statusReason: statusReason,
+      _totalCalls: totalCalls,
+      _totalConnected: totalConnected,
+      _totalRemarks: callHistory.filter((c) => c.remark).length,
+      _pendingFollowUps: pendingFollowUps,
+      _completedFollowUps: completedFollowUps,
     };
   });
 
