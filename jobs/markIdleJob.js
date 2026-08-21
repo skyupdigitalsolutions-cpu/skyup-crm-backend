@@ -17,8 +17,18 @@ const cron       = require('node-cron');
 const Attendance = require('../models/Attendance');
 
 // ── Helpers (duplicated from attendanceController to keep job self-contained) ─
+// FIX (clock/timezone bug): this was a straight `new Date().toISOString().slice(0,10)`
+// — the UTC date. attendanceController.js's todayStr() was fixed a while back to
+// compute the IST wall-clock date instead (UTC and IST disagree on "today" every
+// night between 12:00 AM and 5:30 AM IST), but this duplicated copy was never
+// updated to match. Net effect: for that ~5.5 hour window every night, this job
+// queried Attendance for the WRONG date — every real record for "tonight" was
+// filed under the correct IST date by clockIn/pingActivity, while this job was
+// searching for the UTC date (still "yesterday"), so it silently found zero
+// records and marked nobody idle for the entire early-morning window.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // +05:30 in ms
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 function calcBreakMinutes(breaks) {
@@ -54,7 +64,7 @@ async function runMarkIdle() {
 
     // ── Build bulkWrite ops — one write per idle record instead of N awaited saves
     const ops = stale.map(rec => {
-      const newBreak = { startTime: now, reason: 'Auto Idle' };
+      const newBreak = { startTime: now, reason: 'Auto Idle', remarkStatus: 'pending' };
       const updatedBreaks = [...rec.breaks, newBreak];
       return {
         updateOne: {
