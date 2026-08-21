@@ -93,7 +93,7 @@ const receiveWebhook = async (req, res) => {
         // ── Handle status updates (sent/delivered/read/failed) ──────────────
         if (value.statuses?.length) {
           for (const status of value.statuses) {
-            await handleStatusUpdate(status);
+            await handleStatusUpdate(status, config);
           }
         }
       }
@@ -246,8 +246,19 @@ async function handleInboundMessage(msg, value, config) {
       io.to(`wa_agent_${conversation.assignedAgent.toString()}`).emit("wa_message", payload);
     }
 
-    // Always notify admin room
+    // Legacy — no one joins this room anymore (see company-room fix below)
     io.to("wa_admin").emit("wa_message", payload);
+
+    // FIX: this handler only ever emitted to wa_agent_<assignedAgent> and the
+    // dead wa_admin room. The frontend migrated off wa_admin a while back to
+    // a company-scoped room (wa_company_<companyId>) to stop a cross-tenant
+    // leak — see the matching comment in whatsappChatController.js. That
+    // migration was applied to the outbound send paths but missed here, so
+    // admin/super admin (and any employee who isn't the exact assigned
+    // agent) never saw inbound replies arrive live — only the 1.5s poll or a
+    // manual refresh would surface them. Mirrors the MSG91 webhook's
+    // company-room emit (controllers/msg91WebhookController.js).
+    io.to(`wa_company_${config.company.toString()}`).emit("wa_message", payload);
   }
 
   console.log(`📩 WA inbound: ${waPhone} → "${body.substring(0, 60)}"`);
@@ -256,7 +267,7 @@ async function handleInboundMessage(msg, value, config) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal: Update message delivery status
 // ─────────────────────────────────────────────────────────────────────────────
-async function handleStatusUpdate(status) {
+async function handleStatusUpdate(status, config) {
   const { id: waMessageId, status: newStatus, recipient_id } = status;
 
   await WhatsAppMessage.findOneAndUpdate(
@@ -267,11 +278,17 @@ async function handleStatusUpdate(status) {
   // Emit status update to frontend in real-time
   const io = global._io;
   if (io) {
-    io.to("wa_admin").emit("wa_status_update", {
+    const payload = {
       waMessageId,
       status: newStatus,
       recipientPhone: recipient_id,
-    });
+    };
+    io.to("wa_admin").emit("wa_status_update", payload); // legacy — no one joins this room anymore
+    // FIX: same company-room gap as handleInboundMessage above — delivery/
+    // read ticks never reached anyone without this.
+    if (config?.company) {
+      io.to(`wa_company_${config.company.toString()}`).emit("wa_status_update", payload);
+    }
   }
 
   console.log(`📊 WA status update: ${waMessageId} → ${newStatus}`);
