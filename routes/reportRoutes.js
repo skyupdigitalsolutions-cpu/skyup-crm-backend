@@ -16,10 +16,12 @@ const {
   campaignReport,
   nonConversionReport,
   dailyOutcomesReport,
+  leadInsights,
 } = require('../controllers/reportController');
 
 // Works for both admin and user tokens — controller resolves caller identity
 router.get('/daily',          protectAny,   dailyReport);
+router.get('/lead-insights',  protectAny,   leadInsights);
 
 // Gated: only enabled for the one company it's rolled out to (see
 // devOverrides.featureToggles.callOutcomesReport in Company Details).
