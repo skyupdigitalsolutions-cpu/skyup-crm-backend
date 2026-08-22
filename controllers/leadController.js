@@ -1119,11 +1119,15 @@ const patchLead = async (req, res) => {
     if (remark !== undefined) update.remark = remark;
 
     // industry and service are saved only when the lead's company has the
-    // leadNurtureSequence feature enabled (checked via entitlement).
-    // For all other companies these fields are silently ignored.
+    // leadNurtureSequence feature enabled.
+    // FIX: was checking ents?.features?.leadNurtureSequence but the entitlement
+    // object has no nested `features` key — leadNurtureSequence is a top-level
+    // key on ents (spread from planLimits.features at build time). The broken
+    // path always returned undefined → false → silently dropped industry/service
+    // on every save even when the toggle was ON.
     const companyIdStr = String(lead.company?._id || lead.company || "");
     const ents = await getCompanyEntitlements(companyIdStr).catch(() => null);
-    const nurtureEnabled = !!ents?.features?.leadNurtureSequence;
+    const nurtureEnabled = !!ents?.leadNurtureSequence;
     if (nurtureEnabled) {
       if (industry !== undefined && industry !== "") update.industry = industry;
       if (service  !== undefined && service  !== "") update.service  = service;
