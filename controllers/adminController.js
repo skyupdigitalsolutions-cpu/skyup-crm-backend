@@ -113,13 +113,17 @@ const createAdmin = async (req, res) => {
       metadata: { createdEmail: admin.email, createdRole: "admin" },
     });
 
+    // ── SECURITY FIX: plainPassword removed from response ────────────────────
+    // The frontend now uses the password from its own form state (which the
+    // admin already typed) to display in the CredentialsModal — no need to
+    // echo it back over the network. Transmitting credentials in API responses
+    // risks exposure in proxy logs, browser network history, and MITM attacks.
     res.status(201).json({
-      _id:           admin._id,
-      name:          admin.name,
-      email:         admin.email,
-      company:       admin.company,
-      role:          "admin",
-      plainPassword: password, // shown once in the UI, then discarded client-side too
+      _id:     admin._id,
+      name:    admin.name,
+      email:   admin.email,
+      company: admin.company,
+      role:    "admin",
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -275,10 +279,14 @@ const createCompanyUser = async (req, res) => {
       metadata: { createdEmail: user.email, createdRole: user.role },
     });
 
+    // ── SECURITY FIX: plainPassword removed from response ────────────────────
+    // Same reasoning as createAdmin above — frontend uses its own form state.
     res.status(201).json({
-      _id: user._id, name: user.name, email: user.email,
-      company: user.company, role: user.role,
-      plainPassword: password, // shown once in the UI, then discarded client-side too
+      _id:                user._id,
+      name:               user.name,
+      email:              user.email,
+      company:            user.company,
+      role:               user.role,
       contactAccountEmail: user.contactAccountEmail,
     });
   } catch (error) {
