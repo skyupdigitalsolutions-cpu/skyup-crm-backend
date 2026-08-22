@@ -19,7 +19,8 @@ const verifyWebhook = async (req, res) => {
   const token     = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  console.log(`📲 WA Webhook verify — mode: "${mode}", token: "${token}"`);
+  // SECURITY FIX: never log the full verify token — mask last 4 chars only
+  console.log(`📲 WA Webhook verify — mode: "${mode}", token: "****${String(token || "").slice(-4)}"`);
 
   if (mode !== "subscribe") return res.sendStatus(403);
 
