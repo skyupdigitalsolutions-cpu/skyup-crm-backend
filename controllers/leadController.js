@@ -1,5 +1,6 @@
 // controllers/leadController.js
-const { maskPhone, maskEmail, maskLeadPII } = require('../utils/maskPhone'); — Merge Number feature removed; Single Additional Phone Number system
+// Merge Number feature removed; Single Additional Phone Number system
+const { maskPhone, maskEmail, maskLeadPII } = require('../utils/maskPhone');
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
 const Company = require("../models/Company");
@@ -25,7 +26,7 @@ const getCompanyId = (req) =>
 // Auto-template service — direct in-process calls, no HTTP, no auth tokens
 const { autoSendTemplates, sendInterestedBlast } = require("../services/autoTemplateService");
 const { sendOutcomeAutomation } = require("../services/outcomeAutomationService");
-const { triggerNurtureForLead } = require("../jobs/nurtureSequenceJob");
+const { triggerNurtureForLead, NURTURE_COMPANY_ID } = require("../jobs/nurtureSequenceJob");
 const { sendMetaConversionEvent } = require("../services/metaConversionService");
 const { getCompanyEntitlements } = require("../services/entitlementService");
 const { notifyCampaignLead, notifyEmployeeLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
@@ -1134,7 +1135,15 @@ const patchLead = async (req, res) => {
     // on every save even when the toggle was ON.
     const companyIdStr = String(lead.company?._id || lead.company || "");
     const ents = await getCompanyEntitlements(companyIdStr).catch(() => null);
-    const nurtureEnabled = !!ents?.leadNurtureSequence;
+    // FIX: previously only checked ents?.leadNurtureSequence. The nurture
+    // job (jobs/nurtureSequenceJob.js) runs unconditionally for
+    // NURTURE_COMPANY_ID, independent of this entitlement toggle. If the
+    // toggle was off for that company, industry/service never got saved
+    // here, so the auto-resolve template naming could never find them —
+    // every nurture send was silently skipped with "No template name
+    // resolved", with no error anywhere. Bypass the entitlement check for
+    // the hardcoded nurture company so tagging always works for it.
+    const nurtureEnabled = !!ents?.leadNurtureSequence || companyIdStr === NURTURE_COMPANY_ID;
     if (nurtureEnabled) {
       if (industry !== undefined && industry !== "") update.industry = industry;
       if (service  !== undefined && service  !== "") update.service  = service;
