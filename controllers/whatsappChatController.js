@@ -6,7 +6,8 @@ const WhatsAppConfig = require("../models/WhatsAppConfig");
 const WhatsAppConversation = require("../models/WhatsAppConversation");
 const crypto = require("crypto");
 const WhatsAppMessage = require("../models/WhatsAppMessage");
-const WhatsAppSendLog = require("../models/WhatsAppSendLog");
+const WhatsAppSendLog  = require("../models/WhatsAppSendLog");
+const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 const Lead = require("../models/Leads");
 const { normalizePhone: _sharedNormalizePhone } = require("../utils/normalizePhone");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
@@ -2160,12 +2161,34 @@ const getSendLogReport = async (req, res) => {
       ]),
     ]);
 
+    // ── Enrich rows with templateCategory (UTILITY / MARKETING) ────────────
+    // Hardcoded utility templates that may not be in the WhatsAppTemplate collection
+    const HARDCODED_UTILITY = new Set([
+      "crm_followup_leads", "crm_call_back_later", "crm_followup_reminder",
+      "crm_lead_not_interested", "crm_lead_invalid",
+    ]);
+    const templateNames = [...new Set(rows.map(r => r.templateName).filter(Boolean))];
+    let categoryMap = new Map();
+    if (templateNames.length > 0) {
+      const tplDocs = await WhatsAppTemplate.find(
+        { company: companyId, name: { $in: templateNames } },
+        { name: 1, category: 1 }
+      ).lean();
+      categoryMap = new Map(tplDocs.map(t => [t.name, t.category || "UTILITY"]));
+    }
+    const enrichedRows = rows.map(r => ({
+      ...r,
+      templateCategory: r.templateName
+        ? (categoryMap.get(r.templateName) || (HARDCODED_UTILITY.has(r.templateName) ? "UTILITY" : "MARKETING"))
+        : null,
+    }));
+
     const summary = { sent: 0, failed: 0, skipped: 0 };
     summaryAgg.forEach((s) => { if (s._id in summary) summary[s._id] = s.count; });
 
     res.json({
       success: true,
-      rows,
+      rows: enrichedRows,
       summary,
       pagination: { page, limit, total, totalPages: Math.max(Math.ceil(total / limit), 1) },
     });
