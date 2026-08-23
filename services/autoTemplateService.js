@@ -16,9 +16,33 @@ const SmsConfig      = require("../models/SmsConfig");
 const EmailLog       = require("../models/EmailLog");
 const SmsLog         = require("../models/SmsLog");
 const Lead           = require("../models/Leads");
+const WhatsAppSendLog = require("../models/WhatsAppSendLog");
 
 // Append a WhatsApp template send to the lead's templateHistory (shown in the
 // Update Lead popup). Fire-and-forget — never blocks or throws into the caller.
+// ── Log WhatsApp auto-template sends to WhatsAppSendLog ──────────────────────
+// Previously autoTemplateService only wrote to lead.templateHistory, so
+// new-lead sends (crm_followup_leads) and interested-blast sends were
+// completely invisible in the WhatsApp → Reports table.
+async function _logAutoTemplateSend({ lead, companyId, templateName, status, detail }) {
+  try {
+    await WhatsAppSendLog.create({
+      company:      companyId,
+      lead:         lead?._id    || null,
+      phone:        lead?.mobile || '',
+      name:         lead?.name   || '',
+      templateName: templateName || '',
+      languageCode: 'en',
+      channel:      'manual',      // auto-template sends use 'manual' channel slot
+      status:       status === 'sent' ? 'sent' : status === 'skipped' ? 'skipped' : 'failed',
+      reason:       detail || '',
+      sentByName:   'Auto-template (New Lead)',
+    });
+  } catch (err) {
+    console.warn('[autoTemplate] WhatsAppSendLog write failed:', err.message);
+  }
+}
+
 function recordTemplateHistory(lead, templateName, status = "sent") {
   try {
     if (!lead?._id || !templateName) return;
@@ -261,6 +285,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         return { channel: "whatsapp", status: "failed", detail: `MSG91 rejected the message: ${detail}` };
       }
       recordTemplateHistory(lead, templateName, "sent");
+      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} using template "${templateName}"` });
       return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} using template "${templateName}"` };
     } catch (err) {
       const detail = JSON.stringify(err?.response?.data || err.message);
@@ -286,6 +311,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
       });
       console.log(`[autoTemplate] ✅ WA Meta sent:`, JSON.stringify(resp.data));
       recordTemplateHistory(lead, templateName, "sent");
+      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"` });
       return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"` };
     } catch (err) {
       const detail = JSON.stringify(err?.response?.data || err.message);
