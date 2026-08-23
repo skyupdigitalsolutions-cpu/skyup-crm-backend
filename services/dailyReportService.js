@@ -1020,14 +1020,18 @@ async function generateAndSend(config, companyName, reportDate, triggeredBy = 's
 
   try {
     // ── Generate report ───────────────────────────────────────────────────
+    // FIX: declare dayStart/dayEnd FIRST before any function uses them.
+    // Previously getOutcomeStats(companyId, dayStart, dayEnd) was called on
+    // the line BEFORE the const { dayStart, dayEnd } declaration, causing
+    // "Cannot access 'dayStart' before initialization" (temporal dead zone)
+    // and crashing the report job every day since the bug was introduced.
+    const { dayStart, dayEnd } = getCompanyDayBounds(config.timezone || 'Asia/Kolkata', localDate);
+
     const report       = await buildReport(companyId, config, localDate);
     const nurtureStats  = await getNurtureStats(companyId, localDate);
     const outcomeStats  = await getOutcomeStats(companyId, dayStart, dayEnd);
     const statusSnap    = await getStatusSnapshot(companyId);
-
-    // Get day bounds for WhatsApp query (needs UTC range like other aggregations)
-    const { dayStart, dayEnd } = getCompanyDayBounds(config.timezone || 'Asia/Kolkata', localDate);
-    const waStats           = await getWhatsAppStats(companyId, dayStart, dayEnd);
+    const waStats       = await getWhatsAppStats(companyId, dayStart, dayEnd);
 
     // ── Empty report check ────────────────────────────────────────────────
     if (!report.hasActivity && !config.sendEmptyReport) {
