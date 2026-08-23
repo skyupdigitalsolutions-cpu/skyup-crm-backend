@@ -1,65 +1,67 @@
-// scripts/clearPlainPasswords.js — NEW FILE
+#!/usr/bin/env node
+// scripts/clearPlainPasswords.js
 // ─────────────────────────────────────────────────────────────────────────────
-// SECURITY FIX — one-time cleanup.
+// ONE-TIME SECURITY MIGRATION: clears plainPassword from all Admin and User
+// documents in MongoDB. This field stored plaintext credentials from older
+// versions of the admin creation flow. It is now removed from all API
+// responses and should also be removed from the database.
 //
-// Admin.plainPassword and User.plainPassword used to store every account's
-// actual password in plaintext (for a "super_admin view credentials"
-// feature). That's been removed from all code paths (see models/Admin.js,
-// models/Users.js, controllers/adminController.js, superAdminController.js,
-// forgotPasswordController.js) and replaced with a one-time "Reset Password"
-// action instead.
+// SAFE TO RUN: only updates documents where plainPassword is not null.
+//              Does not delete any documents or touch any other fields.
 //
-// This script clears out whatever plaintext values are ALREADY sitting in
-// the database from before that fix — run it once, after deploying the code
-// changes above.
+// HOW TO RUN:
+//   NODE_ENV=production MONGODB_URI=<your-uri> node scripts/clearPlainPasswords.js
 //
-// Usage:
-//   MONGO_URI="mongodb+srv://..." node scripts/clearPlainPasswords.js
-//   (or relies on .env if MONGO_URI/MONGODB_URI is already set there)
-//
-// This does NOT change anyone's actual login password (the hashed `password`
-// field is untouched) — it only removes the plaintext copy. No one is locked
-// out by running this.
+// EXPECTED OUTPUT:
+//   ✅ Admins cleared: N
+//   ✅ Users cleared:  N
+//   Done. No plaintext passwords remain in the database.
 // ─────────────────────────────────────────────────────────────────────────────
 
 require("dotenv").config();
 const mongoose = require("mongoose");
 
-const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI || process.env.DB_URI;
+const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
+if (!MONGODB_URI) {
+  console.error("❌ MONGODB_URI env var is not set.");
+  process.exit(1);
+}
 
-async function main() {
-  if (!MONGO_URI) {
-    console.error("❌ No Mongo connection string found (MONGO_URI / MONGODB_URI / DB_URI).");
+async function run() {
+  await mongoose.connect(MONGODB_URI);
+  console.log("✅ Connected to MongoDB");
+
+  const db = mongoose.connection.db;
+
+  // ── Clear from admins collection ───────────────────────────────────────────
+  const adminResult = await db.collection("admins").updateMany(
+    { plainPassword: { $ne: null, $exists: true } },
+    { $set: { plainPassword: null } }
+  );
+  console.log(`✅ Admins cleared: ${adminResult.modifiedCount}`);
+
+  // ── Clear from users collection ────────────────────────────────────────────
+  const userResult = await db.collection("users").updateMany(
+    { plainPassword: { $ne: null, $exists: true } },
+    { $set: { plainPassword: null } }
+  );
+  console.log(`✅ Users cleared:  ${userResult.modifiedCount}`);
+
+  // ── Verification: confirm no documents still have a non-null value ─────────
+  const adminRemaining = await db.collection("admins").countDocuments({ plainPassword: { $ne: null } });
+  const userRemaining  = await db.collection("users").countDocuments({ plainPassword: { $ne: null } });
+
+  if (adminRemaining > 0 || userRemaining > 0) {
+    console.error(`❌ WARNING: ${adminRemaining} admins and ${userRemaining} users still have plainPassword set.`);
     process.exit(1);
   }
 
-  await mongoose.connect(MONGO_URI);
-  console.log("✅ Connected to MongoDB");
-
-  const Admin = require("../models/Admin");
-  const User  = require("../models/Users");
-
-  const adminResult = await Admin.updateMany(
-    { plainPassword: { $ne: null } },
-    { $set: { plainPassword: null } }
-  );
-  console.log(`✅ Admin: cleared plainPassword on ${adminResult.modifiedCount} document(s)`);
-
-  const userResult = await User.updateMany(
-    { plainPassword: { $ne: null } },
-    { $set: { plainPassword: null } }
-  );
-  console.log(`✅ User: cleared plainPassword on ${userResult.modifiedCount} document(s)`);
-
-  console.log("\nDone. No login passwords were changed — only the plaintext copy was removed.");
-  console.log("Recommended next step: once you've confirmed the app works fine without it,");
-  console.log("drop the plainPassword field from models/Admin.js and models/Users.js entirely.");
-
+  console.log("Done. No plaintext passwords remain in the database.");
   await mongoose.disconnect();
   process.exit(0);
 }
 
-main().catch((err) => {
+run().catch((err) => {
   console.error("❌ Migration failed:", err.message);
   process.exit(1);
 });
