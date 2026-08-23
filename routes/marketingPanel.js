@@ -9,11 +9,14 @@ const bcrypt   = require("bcryptjs");
 const Admin    = require("../models/Admin");
 const { protectMarketing } = require("../middlewares/marketingAuthMiddleware");
 const { getMarketingDashboard } = require("../controllers/adminController");
+// SECURITY FIX: reuse the same Redis-backed rate limiters as other auth routes
+const { authLimiter, ipFloodLimiter } = require("../middlewares/rateLimiter");
 
 // ── Dedicated marketing panel login ───────────────────────────────────────────
 // Marketing users ONLY — accepts marketingAccess:true admins + super_admin.
 // Returns same JWT shape as main login so mktApi interceptor works identically.
-router.post("/login", async function (req, res) {
+// SECURITY FIX: ipFloodLimiter (300/15min per IP) + authLimiter (10/15min per account)
+router.post("/login", ipFloodLimiter, authLimiter, async function (req, res) {
   try {
     const email    = (req.body.email    || "").toLowerCase().trim();
     const password = req.body.password  || "";
