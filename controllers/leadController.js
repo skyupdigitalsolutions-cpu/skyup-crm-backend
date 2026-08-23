@@ -1,4 +1,5 @@
-// controllers/leadController.js — Merge Number feature removed; Single Additional Phone Number system
+// controllers/leadController.js
+const { maskPhone, maskEmail, maskLeadPII } = require('../utils/maskPhone'); — Merge Number feature removed; Single Additional Phone Number system
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
 const Company = require("../models/Company");
@@ -105,7 +106,10 @@ const getLeads = async (req, res) => {
     })
       .populate("user", "name email")
       .populate("previousAgents", "name email");
-    res.status(200).json(leads);
+    // SECURITY: mask PII — employees never see raw phone/email in API response
+    const callerRole = req.user?.role || "user";
+    const masked = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, callerRole));
+    res.status(200).json(masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -175,7 +179,10 @@ const getLeadsByCampaign = async (req, res) => {
     const leads = await Lead.find(mergeLeadScope(filter, scope))
       .populate("user", "name email")
       .populate("previousAgents", "name email");
-    res.status(200).json(leads);
+    // SECURITY: mask PII based on caller role
+    const adminRole = req.admin?.role || req.superAdmin?.role || "admin";
+    const masked = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, adminRole));
+    res.status(200).json(masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
