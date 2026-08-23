@@ -497,4 +497,4 @@ function startNurtureSequenceJob() {
   console.log("✅ Nurture sequence job started (11:00 AM IST daily, company 6a22662b7aea6e4034f44aae).");
 }
 
-module.exports = { startNurtureSequenceJob, runNurtureSequenceCheck, triggerNurtureForLead };
+module.exports = { startNurtureSequenceJob, runNurtureSequenceCheck, triggerNurtureForLead, NURTURE_COMPANY_ID: ENABLED_COMPANY_ID };
