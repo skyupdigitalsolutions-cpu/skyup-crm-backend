@@ -218,6 +218,25 @@ function ruleMatchesStatus(rule, lead) {
     if (!wanted.includes(leadIndustry)) return false;
   }
 
+  // ── Campaign filter ─────────────────────────────────────────────────────
+  // When campaigns list is set on the rule, only fire for leads whose
+  // lead.campaign matches one of those campaign names (case-insensitive).
+  if (Array.isArray(t.campaigns) && t.campaigns.length) {
+    const leadCampaign = String(lead.campaign || "").trim().toLowerCase();
+    if (!leadCampaign) return false; // rule targets specific campaigns; untagged lead can't match
+    const wanted = t.campaigns.map((c) => String(c || "").trim().toLowerCase());
+    if (!wanted.includes(leadCampaign)) return false;
+  }
+
+  // ── Ad-Set filter ─────────────────────────────────────────────────────────
+  // Narrower than campaign — filter by specific ad set name.
+  if (Array.isArray(t.adSets) && t.adSets.length) {
+    const leadAdSet = String(lead.adSetName || "").trim().toLowerCase();
+    if (!leadAdSet) return false;
+    const wanted = t.adSets.map((a) => String(a || "").trim().toLowerCase());
+    if (!wanted.includes(leadAdSet)) return false;
+  }
+
   return true;
 }
 
@@ -283,6 +302,31 @@ async function _logNurtureResult(lead, rule, result) {
     });
   } catch (err) {
     console.error("[nurtureSequence] failed to write send-log entry:", err.message);
+  }
+}
+
+// ── Belt-and-suspenders dedup: check templateHistory ─────────────────────────
+// If autoSendTemplates sent this template today before nurtureSent was stamped,
+// check templateHistory as a fallback guard.
+async function alreadySentViaTemplateHistory(leadId, rule, todayKey) {
+  try {
+    const templateName = rule.action?.whatsapp?.templateName || "";
+    const variations   = rule.action?.whatsapp?.templateVariations || [];
+    const allTemplates = [templateName, ...variations].filter(Boolean);
+    if (!allTemplates.length) return false;
+
+    const [y, m, d] = todayKey.split("-").map(Number);
+    const todayStart = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
+    const todayEnd   = new Date(Date.UTC(y, m - 1, d, 18, 29, 59, 999)); // end of IST day in UTC
+
+    const lead = await Lead.findOne(
+      { _id: leadId, "templateHistory.sentAt": { $gte: todayStart, $lte: todayEnd },
+        "templateHistory.templateName": { $in: allTemplates } },
+      { _id: 1 }
+    ).lean();
+    return !!lead;
+  } catch {
+    return false;
   }
 }
 
@@ -413,7 +457,7 @@ async function runNurtureSequenceCheck() {
     status:     { $nin: ["Not Interested"] },
     mergedInto: null,
   })
-    .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user industry service businessName")
+    .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user industry service businessName campaign adSetName")
     .lean();
 
   let totalSent = 0;
@@ -423,6 +467,8 @@ async function runNurtureSequenceCheck() {
       if (!ruleMatchesCron(rule, lead, now))  continue;
       if (!eligibleForRepeat(rule, lead, todayKey)) continue;
       if (alreadyFiredToday(rule, lead, todayKey))  continue;
+      // DEDUP FIX: belt-and-suspenders check against templateHistory
+      if (await alreadySentViaTemplateHistory(lead._id, rule, todayKey)) continue;
 
       const result = await fireRule(rule, lead, company, todayKey);
       _logNurtureResult(lead, rule, result); // fire-and-forget, never blocks the cron loop
@@ -450,7 +496,7 @@ async function triggerNurtureForLead(leadId, newStatus) {
     isClosed:   { $ne: true },
     mergedInto: null,
   })
-    .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user industry service businessName")
+    .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user industry service businessName campaign adSetName")
     .lean();
 
   if (!lead) return; // not this company's lead, or not found
@@ -468,6 +514,10 @@ async function triggerNurtureForLead(leadId, newStatus) {
   for (const rule of rules) {
     if (!ruleMatchesStatus(rule, leadWithNewStatus)) continue;
     if (alreadyFiredToday(rule, leadWithNewStatus, todayKey)) continue;
+    // DEDUP FIX: skip if autoSendTemplates already sent this exact template today
+    // (autoSendTemplates now stamps nurtureSent, but this is a belt-and-suspenders
+    //  check for any edge cases where the stamp didn't land in time)
+    if (await alreadySentViaTemplateHistory(leadWithNewStatus._id, rule, todayKey)) continue;
 
     const result = await fireRule(rule, leadWithNewStatus, company, todayKey);
     _logNurtureResult(leadWithNewStatus, rule, result); // fire-and-forget
