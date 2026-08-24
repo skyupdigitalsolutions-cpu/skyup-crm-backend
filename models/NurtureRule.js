@@ -55,6 +55,18 @@ const nurtureRuleSchema = new mongoose.Schema(
       sources: { type: [String], default: [] },
       includeManualOrImported: { type: Boolean, default: false },
 
+      // ── Campaign / Ad-Set filter ─────────────────────────────────────────
+      // When set, this rule only fires for leads whose lead.campaign matches
+      // one of these campaign names (case-insensitive). Empty = all campaigns.
+      // This lets you create separate nurture rules per campaign:
+      //   • "Digital Marketing" campaign → digital_marketing_crm_awareness_v1
+      //   • "Real Estate" campaign       → real_estate_crm_awareness_v1
+      campaigns: { type: [String], default: [] },
+
+      // Narrower than campaign — filter by specific ad set names.
+      // Checked against lead.adSetName (case-insensitive). Empty = all ad sets.
+      adSets: { type: [String], default: [] },
+
       // ── Domain-wise filter ────────────────────────────────────────────────
       // Only fire for leads whose Lead.industry is in this list. Empty = any
       // industry (including leads with no industry tag at all).
