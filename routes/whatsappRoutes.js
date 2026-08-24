@@ -100,4 +100,17 @@ router.post("/employee-bulk-send", protect, requireFeature("whatsappBlast"), emp
 // their own employee-blast sends (scoped inside the controller).
 router.get("/send-log", protectAny, getSendLogReport);
 
+// ── WhatsApp Screenshot Extract & Import ──────────────────────────────────────
+const {
+  screenshotUpload,
+  extractScreenshot,
+  importScreenshot,
+} = require("../controllers/whatsappScreenshotController");
+
+// Extract messages from a screenshot (preview only — no DB write)
+router.post("/screenshot/extract", protectAny, screenshotUpload, extractScreenshot);
+
+// Extract + save into the lead's conversation
+router.post("/screenshot/import",  protectAny, screenshotUpload, importScreenshot);
+
 module.exports = router;
