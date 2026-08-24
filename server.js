@@ -40,6 +40,7 @@ const developerRoutes   = require('./routes/developerRoutes');
 const adminRoute        = require('./routes/adminRoute');
 const authRoute         = require('./routes/authRoutes');
 const leadRoute         = require('./routes/leadRoute');
+const leadAIRoute       = require('./routes/leadAIAnalysisRoute');
 
 // ── Privacy & Subscription Routes ─────────────────────────────────────────────
 const privacyRoute      = require('./routes/privacyRoute');
@@ -91,6 +92,7 @@ const { startFollowUpReminderJob }    = require('./jobs/followUpReminderJob');
 const { startNurtureSequenceJob }     = require('./jobs/nurtureSequenceJob');
 const { startMetaAutoSyncJob }        = require('./jobs/metaAutoSyncJob'); // NEW — auto-syncs new Meta ad sets & forms
 const { startDailyReportJob }         = require('./jobs/dailyReportJob');
+const { startLeadAIAnalysisJob }      = require('./jobs/leadAIAnalysisJob');
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute         = require('./routes/smsCampaign');
@@ -103,6 +105,7 @@ const dailyReportRoute    = require('./routes/dailyReportRoute');
 
 // ── WhatsApp Routes (MSG91 + Meta) ────────────────────────────────────────────
 const whatsappRoutes    = require('./routes/whatsappRoutes');
+const { screenshotUpload, extractScreenshot, importScreenshot } = require('./controllers/whatsappScreenshotController');
 const msg91WebhookRoute = require('./routes/msg91Webhook');
 const { auditAccess } = require('./middlewares/accessAudit');
 
@@ -317,6 +320,7 @@ app.use('/api/terms',               require('./routes/termsRoute'));
 // Mounted at the router level so every current and future lead/report endpoint
 // is logged automatically — see middlewares/accessAudit.js.
 app.use('/api/lead',                auditAccess({ resourceType: 'Lead' }), leadRoute);
+app.use('/api/lead',                leadAIRoute);
 app.use('/api/project',             projectRoute);
 app.use('/api/attendance',          attendanceRoute);
 app.use('/api/razorpay',            razorpayRoute);
@@ -481,6 +485,7 @@ connectDB().then(() => {
     startNurtureSequenceJob();   // 11:00 AM IST daily
     startMetaAutoSyncJob();
     startDailyReportJob();         // Sends daily Telegram performance report at each company's configured time
+    startLeadAIAnalysisJob();     // AI Lead Outcome Intelligence — processes pending analyses every 2 min
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();
