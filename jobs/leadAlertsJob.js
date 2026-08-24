@@ -249,19 +249,16 @@ async function runFollowUpAlerts() {
     const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
     const todayEnd   = new Date(now); todayEnd.setHours(23, 59, 59, 999);
 
-    const adminIds = await Admin.find({ role: 'admin' })
-      .select('_id')
-      .lean()
-      .then(docs => docs.map(d => d._id));
-
+    // Query all leads with a pending follow-up due today or overdue
+    // No longer filtering by assignedAdmin — also picks up employee-assigned leads
     const leads = await Lead.find({
       isClosed:       { $ne: true },
       status:         { $ne: 'Converted' },
-      assignedAdmin:  { $in: adminIds },
+      mergedInto:     null,
       scheduledCalls: { $elemMatch: { done: false, scheduledAt: { $lte: todayEnd } } },
     })
       .select('_id name mobile company assignedAdmin user status scheduledCalls')
-      .populate('user',          'name email')
+      .populate('user',          'name email fcmToken')   // employee assigned to lead
       .populate('assignedAdmin', 'name email fcmToken role')
       .lean();
 
@@ -287,6 +284,8 @@ async function runFollowUpAlerts() {
 
     for (const [bucket, type] of [[overdueLeads, 'overdue'], [dueTodayLeads, 'due']]) {
       if (!bucket.length) continue;
+
+      // ── 1. Alert admins (grouped by assignedAdmin) ──────────────────────────
       const byAdmin = groupByAdmin(bucket);
       for (const [adminId, adminLeads] of byAdmin) {
         if (adminId === '__unknown__') continue;
@@ -295,9 +294,60 @@ async function runFollowUpAlerts() {
         if (admin.role === 'super_admin') continue;
         await sendFollowUpAlert(admin, adminLeads, type);
       }
+
+      // ── 2. Alert employees (grouped by lead.user) ───────────────────────────
+      // Each employee gets alerted only about their own assigned leads.
+      // This is the KEY FIX — previously employees never got this alert.
+      const byUser = new Map();
+      for (const lead of bucket) {
+        if (!lead.user?._id) continue;
+        const uid = String(lead.user._id);
+        if (!byUser.has(uid)) byUser.set(uid, []);
+        byUser.get(uid).push(lead);
+      }
+
+      // Fetch User docs for fcmToken (populate already fetched name/email/fcmToken)
+      for (const [userId, userLeads] of byUser) {
+        const user = userLeads[0].user;
+        if (!user || !user._id) continue;
+        // Use sendFollowUpAlert — it works for any recipient with _id + fcmToken
+        // Socket room for employees uses 'agent:userId' prefix
+        await sendFollowUpAlertToEmployee(user, userLeads, type);
+      }
     }
   } catch (err) {
     console.error('[LeadAlertsJob] runFollowUpAlerts error:', err.message);
+  }
+}
+
+// ── Send follow-up alert to an employee (User role) ───────────────────────────
+// Mirrors sendFollowUpAlert but uses the 'agent' socket room instead of 'admin'.
+async function sendFollowUpAlertToEmployee(user, leads, type) {
+  try {
+    const { sendFollowUpAlert } = require('../services/fcmService');
+    const count     = leads.length;
+    const isOverdue = type === 'overdue';
+
+    // ── Socket alert ─────────────────────────────────────────────────────────
+    const _io = global._io;
+    if (_io && user._id) {
+      _io.to(`agent:${user._id}`).emit('follow_up_alert', {
+        type,
+        count,
+        leads: leads.map(l => ({ leadId: String(l._id), leadName: l.name })),
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // ── FCM push notification ─────────────────────────────────────────────────
+    if (user.fcmToken) {
+      // Pass user with role='user' so sendFollowUpAlert uses correct socket room
+      await sendFollowUpAlert({ ...user, role: 'user' }, leads, type);
+    }
+
+    console.log(`[LeadAlertsJob] Follow-up alert (${type}) → employee "${user.name}" — ${count} lead(s)`);
+  } catch (err) {
+    console.error('[LeadAlertsJob] sendFollowUpAlertToEmployee error:', err.message);
   }
 }
 
@@ -388,16 +438,17 @@ function startLeadAlertsJob() {
     runNoFollowUpDateCheck();
   });
 
-  // Follow-up due alerts — once a day at 9:00 AM
-  cron.schedule('0 9 * * *', () => {
-    console.log('[LeadAlertsJob] Running follow-up due alerts...');
+  // Follow-up due alerts — once a day at 9:30 AM IST
+  // Sends to BOTH admins AND employees so everyone knows their follow-ups for the day.
+  cron.schedule('30 9 * * *', () => {
+    console.log('[LeadAlertsJob] Running follow-up due alerts (9:30 AM)...');
     runFollowUpAlerts();
-  });
+  }, { timezone: 'Asia/Kolkata' });
 
   console.log('[LeadAlertsJob] ✅ Lead alert jobs started');
   console.log('  → No-action (admin 1h + 2h, super_admin 3h escalation): every 15 min');
   console.log('  → Missing follow-up date (employee, 24h+, re-fires 24h): every 15 min');
-  console.log('  → Follow-up due (admin only):                            daily at 9:00 AM');
+  console.log('  → Follow-up due (admin + employee):                      daily at 9:30 AM IST');
 }
 
 module.exports = {
