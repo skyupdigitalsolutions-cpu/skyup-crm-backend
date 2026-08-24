@@ -50,21 +50,46 @@ function maskEmail(email) {
 }
 
 /**
- * Apply masking to a lead object based on caller role.
+ * Apply masking to a lead object based on caller role and ownership.
+ *
  * @param {object} lead      - raw lead from DB
  * @param {string} role      - "super_admin" | "admin" | "user" | "employee"
- * @returns {object}         - lead with mobile/email masked if not super_admin
+ * @param {string} [callerId] - the _id of the requesting user/admin (string).
+ *                              When provided, employees see FULL numbers for
+ *                              their own assigned leads so they can dial.
+ * @returns {object}         - lead with mobile/email masked if applicable
+ *
+ * POLICY:
+ *   • super_admin  → always full (owns all data)
+ *   • employee/user → full for their OWN leads (lead.user == callerId)
+ *                     masked for other employees' leads
+ *   • admin        → masked; can reveal via POST /:id/reveal-phone
  */
-function maskLeadPII(lead, role) {
+function maskLeadPII(lead, role, callerId) {
   if (!lead) return lead;
+
   const isSuperAdmin = role === 'super_admin' || role === 'superadmin';
-  if (isSuperAdmin) return lead;          // super_admin sees everything raw
+  if (isSuperAdmin) return lead;
+
+  // Employees see full numbers for their own assigned leads —
+  // they need the real number to make phone calls.
+  const isEmployee = role === 'user' || role === 'employee';
+  if (isEmployee && callerId) {
+    const leadUserId = lead.user?._id
+      ? String(lead.user._id)
+      : lead.user
+        ? String(lead.user)
+        : null;
+    if (leadUserId && leadUserId === String(callerId)) {
+      return lead; // own lead — return full number, no masking
+    }
+  }
+
   return {
     ...lead,
-    mobile:       lead.mobile       ? maskPhone(lead.mobile)       : lead.mobile,
-    primaryPhone: lead.primaryPhone ? maskPhone(lead.primaryPhone) : lead.primaryPhone,
-    email:        lead.email        ? maskEmail(lead.email)        : lead.email,
-    // secondaryPhone also masked
+    mobile:        lead.mobile        ? maskPhone(lead.mobile)        : lead.mobile,
+    primaryPhone:  lead.primaryPhone  ? maskPhone(lead.primaryPhone)  : lead.primaryPhone,
+    email:         lead.email         ? maskEmail(lead.email)         : lead.email,
     secondaryPhone: lead.secondaryPhone ? maskPhone(lead.secondaryPhone) : lead.secondaryPhone,
   };
 }
