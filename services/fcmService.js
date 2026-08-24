@@ -408,8 +408,15 @@ async function sendNoActionAlert(recipient, leads, threshold = 'daily') {
     console.log(`[FCM] ✅ No-action alert sent to "${recipient.name}" — ${count} lead(s)`);
   } catch (err) {
     if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
-      await Admin.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
-      console.warn(`[FCM] Cleared stale FCM token for admin "${recipient.name}"`);
+      // Clear stale token — check both Admin and User collections
+      const role = String(recipient.role || '').toLowerCase();
+      if (role === 'user' || role === 'employee') {
+        const UserModel = require('../models/Users');
+        await UserModel.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
+      } else {
+        await Admin.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
+      }
+      console.warn(`[FCM] Cleared stale FCM token for "${recipient.name}" (role: ${recipient.role})`);
     } else {
       console.error('[FCM] sendNoActionAlert error:', err.message);
     }
@@ -437,9 +444,13 @@ async function sendFollowUpAlert(recipient, leads, type = 'due') {
     // ── Socket ────────────────────────────────────────────────────────────────
     const _io = global._io;
     if (_io && recipient._id) {
-      const room = recipient.role === 'super_admin'
+      // FIX: employees (role='user') join 'agent:id' rooms, not 'admin:id'
+      const role = String(recipient.role || '').toLowerCase();
+      const room = role === 'super_admin' || role === 'superadmin'
         ? `superadmin:${recipient._id}`
-        : `admin:${recipient._id}`;
+        : role === 'user' || role === 'employee'
+          ? `agent:${recipient._id}`
+          : `admin:${recipient._id}`;
       _io.to(room).emit('follow_up_alert', {
         type,
         count,
@@ -471,8 +482,15 @@ async function sendFollowUpAlert(recipient, leads, type = 'due') {
     console.log(`[FCM] ✅ Follow-up alert (${type}) sent to "${recipient.name}" — ${count} lead(s)`);
   } catch (err) {
     if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
-      await Admin.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
-      console.warn(`[FCM] Cleared stale FCM token for admin "${recipient.name}"`);
+      // Clear stale token — check both Admin and User collections
+      const role = String(recipient.role || '').toLowerCase();
+      if (role === 'user' || role === 'employee') {
+        const UserModel = require('../models/Users');
+        await UserModel.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
+      } else {
+        await Admin.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
+      }
+      console.warn(`[FCM] Cleared stale FCM token for "${recipient.name}" (role: ${recipient.role})`);
     } else {
       console.error('[FCM] sendFollowUpAlert error:', err.message);
     }
