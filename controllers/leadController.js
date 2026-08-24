@@ -12,6 +12,11 @@ function getCallerRole(req) {
   );
 }
 
+// ── Get caller _id — used to check ownership for masking ─────────────────────
+function getCallerId(req) {
+  return req.user?._id || req.admin?._id || req.superAdmin?._id || null;
+}
+
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
 const Company = require("../models/Company");
@@ -119,9 +124,10 @@ const getLeads = async (req, res) => {
       .select(MOBILE_LIST_PROJECTION)
       .populate("user", "name email")
       .lean();
-    // SECURITY: mask PII — employees never see raw phone/email in API response
+    // SECURITY: mask PII — employees see full numbers for their own leads
     const callerRole = req.user?.role || "user";
-    const masked = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, callerRole));
+    const callerId = getCallerId(req);
+    const masked = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, callerRole, callerId));
     res.status(200).json(masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -133,9 +139,10 @@ const getLead = async (req, res) => {
     const { id } = req.params;
     const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    // SECURITY: mask PII for non-superadmin roles
+    // SECURITY: mask PII for non-superadmin roles — employees see own leads unmasked
     const callerRole = getCallerRole(req);
-    res.status(200).json(maskLeadPII(lead.toObject ? lead.toObject() : lead, callerRole));
+    const callerId = getCallerId(req);
+    res.status(200).json(maskLeadPII(lead.toObject ? lead.toObject() : lead, callerRole, callerId));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -178,7 +185,8 @@ const getLeadsByCampaign = async (req, res) => {
         .lean();
       // SECURITY: mask PII based on caller role
       const callerRole = getCallerRole(req);
-      const leads = rawLeads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, callerRole));
+      const callerId = getCallerId(req);
+      const leads = rawLeads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, callerRole, callerId));
       return res.status(200).json(leads);
     }
 
@@ -200,7 +208,8 @@ const getLeadsByCampaign = async (req, res) => {
       .populate("previousAgents", "name email");
     // SECURITY: mask PII based on caller role
     const adminRole = req.admin?.role || req.superAdmin?.role || "admin";
-    const masked = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, adminRole));
+    const callerId = getCallerId(req);
+    const masked = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, adminRole, callerId));
     res.status(200).json(masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -269,8 +278,8 @@ const createLead = async (req, res) => {
     });
 
     autoSendTemplates(lead, companyId);
-    // SECURITY: mask PII in create response (admin sees what they just entered but masked)
-    res.status(201).json(maskLeadPII(lead.toObject ? lead.toObject() : lead, getCallerRole(req)));
+    // SECURITY: mask PII in create response
+    res.status(201).json(maskLeadPII(lead.toObject ? lead.toObject() : lead, getCallerRole(req), getCallerId(req)));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -875,7 +884,7 @@ const updateLead = async (req, res) => {
 
     const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, { new: true });
     // SECURITY: mask PII in update response
-    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req));
+    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req), getCallerId(req));
     return res.status(200).json(_masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -999,7 +1008,7 @@ const adminUpdateLead = async (req, res) => {
     }
 
     // SECURITY: mask PII in update response
-    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req));
+    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req), getCallerId(req));
     return res.status(200).json(_masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1066,9 +1075,10 @@ const MOBILE_LIST_PROJECTION = {
   // callHistory: only the LAST entry for lastOutcome/lastCalledAt/remark detection.
   // $slice: -1 returns just the last element — avoids sending full history array.
   "callHistory":     { $slice: -3 },
-  // scheduledCalls: only need to know if any exist (count check in formatLead).
-  // $slice: 0 returns the array length metadata only — not the entries themselves.
-  "scheduledCalls":  { $slice: 0 },
+  // scheduledCalls: return up to 5 pending entries so the frontend can show
+  // follow-up due badges and filter. $slice: 0 was incorrectly used before
+  // (it returns [] not length metadata — MongoDB doesn't support length-only projection).
+  "scheduledCalls":  { $slice: 5 },
   // user: populated below — only name needed for list row.
   user:              1,
 };
@@ -1099,8 +1109,8 @@ const ADMIN_LIST_PROJECTION = {
   updatedAt:         1,
   // callHistory — last 3 only (for the recent-activity indicator)
   callHistory:       { $slice: -3 },
-  // scheduledCalls — count check only
-  scheduledCalls:    { $slice: 0 },
+  // scheduledCalls — up to 5 entries for follow-up due badge + filter
+  scheduledCalls:    { $slice: 5 },
   // nurture tracking
   nurtureStage:      1,
   nurtureSequence:   1,
@@ -1148,7 +1158,8 @@ const getMyLeads = async (req, res) => {
         const leads   = hasMore ? changed.slice(0, DELTA_LIMIT) : changed;
         // SECURITY: mask PII in delta response
         const _callerRole = getCallerRole(req);
-        return res.status(200).json({ leads: leads.map(l => maskLeadPII(l, _callerRole)), delta: true, hasMore });
+        const _callerId = getCallerId(req);
+        return res.status(200).json({ leads: leads.map(l => maskLeadPII(l, _callerRole, _callerId)), delta: true, hasMore });
       }
     }
 
@@ -1167,7 +1178,8 @@ const getMyLeads = async (req, res) => {
     const rawLeads = hasMore ? raw.slice(0, limit) : raw;
     // SECURITY: mask PII — never return raw phone/email for non-superadmin
     const callerRole = getCallerRole(req);
-    const leads = rawLeads.map(l => maskLeadPII(l, callerRole));
+    const callerId = getCallerId(req);
+    const leads = rawLeads.map(l => maskLeadPII(l, callerRole, callerId));
 
     res.status(200).json({
       leads,
@@ -1399,7 +1411,7 @@ const patchLead = async (req, res) => {
     }
 
     // SECURITY: mask PII in update response
-    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req));
+    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req), getCallerId(req));
     return res.status(200).json(_masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1450,7 +1462,7 @@ const patchLeadTemperature = async (req, res) => {
 
     const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
     // SECURITY: mask PII in update response
-    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req));
+    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req), getCallerId(req));
     return res.status(200).json(_masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -2209,7 +2221,8 @@ const adminGetAllLeads = async (req, res) => {
 
     // SECURITY: mask PII based on caller role
     const _callerRole = getCallerRole(req);
-    const maskedLeads = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, _callerRole));
+    const _callerId = getCallerId(req);
+    const maskedLeads = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, _callerRole, _callerId));
     res.status(200).json({ leads: maskedLeads, total, page, limit, pages: Math.ceil(total / limit) || 1 });
   } catch (error) {
     res.status(500).json({ message: error.message });
