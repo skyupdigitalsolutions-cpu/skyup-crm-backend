@@ -1,6 +1,17 @@
 // controllers/leadController.js
 // Merge Number feature removed; Single Additional Phone Number system
 const { maskPhone, maskEmail, maskLeadPII } = require('../utils/maskPhone');
+
+// ── Get caller role from request (works for all middleware types) ─────────────
+function getCallerRole(req) {
+  return (
+    req.superAdmin?.role ||
+    req.admin?.role ||
+    req.user?.role ||
+    "user"
+  );
+}
+
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
 const Company = require("../models/Company");
@@ -105,8 +116,9 @@ const getLeads = async (req, res) => {
       $or: [{ user: req.user._id }, { user: null }],
       mergedInto: null,
     })
+      .select(MOBILE_LIST_PROJECTION)
       .populate("user", "name email")
-      .populate("previousAgents", "name email");
+      .lean();
     // SECURITY: mask PII — employees never see raw phone/email in API response
     const callerRole = req.user?.role || "user";
     const masked = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, callerRole));
@@ -121,7 +133,9 @@ const getLead = async (req, res) => {
     const { id } = req.params;
     const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    res.status(200).json(lead);
+    // SECURITY: mask PII for non-superadmin roles
+    const callerRole = getCallerRole(req);
+    res.status(200).json(maskLeadPII(lead.toObject ? lead.toObject() : lead, callerRole));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -158,9 +172,13 @@ const getLeadsByCampaign = async (req, res) => {
       }
       const scope = await getAdminLeadScope(req, companyId);
       const q = mergeLeadScope({ company: companyId, $or: or }, scope);
-      const leads = await Lead.find(q)
+      const rawLeads = await Lead.find(q)
+        .select(ADMIN_LIST_PROJECTION)
         .populate("user", "name email")
-        .populate("previousAgents", "name email");
+        .lean();
+      // SECURITY: mask PII based on caller role
+      const callerRole = getCallerRole(req);
+      const leads = rawLeads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, callerRole));
       return res.status(200).json(leads);
     }
 
@@ -251,7 +269,8 @@ const createLead = async (req, res) => {
     });
 
     autoSendTemplates(lead, companyId);
-    res.status(201).json(lead);
+    // SECURITY: mask PII in create response (admin sees what they just entered but masked)
+    res.status(201).json(maskLeadPII(lead.toObject ? lead.toObject() : lead, getCallerRole(req)));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -855,7 +874,9 @@ const updateLead = async (req, res) => {
     }
 
     const updatedLead = await Lead.findByIdAndUpdate(id, safeBody, { new: true });
-    return res.status(200).json(updatedLead);
+    // SECURITY: mask PII in update response
+    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req));
+    return res.status(200).json(_masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -977,7 +998,9 @@ const adminUpdateLead = async (req, res) => {
       }
     }
 
-    return res.status(200).json(updatedLead);
+    // SECURITY: mask PII in update response
+    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req));
+    return res.status(200).json(_masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1049,6 +1072,43 @@ const MOBILE_LIST_PROJECTION = {
   // user: populated below — only name needed for list row.
   user:              1,
 };
+// ── Admin lead list projection ─────────────────────────────────────────────────
+// Returns ONLY the fields the AdminLeadsPage table and lead-card need.
+// This cuts the Network tab payload from 50KB+ per lead to ~1KB.
+// Sensitive fields (voiceBot*, AES-encrypted fields, full callHistory, etc.)
+// are intentionally excluded — the detail modal fetches them individually via
+// GET /lead/:id when the user opens a specific lead.
+const ADMIN_LIST_PROJECTION = {
+  name:              1,
+  mobile:            1,
+  primaryPhone:      1,
+  secondaryPhone:    1,
+  email:             1,
+  status:            1,
+  campaign:          1,
+  source:            1,
+  remark:            1,
+  temperature:       1,
+  leadScore:         1,
+  Quality:           1,
+  user:              1,
+  followUpDate:      1,
+  isClosed:          1,
+  mergedInto:        1,
+  createdAt:         1,
+  updatedAt:         1,
+  // callHistory — last 3 only (for the recent-activity indicator)
+  callHistory:       { $slice: -3 },
+  // scheduledCalls — count check only
+  scheduledCalls:    { $slice: 0 },
+  // nurture tracking
+  nurtureStage:      1,
+  nurtureSequence:   1,
+  // NOT included: voiceBotSummary, voiceBotScore, voiceBotTranscript,
+  // templateHistory, qualificationBreakdown, activityTimeline,
+  // meetingRemarks, revealLog, encryptedMobile, encryptedEmail,
+  // interestedBlastSentAt, noActionAlertSuperAdminSentAt — all fetched on demand
+};
 
 const getMyLeads = async (req, res) => {
   try {
@@ -1082,7 +1142,9 @@ const getMyLeads = async (req, res) => {
 
         const hasMore = changed.length > DELTA_LIMIT;
         const leads   = hasMore ? changed.slice(0, DELTA_LIMIT) : changed;
-        return res.status(200).json({ leads, delta: true, hasMore });
+        // SECURITY: mask PII in delta response
+        const _callerRole = getCallerRole(req);
+        return res.status(200).json({ leads: leads.map(l => maskLeadPII(l, _callerRole)), delta: true, hasMore });
       }
     }
 
@@ -1098,7 +1160,10 @@ const getMyLeads = async (req, res) => {
       .lean();
 
     const hasMore = raw.length > limit;
-    const leads   = hasMore ? raw.slice(0, limit) : raw;
+    const rawLeads = hasMore ? raw.slice(0, limit) : raw;
+    // SECURITY: mask PII — never return raw phone/email for non-superadmin
+    const callerRole = getCallerRole(req);
+    const leads = rawLeads.map(l => maskLeadPII(l, callerRole));
 
     res.status(200).json({
       leads,
@@ -1329,7 +1394,9 @@ const patchLead = async (req, res) => {
       );
     }
 
-    return res.status(200).json(updatedLead);
+    // SECURITY: mask PII in update response
+    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req));
+    return res.status(200).json(_masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1378,7 +1445,9 @@ const patchLeadTemperature = async (req, res) => {
     if (lastCalledByBot !== undefined) update.lastCalledByBot = lastCalledByBot;
 
     const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
-    return res.status(200).json(updatedLead);
+    // SECURITY: mask PII in update response
+    const _masked = maskLeadPII(updatedLead && updatedLead.toObject ? updatedLead.toObject() : updatedLead, getCallerRole(req));
+    return res.status(200).json(_masked);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -2126,12 +2195,16 @@ const adminGetAllLeads = async (req, res) => {
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
+        .select(ADMIN_LIST_PROJECTION)
         .populate("user", "name email")
-        .populate("previousAgents", "name email"),
+        .lean(),
       Lead.countDocuments(query),
     ]);
 
-    res.status(200).json({ leads, total, page, limit, pages: Math.ceil(total / limit) || 1 });
+    // SECURITY: mask PII based on caller role
+    const _callerRole = getCallerRole(req);
+    const maskedLeads = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, _callerRole));
+    res.status(200).json({ leads: maskedLeads, total, page, limit, pages: Math.ceil(total / limit) || 1 });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
