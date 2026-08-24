@@ -1122,6 +1122,10 @@ const getMyLeads = async (req, res) => {
       mergedInto: null,
       isClosed:  { $ne: true },
     };
+    // Run countDocuments in parallel with the data fetch so the web dashboard
+    // can compute total pages and fetch all of them (mobile app uses hasMore).
+    // countDocuments on an indexed query is fast (covered by company+user index).
+    const total = await Lead.countDocuments(query);
 
     // ── Delta fetch: ?since=<ISO timestamp> ──────────────────────────────────
     // Mobile app sends this on stale-check refreshes (every 5 min tab focus).
@@ -1170,8 +1174,8 @@ const getMyLeads = async (req, res) => {
       page,
       limit,
       hasMore,
-      // total and pages removed — not computed to avoid countDocuments().
-      // Frontend uses hasMore to decide whether to show "load more".
+      total,                               // total assigned leads (for KPIs)
+      pages: Math.ceil(total / limit),     // total pages (for web dashboard multi-fetch)
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -2183,7 +2187,9 @@ const adminGetAllLeads = async (req, res) => {
     // already reads `leadsRes.data?.leads` first (with an array fallback for
     // backward compatibility), so no frontend change is required for this fix.
     const page  = Math.max(1, parseInt(req.query.page  || "1",   10));
-    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit || "500", 10)));
+    // FIX: removed hardcoded 500 cap — allow fetching all leads across pages.
+    // Frontend now fetches multiple pages if total > limit.
+    const limit = Math.max(1, parseInt(req.query.limit || "500", 10));
     const skip  = (page - 1) * limit;
 
     // Per-admin isolation: admins see only their own leads; super_admin sees all.
