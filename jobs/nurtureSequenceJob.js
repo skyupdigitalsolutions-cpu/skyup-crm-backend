@@ -23,6 +23,12 @@
 // COMPANY GATE:
 //   Only runs for company 6a22662b7aea6e4034f44aae (SkyUp Digital Solutions).
 //   Every other company is silently skipped.
+//
+// NO INDUSTRY/SERVICE GUARD:
+//   When a rule uses autoResolveTemplate=true and the lead has no industry or
+//   service set, the rule is hard-skipped for that lead. Previously it fell
+//   through to a generic fallback template — that random send is now blocked.
+//   Set industry + service on the lead to enable nurture for it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const cron        = require("node-cron");
@@ -48,6 +54,8 @@ const HARD_SKIP_STATUSES = new Set(["Not Interested"]);
 
 // Sources that never receive nurture messages
 const BLOCKED_SOURCES = new Set(["manual", "csv import", "excel import", "other"]);
+
+
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -132,15 +140,15 @@ function resolveNextVariation(rule, lead) {
   const autoMode = !!wa.autoResolveTemplate && !!wa.funnelStage;
   if (autoMode) {
     if (!canResolve(lead)) {
-      // Lead has no industry/service — cannot auto-resolve. Try templateVariations
-      // first, then fall back to the single templateName on the rule. Auto-resolve
-      // rules typically have an empty templateVariations, so the single templateName
-      // acts as the last-resort generic fallback for untagged leads.
+      // Lead has no industry/service set — we cannot resolve a meaningful template.
+      // Hard stop: return null so fireRule() skips this lead entirely.
+      // Previously this fell through to templateVariations/templateName and sent a
+      // random generic template to untagged leads — that behaviour is now blocked.
       console.warn(
-        `[NurtureJob] lead ${lead._id} missing industry/service — ` +
-        `cannot auto-resolve "${wa.funnelStage}" template; falling back to templateVariations/templateName`
+        `[NurtureJob] Skipped lead ${lead._id} — no industry/service set, ` +
+        `cannot resolve "${wa.funnelStage}" template. Set industry+service on the lead to enable nurture.`
       );
-      // fall through to the variation / single-template block below
+      return { templateName: null, nextIndex: -1, skippedNoIndustry: true };
     } else {
       const count = Math.max(1, Number(wa.variationCount) || 5);
       const idx   = nextVariationIndex(rule, lead, count);
@@ -196,6 +204,7 @@ function resolveNextVariation(rule, lead) {
 function ruleMatchesStatus(rule, lead) {
   if (HARD_SKIP_STATUSES.has(lead.status)) return false;
   if (isManualOrImported(lead)) return false;
+
 
   const t = rule.trigger || {};
   const statusStage = rule.action?.whatsapp?.statusStage || "";
@@ -338,9 +347,14 @@ async function fireRule(rule, lead, company, todayKey) {
     return { status: "skipped", detail: "WhatsApp not enabled on rule" };
   }
 
-  const { templateName, nextIndex, autoResolved } = resolveNextVariation(rule, lead);
+  const { templateName, nextIndex, autoResolved, skippedNoIndustry } = resolveNextVariation(rule, lead);
   if (!templateName) {
-    return { status: "skipped", detail: "No template name resolved" };
+    return {
+      status: "skipped",
+      detail: skippedNoIndustry
+        ? "No industry/service on lead — nurture blocked for untagged leads"
+        : "No template name resolved",
+    };
   }
 
   // ── Verify the template actually exists in MSG91 before spending a send ──
@@ -506,6 +520,7 @@ async function triggerNurtureForLead(leadId, newStatus) {
   const leadWithNewStatus = { ...lead, status: newStatus };
 
   if (isManualOrImported(leadWithNewStatus)) return;
+
 
   const rules = await NurtureRule.find({ company: ENABLED_COMPANY_ID, enabled: true }).lean();
   const company = await Company.findById(ENABLED_COMPANY_ID).select("name _id").lean();
