@@ -388,6 +388,7 @@ async function getCompanyEntitlements(companyId) {
     leadNurtureSequence: false,
     callOutcomesReport:  false,
     metaConversionSync:  false,
+    leadIntelligence:    false,   // AI Lead Intelligence page — enabled per-company
     // Employee Excel / Google Sheet integration — AVAILABILITY flag. Turned ON
     // per-company by the Developer panel (devOverrides.featureToggles). This is
     // Layer 1 of the two-tier gate; Layer 2 is company.employeeSheetIntegration
