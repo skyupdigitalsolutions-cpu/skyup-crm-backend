@@ -319,8 +319,8 @@ app.use('/api/terms',               require('./routes/termsRoute'));
 // ── Personal-data access auditing (A.8.15 / A.8.16) ──────────────────────────
 // Mounted at the router level so every current and future lead/report endpoint
 // is logged automatically — see middlewares/accessAudit.js.
+app.use('/api/lead',                leadAIRoute);                                         // AI routes FIRST — avoids /:id catch-all in leadRoute swallowing /ai-report
 app.use('/api/lead',                auditAccess({ resourceType: 'Lead' }), leadRoute);
-app.use('/api/lead',                leadAIRoute);
 app.use('/api/project',             projectRoute);
 app.use('/api/attendance',          attendanceRoute);
 app.use('/api/razorpay',            razorpayRoute);
