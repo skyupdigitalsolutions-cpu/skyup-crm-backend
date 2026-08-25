@@ -137,7 +137,9 @@ function resolveNextVariation(rule, lead) {
   // Build the template name from the lead's own industry + service instead of
   // reading a hardcoded list. Still cycles V1→V5 and resets on stage change,
   // so the variation bookkeeping below is shared by both modes.
-  const autoMode = !!wa.autoResolveTemplate && !!wa.funnelStage;
+  // Use per-lead funnelStageOverride if set (auto-progressed by stageProgressor.service.js)
+  const effectiveFunnelStage = lead.funnelStageOverride || wa.funnelStage;
+  const autoMode = !!wa.autoResolveTemplate && !!effectiveFunnelStage;
   if (autoMode) {
     if (!canResolve(lead)) {
       // Lead has no industry/service set — we cannot resolve a meaningful template.
@@ -152,7 +154,7 @@ function resolveNextVariation(rule, lead) {
     } else {
       const count = Math.max(1, Number(wa.variationCount) || 5);
       const idx   = nextVariationIndex(rule, lead, count);
-      const templateName = resolveForLead(lead, wa.funnelStage, idx + 1);
+      const templateName = resolveForLead(lead, effectiveFunnelStage, idx + 1);
       return { templateName, nextIndex: idx, autoResolved: true };
     }
   }
@@ -204,6 +206,13 @@ function resolveNextVariation(rule, lead) {
 function ruleMatchesStatus(rule, lead) {
   if (HARD_SKIP_STATUSES.has(lead.status)) return false;
   if (isManualOrImported(lead)) return false;
+  // Skip standard nurture for leads in objection-handling sequence
+  // (objection job runs separately — don't double-send)
+  if (lead.objectionTag && rule.trigger?.isObjectionRule !== true) {
+    // Still allow re-engagement rules (minDaysSinceLastTouch > 21) to fire
+    const minDays = rule.trigger?.minDaysSinceLastTouch || 0;
+    if (minDays < 21) return false;
+  }
 
 
   const t = rule.trigger || {};
@@ -317,11 +326,14 @@ async function _logNurtureResult(lead, rule, result) {
 // ── Belt-and-suspenders dedup: check templateHistory ─────────────────────────
 // If autoSendTemplates sent this template today before nurtureSent was stamped,
 // check templateHistory as a fallback guard.
-async function alreadySentViaTemplateHistory(leadId, rule, todayKey) {
+async function alreadySentViaTemplateHistory(leadId, rule, todayKey, resolvedTemplateName = null) {
   try {
     const templateName = rule.action?.whatsapp?.templateName || "";
     const variations   = rule.action?.whatsapp?.templateVariations || [];
-    const allTemplates = [templateName, ...variations].filter(Boolean);
+    // Also include the runtime-resolved auto template name (critical for dedup
+    // with autoTemplateService which also writes to templateHistory)
+    const allTemplates = [templateName, ...variations, resolvedTemplateName]
+      .filter(Boolean);
     if (!allTemplates.length) return false;
 
     const [y, m, d] = todayKey.split("-").map(Number);
@@ -355,6 +367,38 @@ async function fireRule(rule, lead, company, todayKey) {
         ? "No industry/service on lead — nurture blocked for untagged leads"
         : "No template name resolved",
     };
+  }
+
+  // DEDUP: for auto-resolved templates, check templateHistory NOW that we know
+  // the actual resolved name — prevents double-send when autoTemplateService
+  // already fired the same template in the same cron window (seen as duplicates
+  // in the send log when both jobs run at the same time).
+  if (autoResolved) {
+    const [y2, m2, d2] = todayKey.split("-").map(Number);
+    const todayStart2  = new Date(Date.UTC(y2, m2 - 1, d2, 0, 0, 0));
+    const todayEnd2    = new Date(Date.UTC(y2, m2 - 1, d2, 18, 29, 59, 999));
+    try {
+      const alreadySent = await Lead.findOne(
+        {
+          _id: lead._id,
+          "templateHistory.templateName": templateName,
+          "templateHistory.sentAt": { $gte: todayStart2, $lte: todayEnd2 },
+        },
+        { _id: 1 }
+      ).lean();
+      if (alreadySent) {
+        console.log(
+          `[NurtureJob] Dedup: "${templateName}" already in templateHistory today ` +
+          `for lead ${lead._id} — skipped (likely sent by autoTemplateService)`
+        );
+        return {
+          status: "skipped",
+          detail: `Duplicate — "${templateName}" already sent today via another channel`,
+        };
+      }
+    } catch (e) {
+      console.warn(`[NurtureJob] templateHistory dedup check failed: ${e.message} — proceeding`);
+    }
   }
 
   // ── Verify the template actually exists in MSG91 before spending a send ──
