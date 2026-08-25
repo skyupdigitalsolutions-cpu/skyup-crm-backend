@@ -18,9 +18,11 @@ const {
 const { protectAdmin }   = require("../middlewares/adminAuthMiddleware");
 const { protect }        = require("../middlewares/authMiddleware");
 const { validateObjectId } = require("../middlewares/validateObjectId");
+const { requireFeature } = require("../middlewares/entitlementMiddleware");
 
-// Management report — admin only
-router.get("/ai-report", protectAdmin, getAIReport);
+// Management report — admin only, gated behind leadIntelligence feature toggle
+// Enable per-company: Developer panel → Company → devOverrides.featureToggles.leadIntelligence = true
+router.get("/ai-report", protectAdmin, requireFeature("leadIntelligence"), getAIReport);
 
 // Lead-level — accessible to both admin and employee
 // (employee access: GET only their assigned leads — enforced in controller via company isolation)
