@@ -25,6 +25,7 @@ const {
   refreshMedia,
   markConversationRead,
   getSendLogReport,
+  getTemplateBody,
 } = require("../controllers/whatsappChatController");
 const { makeCompanyUploadMiddleware } = require("../services/cloudinaryService");
 
@@ -99,6 +100,10 @@ router.post("/employee-bulk-send", protect, requireFeature("whatsappBlast"), emp
 // protectAny — admin/super_admin see the whole company; employees see only
 // their own employee-blast sends (scoped inside the controller).
 router.get("/send-log", protectAny, getSendLogReport);
+
+// Cached generic template body (unsubstituted) — used by the "View" modal on
+// template-sent timeline entries recorded before content tracking existed.
+router.get("/template-body", protectAny, getTemplateBody);
 
 // ── WhatsApp Screenshot Extract & Import ──────────────────────────────────────
 const {
