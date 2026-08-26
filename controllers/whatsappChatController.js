@@ -9,6 +9,7 @@ const WhatsAppMessage = require("../models/WhatsAppMessage");
 const WhatsAppSendLog  = require("../models/WhatsAppSendLog");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 const { extractBodyText, substitute } = require("../utils/templateContentResolver");
+const { fetchLiveTemplateBody } = require("../services/msg91TemplateService");
 
 // ── Resolve a template's cached body text ONCE per batch, so every recipient
 // in a bulk/CSV/employee blast just does a cheap string substitution instead
@@ -2249,10 +2250,25 @@ const getTemplateBody = async (req, res) => {
     if (!companyId) return res.status(401).json({ success: false, message: "Unauthorized" });
     if (!name) return res.status(400).json({ success: false, message: "name is required" });
 
+    // 1. Try the local cache first — instant, no external call.
     const tplDoc = await WhatsAppTemplate.findOne({ company: companyId, name }).lean();
-    const body = extractBodyText(tplDoc);
+    let body = extractBodyText(tplDoc);
+    let source = body ? "cache" : "";
 
-    return res.json({ success: true, body: body || "" });
+    // 2. Cache miss (or the cache has no BODY component yet) — go straight to
+    // MSG91 and fetch this template's real approved text live, so "View"
+    // always shows the actual sent content rather than a generic fallback.
+    if (!body) {
+      try {
+        const live = await fetchLiveTemplateBody(companyId, name);
+        body = live.body || "";
+        source = body ? "msg91-live" : "";
+      } catch (liveErr) {
+        console.warn("getTemplateBody live MSG91 fetch failed:", liveErr.message);
+      }
+    }
+
+    return res.json({ success: true, body, source });
   } catch (err) {
     console.error("getTemplateBody error:", err.message);
     return res.status(500).json({ success: false, message: err.message });
