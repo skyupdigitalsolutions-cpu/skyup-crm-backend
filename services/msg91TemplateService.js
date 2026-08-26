@@ -22,6 +22,7 @@ const axios = require("axios");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 const WhatsAppConfig   = require("../models/WhatsAppConfig");
 const { encrypt, hmac } = require("../utils/fieldCrypto");
+const { extractBodyTextFromRaw } = require("../utils/templateContentResolver");
 const { STAGES }       = require("../utils/templateNameResolver");
 
 const STAGE_SET = new Set(STAGES);
@@ -530,14 +531,7 @@ async function fetchLiveTemplateBody(companyId, name) {
     return { body: "", template: null, source: "msg91-live" };
   }
 
-  const comps = match.components || match.component || match.structure?.components;
-  let body = "";
-  if (Array.isArray(comps)) {
-    const bodyComp = comps.find(
-      (c) => String(c.type || c.component_type || "").toUpperCase() === "BODY"
-    );
-    body = bodyComp?.text || bodyComp?.value || "";
-  }
+  const body = extractBodyTextFromRaw(match);
 
   // Best-effort: refresh the cache for this one template so future views
   // (and future sends) don't need to hit MSG91 again. Never let a cache
