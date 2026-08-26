@@ -1,5 +1,27 @@
 const MetaConfig = require("../models/MetaConfig");
 const Lead       = require("../models/Leads");
+const { INDUSTRIES, SERVICES } = require("../utils/templateNameResolver");
+
+// ── Validate nurture tags against the SAME canonical lists templateNameResolver.js
+// uses to build approved MSG91 template names — single source of truth, not a
+// third hardcoded copy (metaWebhookController.js keeps its own copy today
+// too; this at least stops a NEW blind-trust path from being added here).
+//
+// Unlike metaWebhookController.js's per-lead form-field extraction — which
+// already validates before assigning — this campaign-level default previously
+// took req.body.industry/service completely unchecked. A typo or unsupported
+// value here doesn't fail loudly: canResolve() still returns true (both
+// fields non-empty), so every lead from the campaign tries to resolve a real
+// template name that doesn't exist, gets caught by the "not in synced MSG91
+// list" guard in jobs/nurtureSequenceJob.js, and is silently skipped —
+// forever, for the whole campaign, with nothing but a server log line.
+const VALID_INDUSTRIES = new Set(INDUSTRIES);
+const VALID_SERVICES   = new Set(SERVICES);
+
+function sanitizeNurtureTag(rawValue, validSet) {
+  const trimmed = String(rawValue || "").trim();
+  return trimmed && validSet.has(trimmed) ? trimmed : "";
+}
 
 // GET - All campaign connections for the admin's company (token hidden)
 // BUG FIX: also returns real lead counts so the Campaigns page card shows the
@@ -145,9 +167,13 @@ const addConfig = async (req, res) => {
       category:        req.body.category?.trim() || "",
       // ── Lead Nurture tags ─────────────────────────────────────────────────
       // Set industry/service so every lead from this campaign is auto-tagged.
-      // Values must match templateNameResolver.js canonical list exactly.
-      industry:        req.body.industry?.trim() || "",
-      service:         req.body.service?.trim()  || "",
+      // Validated against the same canonical list templateNameResolver.js
+      // uses — an unrecognised value is dropped (empty string) rather than
+      // saved, so untagged leads correctly fall through to manual tagging or
+      // the niche fallback instead of silently resolving a template name
+      // that will never exist in MSG91.
+      industry:        sanitizeNurtureTag(req.body.industry, VALID_INDUSTRIES),
+      service:         sanitizeNurtureTag(req.body.service,  VALID_SERVICES),
       company:         companyId,
       createdBy:       req.admin._id || req.admin.id || null,
       roundRobinIndex: 0,
@@ -179,6 +205,18 @@ const updateConfig = async (req, res) => {
     delete req.body.roundRobinIndex;
     // Prevent changing company via PUT
     delete req.body.company;
+
+    // Same validation as addConfig — a PUT can update industry/service too,
+    // and req.body is passed straight through to findByIdAndUpdate below, so
+    // an invalid value here would silently doom every future lead on this
+    // campaign to a nurture template name that doesn't exist. Sanitize
+    // in-place rather than trusting the client.
+    if (req.body.industry !== undefined) {
+      req.body.industry = sanitizeNurtureTag(req.body.industry, VALID_INDUSTRIES);
+    }
+    if (req.body.service !== undefined) {
+      req.body.service = sanitizeNurtureTag(req.body.service, VALID_SERVICES);
+    }
 
     const updated = await MetaConfig.findByIdAndUpdate(
       req.params.id,
