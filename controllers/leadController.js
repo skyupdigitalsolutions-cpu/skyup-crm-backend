@@ -46,6 +46,18 @@ const { triggerNurtureForLead, NURTURE_COMPANY_ID } = require("../jobs/nurtureSe
 const { sendMetaConversionEvent } = require("../services/metaConversionService");
 const { getCompanyEntitlements } = require("../services/entitlementService");
 const { notifyCampaignLead, notifyEmployeeLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
+const { INDUSTRIES, SERVICES } = require("../utils/templateNameResolver");
+
+// Same canonical-list validation used in metaConfigController.js — the
+// locked <select> dropdowns in the UI (UserLeadsPage.jsx etc.) can only ever
+// submit a valid value, but this endpoint itself is the actual API surface;
+// a direct call (script, mobile client, Postman) could otherwise set any
+// string here. An unrecognised industry/service doesn't fail loudly — it
+// still passes canResolve() (both fields non-empty) and silently resolves a
+// template name that will never exist in MSG91, so the lead gets zero
+// nurture messages forever with nothing but a server log line.
+const VALID_NURTURE_INDUSTRIES = new Set(INDUSTRIES);
+const VALID_NURTURE_SERVICES   = new Set(SERVICES);
 
 // ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
 async function getNextUser(companyId, excludeIds = []) {
@@ -1216,18 +1228,20 @@ const patchLead = async (req, res) => {
     // on every save even when the toggle was ON.
     const companyIdStr = String(lead.company?._id || lead.company || "");
     const ents = await getCompanyEntitlements(companyIdStr).catch(() => null);
-    // FIX: previously only checked ents?.leadNurtureSequence. The nurture
-    // job (jobs/nurtureSequenceJob.js) runs unconditionally for
-    // NURTURE_COMPANY_ID, independent of this entitlement toggle. If the
-    // toggle was off for that company, industry/service never got saved
-    // here, so the auto-resolve template naming could never find them —
-    // every nurture send was silently skipped with "No template name
-    // resolved", with no error anywhere. Bypass the entitlement check for
-    // the hardcoded nurture company so tagging always works for it.
+    // Nurture is fully multi-tenant now (jobs/nurtureSequenceJob.js gates on
+    // this exact same entitlement flag via getNurtureEnabledCompanyIds()), so
+    // there's no longer a hardcoded company to bypass this check for.
+    // NURTURE_COMPANY_ID is kept only for backward compatibility with this
+    // import and is always null — `=== NURTURE_COMPANY_ID` never matches,
+    // leaving the entitlement flag as the single source of truth.
     const nurtureEnabled = !!ents?.leadNurtureSequence || companyIdStr === NURTURE_COMPANY_ID;
     if (nurtureEnabled) {
-      if (industry !== undefined && industry !== "") update.industry = industry;
-      if (service  !== undefined && service  !== "") update.service  = service;
+      if (industry !== undefined && industry !== "" && VALID_NURTURE_INDUSTRIES.has(String(industry).trim())) {
+        update.industry = String(industry).trim();
+      }
+      if (service !== undefined && service !== "" && VALID_NURTURE_SERVICES.has(String(service).trim())) {
+        update.service = String(service).trim();
+      }
     }
 
     const temp = temperature || Quality;
