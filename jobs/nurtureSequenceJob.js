@@ -311,6 +311,7 @@ async function _logNurtureResult(lead, rule, result) {
       name: lead.name || "",
       templateName: result.templateName || "",
       languageCode: "en",
+      content:      result.content || "",
       channel: "nurture",
       status: result.status === "sent" ? "sent" : result.status === "skipped" ? "skipped" : "failed",
       reason: result.detail || "",
@@ -487,7 +488,7 @@ async function fireRule(rule, lead, company, todayKey) {
     `status="${lead.status}" template="${templateName}" (V${nextIndex + 1})`
   );
 
-  return { status: "sent", templateName, variationIndex: nextIndex + 1 };
+  return { status: "sent", templateName, variationIndex: nextIndex + 1, content: result?.content || "" };
 }
 
 // ── Cron run ──────────────────────────────────────────────────────────────────
