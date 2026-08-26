@@ -24,6 +24,25 @@
 const https    = require('https');
 const Company  = require('../models/Company');
 const User     = require('../models/Users');
+const Lead     = require('../models/Leads');
+
+// ── Log a Telegram send to the lead's telegramNotifications history ──────────
+// Lets the lead's chronological journey show exactly when a Telegram alert
+// went out and to whom, alongside calls / template sends. Fire-and-forget:
+// never blocks or throws into the caller — a logging failure must never
+// affect whether the actual Telegram message gets sent.
+function recordTelegramNotification(lead, { type, recipientName, recipientRole, status = 'sent', detail = '' }) {
+  try {
+    const leadId = lead?._id || lead;
+    if (!leadId) return;
+    Lead.updateOne(
+      { _id: leadId },
+      { $push: { telegramNotifications: { type, recipientName: recipientName || '', recipientRole: recipientRole || '', sentAt: new Date(), status, detail } } }
+    ).catch((e) => console.error('[Telegram] telegramNotifications record error:', e.message));
+  } catch (e) {
+    console.error('[Telegram] telegramNotifications record error:', e.message);
+  }
+}
 
 // ── Plan entitlement gate ─────────────────────────────────────────────────────
 // Telegram notifications require the "telegramNotification" feature, which is
@@ -214,10 +233,12 @@ async function notifyCampaignLead(lead, companyId) {
     // ── Step 4: Send ──────────────────────────────────────────────────────
     await sendTelegramMessage(company.telegramBotToken, company.telegramChatId, text);
     console.log(`[Telegram] ✅ Campaign lead notification sent for "${lead.name}" → company "${company.name}"`);
+    recordTelegramNotification(lead, { type: 'campaign_company', recipientName: company.name, recipientRole: 'company', status: 'sent' });
 
   } catch (err) {
     // Never crash lead creation because of a notification failure
     console.error('[Telegram] notifyCampaignLead error:', err.message);
+    recordTelegramNotification(lead, { type: 'campaign_company', recipientRole: 'company', status: 'failed', detail: err.message });
   }
 }
 
@@ -291,10 +312,12 @@ async function notifyEmployeeLead(userId, lead, companyId) {
     const text = buildEmployeeMessage(lead, employee.name);
     await sendTelegramMessage(company.telegramBotToken, employee.telegramChatId, text);
     console.log(`[Telegram] ✅ Lead assignment notified → employee "${employee.name}"`);
+    recordTelegramNotification(lead, { type: 'employee_assigned', recipientName: employee.name, recipientRole: 'employee', status: 'sent', detail: `Lead assignment alert sent to ${employee.name}` });
 
   } catch (err) {
     // Never crash lead assignment because of a Telegram failure
     console.error('[Telegram] notifyEmployeeLead error:', err.message);
+    recordTelegramNotification(lead, { type: 'employee_assigned', recipientRole: 'employee', status: 'failed', detail: err.message });
   }
 }
 
@@ -355,8 +378,10 @@ async function notifyAdminCampaignLead(adminId, lead, companyId) {
     const text = buildAdminCampaignMessage(lead, admin.name, company.name);
     await sendTelegramMessage(company.telegramBotToken, admin.telegramChatId, text);
     console.log(`[Telegram] ✅ Campaign lead notified → admin "${admin.name}"`);
+    recordTelegramNotification(lead, { type: 'campaign_admin', recipientName: admin.name, recipientRole: 'admin', status: 'sent' });
   } catch (err) {
     console.error('[Telegram] notifyAdminCampaignLead error:', err.message);
+    recordTelegramNotification(lead, { type: 'campaign_admin', recipientRole: 'admin', status: 'failed', detail: err.message });
   }
 }
 
@@ -399,8 +424,10 @@ async function notifyAllAdminsCampaignLead(lead, companyId) {
           const text = buildAdminCampaignMessage(lead, admin.name, company.name);
           await sendTelegramMessage(company.telegramBotToken, admin.telegramChatId, text);
           console.log(`[Telegram] ✅ Campaign lead notified → admin "${admin.name}"`);
+          recordTelegramNotification(lead, { type: 'campaign_admin', recipientName: admin.name, recipientRole: 'admin', status: 'sent' });
         } catch (e) {
           console.error(`[Telegram] Failed to notify admin "${admin.name}":`, e.message);
+          recordTelegramNotification(lead, { type: 'campaign_admin', recipientName: admin.name, recipientRole: 'admin', status: 'failed', detail: e.message });
         }
       })
     );
