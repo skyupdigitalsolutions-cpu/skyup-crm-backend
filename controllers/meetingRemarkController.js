@@ -193,12 +193,16 @@ async function _sendClientMeetingWhatsApp({ lead, companyId, meetingDate, meetin
       console.error('[meetingWhatsApp] conversation log error:', logErr.message);
     }
 
-    // Record in the lead's template history (shown in the Update Lead popup)
+    // Record in the lead's template history (shown in the Update Lead popup).
+    // Content is reconstructed from the actual meeting variables we just sent
+    // (client_meeting_reminder isn't always cached in WhatsAppTemplate, so we
+    // build a readable equivalent rather than showing nothing).
     try {
       if (lead?._id) {
+        const content = `Hi ${clientName}, this is a reminder from ${companyName} for your ${modeStr} meeting on ${dateStr} at ${timeStr} with ${agentStr}.`;
         await Lead.updateOne(
           { _id: lead._id },
-          { $push: { templateHistory: { templateName: 'client_meeting_reminder', sentAt: new Date(), channel: 'whatsapp', status: 'sent' } } }
+          { $push: { templateHistory: { templateName: 'client_meeting_reminder', sentAt: new Date(), channel: 'whatsapp', status: 'sent', content } } }
         );
       }
     } catch (histErr) {
