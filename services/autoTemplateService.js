@@ -17,6 +17,7 @@ const EmailLog       = require("../models/EmailLog");
 const SmsLog         = require("../models/SmsLog");
 const Lead           = require("../models/Leads");
 const WhatsAppSendLog = require("../models/WhatsAppSendLog");
+const { resolveTemplateContent } = require("../utils/templateContentResolver");
 
 // Append a WhatsApp template send to the lead's templateHistory (shown in the
 // Update Lead popup). Fire-and-forget — never blocks or throws into the caller.
@@ -24,7 +25,7 @@ const WhatsAppSendLog = require("../models/WhatsAppSendLog");
 // Previously autoTemplateService only wrote to lead.templateHistory, so
 // new-lead sends (crm_followup_leads) and interested-blast sends were
 // completely invisible in the WhatsApp → Reports table.
-async function _logAutoTemplateSend({ lead, companyId, templateName, status, detail }) {
+async function _logAutoTemplateSend({ lead, companyId, templateName, status, detail, content = "" }) {
   try {
     await WhatsAppSendLog.create({
       company:      companyId,
@@ -33,6 +34,7 @@ async function _logAutoTemplateSend({ lead, companyId, templateName, status, det
       name:         lead?.name   || '',
       templateName: templateName || '',
       languageCode: 'en',
+      content:      content || '',
       channel:      'manual',      // auto-template sends use 'manual' channel slot
       status:       status === 'sent' ? 'sent' : status === 'skipped' ? 'skipped' : 'failed',
       reason:       detail || '',
@@ -43,12 +45,12 @@ async function _logAutoTemplateSend({ lead, companyId, templateName, status, det
   }
 }
 
-function recordTemplateHistory(lead, templateName, status = "sent") {
+function recordTemplateHistory(lead, templateName, status = "sent", content = "") {
   try {
     if (!lead?._id || !templateName) return;
     Lead.updateOne(
       { _id: lead._id },
-      { $push: { templateHistory: { templateName: String(templateName).trim(), sentAt: new Date(), channel: "whatsapp", status } } }
+      { $push: { templateHistory: { templateName: String(templateName).trim(), sentAt: new Date(), channel: "whatsapp", status, content: content || "" } } }
     ).catch((e) => console.error("[autoTemplate] templateHistory record error:", e.message));
   } catch (e) {
     console.error("[autoTemplate] templateHistory record error:", e.message);
@@ -284,9 +286,23 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         console.error(`[autoTemplate] ❌ WA rejected by MSG91:`, detail);
         return { channel: "whatsapp", status: "failed", detail: `MSG91 rejected the message: ${detail}` };
       }
-      recordTemplateHistory(lead, templateName, "sent");
-      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} using template "${templateName}"` });
-      return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} using template "${templateName}"` };
+      // ── Resolve the actual rendered content, best-effort ────────────────
+      // Real template body (with {{1}}/{{2}} filled in) when cached, else a
+      // readable fallback built from the variables we actually sent — so
+      // "Templates Sent" always shows something more useful than a bare name.
+      const contentVars = { 1: components.body_1?.value || "" };
+      if (components.body_2) contentVars[2] = components.body_2.value;
+      const content = await resolveTemplateContent({
+        companyId,
+        templateName,
+        variables: contentVars,
+        fallbackText: wantsBusinessName
+          ? `Message sent to ${components.body_1?.value || "the lead"} regarding ${components.body_2?.value || "their business"} (template: ${templateName})`
+          : `Message sent to ${components.body_1?.value || "the lead"} (template: ${templateName})`,
+      });
+      recordTemplateHistory(lead, templateName, "sent", content);
+      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} using template "${templateName}"`, content });
+      return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} using template "${templateName}"`, templateName, content };
     } catch (err) {
       const detail = JSON.stringify(err?.response?.data || err.message);
       console.error(`[autoTemplate] ❌ WA error:`, detail);
@@ -310,9 +326,15 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         headers: { Authorization: `Bearer ${config.accessToken}`, "Content-Type": "application/json" },
       });
       console.log(`[autoTemplate] ✅ WA Meta sent:`, JSON.stringify(resp.data));
-      recordTemplateHistory(lead, templateName, "sent");
-      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"` });
-      return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"` };
+      const content = await resolveTemplateContent({
+        companyId,
+        templateName,
+        variables: { 1: lead.name || "" },
+        fallbackText: `Message sent to ${lead.name || "the lead"} via Meta (template: ${templateName})`,
+      });
+      recordTemplateHistory(lead, templateName, "sent", content);
+      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, content });
+      return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, templateName, content };
     } catch (err) {
       const detail = JSON.stringify(err?.response?.data || err.message);
       console.error(`[autoTemplate] ❌ WA Meta error:`, detail);
