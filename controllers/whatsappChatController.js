@@ -2235,6 +2235,30 @@ const getSendLogReport = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /whatsapp/template-body?name=crm_call_missed
+// Returns the cached (generic, unsubstituted) template body text, for the
+// "View" modal on template-sent timeline entries that predate content
+// tracking — so even old records can show what the template generally says,
+// instead of just its internal name.
+// ─────────────────────────────────────────────────────────────────────────────
+const getTemplateBody = async (req, res) => {
+  try {
+    const { companyId } = callerCtx(req);
+    const name = String(req.query.name || "").trim();
+    if (!companyId) return res.status(401).json({ success: false, message: "Unauthorized" });
+    if (!name) return res.status(400).json({ success: false, message: "name is required" });
+
+    const tplDoc = await WhatsAppTemplate.findOne({ company: companyId, name }).lean();
+    const body = extractBodyText(tplDoc);
+
+    return res.json({ success: true, body: body || "" });
+  } catch (err) {
+    console.error("getTemplateBody error:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   getConversations,
   getMessages,
@@ -2257,4 +2281,5 @@ module.exports = {
   getConversationByLead,
   getUnreadCounts,
   getSendLogReport,
+  getTemplateBody,
 };
