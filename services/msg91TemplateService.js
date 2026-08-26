@@ -492,11 +492,88 @@ async function findTemplate(companyId, name) {
   return WhatsAppTemplate.findOne({ company: companyId, name }).lean();
 }
 
+/**
+ * Fetch ONE template's real approved body text LIVE from MSG91 — not the
+ * local cache. Used for the "View" content modal so a lead's actual sent
+ * template always shows the true wording, even for a template that hasn't
+ * been synced (or was renamed/edited) since the last sync run.
+ *
+ * MSG91 has no "get one template" endpoint, so this pulls the full list
+ * (same call the sync job makes) and picks out the matching one. While
+ * we're at it, we also upsert that single template into the local cache so
+ * the next lookup for the same name is instant and doesn't need to hit
+ * MSG91 again.
+ *
+ * @returns {{ body: string, template: object|null, source: "msg91-live" }}
+ */
+async function fetchLiveTemplateBody(companyId, name) {
+  const target = String(name || "").trim();
+  if (!target) return { body: "", template: null, source: "msg91-live" };
+
+  const config = await WhatsAppConfig.findOne({ company: companyId }).lean();
+  if (!config) throw new Error("No WhatsAppConfig for this company");
+
+  const authKey = config.msg91AuthKey || "";
+  const rawNum  = String(config.msg91IntegratedNumber || "").replace(/\D/g, "");
+  if (!authKey) throw new Error("WhatsAppConfig.msg91AuthKey is empty");
+  if (!rawNum)  throw new Error("WhatsAppConfig.msg91IntegratedNumber is empty");
+  const number = rawNum.length === 10 ? `91${rawNum}` : rawNum;
+
+  const { templates } = await fetchFromMsg91({ authKey, integratedNumber: number });
+
+  const match = (templates || []).find((t) => {
+    const n = String(t.template_name || t.name || t.templateName || t.elementName || "").trim();
+    return n.toLowerCase() === target.toLowerCase();
+  });
+
+  if (!match) {
+    return { body: "", template: null, source: "msg91-live" };
+  }
+
+  const comps = match.components || match.component || match.structure?.components;
+  let body = "";
+  if (Array.isArray(comps)) {
+    const bodyComp = comps.find(
+      (c) => String(c.type || c.component_type || "").toUpperCase() === "BODY"
+    );
+    body = bodyComp?.text || bodyComp?.value || "";
+  }
+
+  // Best-effort: refresh the cache for this one template so future views
+  // (and future sends) don't need to hit MSG91 again. Never let a cache
+  // write failure block returning the live result to the caller.
+  try {
+    const numberHash = hmac(number);
+    await WhatsAppTemplate.updateOne(
+      { company: companyId, name: target, integratedNumberHash: numberHash },
+      {
+        $set: {
+          company: companyId,
+          name: target,
+          integratedNumber: encrypt(number),
+          integratedNumberHash: numberHash,
+          language: String(match.language || match.language_code || match.languageCode || "en").trim(),
+          category: String(match.category || "").trim().toUpperCase(),
+          bodyVariableCount: countBodyVariables(match),
+          raw: match,
+          lastSyncedAt: new Date(),
+        },
+      },
+      { upsert: true }
+    );
+  } catch (e) {
+    console.warn("[msg91Templates] fetchLiveTemplateBody cache refresh failed:", e.message);
+  }
+
+  return { body, template: match, source: "msg91-live" };
+}
+
 module.exports = {
   syncTemplatesForCompany,
   probeTemplateEndpoints,
   fetchRaw,
   findTemplate,
+  fetchLiveTemplateBody,
   parseNurtureName,
   countBodyVariables,
   CANDIDATES,
