@@ -20,9 +20,25 @@
 //   When stage changes (status moves to a new statusStage), index resets to -1
 //   so V1 fires first. Otherwise increments: V1→V2→V3→V4→V5→V1→...
 //
-// COMPANY GATE:
-//   Only runs for company 6a22662b7aea6e4034f44aae (SkyUp Digital Solutions).
-//   Every other company is silently skipped.
+// COMPANY GATE — MULTI-TENANT:
+//   Previously hardcoded to a single company ID. That's fragile by
+//   construction — swap the constant for anything that doesn't resolve to a
+//   real document (an empty string, a typo, null) and Company.findById(...)
+//   / Lead.findOne({ company: ... }) both just match nothing. The job then
+//   "runs" on schedule, logs a skip line, and quietly does nothing for every
+//   company — including the one it used to serve — with no error anywhere.
+//
+//   Replaced with the SAME entitlement flag nurtureRoute.js already enforces
+//   on every /api/nurture/* call (Company.devOverrides.featureToggles.
+//   leadNurtureSequence, via services/entitlementService.js) — so a company
+//   is nurture-eligible if and only if an admin's rule-builder page is even
+//   visible to them. One definition of "which companies get this feature",
+//   not two that can drift apart.
+//     • Cron: getNurtureEnabledCompanyIds() finds every qualifying company
+//       up front, then loops rules/leads per company.
+//     • Immediate trigger: loads the lead first (its company isn't known
+//       until then), then checks that ONE company's entitlement before
+//       doing anything else.
 //
 // NO INDUSTRY/SERVICE GUARD:
 //   When a rule uses autoResolveTemplate=true and the lead has no industry or
@@ -40,11 +56,22 @@ const { sendAutoWhatsApp } = require("../services/autoTemplateService");
 const { resolveForLead, canResolve } = require("../utils/templateNameResolver");
 const { findTemplate } = require("../services/msg91TemplateService");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
+const { getCompanyEntitlements } = require("../services/entitlementService");
 
 const IST_TIMEZONE = "Asia/Kolkata";
 
-// ── Single company gate ───────────────────────────────────────────────────────
-const ENABLED_COMPANY_ID =null;
+// ── Multi-tenant company gate ──────────────────────────────────────────────────
+// Every company currently entitled to lead nurture — the exact same set an
+// admin at that company could see the Nurture Sequence Builder page for. A
+// company becomes eligible the moment Developer > Company Details flips
+// devOverrides.featureToggles.leadNurtureSequence on; no redeploy needed to
+// add or remove a company.
+async function getNurtureEnabledCompanyIds() {
+  const companies = await Company.find({
+    "devOverrides.featureToggles.leadNurtureSequence": true,
+  }).select("_id").lean();
+  return companies.map((c) => c._id);
+}
 
 // "Not Interested" leads are hard-skipped globally — never receive nurture messages.
 // "Converted" is NOT skipped here; it can still receive Action-stage messages
@@ -497,46 +524,50 @@ async function runNurtureSequenceCheck() {
   const now      = new Date();
   const todayKey = istDayKey(now);
 
-  // Company gate — only SkyUp Digital Solutions
-  const company = await Company.findById(ENABLED_COMPANY_ID).select("name _id").lean();
-  if (!company) {
-    console.log(`[nurtureSequence] Company ${ENABLED_COMPANY_ID} not found — skipping.`);
+  // Multi-tenant company gate — every company with the entitlement on today,
+  // looked up fresh each run so a company enabled/disabled mid-day takes
+  // effect on the very next tick without a redeploy.
+  const companyIds = await getNurtureEnabledCompanyIds();
+  if (!companyIds.length) {
+    console.log("[nurtureSequence] No companies have leadNurtureSequence enabled — skipping.");
     return { sent: 0 };
   }
-
-  const rules = await NurtureRule.find({ company: ENABLED_COMPANY_ID, enabled: true }).lean();
-  if (!rules.length) {
-    console.log("[nurtureSequence] No enabled rules — skipping.");
-    return { sent: 0 };
-  }
-
-  const leads = await Lead.find({
-    company:    ENABLED_COMPANY_ID,
-    isClosed:   { $ne: true },
-    status:     { $nin: ["Not Interested"] },
-    mergedInto: null,
-  })
-    .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user industry service businessName campaign adSetName")
-    .lean();
 
   let totalSent = 0;
 
-  for (const lead of leads) {
-    for (const rule of rules) {
-      if (!ruleMatchesCron(rule, lead, now))  continue;
-      if (!eligibleForRepeat(rule, lead, todayKey)) continue;
-      if (alreadyFiredToday(rule, lead, todayKey))  continue;
-      // DEDUP FIX: belt-and-suspenders check against templateHistory
-      if (await alreadySentViaTemplateHistory(lead._id, rule, todayKey)) continue;
+  for (const companyId of companyIds) {
+    const company = await Company.findById(companyId).select("name _id").lean();
+    if (!company) continue; // deleted between the query above and now — skip, don't crash the run
 
-      const result = await fireRule(rule, lead, company, todayKey);
-      _logNurtureResult(lead, rule, result); // fire-and-forget, never blocks the cron loop
-      if (result.status === "sent") totalSent++;
+    const rules = await NurtureRule.find({ company: companyId, enabled: true }).lean();
+    if (!rules.length) continue; // entitlement on, but no rules built yet for this company
+
+    const leads = await Lead.find({
+      company:    companyId,
+      isClosed:   { $ne: true },
+      status:     { $nin: ["Not Interested"] },
+      mergedInto: null,
+    })
+      .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user industry service businessName campaign adSetName")
+      .lean();
+
+    for (const lead of leads) {
+      for (const rule of rules) {
+        if (!ruleMatchesCron(rule, lead, now))  continue;
+        if (!eligibleForRepeat(rule, lead, todayKey)) continue;
+        if (alreadyFiredToday(rule, lead, todayKey))  continue;
+        // DEDUP FIX: belt-and-suspenders check against templateHistory
+        if (await alreadySentViaTemplateHistory(lead._id, rule, todayKey)) continue;
+
+        const result = await fireRule(rule, lead, company, todayKey);
+        _logNurtureResult(lead, rule, result); // fire-and-forget, never blocks the cron loop
+        if (result.status === "sent") totalSent++;
+      }
     }
   }
 
   if (totalSent) {
-    console.log(`[nurtureSequence] Cron run complete — sent ${totalSent} message(s).`);
+    console.log(`[nurtureSequence] Cron run complete — sent ${totalSent} message(s) across ${companyIds.length} compan${companyIds.length === 1 ? "y" : "ies"}.`);
   }
   return { sent: totalSent };
 }
@@ -549,16 +580,25 @@ async function triggerNurtureForLead(leadId, newStatus) {
 
   const todayKey = istDayKey();
 
+  // Load the lead first — its company isn't known until we do, so the
+  // entitlement check below is a second query rather than a filter here.
   const lead = await Lead.findOne({
     _id:        leadId,
-    company:    ENABLED_COMPANY_ID,
     isClosed:   { $ne: true },
     mergedInto: null,
   })
     .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user industry service businessName campaign adSetName")
     .lean();
 
-  if (!lead) return; // not this company's lead, or not found
+  if (!lead) return; // not found
+
+  const companyIdStr = String(lead.company?._id || lead.company || "");
+  if (!companyIdStr) return;
+
+  // Multi-tenant entitlement check — same flag the cron gate and the
+  // /api/nurture/* routes already enforce.
+  const ents = await getCompanyEntitlements(companyIdStr).catch(() => null);
+  if (!ents?.leadNurtureSequence) return; // this company isn't nurture-enabled
 
   // Use newStatus (the incoming value) for stage matching since the DB may
   // not yet reflect the update when this fires
@@ -566,9 +606,8 @@ async function triggerNurtureForLead(leadId, newStatus) {
 
   if (isManualOrImported(leadWithNewStatus)) return;
 
-
-  const rules = await NurtureRule.find({ company: ENABLED_COMPANY_ID, enabled: true }).lean();
-  const company = await Company.findById(ENABLED_COMPANY_ID).select("name _id").lean();
+  const rules = await NurtureRule.find({ company: lead.company, enabled: true }).lean();
+  const company = await Company.findById(lead.company).select("name _id").lean();
   if (!company) return;
 
   for (const rule of rules) {
@@ -604,7 +643,18 @@ function startNurtureSequenceJob() {
     { timezone: IST_TIMEZONE }
   );
 
-  console.log("✅ Nurture sequence job started (11:00 AM IST daily, company 6a22662b7aea6e4034f44aae).");
+  console.log("✅ Nurture sequence job started (11:00 AM IST daily, multi-tenant — every company with leadNurtureSequence enabled).");
 }
 
-module.exports = { startNurtureSequenceJob, runNurtureSequenceCheck, triggerNurtureForLead, NURTURE_COMPANY_ID: ENABLED_COMPANY_ID };
+module.exports = {
+  startNurtureSequenceJob,
+  runNurtureSequenceCheck,
+  triggerNurtureForLead,
+  // Deprecated: nurture is multi-tenant now (see getNurtureEnabledCompanyIds
+  // above), so there is no longer a single "the" nurture company. Kept as
+  // null (rather than removed) so the existing destructured import in
+  // leadController.js doesn't throw — the `=== NURTURE_COMPANY_ID` bypass
+  // there now simply never matches, which is correct: that company's real
+  // entitlement flag (ents?.leadNurtureSequence) already gates it on its own.
+  NURTURE_COMPANY_ID: null,
+};
