@@ -87,6 +87,39 @@ const leadSchema = mongoose.Schema(
             sentAt:       { type: Date,   default: Date.now },
             channel:      { type: String, default: "whatsapp" },
             status:       { type: String, default: "sent" }, // "sent" | "failed"
+            // The actual rendered message text that was sent (template body
+            // with {{1}}/{{2}}… placeholders filled in with this lead's real
+            // values), so "Templates Sent" views can show WHAT was said, not
+            // just the template's internal name. Best-effort: populated when
+            // the sender can resolve the template's cached body text (see
+            // utils/templateContentResolver.js); left blank for older sends
+            // recorded before this field existed.
+            content:      { type: String, default: "" },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
+
+    // ── Telegram notification log ─────────────────────────────────────────────
+    // Every Telegram notification actually fired for this lead (new-lead alert
+    // to admins, or "lead assigned to you" alert to the employee), so the lead's
+    // chronological journey can show exactly when — and to whom — a Telegram
+    // ping went out, alongside calls and template sends. Recorded by
+    // services/telegramService.js. Fire-and-forget: a logging failure here must
+    // never block or fail the actual notification send.
+    telegramNotifications: {
+      type: [
+        new mongoose.Schema(
+          {
+            // "employee_assigned" | "campaign_admin" | "campaign_company"
+            type:          { type: String, required: true },
+            recipientName: { type: String, default: "" },
+            recipientRole: { type: String, default: "" }, // "employee" | "admin"
+            sentAt:        { type: Date,   default: Date.now },
+            status:        { type: String, default: "sent" }, // "sent" | "failed"
+            detail:        { type: String, default: "" },
           },
           { _id: false }
         ),
