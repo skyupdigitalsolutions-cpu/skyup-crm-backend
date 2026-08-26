@@ -8,6 +8,19 @@ const crypto = require("crypto");
 const WhatsAppMessage = require("../models/WhatsAppMessage");
 const WhatsAppSendLog  = require("../models/WhatsAppSendLog");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
+const { extractBodyText, substitute } = require("../utils/templateContentResolver");
+
+// ── Resolve a template's cached body text ONCE per batch, so every recipient
+// in a bulk/CSV/employee blast just does a cheap string substitution instead
+// of a DB lookup per-lead. Returns "" if the template isn't cached yet.
+async function _resolveBatchBodyText(companyId, templateName) {
+  try {
+    const tplDoc = await WhatsAppTemplate.findOne({ company: companyId, name: String(templateName || "").trim() }).lean();
+    return extractBodyText(tplDoc);
+  } catch {
+    return "";
+  }
+}
 const Lead = require("../models/Leads");
 const { normalizePhone: _sharedNormalizePhone } = require("../utils/normalizePhone");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
@@ -1031,6 +1044,10 @@ const _sendTemplateToPhone = async ({
 async function _logWaSendBatch({ companyId, channel, templateName, languageCode, sentByAdmin, sentByUser, sentByName, campaign, results }) {
   try {
     if (!results?.length) return;
+    // Resolve the template's real body text once for the whole batch, then
+    // substitute each recipient's own name — so "what did we send" shows the
+    // actual message, not just the template's internal name.
+    const bodyText = await _resolveBatchBodyText(companyId, templateName);
     const docs = results.map((r) => ({
       company: companyId,
       lead: r.leadId || null,
@@ -1038,6 +1055,9 @@ async function _logWaSendBatch({ companyId, channel, templateName, languageCode,
       name: r.name || "",
       templateName,
       languageCode,
+      content: bodyText
+        ? substitute(bodyText, { 1: r.name || "" })
+        : (r.status === "sent" ? `Message sent to ${r.name || "the lead"} (template: ${templateName})` : ""),
       channel,
       status: r.status === "sent" ? "sent" : r.status === "skipped" ? "skipped" : "failed",
       reason: r.reason || "",
@@ -1060,8 +1080,12 @@ const _saveConversationAndMessage = async ({
   leadId,
   templateName,
   waMessageId,
+  content, // optional: real rendered template text, when resolvable
 }) => {
-  const templatePreview = `[Template: ${templateName}]`;
+  // Prefer the real rendered content (so the conversation thread shows what
+  // was actually said) — fall back to the old "[Template: name]" placeholder
+  // when the template body isn't cached yet.
+  const templatePreview = content || `[Template: ${templateName}]`;
   let conversation = await resolveCanonicalConversation({
     leadId: leadId || null,
     phoneVariants: [cleanPhone],
@@ -1161,6 +1185,10 @@ const bulkSendToLeads = async (req, res) => {
     let sent = 0,
       failed = 0;
 
+    // Resolve the template's real body text ONCE for the whole blast, then
+    // substitute each lead's own name — avoids a DB lookup per recipient.
+    const bulkBodyText = await _resolveBatchBodyText(companyId, templateName);
+
     for (const lead of leads) {
       const cleanPhone = normalizePhone(lead.mobile);
       if (cleanPhone.length < 10) {
@@ -1192,6 +1220,7 @@ const bulkSendToLeads = async (req, res) => {
           leadId: lead._id,
           templateName,
           waMessageId,
+          content: bulkBodyText ? substitute(bulkBodyText, { 1: lead.name || "" }) : "",
         });
         results.push({
           leadId: lead._id,
@@ -1264,6 +1293,9 @@ const bulkSendCSV = async (req, res) => {
     let sent = 0,
       failed = 0;
 
+    // Resolve the template's real body text ONCE for the whole CSV batch.
+    const csvBodyText = await _resolveBatchBodyText(companyId, templateName);
+
     for (const recipient of recipients) {
       const cleanPhone = normalizePhone(recipient.phone);
       const contactName = recipient.name || "";
@@ -1297,6 +1329,7 @@ const bulkSendCSV = async (req, res) => {
           leadId: lead?._id || null,
           templateName,
           waMessageId,
+          content: csvBodyText ? substitute(csvBodyText, { 1: contactName || "" }) : "",
         });
         results.push({ name: contactName, phone: cleanPhone, status: "sent" });
         sent++;
@@ -1534,6 +1567,9 @@ const employeeBulkSend = async (req, res) => {
     let sent = 0,
       failed = 0;
 
+    // Resolve the template's real body text ONCE for the whole employee blast.
+    const empBodyText = await _resolveBatchBodyText(companyId, templateName);
+
     for (const lead of leads) {
       const cleanPhone = normalizePhone(lead.mobile);
       if (cleanPhone.length < 10) {
@@ -1565,6 +1601,7 @@ const employeeBulkSend = async (req, res) => {
           leadId: lead._id,
           templateName,
           waMessageId,
+          content: empBodyText ? substitute(empBodyText, { 1: lead.name || "" }) : "",
         });
         results.push({
           leadId: lead._id,
