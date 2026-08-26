@@ -206,9 +206,37 @@ const getAIReport = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/lead/:leadId/timeline  (and /api/lead/admin/:leadId/timeline)
+// Full chronological journey for one lead: new-lead arrival, template sends
+// (with rendered content), Telegram notifications, calls, follow-ups,
+// meetings, stage changes and the WhatsApp conversation thread — everything
+// merged and sorted by actual date/time. Powers the "Lead Journey Timeline"
+// view in Lead Insights / the lead drawer.
+// ─────────────────────────────────────────────────────────────────────────────
+const getLeadTimeline = async (req, res) => {
+  try {
+    const companyId = getCompanyId(req);
+    if (!companyId) return res.status(401).json({ success: false, message: "Unauthorized" });
+
+    await verifyLeadCompany(req.params.leadId, companyId);
+
+    const { timeline } = await buildLeadTimeline(req.params.leadId, companyId);
+
+    return res.json({ success: true, timeline });
+  } catch (err) {
+    console.error("[leadAI:timeline]", err.message);
+    return res.status(err.message.includes("access denied") ? 403 : 500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
 module.exports = {
   getAIAnalysis,
   createAIAnalysis,
   reanalyzeAIAnalysis,
   getAIReport,
+  getLeadTimeline,
 };
