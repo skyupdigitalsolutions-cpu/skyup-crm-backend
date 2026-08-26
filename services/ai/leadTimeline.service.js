@@ -26,6 +26,16 @@ async function buildLeadTimeline(leadId, companyId) {
 
   const timeline = [];
 
+  // ── 1b. Lead created — always the first event in the journey ──────────────
+  timeline.push({
+    type:        "LEAD_CREATED",
+    date:        lead.createdAt || lead.date,
+    referenceId: null,
+    source:      lead.source   || "",
+    campaign:    lead.campaign || "",
+    initialRemark: lead.initialRemark || lead.remark || "",
+  });
+
   // ── 2. Call history (embedded) ────────────────────────────────────────────
   for (const ch of lead.callHistory || []) {
     timeline.push({
@@ -82,6 +92,25 @@ async function buildLeadTimeline(leadId, companyId) {
       templateName: th.templateName || "",
       status:       th.status  || "sent",
       channel:      th.channel || "whatsapp",
+      // Rendered message text (template body with this lead's values filled
+      // in), when it was resolvable at send time. See
+      // utils/templateContentResolver.js — blank for sends recorded before
+      // this field existed.
+      content:      th.content || "",
+    });
+  }
+
+  // ── 5b. Telegram notifications (embedded telegramNotifications) ───────────
+  for (const tn of lead.telegramNotifications || []) {
+    timeline.push({
+      type:          "TELEGRAM_NOTIFICATION",
+      date:          tn.sentAt,
+      referenceId:   null,
+      notificationType: tn.type          || "",
+      recipientName: tn.recipientName    || "",
+      recipientRole: tn.recipientRole    || "",
+      status:        tn.status           || "sent",
+      detail:        tn.detail           || "",
     });
   }
 
@@ -181,6 +210,7 @@ async function buildLeadTimeline(leadId, companyId) {
       scheduledCalls:   lead.scheduledCalls   || [],
       meetingRemarks:   lead.meetingRemarks   || [],
       templateHistory:  lead.templateHistory  || [],
+      telegramNotifications: lead.telegramNotifications || [],
       waMessages,
       waConversation,
       transcribedCalls,
