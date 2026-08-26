@@ -44,7 +44,7 @@ const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 const IST_TIMEZONE = "Asia/Kolkata";
 
 // ── Single company gate ───────────────────────────────────────────────────────
-const ENABLED_COMPANY_ID = "6a22662b7aea6e4034f44aae";
+const ENABLED_COMPANY_ID =null;
 
 // "Not Interested" leads are hard-skipped globally — never receive nurture messages.
 // "Converted" is NOT skipped here; it can still receive Action-stage messages
