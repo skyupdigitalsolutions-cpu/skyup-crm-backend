@@ -34,6 +34,12 @@ const whatsAppSendLogSchema = new mongoose.Schema(
     templateName: { type: String, default: "" },
     languageCode: { type: String, default: "" },
 
+    // Best-effort rendered message text (template body with placeholders
+    // filled in) — lets the send-log report show WHAT was sent, not just
+    // the template's internal name. Blank when the template body couldn't
+    // be resolved from the cached WhatsAppTemplate at send time.
+    content: { type: String, default: "" },
+
     channel: {
       type: String,
       enum: ["blast", "blast-csv", "employee-blast", "nurture", "manual"],
