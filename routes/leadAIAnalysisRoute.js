@@ -13,6 +13,7 @@ const {
   createAIAnalysis,
   reanalyzeAIAnalysis,
   getAIReport,
+  getLeadTimeline,
 } = require("../controllers/leadAIAnalysisController");
 
 const { protectAdmin }   = require("../middlewares/adminAuthMiddleware");
@@ -40,6 +41,22 @@ router.get(
   validateObjectId("leadId"),
   (req, res, next) => { req.params.leadId = req.params.leadId; next(); },
   getAIAnalysis
+);
+
+// Full chronological journey timeline (lead created → templates → telegram
+// notifications → calls → follow-ups → meetings → status changes)
+router.get(
+  "/:leadId/timeline",
+  protect,
+  validateObjectId("leadId"),
+  getLeadTimeline
+);
+
+router.get(
+  "/admin/:leadId/timeline",
+  protectAdmin,
+  validateObjectId("leadId"),
+  getLeadTimeline
 );
 
 // Trigger new analysis
