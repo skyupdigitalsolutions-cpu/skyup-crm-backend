@@ -18,6 +18,42 @@ const SmsLog         = require("../models/SmsLog");
 const Lead           = require("../models/Leads");
 const WhatsAppSendLog = require("../models/WhatsAppSendLog");
 const { resolveTemplateContent } = require("../utils/templateContentResolver");
+const { buildTemplateName } = require("../utils/templateNameResolver");
+
+// ── Guard against a static template name that belongs to a DIFFERENT
+// industry/service than the lead it's about to be sent to ────────────────────
+//
+// autoSendTemplates(), outcomeAutomationService.js, followUpReminderJob.js,
+// and sendInterestedBlast() all pass a fixed, admin-configured template name
+// (e.g. Company.autoTemplate.whatsapp.templateName) with NO per-lead
+// resolution — that field was designed for a single generic message like
+// "crm_followup_leads", sent to every new lead regardless of vertical.
+//
+// If an admin instead configures one of the 1,760 industry×service auto-
+// resolve library names there (e.g. "digital_marketing_crm_awareness_v2" —
+// easy to do by accident, since it's a real, approved, copy-pasteable
+// template name), this fixed-name path has always sent it to EVERY lead
+// unconditionally, regardless of that lead's actual industry/service. This
+// check recognises the auto-resolve naming pattern and blocks the send
+// unless it genuinely matches the lead's own tagged industry/service.
+//
+// A configured name that does NOT match the auto-resolve pattern at all
+// (e.g. "crm_followup_leads") is untouched — this only fires for names that
+// look like they came from the industry×service library.
+const AUTO_LIB_NAME_RE = new RegExp(`_(awareness|interest|desire|action)_v(\\d+)$`, "i");
+
+function staticTemplateMismatchesLeadVertical(templateName, lead) {
+  const name = String(templateName || "").trim().toLowerCase();
+  const match = AUTO_LIB_NAME_RE.exec(name);
+  if (!match) return false; // doesn't look like an auto-resolve library name — nothing to check
+
+  const [, stage, variation] = match;
+  const expected = buildTemplateName(lead?.industry, lead?.service, stage, variation);
+  // expected === "" when the lead has no industry/service at all — that's
+  // still a mismatch (an industry-specific template can't be right for an
+  // untagged lead), same as expected being a different vertical entirely.
+  return expected !== name;
+}
 
 // Append a WhatsApp template send to the lead's templateHistory (shown in the
 // Update Lead popup). Fire-and-forget — never blocks or throws into the caller.
@@ -25,7 +61,17 @@ const { resolveTemplateContent } = require("../utils/templateContentResolver");
 // Previously autoTemplateService only wrote to lead.templateHistory, so
 // new-lead sends (crm_followup_leads) and interested-blast sends were
 // completely invisible in the WhatsApp → Reports table.
-async function _logAutoTemplateSend({ lead, companyId, templateName, status, detail, content = "" }) {
+// channel/sentByName/ruleId/ruleName let each caller stamp its own correct
+// attribution on the ONE log row this function writes for a successful send.
+// Previously hardcoded to "Auto-template (New Lead)" regardless of who
+// actually triggered the send — so a nurture-rule send, an outcome-based
+// send (e.g. "Not Answered" → crm_call_missed), and a plain new-lead welcome
+// send were all indistinguishable in the report, and nurture additionally
+// wrote a SECOND log row of its own on top of this one for the same send.
+async function _logAutoTemplateSend({
+  lead, companyId, templateName, status, detail, content = "",
+  channel = "manual", sentByName = "Auto-template (New Lead)", ruleId = null, ruleName = "",
+}) {
   try {
     await WhatsAppSendLog.create({
       company:      companyId,
@@ -35,10 +81,11 @@ async function _logAutoTemplateSend({ lead, companyId, templateName, status, det
       templateName: templateName || '',
       languageCode: 'en',
       content:      content || '',
-      channel:      'manual',      // auto-template sends use 'manual' channel slot
+      channel,
       status:       status === 'sent' ? 'sent' : status === 'skipped' ? 'skipped' : 'failed',
       reason:       detail || '',
-      sentByName:   'Auto-template (New Lead)',
+      sentByName,
+      ...(ruleId ? { ruleId, ruleName } : {}),
     });
   } catch (err) {
     console.warn('[autoTemplate] WhatsAppSendLog write failed:', err.message);
@@ -134,6 +181,41 @@ async function sendSmartEmail({ to, toName, subject, html, fromName, companyId }
 // ─── 1. WhatsApp ─────────────────────────────────────────────────────────────
 async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
   const { templateName = "crm_followup_leads", languageCode = "en" } = whatsappSettings;
+
+  // Block a configured static template that belongs to a different
+  // industry/service than this lead — see staticTemplateMismatchesLeadVertical
+  // above. Safe to apply to every caller including nurture's own
+  // auto-resolved sends: those names are built from THIS SAME lead's
+  // industry/service via the identical buildTemplateName() formula, so they
+  // can never mismatch themselves — this only ever fires for a static,
+  // admin-configured name that doesn't match.
+  if (staticTemplateMismatchesLeadVertical(templateName, lead)) {
+    console.warn(
+      `[autoTemplate] ⚠️ Blocked — configured template "${templateName}" belongs to a ` +
+      `different industry/service than lead ${lead?._id} (industry="${lead?.industry || "(none)"}", ` +
+      `service="${lead?.service || "(none)"}"). Check Communications → Auto-Template / ` +
+      `Interested-Blast / Follow-up settings for a misconfigured template name.`
+    );
+    return {
+      channel: "whatsapp",
+      status: "skipped",
+      detail: `Template "${templateName}" is from a different industry/service than this lead — check your automation settings.`,
+    };
+  }
+
+  // Attribution for the ONE log row this function writes on a successful
+  // send. Each caller passes its own values so the report shows who/what
+  // actually triggered the send instead of a hardcoded "New Lead" label —
+  // e.g. nurtureSequenceJob.js passes channel="nurture" + the rule's
+  // id/name, and no longer needs a second logging call of its own for the
+  // "sent" case, which is what caused nurture sends to show up twice in the
+  // WhatsApp send-log report.
+  const {
+    logChannel = "manual",
+    logSentByName = "Auto-template (New Lead)",
+    logRuleId = null,
+    logRuleName = "",
+  } = whatsappSettings;
 
   console.log(`[autoTemplate] WA → looking up WhatsAppConfig for company ${companyId}`);
 
@@ -301,7 +383,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
           : `Message sent to ${components.body_1?.value || "the lead"} (template: ${templateName})`,
       });
       recordTemplateHistory(lead, templateName, "sent", content);
-      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} using template "${templateName}"`, content });
+      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} using template "${templateName}"`, content, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
       return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} using template "${templateName}"`, templateName, content };
     } catch (err) {
       const detail = JSON.stringify(err?.response?.data || err.message);
@@ -333,7 +415,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         fallbackText: `Message sent to ${lead.name || "the lead"} via Meta (template: ${templateName})`,
       });
       recordTemplateHistory(lead, templateName, "sent", content);
-      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, content });
+      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, content, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
       return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, templateName, content };
     } catch (err) {
       const detail = JSON.stringify(err?.response?.data || err.message);
