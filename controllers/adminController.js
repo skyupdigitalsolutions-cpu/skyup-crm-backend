@@ -5,6 +5,7 @@ const User    = require("../models/Users");
 const Lead    = require("../models/Leads");
 const Company = require("../models/Company");
 const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
+const { looksLikeAutoResolvedName } = require("../utils/templateNameResolver");
 const { logAuditEvent } = require("../utils/auditLogger");
 const multer  = require("multer");
 const path    = require("path");
@@ -591,7 +592,21 @@ const updateAutoTemplateSettings = async (req, res) => {
     const update = {};
     if (whatsapp !== undefined) {
       if (typeof whatsapp.enabled      === "boolean") update["autoTemplate.whatsapp.enabled"]      = whatsapp.enabled;
-      if (whatsapp.templateName !== undefined)         update["autoTemplate.whatsapp.templateName"] = whatsapp.templateName;
+      if (whatsapp.templateName !== undefined) {
+        // Reject an industry-specific auto-resolve-library name here — this
+        // field is a SINGLE fixed template sent to every new lead regardless
+        // of industry/service, so a name like "digital_marketing_crm_
+        // awareness_v2" would blast that one vertical's message to everyone.
+        // (services/autoTemplateService.js also blocks this at send time as
+        // a safety net, but rejecting the save here stops it from ever being
+        // configured in the first place.)
+        if (looksLikeAutoResolvedName(whatsapp.templateName)) {
+          return res.status(400).json({
+            message: `"${whatsapp.templateName}" looks like an industry+service specific template from the auto-resolve library, not a generic one. This setting sends the SAME message to every new lead regardless of their industry — use a generic template (e.g. "crm_followup_leads") here instead. Industry-specific messaging belongs in Lead Nurture rules.`,
+          });
+        }
+        update["autoTemplate.whatsapp.templateName"] = whatsapp.templateName;
+      }
       if (whatsapp.languageCode !== undefined)         update["autoTemplate.whatsapp.languageCode"] = whatsapp.languageCode;
     }
     if (email !== undefined) {
@@ -635,7 +650,16 @@ const updateInterestedBlastSettings = async (req, res) => {
     const update = {};
     if (whatsapp !== undefined) {
       if (typeof whatsapp.enabled      === "boolean") update["interestedBlast.whatsapp.enabled"]      = whatsapp.enabled;
-      if (whatsapp.templateName !== undefined)         update["interestedBlast.whatsapp.templateName"] = whatsapp.templateName;
+      if (whatsapp.templateName !== undefined) {
+        // Same reasoning as updateAutoTemplateSettings above — this is one
+        // fixed message for every "Interested" lead regardless of vertical.
+        if (looksLikeAutoResolvedName(whatsapp.templateName)) {
+          return res.status(400).json({
+            message: `"${whatsapp.templateName}" looks like an industry+service specific template from the auto-resolve library, not a generic one. This setting sends the SAME message to every "Interested" lead regardless of their industry — use a generic template here instead. Industry-specific messaging belongs in Lead Nurture rules.`,
+          });
+        }
+        update["interestedBlast.whatsapp.templateName"] = whatsapp.templateName;
+      }
       if (whatsapp.languageCode !== undefined)         update["interestedBlast.whatsapp.languageCode"] = whatsapp.languageCode;
     }
     if (email !== undefined) {
