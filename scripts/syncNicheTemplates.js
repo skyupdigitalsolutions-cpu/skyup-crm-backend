@@ -40,11 +40,23 @@ async function run() {
   const { NICHES, STAGES, NICHE_VARIATION_COUNT, buildNicheTemplateName } = require("../utils/templateNameResolver");
 
   // ── Build the full list of the 144 expected niche template names ─────────
+  // Track which niche each name belongs to via a Map built in the SAME loop
+  // that generates the names — grouping by string-prefix matching afterward
+  // is unsafe, since several niches' real MSG91 prefixes (ai_automation,
+  // meta_googleads, socialmedia, videoediting, saanvi_voiceagent,
+  // whatsapp_bot) don't share a clean prefix with the plain niche id, and
+  // some (meta_googleads, socialmedia, videoediting) don't even start with
+  // it at all — a prior version of this script's per-niche breakdown got
+  // this wrong for exactly those three, always showing them as "0/0/0 ALL
+  // MISSING" regardless of their real, correct coverage.
   const expectedNames = [];
+  const nicheOfName = new Map();
   for (const niche of NICHES) {
     for (const stage of STAGES) {
       for (let v = 1; v <= NICHE_VARIATION_COUNT; v++) {
-        expectedNames.push(buildNicheTemplateName(niche, stage, v));
+        const name = buildNicheTemplateName(niche, stage, v);
+        expectedNames.push(name);
+        nicheOfName.set(name, niche);
       }
     }
   }
@@ -100,9 +112,13 @@ async function run() {
     // Per-niche breakdown — far more actionable than a flat list once
     // missing.length gets into the dozens: tells you exactly WHICH niches
     // still need content, not just how many template names overall.
+    // Grouped via nicheOfName (built alongside expectedNames above) — NOT
+    // string-prefix matching, since several niches' real MSG91 prefixes
+    // don't share a clean prefix with the plain niche id (see comment above
+    // expectedNames generation).
     console.log(`\n   Per-niche breakdown (out of ${STAGES.length * NICHE_VARIATION_COUNT} per niche):`);
     for (const niche of NICHES) {
-      const nicheNames = expectedNames.filter((n) => n.startsWith(`${niche}_`));
+      const nicheNames = expectedNames.filter((n) => nicheOfName.get(n) === niche);
       const nicheApproved = nicheNames.filter((n) => approved.includes(n)).length;
       const nicheNotApproved = nicheNames.filter((n) => notApproved.some((x) => x.name === n)).length;
       const nicheMissing = nicheNames.filter((n) => missing.includes(n)).length;
