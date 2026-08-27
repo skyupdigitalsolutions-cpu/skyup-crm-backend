@@ -59,7 +59,28 @@ const createRule = async (req, res) => {
       enabled: enabled !== false,
     });
 
-    res.status(201).json({ success: true, rule });
+    // Warn (don't block — a deliberate multi-touch sequence for one status is
+    // legitimate) when this creates a SECOND enabled rule for the same status
+    // stage. nurtureSequenceJob.js's dedup is keyed per-rule, so two rules
+    // targeting the same status independently evaluate — and independently
+    // log, sent or skipped — every matching lead. Surfacing this now, at
+    // creation time, beats discovering it later as hundreds of doubled rows
+    // in the WhatsApp send-log report.
+    let warning = null;
+    const stage = rule.action?.whatsapp?.statusStage;
+    if (stage && rule.enabled) {
+      const siblingCount = await NurtureRule.countDocuments({
+        company,
+        enabled: true,
+        _id: { $ne: rule._id },
+        "action.whatsapp.statusStage": stage,
+      });
+      if (siblingCount > 0) {
+        warning = `${siblingCount} other enabled rule(s) already target status "${stage}". Every lead in that status will be evaluated by all of them — if this isn't a deliberate multi-touch sequence, disable the extras.`;
+      }
+    }
+
+    res.status(201).json({ success: true, rule, warning });
   } catch (err) {
     console.error("[nurtureController.createRule]", err.message);
     res.status(500).json({ message: err.message });
@@ -79,7 +100,24 @@ const updateRule = async (req, res) => {
     );
     if (!rule) return res.status(404).json({ message: "Rule not found" });
 
-    res.json({ success: true, rule });
+    // Same warning as createRule — an update can just as easily introduce a
+    // duplicate-stage situation (e.g. re-enabling a previously-disabled rule,
+    // or changing statusStage to match an existing one).
+    let warning = null;
+    const stage = rule.action?.whatsapp?.statusStage;
+    if (stage && rule.enabled) {
+      const siblingCount = await NurtureRule.countDocuments({
+        company,
+        enabled: true,
+        _id: { $ne: rule._id },
+        "action.whatsapp.statusStage": stage,
+      });
+      if (siblingCount > 0) {
+        warning = `${siblingCount} other enabled rule(s) already target status "${stage}". Every lead in that status will be evaluated by all of them — if this isn't a deliberate multi-touch sequence, disable the extras.`;
+      }
+    }
+
+    res.json({ success: true, rule, warning });
   } catch (err) {
     console.error("[nurtureController.updateRule]", err.message);
     res.status(500).json({ message: err.message });
