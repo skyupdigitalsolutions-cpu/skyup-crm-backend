@@ -97,17 +97,31 @@ async function run() {
     console.log(`   ⚠️  Exists, not approved: ${notApproved.length}`);
     console.log(`   ❌ Missing entirely:  ${missing.length}`);
 
+    // Per-niche breakdown — far more actionable than a flat list once
+    // missing.length gets into the dozens: tells you exactly WHICH niches
+    // still need content, not just how many template names overall.
+    console.log(`\n   Per-niche breakdown (out of ${STAGES.length * NICHE_VARIATION_COUNT} per niche):`);
+    for (const niche of NICHES) {
+      const nicheNames = expectedNames.filter((n) => n.startsWith(`${niche}_`));
+      const nicheApproved = nicheNames.filter((n) => approved.includes(n)).length;
+      const nicheNotApproved = nicheNames.filter((n) => notApproved.some((x) => x.name === n)).length;
+      const nicheMissing = nicheNames.filter((n) => missing.includes(n)).length;
+      const flag = nicheMissing === nicheNames.length ? "❌ ALL MISSING"
+        : nicheMissing === 0 && nicheNotApproved === 0 ? "✅ complete"
+        : "⚠️  partial";
+      console.log(
+        `     ${niche.padEnd(10)} approved=${nicheApproved}  notApproved=${nicheNotApproved}  missing=${nicheMissing}   ${flag}`
+      );
+    }
+
     if (notApproved.length) {
-      console.log(`\n   Not-yet-approved:`);
+      console.log(`\n   Not-yet-approved (full list):`);
       notApproved.forEach(({ name, status }) => console.log(`     - ${name} (status: ${status})`));
     }
 
-    if (missing.length && missing.length <= 20) {
-      console.log(`\n   Missing:`);
+    if (missing.length) {
+      console.log(`\n   Missing (full list, ${missing.length}):`);
       missing.forEach((name) => console.log(`     - ${name}`));
-    } else if (missing.length) {
-      console.log(`\n   Missing (first 20 of ${missing.length}):`);
-      missing.slice(0, 20).forEach((name) => console.log(`     - ${name}`));
     }
   }
 
