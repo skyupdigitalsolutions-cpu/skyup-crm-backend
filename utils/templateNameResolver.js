@@ -86,6 +86,120 @@ function canResolve(lead) {
   return !!(lead && slug(lead.industry) && slug(lead.service));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NICHE FALLBACK LIBRARY — for leads that have no industry+service pair.
+//
+// Previously such leads were hard-skipped from nurture entirely (see
+// jobs/nurtureSequenceJob.js) — no industry/service meant no message, ever,
+// until someone tagged the lead. This is a second, smaller library that
+// takes over automatically instead, so untagged leads still get something:
+//
+//   • Lead has a SERVICE tagged (industry missing) → the niche matched to
+//     that service (e.g. service="CRM" → "crm_awareness_v1")
+//   • Lead has NEITHER tagged → the "general" niche (e.g. "general_awareness_v1")
+//
+// NAMING: "{niche}_{stage}_v{n}" — deliberately no prefix. Niche slugs are
+// single words (general, ai, crm, saanvi, website, ads, social, video,
+// whatsapp) and no real industry+service slug combination ever collapses to
+// just one of these words, so there's no collision risk with the real
+// 1,760-template library's "{industry}_{service}_{stage}_v{n}" names.
+//
+// These 9 niches come from SkyUp's own AIDA outreach template set (9
+// niches × 4 stages × 4 variations = 144 templates) — same stage structure
+// and {{1}}/{{2}} placeholder convention as the real library, just generic
+// copy instead of industry-specific copy. They must be created and approved
+// in MSG91 under this exact naming before this fallback can actually send —
+// this resolver only builds names, fireRule() already verifies a resolved
+// name exists and is approved before spending a send, so an unsynced/
+// unapproved niche template cleanly skips rather than failing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const NICHES = [
+  "general", "ai", "crm", "saanvi", "website", "ads", "social", "video", "whatsapp",
+];
+
+// How many variations exist per niche/stage today (the AIDA template set has
+// 4 per stage, not 5 — kept separate from the real library's variationCount
+// so a rule doesn't try to build "..._v5" for a niche that only goes to v4).
+const NICHE_VARIATION_COUNT = 4;
+
+// Maps a lead's SERVICES value to the niche with matching content. SEO and
+// Graphic Design have no dedicated niche in the AIDA set, so they fall back
+// to "general" rather than guessing an unrelated niche.
+const SERVICE_TO_NICHE = {
+  "SEO":                            "general",
+  "Paid Ads":                       "ads",
+  "Website Design & Development":   "website",
+  "AI Automation":                  "ai",
+  "CRM":                            "crm",
+  "Video Editing":                  "video",
+  "Graphic Design":                 "general",
+  "Social Media Marketing":         "social",
+};
+
+/**
+ * Build a niche fallback template name.
+ * @param {string} niche     one of NICHES
+ * @param {string} stage     awareness | interest | desire | action
+ * @param {number} variation 1-based (1–4)
+ */
+function buildNicheTemplateName(niche, stage, variation) {
+  const n  = slug(niche) || "general";
+  const st = String(stage || "").toLowerCase().trim();
+  const v  = Number(variation) || 1;
+  if (!st) return "";
+  return `${n}_${st}_v${v}`;
+}
+
+/**
+ * Which niche to use for a lead that's missing industry+service, based on
+ * whatever IS known about them. Never returns null — "general" is always a
+ * valid fallback-of-last-resort.
+ */
+function nicheForLead(lead) {
+  const service = String(lead?.service || "").trim();
+  return SERVICE_TO_NICHE[service] || "general";
+}
+
+/**
+ * The single entry point nurture should call instead of resolveForLead()
+ * directly — always returns SOMETHING resolvable, in priority order:
+ *   1. industry + service both tagged → the real 1,760-template library
+ *   2. service only tagged            → the niche matched to that service
+ *   3. neither tagged                 → the "general" niche
+ *
+ * The returned `variationCount` tells the caller which cycle length to use
+ * for this lead (5 for the real library, 4 for any niche fallback) — pass
+ * it into nextVariationIndex() instead of the rule's own variationCount
+ * when tier !== "industry_service".
+ *
+ * @param {object} lead
+ * @param {string} stage      awareness | interest | desire | action
+ * @param {number} variation  1-based, already computed by the caller for
+ *                            whichever tier this resolves to
+ * @returns {{ templateName: string, tier: "industry_service"|"service_niche"|"general_niche" }}
+ */
+function resolveWithFallback(lead, stage, variation) {
+  if (canResolve(lead)) {
+    return {
+      templateName: buildTemplateName(lead.industry, lead.service, stage, variation),
+      tier: "industry_service",
+      variationCount: 5,
+    };
+  }
+
+  const service = String(lead?.service || "").trim();
+  const niche = SERVICE_TO_NICHE[service] || "general";
+  return {
+    templateName: buildNicheTemplateName(niche, stage, variation),
+    // "service_niche" only when the lead's service is a recognised SERVICES
+    // value (even if that service happens to map to "general" itself, e.g.
+    // SEO/Graphic Design) — "general_niche" means we know nothing at all.
+    tier: SERVICE_TO_NICHE[service] ? "service_niche" : "general_niche",
+    variationCount: NICHE_VARIATION_COUNT,
+  };
+}
+
 /**
  * True when a template name matches the auto-resolve library's naming
  * pattern (…_<stage>_v<n>) — i.e. it looks like it was generated for one
@@ -107,6 +221,13 @@ module.exports = {
   resolveForLead,
   canResolve,
   looksLikeAutoResolvedName,
+  // Niche fallback library
+  NICHES,
+  NICHE_VARIATION_COUNT,
+  SERVICE_TO_NICHE,
+  buildNicheTemplateName,
+  nicheForLead,
+  resolveWithFallback,
   STAGES,
   INDUSTRIES,
   SERVICES,
