@@ -86,11 +86,27 @@ function canResolve(lead) {
   return !!(lead && slug(lead.industry) && slug(lead.service));
 }
 
+/**
+ * True when a template name matches the auto-resolve library's naming
+ * pattern (…_<stage>_v<n>) — i.e. it looks like it was generated for one
+ * SPECIFIC industry+service combo, not a generic, works-for-everyone
+ * template. Used to stop an admin from accidentally pasting one of the
+ * 1,760 industry-specific names into a setting that's meant to hold ONE
+ * fixed message sent to every lead regardless of vertical (Auto-Template,
+ * Interested-Blast, Follow-up Reminder) — see services/autoTemplateService.js
+ * staticTemplateMismatchesLeadVertical() for the runtime send-time guard
+ * this pairs with.
+ */
+function looksLikeAutoResolvedName(name) {
+  return new RegExp(`_(${STAGES.join("|")})_v\\d+$`, "i").test(String(name || "").trim());
+}
+
 module.exports = {
   slug,
   buildTemplateName,
   resolveForLead,
   canResolve,
+  looksLikeAutoResolvedName,
   STAGES,
   INDUSTRIES,
   SERVICES,
