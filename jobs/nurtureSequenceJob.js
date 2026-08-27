@@ -53,7 +53,7 @@ const Company     = require("../models/Company");
 const NurtureRule = require("../models/NurtureRule");
 const WhatsAppSendLog = require("../models/WhatsAppSendLog");
 const { sendAutoWhatsApp } = require("../services/autoTemplateService");
-const { resolveForLead, canResolve } = require("../utils/templateNameResolver");
+const { resolveForLead, canResolve, resolveWithFallback, NICHE_VARIATION_COUNT } = require("../utils/templateNameResolver");
 const { findTemplate } = require("../services/msg91TemplateService");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 const { getCompanyEntitlements } = require("../services/entitlementService");
@@ -164,34 +164,54 @@ function resolveNextVariation(rule, lead) {
   // Build the template name from the lead's own industry + service instead of
   // reading a hardcoded list. Still cycles V1→V5 and resets on stage change,
   // so the variation bookkeeping below is shared by both modes.
-  // Use per-lead funnelStageOverride if set (auto-progressed by stageProgressor.service.js)
-  const effectiveFunnelStage = lead.funnelStageOverride || wa.funnelStage;
-  const autoMode = !!wa.autoResolveTemplate && !!effectiveFunnelStage;
-  if (autoMode) {
-    if (!canResolve(lead)) {
-      // Lead has no industry/service set — we cannot resolve a meaningful template.
-      // Hard stop: return null so fireRule() skips this lead entirely.
-      // Previously this fell through to templateVariations/templateName and sent a
-      // random generic template to untagged leads — that behaviour is now blocked.
+  //
+  // IMPORTANT: gate this on wa.autoResolveTemplate ALONE, not combined with
+  // funnelStage being non-empty. A prior version gated on both — so a rule
+  // saved with autoResolveTemplate=true but an accidentally-empty funnelStage
+  // fell straight through to the static templateName/templateVariations
+  // fallback below, completely bypassing the industry/service check for
+  // EVERY lead matching that rule's status. That's how a single static,
+  // industry-specific-looking template (e.g. "digital_marketing_crm_
+  // awareness_v2") could get sent to leads with no industry/service tagged
+  // at all — the fallback branch was never meant to be reachable for a rule
+  // explicitly configured as auto-resolve, only for genuinely manual rules.
+  if (wa.autoResolveTemplate) {
+    const effectiveFunnelStage = lead.funnelStageOverride || wa.funnelStage;
+
+    if (!effectiveFunnelStage) {
       console.warn(
-        `[NurtureJob] Skipped lead ${lead._id} — no industry/service set, ` +
-        `cannot resolve "${wa.funnelStage}" template. Set industry+service on the lead to enable nurture.`
+        `[NurtureJob] Rule "${rule.name}" has autoResolveTemplate=true but no ` +
+        `funnelStage configured — skipping lead ${lead._id}. Set a funnel stage ` +
+        `on this rule; it will never fall back to a static template.`
       );
-      return { templateName: null, nextIndex: -1, skippedNoIndustry: true };
-    } else {
-      const count = Math.max(1, Number(wa.variationCount) || 5);
-      const idx   = nextVariationIndex(rule, lead, count);
-      const templateName = resolveForLead(lead, effectiveFunnelStage, idx + 1);
-      return { templateName, nextIndex: idx, autoResolved: true };
+      return { templateName: null, nextIndex: -1, skippedNoFunnelStage: true };
     }
+
+    // A lead with no industry+service no longer gets hard-skipped — it now
+    // falls through to the niche fallback library instead (matched to the
+    // lead's service if that alone is set, else the "general" niche), so
+    // untagged leads still receive nurture instead of nothing at all. See
+    // resolveWithFallback() in templateNameResolver.js for the 3-tier
+    // priority order.
+    //
+    // The cycle LENGTH depends on which tier this lead resolves to — the
+    // real 1,760-template library has 5 variations per stage, the niche
+    // fallback library only has 4 — so the count must be picked BEFORE
+    // computing the variation index, using the exact same canResolve()
+    // check resolveWithFallback() uses internally to choose a tier.
+    const count = canResolve(lead)
+      ? Math.max(1, Number(wa.variationCount) || 5)
+      : NICHE_VARIATION_COUNT;
+    const idx = nextVariationIndex(rule, lead, count);
+    const { templateName, tier } = resolveWithFallback(lead, effectiveFunnelStage, idx + 1);
+    return { templateName, nextIndex: idx, autoResolved: true, resolutionTier: tier };
   }
 
+  // ── STATIC MODE — only reached when autoResolveTemplate is explicitly
+  // false. Never a fallback for a misconfigured auto-resolve rule (see above).
   const variations = wa.templateVariations;
   if (!Array.isArray(variations) || variations.length === 0) {
     // No variation list — use the single fallback templateName on the rule.
-    // For auto-resolve rules with untagged leads this is the last resort;
-    // set action.whatsapp.templateName on the rule to a generic template
-    // (e.g. "generic_awareness_v1") so these leads still get nurtured.
     return { templateName: wa.templateName || "", nextIndex: 0 };
   }
 
@@ -327,9 +347,18 @@ function eligibleForRepeat(rule, lead, todayKey) {
 // ── Fire a rule for a lead ────────────────────────────────────────────────────
 
 // Persist the outcome so the "sent template report" (WhatsApp send-log) shows
-// nurture sends alongside manual blasts — previously this only ever produced
-// a console.log line that vanished into server logs.
+// nurture sends alongside manual blasts.
+//
+// Only writes for "skipped"/"failed" outcomes now — those happen BEFORE
+// sendAutoWhatsApp() is ever called (e.g. no template resolved, dedup hit,
+// template not approved), so nothing else logs them. A "sent" outcome is
+// skipped here deliberately: sendAutoWhatsApp() already writes the one log
+// row for that send itself now (with channel="nurture" and this rule's
+// id/name, passed through via whatsappSettings.logChannel/logRuleId/
+// logRuleName below) — writing a second row here for "sent" was producing
+// two identical-looking rows in the report for every single real send.
 async function _logNurtureResult(lead, rule, result) {
+  if (result.status === "sent") return;
   try {
     await WhatsAppSendLog.create({
       company: lead.company,
@@ -340,7 +369,7 @@ async function _logNurtureResult(lead, rule, result) {
       languageCode: "en",
       content:      result.content || "",
       channel: "nurture",
-      status: result.status === "sent" ? "sent" : result.status === "skipped" ? "skipped" : "failed",
+      status: result.status === "skipped" ? "skipped" : "failed",
       reason: result.detail || "",
       sentByName: "Nurture automation",
       ruleId: rule._id,
@@ -387,12 +416,12 @@ async function fireRule(rule, lead, company, todayKey) {
     return { status: "skipped", detail: "WhatsApp not enabled on rule" };
   }
 
-  const { templateName, nextIndex, autoResolved, skippedNoIndustry } = resolveNextVariation(rule, lead);
+  const { templateName, nextIndex, autoResolved, resolutionTier, skippedNoFunnelStage } = resolveNextVariation(rule, lead);
   if (!templateName) {
     return {
       status: "skipped",
-      detail: skippedNoIndustry
-        ? "No industry/service on lead — nurture blocked for untagged leads"
+      detail: skippedNoFunnelStage
+        ? `Rule "${rule.name}" has no funnel stage configured — fix the rule, not the lead`
         : "No template name resolved",
     };
   }
@@ -489,6 +518,10 @@ async function fireRule(rule, lead, company, todayKey) {
     return { status: "skipped", detail: "Already fired today (atomic claim lost)" };
   }
 
+  const tierSuffix = resolutionTier === "service_niche" ? " (service niche fallback)"
+    : resolutionTier === "general_niche" ? " (general niche fallback)"
+    : "";
+
   const result = await sendAutoWhatsApp({
     companyId:        company._id,
     lead,
@@ -496,6 +529,15 @@ async function fireRule(rule, lead, company, todayKey) {
       ...rule.action.whatsapp,
       templateName,
       languageCode: rule.action.whatsapp.languageCode || "en",
+      // Correct attribution for the ONE log row sendAutoWhatsApp() writes on
+      // success — see _logNurtureResult() above for why this rule no longer
+      // writes a second row itself for the "sent" case. tierSuffix makes it
+      // visible in the send-log report whether this lead's own industry+
+      // service resolved the template, or it fell back to a niche match.
+      logChannel:    "nurture",
+      logSentByName: `Nurture automation${tierSuffix}`,
+      logRuleId:     rule._id,
+      logRuleName:   rule.name || "",
     },
   }).catch((err) => ({ channel: "whatsapp", status: "failed", detail: err.message }));
 
@@ -510,12 +552,23 @@ async function fireRule(rule, lead, company, todayKey) {
     return { status: "failed", detail: result?.detail || "Send failed", templateName };
   }
 
+  const tierLabel = resolutionTier === "industry_service" ? "industry+service library"
+    : resolutionTier === "service_niche" ? "service-matched niche fallback"
+    : resolutionTier === "general_niche" ? "general niche fallback"
+    : "";
   console.log(
     `[nurtureSequence] rule "${rule.name}" → lead ${lead._id} ("${lead.name}") ` +
-    `status="${lead.status}" template="${templateName}" (V${nextIndex + 1})`
+    `status="${lead.status}" template="${templateName}" (V${nextIndex + 1})` +
+    (tierLabel ? ` [${tierLabel}]` : "")
   );
 
-  return { status: "sent", templateName, variationIndex: nextIndex + 1, content: result?.content || "" };
+  return {
+    status: "sent",
+    templateName,
+    variationIndex: nextIndex + 1,
+    content: result?.content || "",
+    detail: tierLabel ? `Sent via ${tierLabel}` : undefined,
+  };
 }
 
 // ── Cron run ──────────────────────────────────────────────────────────────────
