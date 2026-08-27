@@ -91,6 +91,7 @@ const { startMeetingReminderJob }     = require('./jobs/meetingReminderJob');
 const { startFollowUpReminderJob }    = require('./jobs/followUpReminderJob');
 const { startNurtureSequenceJob }     = require('./jobs/nurtureSequenceJob');
 const { startMetaAutoSyncJob }        = require('./jobs/metaAutoSyncJob'); // NEW — auto-syncs new Meta ad sets & forms
+const { startTemplateSyncJob }        = require('./jobs/templateSyncJob'); // NEW — auto-syncs WhatsApp templates from MSG91
 const { startDailyReportJob }         = require('./jobs/dailyReportJob');
 const { startLeadAIAnalysisJob }      = require('./jobs/leadAIAnalysisJob');
 
@@ -484,6 +485,7 @@ connectDB().then(() => {
     // toggle. Enable the toggle from Developer > Company Details panel.
     startNurtureSequenceJob();   // 11:00 AM IST daily
     startMetaAutoSyncJob();
+    startTemplateSyncJob();      // hourly — keeps WhatsApp template cache fresh from MSG91
     startDailyReportJob();         // Sends daily Telegram performance report at each company's configured time
     startLeadAIAnalysisJob();     // AI Lead Outcome Intelligence — processes pending analyses every 2 min
     // MSG91 inbound: webhook-only mode — no polling needed
