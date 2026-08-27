@@ -26,6 +26,7 @@ const Lead                 = require("../models/Leads");
 const User                 = require("../models/Users");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
 const { getCloudinaryForCompany } = require("../services/cloudinaryService");
+const { slug, SERVICES } = require("../utils/templateNameResolver");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // mirrorInboundMedia — make lead-sent media viewable in the CRM.
@@ -674,6 +675,36 @@ async function processMSG91Payload(rawBody, opts = {}) {
       }
     } catch (e) {
       console.error("[optOut] Stop Promotion handling error:", e.message);
+    }
+
+    // ── Auto-tag lead.service from an interactive list/button reply ──────────
+    // WhatsApp bot flows ask the lead to pick a service via an interactive
+    // list (e.g. row id "svc_ai_automation", title "AI Automation") — a
+    // clean, explicit, customer-stated signal of what they're interested in.
+    // Previously this reply was only ever saved as a chat bubble and then
+    // discarded: lead.industry/service were never touched by it, so leads
+    // who told the bot exactly what they wanted still fell through to the
+    // untagged niche fallback in nurture instead of the correct resolved
+    // template. Matched against the SAME canonical SERVICES list (and its
+    // slug()) that gates every other lead-tagging path, so a reply that
+    // doesn't cleanly match a real service is safely ignored rather than
+    // guessed at.
+    try {
+      const replyTitle = extractInteractiveTitle(item);
+      if (replyTitle && matchingLeads.length) {
+        const matchedService = SERVICES.find((s) => slug(s) === slug(replyTitle));
+        if (matchedService) {
+          const ids = matchingLeads
+            .filter((l) => l.service !== matchedService)
+            .map((l) => l._id);
+          if (ids.length) {
+            await Lead.updateMany({ _id: { $in: ids } }, { $set: { service: matchedService } });
+            console.log(`🏷️  Interactive reply "${replyTitle}" → tagged ${ids.length} lead(s) with service="${matchedService}" (phone ${waPhone})`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("[autoTagService] interactive reply handling error:", e.message);
     }
 
     // ── Save message ──────────────────────────────────────────────────────────
