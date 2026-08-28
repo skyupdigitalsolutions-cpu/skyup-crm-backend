@@ -551,12 +551,30 @@ async function fireRule(rule, lead, company, todayKey) {
   const sent = result?.status === "sent";
 
   if (!sent) {
-    // Release claim so a fixed config can retry
-    await Lead.updateOne(
-      { _id: lead._id },
-      { $unset: { [fieldPath]: "" } }
-    ).catch(() => {});
-    return { status: "failed", detail: result?.detail || "Send failed", templateName };
+    // Distinguish a genuine send FAILURE (MSG91 rejected it, network error)
+    // from a deliberate SKIP (vertical-mismatch guard, template not approved,
+    // template missing from MSG91). Previously everything non-"sent" was
+    // reported as "failed", which is why guard-blocked sends showed up in the
+    // send-log report as FAILED with a confusing reason.
+    const wasSkipped = result?.status === "skipped";
+
+    // Only release the atomic claim for real failures, so a fixed config can
+    // retry. Releasing it on a SKIP was actively harmful: the claim vanished,
+    // so a second rule targeting the same status passed alreadyFiredToday()
+    // and re-evaluated the same lead — which is why every blocked/skipped
+    // lead appeared exactly twice in the logs while real sends deduped fine.
+    if (!wasSkipped) {
+      await Lead.updateOne(
+        { _id: lead._id },
+        { $unset: { [fieldPath]: "" } }
+      ).catch(() => {});
+    }
+
+    return {
+      status: wasSkipped ? "skipped" : "failed",
+      detail: result?.detail || "Send failed",
+      templateName,
+    };
   }
 
   const tierLabel = resolutionTier === "industry_service" ? "industry+service library"
