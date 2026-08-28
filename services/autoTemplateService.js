@@ -92,14 +92,23 @@ async function _logAutoTemplateSend({
   }
 }
 
-function recordTemplateHistory(lead, templateName, status = "sent", content = "") {
+// IMPORTANT: this is `async` and MUST be awaited by callers before the next
+// rule/send is processed for the same lead. It used to be fire-and-forget
+// (no await, just a .catch()), which opened a real race: rule A would send,
+// kick off this write, and return immediately — then rule B's dedup check
+// would query templateHistory before A's write had landed, find nothing, and
+// send the SAME template to the SAME lead again seconds later. That produced
+// genuine duplicate WhatsApp messages (confirmed in MSG91's own delivery log
+// as two separate billed sends ~6s apart), not just duplicate log rows.
+async function recordTemplateHistory(lead, templateName, status = "sent", content = "") {
   try {
     if (!lead?._id || !templateName) return;
-    Lead.updateOne(
+    await Lead.updateOne(
       { _id: lead._id },
       { $push: { templateHistory: { templateName: String(templateName).trim(), sentAt: new Date(), channel: "whatsapp", status, content: content || "" } } }
-    ).catch((e) => console.error("[autoTemplate] templateHistory record error:", e.message));
+    );
   } catch (e) {
+    // Never let a history-write failure break the send that already succeeded.
     console.error("[autoTemplate] templateHistory record error:", e.message);
   }
 }
@@ -382,7 +391,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
           ? `Message sent to ${components.body_1?.value || "the lead"} regarding ${components.body_2?.value || "their business"} (template: ${templateName})`
           : `Message sent to ${components.body_1?.value || "the lead"} (template: ${templateName})`,
       });
-      recordTemplateHistory(lead, templateName, "sent", content);
+      await recordTemplateHistory(lead, templateName, "sent", content);
       void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} using template "${templateName}"`, content, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
       return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} using template "${templateName}"`, templateName, content };
     } catch (err) {
@@ -414,7 +423,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         variables: { 1: lead.name || "" },
         fallbackText: `Message sent to ${lead.name || "the lead"} via Meta (template: ${templateName})`,
       });
-      recordTemplateHistory(lead, templateName, "sent", content);
+      await recordTemplateHistory(lead, templateName, "sent", content);
       void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, content, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
       return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, templateName, content };
     } catch (err) {
