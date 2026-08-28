@@ -137,6 +137,24 @@ const SERVICE_TO_NICHE = {
   "Social Media Marketing":         "social",
 };
 
+// The MSG91 template names actually in use are NOT the plain niche id — they
+// come from the AIDA dashboard's NICHE_SHORT label, lowercased. E.g. niche
+// "ai" → prefix "ai_automation", so the real approved template is
+// "ai_automation_awareness_v1", NOT "ai_awareness_v1". Without this map the
+// resolver builds names that don't exist in MSG91 and every send for those
+// niches is skipped ("not found in synced MSG91 list").
+const NICHE_TEMPLATE_PREFIX = {
+  general: "general",
+  ai:      "ai_automation",
+  crm:     "crm",
+  saanvi:  "saanvi_voiceagent",
+  website: "website",
+  ads:     "meta_googleads",
+  social:  "socialmedia",
+  video:   "videoediting",
+  whatsapp:"whatsapp_bot",
+};
+
 /**
  * Build a niche fallback template name.
  * @param {string} niche     one of NICHES
@@ -144,9 +162,10 @@ const SERVICE_TO_NICHE = {
  * @param {number} variation 1-based (1–4)
  */
 function buildNicheTemplateName(niche, stage, variation) {
-  const n  = slug(niche) || "general";
-  const st = String(stage || "").toLowerCase().trim();
-  const v  = Number(variation) || 1;
+  const key = slug(niche) || "general";
+  const n   = NICHE_TEMPLATE_PREFIX[key] || key;
+  const st  = String(stage || "").toLowerCase().trim();
+  const v   = Number(variation) || 1;
   if (!st) return "";
   return `${n}_${st}_v${v}`;
 }
@@ -225,6 +244,7 @@ module.exports = {
   NICHES,
   NICHE_VARIATION_COUNT,
   SERVICE_TO_NICHE,
+  NICHE_TEMPLATE_PREFIX,
   buildNicheTemplateName,
   nicheForLead,
   resolveWithFallback,
