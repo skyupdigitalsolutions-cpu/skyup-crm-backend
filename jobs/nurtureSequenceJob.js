@@ -383,6 +383,13 @@ async function _logNurtureResult(lead, rule, result) {
 // ── Belt-and-suspenders dedup: check templateHistory ─────────────────────────
 // If autoSendTemplates sent this template today before nurtureSent was stamped,
 // check templateHistory as a fallback guard.
+// NOTE ON SCOPE: callers invoke this BEFORE fireRule() resolves the template
+// name, so `resolvedTemplateName` is always null in practice and this only
+// matches rules that use a STATIC templateName/templateVariations. For
+// auto-resolve rules `allTemplates` is empty and this returns false
+// immediately — that's expected, not a bug. The real cross-rule dedup for
+// auto-resolved names happens inside fireRule(), after resolution, against
+// the actual resolved name (search "DEDUP: for auto-resolved templates").
 async function alreadySentViaTemplateHistory(leadId, rule, todayKey, resolvedTemplateName = null) {
   try {
     const templateName = rule.action?.whatsapp?.templateName || "";
