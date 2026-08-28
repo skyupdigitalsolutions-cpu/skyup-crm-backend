@@ -321,6 +321,65 @@ async function notifyEmployeeLead(userId, lead, companyId) {
   }
 }
 
+// ── Build follow-up reminder message ──────────────────────────────────────────
+function buildFollowUpMessage(lead, employeeName, scheduledAt, note) {
+  const when = new Date(scheduledAt).toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day:      '2-digit', month: 'short', year: 'numeric',
+    hour:     '2-digit', minute: '2-digit', hour12: true,
+  });
+  const phone = lead.primaryPhone || lead.mobile || '—';
+
+  return (
+    `⏰ <b>Follow-up Scheduled</b>\n\n` +
+    `👤 <b>Lead:</b> ${escapeHtml(lead.name || 'Unknown')}\n` +
+    `📞 <b>Phone:</b> <code>${escapeHtml(phone)}</code>\n` +
+    `📅 <b>When:</b> ${when}\n` +
+    (note ? `📝 <b>Note:</b> ${escapeHtml(note)}\n` : '') +
+    `👷 <b>Assigned To:</b> ${escapeHtml(employeeName)}`
+  );
+}
+
+// ── Notify an employee on Telegram when a follow-up call is scheduled ────────
+// Fired from leadController.js's patchLead whenever a new "follow-up" entry
+// is pushed to Lead.scheduledCalls — so the employee gets pinged the moment
+// the follow-up is set, not just when it becomes due (that's the separate
+// jobs/followUpReminderJob.js, which nudges the LEAD, not the employee).
+// Same plan-gate + config pattern as notifyEmployeeLead; silently skips if
+// Telegram isn't configured for this employee/company.
+//
+// Usage:
+//   const { notifyEmployeeFollowUp } = require('../services/telegramService');
+//   await notifyEmployeeFollowUp(userId, lead, companyId, scheduledAt, note);
+async function notifyEmployeeFollowUp(userId, lead, companyId, scheduledAt, note = '') {
+  if (!userId || !lead || !companyId || !scheduledAt) return;
+
+  try {
+    if (!(await telegramEntitled(companyId))) return;
+
+    const employee = await User.findById(userId)
+      .select('name telegramChatId')
+      .lean();
+    if (!employee?.telegramChatId) return;
+
+    const company = await Company.findById(companyId)
+      .select('telegramBotToken telegramEnabled')
+      .lean();
+    if (!company?.telegramEnabled)  return;
+    if (!company?.telegramBotToken) return;
+
+    const text = buildFollowUpMessage(lead, employee.name, scheduledAt, note);
+    await sendTelegramMessage(company.telegramBotToken, employee.telegramChatId, text);
+    console.log(`[Telegram] ✅ Follow-up scheduled notified → employee "${employee.name}"`);
+    recordTelegramNotification(lead, { type: 'employee_followup', recipientName: employee.name, recipientRole: 'employee', status: 'sent', detail: `Follow-up alert sent to ${employee.name} for ${new Date(scheduledAt).toISOString()}` });
+
+  } catch (err) {
+    // Never crash the lead update because of a Telegram failure
+    console.error('[Telegram] notifyEmployeeFollowUp error:', err.message);
+    recordTelegramNotification(lead, { type: 'employee_followup', recipientRole: 'employee', status: 'failed', detail: err.message });
+  }
+}
+
 // ── Build admin campaign lead message ────────────────────────────────────────
 // Slightly different from the company-level message — shows admin context.
 function buildAdminCampaignMessage(lead, adminName, companyName) {
@@ -439,6 +498,7 @@ async function notifyAllAdminsCampaignLead(lead, companyId) {
 module.exports = {
   notifyCampaignLead,
   notifyEmployeeLead,
+  notifyEmployeeFollowUp,
   notifyAdminCampaignLead,
   notifyAllAdminsCampaignLead,
   sendTestNotification,
