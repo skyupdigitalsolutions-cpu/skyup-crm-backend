@@ -45,7 +45,7 @@ const { sendOutcomeAutomation } = require("../services/outcomeAutomationService"
 const { triggerNurtureForLead, NURTURE_COMPANY_ID } = require("../jobs/nurtureSequenceJob");
 const { sendMetaConversionEvent } = require("../services/metaConversionService");
 const { getCompanyEntitlements } = require("../services/entitlementService");
-const { notifyCampaignLead, notifyEmployeeLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
+const { notifyCampaignLead, notifyEmployeeLead, notifyEmployeeFollowUp, notifyAllAdminsCampaignLead } = require("../services/telegramService");
 const { INDUSTRIES, SERVICES } = require("../utils/templateNameResolver");
 
 // Same canonical-list validation used in metaConfigController.js — the
@@ -1087,10 +1087,15 @@ const MOBILE_LIST_PROJECTION = {
   // callHistory: only the LAST entry for lastOutcome/lastCalledAt/remark detection.
   // $slice: -1 returns just the last element — avoids sending full history array.
   "callHistory":     { $slice: -3 },
-  // scheduledCalls: return up to 5 pending entries so the frontend can show
-  // follow-up due badges and filter. $slice: 0 was incorrectly used before
-  // (it returns [] not length metadata — MongoDB doesn't support length-only projection).
-  "scheduledCalls":  { $slice: 5 },
+  // scheduledCalls: return the 5 MOST RECENT entries so the frontend can show
+  // follow-up due badges and filter correctly. MUST be negative ($slice: -5) —
+  // entries are $push-appended chronologically, so a positive slice returns
+  // the OLDEST 5 (usually already-completed calls from way back), silently
+  // hiding the actual current/pending follow-up on any lead with more than 5
+  // scheduledCalls accumulated over time. ($slice: 0 was wrong before this for
+  // a different reason — see old comment — then "fixed" to a still-wrong
+  // positive 5; -5 is the correct value.)
+  "scheduledCalls":  { $slice: -5 },
   // user: populated below — only name needed for list row.
   user:              1,
 };
@@ -1121,8 +1126,11 @@ const ADMIN_LIST_PROJECTION = {
   updatedAt:         1,
   // callHistory — last 3 only (for the recent-activity indicator)
   callHistory:       { $slice: -3 },
-  // scheduledCalls — up to 5 entries for follow-up due badge + filter
-  scheduledCalls:    { $slice: 5 },
+  // scheduledCalls — 5 MOST RECENT entries for follow-up due badge + filter.
+  // Same negative-slice fix as MOBILE_LIST_PROJECTION above — a positive
+  // slice here was returning the oldest 5 (often already-done) instead of
+  // the current pending follow-up.
+  scheduledCalls:    { $slice: -5 },
   // nurture tracking
   nurtureStage:      1,
   nurtureSequence:   1,
@@ -1325,6 +1333,28 @@ const patchLead = async (req, res) => {
       update.$set = { ...(update.$set || {}), ...setOps };
 
     const updatedLead = await Lead.findByIdAndUpdate(id, update, { new: true });
+
+    // ── Telegram — ping the assigned employee when a new follow-up is scheduled
+    // Fires the moment a follow-up call is set (via pushOps.scheduledCalls
+    // above), not when it becomes due — that's the separate daily
+    // followUpReminderJob.js, which nudges the LEAD, not the employee.
+    // Company-gated + silently skipped if Telegram isn't configured, same as
+    // every other Telegram call site. Fire-and-forget, never blocks the response.
+    if (updatedLead && pushOps.scheduledCalls) {
+      const followUpCompanyId = lead.company?._id || lead.company || getCompanyId(req);
+      const assignedEmployeeId = updatedLead.user?._id || updatedLead.user || req.user?._id;
+      if (followUpCompanyId && assignedEmployeeId) {
+        notifyEmployeeFollowUp(
+          assignedEmployeeId,
+          updatedLead,
+          followUpCompanyId,
+          pushOps.scheduledCalls.scheduledAt,
+          pushOps.scheduledCalls.note
+        ).catch((err) =>
+          console.error("[telegram] notifyEmployeeFollowUp patchLead trigger error:", err.message)
+        );
+      }
+    }
 
     // ── Auto-blast when lead is marked Interested ─────────────────────────────
     // Fires SMS, Email, and WhatsApp to the lead when the employee selects
