@@ -38,7 +38,7 @@ const meetingStorage = new CloudinaryStorage({
     return {
       folder:        isAudio ? 'skyup-crm/meeting-recordings' : 'skyup-crm/meeting-docs',
       resource_type: 'auto',
-      public_id:     `${req.user._id || req.user.userId}_${Date.now()}_${file.fieldname}`,
+      public_id:     `${req.user._id || req.user.userId}_${Date.now()}_${file.fieldname}_${file.originalname?.replace(/[^a-zA-Z0-9._-]/g, '_') || ''}`,
       allowed_formats: isAudio
         ? ['mp3', 'm4a', 'aac', 'wav', 'amr', '3gp', 'ogg', 'opus', 'mp4']
         : ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'webp'],
@@ -50,9 +50,29 @@ const meetingUpload = multer({
   storage: meetingStorage,
   limits:  { fileSize: 50 * 1024 * 1024 },
 }).fields([
-  { name: 'document',  maxCount: 1 },
+  { name: 'document',  maxCount: 1 },   // kept for backward compatibility
   { name: 'recording', maxCount: 1 },
+  // NEW — multiple general documents, and a dedicated proposal document slot.
+  { name: 'documents',        maxCount: 10 },
+  { name: 'proposalDocument', maxCount: 1 },
 ]);
+
+// ── Separate small upload for WhatsApp screenshot evidence ────────────────────
+// Images only — a screenshot proving a manual (personal-number) WhatsApp
+// chat with the lead happened, unrelated to the CRM's own WA integration.
+const screenshotStorage = new CloudinaryStorage({
+  cloudinary,
+  params: async (req, file) => ({
+    folder:        'skyup-crm/whatsapp-screenshots',
+    resource_type: 'image',
+    public_id:     `${req.user?._id || req.user?.userId || req.admin?._id}_${Date.now()}`,
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+  }),
+});
+const screenshotUpload = multer({
+  storage: screenshotStorage,
+  limits:  { fileSize: 15 * 1024 * 1024 },
+}).single('screenshot');
 
 // ── Helper: resolve companyId from req — covers ALL role patterns ─────────────
 // authMiddleware sets:
@@ -281,12 +301,14 @@ const addMeetingRemark = (req, res) => {
       const lead = await Lead.findOne({ _id: id, company: companyId });
       if (!lead) return res.status(404).json({ message: 'Lead not found.' });
 
-      const { meetingType, outcome, remark, followUpDate } = req.body;
+      const { meetingType, outcome, remark, followUpDate, proposalSent, additionalInfo } = req.body;
 
       if (!remark || !remark.trim())
         return res.status(400).json({ message: 'Meeting remark / notes are required.' });
       if (!outcome || !outcome.trim())
         return res.status(400).json({ message: 'Meeting outcome is required.' });
+
+      const proposalSentBool = proposalSent === true || proposalSent === 'true';
 
       const entry = {
         userId:       getUserId(req),
@@ -296,8 +318,13 @@ const addMeetingRemark = (req, res) => {
         remark:       remark.trim(),
         metAt:        new Date(),
         followUpDate: followUpDate ? new Date(followUpDate) : null,
+        proposalSent: proposalSentBool,
+        proposalSentAt: proposalSentBool ? new Date() : null,
+        additionalInfo: additionalInfo ? String(additionalInfo).trim() : '',
+        documents: [],
       };
 
+      // Legacy single-document field — kept so any old frontend still works.
       const docFile = req.files?.document?.[0];
       if (docFile) {
         entry.documentUrl  = docFile.path || docFile.secure_url || null;
@@ -308,6 +335,33 @@ const addMeetingRemark = (req, res) => {
       if (recFile) {
         entry.recordingUrl  = recFile.path || recFile.secure_url || null;
         entry.recordingName = recFile.originalname || recFile.filename || null;
+      }
+
+      // NEW — the proposal document, tagged distinctly so the UI can show a
+      // "Proposal" chip separate from general attachments.
+      const proposalFile = req.files?.proposalDocument?.[0];
+      if (proposalFile) {
+        entry.documents.push({
+          url:  proposalFile.path || proposalFile.secure_url,
+          name: proposalFile.originalname || proposalFile.filename || 'Proposal',
+          type: 'proposal',
+        });
+        // A proposal document was attached — treat that as proof it was sent,
+        // even if the checkbox wasn't also ticked.
+        if (!entry.proposalSent) {
+          entry.proposalSent = true;
+          entry.proposalSentAt = new Date();
+        }
+      }
+
+      // NEW — any number of general documents (contracts, photos, notes scans...)
+      const generalFiles = req.files?.documents || [];
+      for (const f of generalFiles) {
+        entry.documents.push({
+          url:  f.path || f.secure_url,
+          name: f.originalname || f.filename || 'Document',
+          type: 'document',
+        });
       }
 
       const updated = await Lead.findByIdAndUpdate(
@@ -434,10 +488,84 @@ const sendMeetingWhatsApp = async (req, res) => {
   }
 };
 
+// ── POST /lead/:id/whatsapp-screenshot ────────────────────────────────────────
+// Uploads one image as proof of a manual WhatsApp conversation with the lead
+// (personal number, outside the CRM's own WhatsApp integration). Body field:
+// `note` (optional, free text — e.g. "confirmed pricing over WA").
+const addWhatsAppScreenshot = (req, res) => {
+  screenshotUpload(req, res, async (multerErr) => {
+    if (multerErr) {
+      return res.status(400).json({ message: `Upload error: ${multerErr.message}` });
+    }
+    try {
+      const { id } = req.params;
+      const companyId = getCompanyId(req);
+
+      const lead = await Lead.findOne({ _id: id, company: companyId });
+      if (!lead) return res.status(404).json({ message: 'Lead not found.' });
+
+      if (!req.file) {
+        return res.status(400).json({ message: 'A screenshot image is required.' });
+      }
+
+      const entry = {
+        url:        req.file.path || req.file.secure_url,
+        name:       req.file.originalname || req.file.filename || 'Screenshot',
+        note:       (req.body.note || '').trim(),
+        uploadedAt: new Date(),
+        userId:     getUserId(req),
+        userName:   getUserName(req),
+      };
+
+      const updated = await Lead.findByIdAndUpdate(
+        id,
+        { $push: { whatsappScreenshots: entry } },
+        { new: true, runValidators: false },
+      );
+
+      const saved = updated.whatsappScreenshots[updated.whatsappScreenshots.length - 1];
+
+      return res.status(201).json({
+        message: 'WhatsApp screenshot saved.',
+        screenshot: saved,
+      });
+    } catch (err) {
+      console.error('[meetingRemarkController] addWhatsAppScreenshot error:', err);
+      return res.status(500).json({ message: err.message || 'Internal server error.' });
+    }
+  });
+};
+
+// ── GET /lead/:id/whatsapp-screenshots ────────────────────────────────────────
+const getWhatsAppScreenshots = async (req, res) => {
+  try {
+    const { id }    = req.params;
+    const companyId = getCompanyId(req);
+
+    const lead = await Lead.findOne(
+      { _id: id, company: companyId },
+      { whatsappScreenshots: 1 },
+    ).lean();
+
+    if (!lead) return res.status(404).json({ message: 'Lead not found.' });
+
+    const sorted = [...(lead.whatsappScreenshots || [])].sort(
+      (a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt),
+    );
+
+    return res.json({ screenshots: sorted });
+  } catch (err) {
+    console.error('[meetingRemarkController] getWhatsAppScreenshots error:', err);
+    return res.status(500).json({ message: err.message || 'Internal server error.' });
+  }
+};
+
 module.exports = {
   addMeetingRemark,
   getMeetingRemarks,
   sendMeetingWhatsApp,
+  addWhatsAppScreenshot,
+  getWhatsAppScreenshots,
   // Exposed for the meeting-reminder cron job (jobs/meetingReminderJob.js)
   _sendClientMeetingWhatsApp,
   _sendClientMeetingEmail,
