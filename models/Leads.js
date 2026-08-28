@@ -44,10 +44,37 @@ const meetingRemarkSchema = new mongoose.Schema(
     remark:       { type: String, default: '' },
     metAt:        { type: Date, default: Date.now },
     followUpDate: { type: Date, default: null },
+    // Kept for backward compatibility with meetings logged before the
+    // `documents` array below existed — old records still read from these.
     documentUrl:  { type: String, default: null },
     documentName: { type: String, default: null },
     recordingUrl: { type: String, default: null },
     recordingName:{ type: String, default: null },
+    // ── Proposal tracking ────────────────────────────────────────────────
+    proposalSent:   { type: Boolean, default: false },
+    proposalSentAt: { type: Date, default: null },
+    // ── Free-form "anything else" notes — separate from `remark` (the main
+    // meeting summary) so the two don't get conflated in the UI or reports.
+    additionalInfo: { type: String, default: '' },
+    // ── Multiple documents per meeting (proposal, contract, photos, etc.) —
+    // the single documentUrl/documentName above only ever held ONE file.
+    documents: {
+      type: [
+        new mongoose.Schema(
+          {
+            url:  { type: String, required: true },
+            name: { type: String, default: '' },
+            // "proposal" | "document" | "other" — lets the UI group/label
+            // attachments (e.g. show a distinct "Proposal" chip) without
+            // needing a separate array per category.
+            type: { type: String, enum: ['proposal', 'document', 'other'], default: 'document' },
+            uploadedAt: { type: Date, default: Date.now },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
     // Tracks which of the 3 meeting reminders (WhatsApp + email) have already
     // been sent for this meeting, so the cron never double-sends:
     //   scheduledAt  — fired immediately when the meeting was scheduled
@@ -113,7 +140,7 @@ const leadSchema = mongoose.Schema(
       type: [
         new mongoose.Schema(
           {
-            // "employee_assigned" | "campaign_admin" | "campaign_company"
+            // "employee_assigned" | "employee_followup" | "campaign_admin" | "campaign_company"
             type:          { type: String, required: true },
             recipientName: { type: String, default: "" },
             recipientRole: { type: String, default: "" }, // "employee" | "admin"
@@ -122,6 +149,28 @@ const leadSchema = mongoose.Schema(
             detail:        { type: String, default: "" },
           },
           { _id: false }
+        ),
+      ],
+      default: [],
+    },
+
+    // ── WhatsApp screenshot evidence ──────────────────────────────────────────
+    // Manual proof of a WhatsApp conversation with the lead that happened
+    // OUTSIDE the CRM's own WhatsApp integration — e.g. an agent chatting
+    // with the lead on their personal number. Purely evidentiary; unrelated
+    // to WhatsAppMessage/WhatsAppConversation (the official in-app thread).
+    whatsappScreenshots: {
+      type: [
+        new mongoose.Schema(
+          {
+            url:        { type: String, required: true },
+            name:       { type: String, default: "" },
+            note:       { type: String, default: "" },
+            uploadedAt: { type: Date, default: Date.now },
+            userId:     { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+            userName:   { type: String, default: "" },
+          },
+          { _id: true }
         ),
       ],
       default: [],
