@@ -18,7 +18,7 @@ const SmsLog         = require("../models/SmsLog");
 const Lead           = require("../models/Leads");
 const WhatsAppSendLog = require("../models/WhatsAppSendLog");
 const { resolveTemplateContent } = require("../utils/templateContentResolver");
-const { buildTemplateName } = require("../utils/templateNameResolver");
+const { buildTemplateName, NICHE_TEMPLATE_PREFIX } = require("../utils/templateNameResolver");
 
 // ── Guard against a static template name that belongs to a DIFFERENT
 // industry/service than the lead it's about to be sent to ────────────────────
@@ -48,6 +48,17 @@ function staticTemplateMismatchesLeadVertical(templateName, lead) {
   if (!match) return false; // doesn't look like an auto-resolve library name — nothing to check
 
   const [, stage, variation] = match;
+
+  // Niche FALLBACK names (general_awareness_v1, website_awareness_v1,
+  // ai_automation_desire_v3 …) also end in _<stage>_v<n>, but they are NOT
+  // industry×service names — they're the correct, intended template for a
+  // lead that has no industry (or only a service). Comparing them against
+  // buildTemplateName() always fails, which made this guard block every
+  // single legitimate fallback send. Recognise them and let them through.
+  const nichePrefixes = Object.values(NICHE_TEMPLATE_PREFIX || {});
+  const stem = name.slice(0, name.lastIndexOf(`_${stage}_v${variation}`));
+  if (nichePrefixes.includes(stem)) return false;
+
   const expected = buildTemplateName(lead?.industry, lead?.service, stage, variation);
   // expected === "" when the lead has no industry/service at all — that's
   // still a mismatch (an industry-specific template can't be right for an
