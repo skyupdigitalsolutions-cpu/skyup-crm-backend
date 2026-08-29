@@ -9,7 +9,7 @@ const WhatsAppMessage = require("../models/WhatsAppMessage");
 const WhatsAppSendLog  = require("../models/WhatsAppSendLog");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 const { extractBodyText, substitute } = require("../utils/templateContentResolver");
-const { fetchLiveTemplateBody } = require("../services/msg91TemplateService");
+const { fetchLiveTemplateBody, syncTemplatesForCompany } = require("../services/msg91TemplateService");
 
 // ── Resolve a template's cached body text ONCE per batch, so every recipient
 // in a bulk/CSV/employee blast just does a cheap string substitution instead
@@ -26,7 +26,6 @@ const Lead = require("../models/Leads");
 const { normalizePhone: _sharedNormalizePhone } = require("../utils/normalizePhone");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
 const { hmac } = require("../utils/fieldCrypto");
-const { claimTemplateSendOnce, releaseSendClaim, finalizeSendClaim } = require("../services/autoTemplateService");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // normalizePhone — WA-safe wrapper around the shared normaliser.
@@ -1133,6 +1132,49 @@ const _saveConversationAndMessage = async ({
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/whatsapp/bulk-send
 // ─────────────────────────────────────────────────────────────────────────────
+// ── GET /api/whatsapp/templates — list cached MSG91 templates ─────────────────
+// Same cache (WhatsAppTemplate) the nurture module uses, but exposed here
+// gated by the "whatsappBlast" feature instead of "leadNurtureSequence" — a
+// company can have Blast enabled without Nurture, and previously had no way
+// to sync/list templates for it at all.
+const listWhatsAppTemplates = async (req, res) => {
+  try {
+    const { companyId } = callerCtx(req);
+    if (!companyId) return res.status(400).json({ error: "Company not resolved from token" });
+
+    const templates = await WhatsAppTemplate.find({ company: companyId })
+      .select("name language category status rawStatusField bodyVariableCount lastSyncedAt")
+      .sort({ name: 1 })
+      .limit(3000)
+      .lean();
+
+    res.json({
+      success: true,
+      templates,
+      lastSyncedAt: templates[0]?.lastSyncedAt || null,
+    });
+  } catch (err) {
+    console.error("[whatsappChatController.listWhatsAppTemplates]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ── POST /api/whatsapp/templates/sync — pull the latest templates from MSG91 ──
+const syncWhatsAppTemplates = async (req, res) => {
+  try {
+    const { companyId } = callerCtx(req);
+    if (!companyId) return res.status(400).json({ error: "Company not resolved from token" });
+
+    const result = await syncTemplatesForCompany(companyId);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("[whatsappChatController.syncWhatsAppTemplates]", err.message);
+    // Message includes which MSG91 endpoints were tried — useful to forward
+    // to MSG91 support if none worked.
+    res.status(502).json({ success: false, error: err.message });
+  }
+};
+
 const bulkSendToLeads = async (req, res) => {
   try {
     const { templateName, languageCode = "en_US", campaign, filter: blastFilter } = req.body;
@@ -1204,27 +1246,6 @@ const bulkSendToLeads = async (req, res) => {
         failed++;
         continue;
       }
-
-      // ── Never send the same template to the same lead twice ────────────────
-      // This endpoint previously had NO deduplication at all — a double-submit
-      // of the blast button, a slow-network retry, or simply running the same
-      // blast filter twice would resend the exact same template to every
-      // matching lead again. Shares the same atomic, race-proof claim used by
-      // every other automated send path (services/autoTemplateService.js) —
-      // claim first, send, then finalize or release depending on outcome.
-      const { claimed } = await claimTemplateSendOnce(lead._id, templateName);
-      if (!claimed) {
-        results.push({
-          leadId: lead._id,
-          name: lead.name,
-          phone: cleanPhone,
-          status: "skipped",
-          reason: `Template "${templateName}" already sent to this lead previously — not resending.`,
-        });
-        await new Promise((r) => setTimeout(r, 150));
-        continue;
-      }
-
       try {
         const waMessageId = await _sendTemplateToPhone({
           cleanPhone,
@@ -1235,7 +1256,6 @@ const bulkSendToLeads = async (req, res) => {
           senderNumber,
           contactName: lead.name,
         });
-        const content = bulkBodyText ? substitute(bulkBodyText, { 1: lead.name || "" }) : "";
         await _saveConversationAndMessage({
           cleanPhone,
           contactName: lead.name,
@@ -1244,9 +1264,8 @@ const bulkSendToLeads = async (req, res) => {
           leadId: lead._id,
           templateName,
           waMessageId,
-          content,
+          content: bulkBodyText ? substitute(bulkBodyText, { 1: lead.name || "" }) : "",
         });
-        await finalizeSendClaim(lead._id, templateName, content); // finalize the claim placeholder — never a second push
         results.push({
           leadId: lead._id,
           name: lead.name,
@@ -1255,7 +1274,6 @@ const bulkSendToLeads = async (req, res) => {
         });
         sent++;
       } catch (err) {
-        await releaseSendClaim(lead._id, templateName); // send failed — free the claim so a future attempt can retry
         const errMsg = err.response?.data?.message || err.message;
         results.push({
           leadId: lead._id,
@@ -1336,31 +1354,6 @@ const bulkSendCSV = async (req, res) => {
         continue;
       }
       try {
-        // Resolve the matching lead BEFORE sending (not after, as before) —
-        // the atomic "never send this template to this lead twice" claim
-        // needs a leadId, so it must happen before the actual send attempt,
-        // not once we already know delivery succeeded.
-        const lead = await findLeadByPhoneDual(cleanPhone, companyId);
-
-        let claimedForLead = true; // recipients with no matching lead have no
-        // lead-level history to dedup against — sent through unguarded, same
-        // as before this fix; there is no way to track "already sent" without
-        // a lead record to attach it to.
-        if (lead?._id) {
-          const { claimed } = await claimTemplateSendOnce(lead._id, templateName);
-          claimedForLead = claimed;
-        }
-        if (!claimedForLead) {
-          results.push({
-            name: contactName,
-            phone: cleanPhone,
-            status: "skipped",
-            reason: `Template "${templateName}" already sent to this lead previously — not resending.`,
-          });
-          await new Promise((r) => setTimeout(r, 150));
-          continue;
-        }
-
         const waMessageId = await _sendTemplateToPhone({
           cleanPhone,
           templateName,
@@ -1370,7 +1363,8 @@ const bulkSendCSV = async (req, res) => {
           senderNumber,
           contactName,
         });
-        const content = csvBodyText ? substitute(csvBodyText, { 1: contactName || "" }) : "";
+        // Dual-phone lead lookup for CSV sends
+        const lead = await findLeadByPhoneDual(cleanPhone, companyId);
         await _saveConversationAndMessage({
           cleanPhone,
           contactName,
@@ -1379,18 +1373,11 @@ const bulkSendCSV = async (req, res) => {
           leadId: lead?._id || null,
           templateName,
           waMessageId,
-          content,
+          content: csvBodyText ? substitute(csvBodyText, { 1: contactName || "" }) : "",
         });
-        if (lead?._id) await finalizeSendClaim(lead._id, templateName, content);
         results.push({ name: contactName, phone: cleanPhone, status: "sent" });
         sent++;
       } catch (err) {
-        // lead may be out of scope here if findLeadByPhoneDual itself threw —
-        // re-resolve defensively so a failed send doesn't leave a stuck claim.
-        try {
-          const leadForRelease = await findLeadByPhoneDual(cleanPhone, companyId);
-          if (leadForRelease?._id) await releaseSendClaim(leadForRelease._id, templateName);
-        } catch { /* best-effort — never let cleanup failure mask the original error */ }
         const errMsg = err.response?.data?.message || err.message;
         results.push({
           name: contactName,
@@ -1640,22 +1627,6 @@ const employeeBulkSend = async (req, res) => {
         failed++;
         continue;
       }
-
-      // Same atomic, never-resend-the-same-template guard as bulkSendToLeads
-      // above — this endpoint had the identical gap.
-      const { claimed } = await claimTemplateSendOnce(lead._id, templateName);
-      if (!claimed) {
-        results.push({
-          leadId: lead._id,
-          name: lead.name,
-          phone: cleanPhone,
-          status: "skipped",
-          reason: `Template "${templateName}" already sent to this lead previously — not resending.`,
-        });
-        await new Promise((r) => setTimeout(r, 150));
-        continue;
-      }
-
       try {
         const waMessageId = await _sendTemplateToPhone({
           cleanPhone,
@@ -1666,7 +1637,6 @@ const employeeBulkSend = async (req, res) => {
           senderNumber,
           contactName: lead.name,
         });
-        const content = empBodyText ? substitute(empBodyText, { 1: lead.name || "" }) : "";
         await _saveConversationAndMessage({
           cleanPhone,
           contactName: lead.name,
@@ -1675,9 +1645,8 @@ const employeeBulkSend = async (req, res) => {
           leadId: lead._id,
           templateName,
           waMessageId,
-          content,
+          content: empBodyText ? substitute(empBodyText, { 1: lead.name || "" }) : "",
         });
-        await finalizeSendClaim(lead._id, templateName, content);
         results.push({
           leadId: lead._id,
           name: lead.name,
@@ -1686,7 +1655,6 @@ const employeeBulkSend = async (req, res) => {
         });
         sent++;
       } catch (err) {
-        await releaseSendClaim(lead._id, templateName);
         const errMsg = err.response?.data?.message || err.message;
         results.push({
           leadId: lead._id,
@@ -2373,4 +2341,6 @@ module.exports = {
   getUnreadCounts,
   getSendLogReport,
   getTemplateBody,
+  listWhatsAppTemplates,
+  syncWhatsAppTemplates,
 };
