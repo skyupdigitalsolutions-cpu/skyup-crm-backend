@@ -28,6 +28,7 @@ const {
   getTemplateBody,
   listWhatsAppTemplates,
   syncWhatsAppTemplates,
+  listLeadSources,
 } = require("../controllers/whatsappChatController");
 const { makeCompanyUploadMiddleware } = require("../services/cloudinaryService");
 
@@ -94,6 +95,7 @@ router.post("/bulk-send",     adminProtect, requireFeature("whatsappBlast"), bul
 // without Nurture enabled can still populate and browse the template cache.
 router.get( "/templates",      adminProtect, requireFeature("whatsappBlast"), listWhatsAppTemplates);
 router.post("/templates/sync", adminProtect, requireFeature("whatsappBlast"), syncWhatsAppTemplates);
+router.get( "/leads/sources",  adminProtect, requireFeature("whatsappBlast"), listLeadSources);
 
 // ─── Bulk send: arbitrary recipients from CSV — whatsappBlast feature required ──
 router.post("/bulk-send-csv", adminProtect, requireFeature("whatsappBlast"), bulkSendCSV);
