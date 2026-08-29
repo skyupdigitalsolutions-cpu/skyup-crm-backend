@@ -1402,6 +1402,35 @@ const resetUserPassword = async (req, res) => {
   }
 };
 
+// ── PATCH /api/admin/update-device — mobile device/FCM token registration ────
+// Mirrors authController.updateDevice (User model) but for the Admin model.
+// Admin.fcmToken already existed in the schema (Admin.js:47) — this was the
+// missing route that would ever actually populate it. Without this, an
+// admin/super_admin login on the WhatsApp admin app can never register for
+// push notifications, even once the app itself has FCM wired up.
+const ADMIN_DEVICE_UPDATE_FIELDS = [
+  "ipAddress", "appName", "appVersion", "platform",
+  "deviceModel", "osVersion", "fcmToken",
+];
+
+const updateAdminDevice = async (req, res) => {
+  try {
+    const update = {};
+    ADMIN_DEVICE_UPDATE_FIELDS.forEach((f) => {
+      if (req.body[f] !== undefined && req.body[f] !== null) {
+        update[f] = req.body[f];
+      }
+    });
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ message: "No device fields provided." });
+    }
+    await Admin.findByIdAndUpdate(req.admin._id, { $set: update });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getMyCompany,
   getAdmin,
@@ -1453,4 +1482,5 @@ module.exports = {
   saveLateLoginConfig: saveAttendanceConfig,
   getAttendanceConfig,
   saveAttendanceConfig,
+  updateAdminDevice,
 };
