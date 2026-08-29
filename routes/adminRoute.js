@@ -75,6 +75,9 @@ router.post("/register", ipFloodLimiter, authLimiter, registerAdmin);
 router.post("/login",    ipFloodLimiter, authLimiter, loginAdmin);
 router.post("/logout",   protectAdmin, logoutAdmin);
 
+// ── Device / FCM token registration (must be before /:id to avoid conflict) ──
+router.patch("/update-device", protectAdmin, adminController.updateAdminDevice);
+
 // ── Company-specific routes (must be before /:id to avoid conflict) ───────────
 router.get("/company/me",        protectAdmin, getMyCompany || ((req, res) => res.status(501).json({ message: "Not implemented" })));
 router.get("/company/users",     protectAdmin, getCompanyUsers);
