@@ -139,37 +139,78 @@ async function _logAutoTemplateSend({
 // send the SAME template to the SAME lead again seconds later. That produced
 // genuine duplicate WhatsApp messages (confirmed in MSG91's own delivery log
 // as two separate billed sends ~6s apart), not just duplicate log rows.
-// ── Permanent "never send the same template twice" guard ─────────────────────
-// Checks the lead's ENTIRE templateHistory (no date window — any time, ever),
-// not just today. This is stricter than the existing same-day dedup layers in
-// jobs/nurtureSequenceJob.js (which only prevent a duplicate WITHIN the same
-// day): once a specific template name has been sent to a specific lead, it
-// will never be sent to that lead again by ANY caller of sendAutoWhatsApp —
-// nurture, the new-lead welcome message, outcome automation, follow-up
-// reminders, or the interested-blast.
+// ── Permanent "never send the same template twice" guard — ATOMIC ────────────
+// See the long comment above the previous implementation for the full
+// reasoning on WHY this exists. This version replaces a "check, then send,
+// then write" sequence — which is NOT safe under true concurrency — with a
+// single atomic MongoDB claim, using the exact same pattern already proven
+// safe for the nurture atomic claim in jobs/nurtureSequenceJob.js.
 //
-// This intentionally interacts with nurture's V1→V5 variation cycling: once a
-// lead has received all approved variations for a stage and the cycle wraps
-// around, the wrapped-around variation is now a REPEAT and gets skipped here
-// — so a lead that stays in one status for a very long time will stop
-// receiving further messages for that stage rather than looping the same
-// content again. That trade-off is intentional per explicit requirement: no
-// template is ever sent to the same lead more than once.
-async function alreadySentThisTemplateEver(leadId, templateName) {
-  if (!leadId || !templateName) return false;
+// THE RACE THIS CLOSES: 5 identical sends of "digital_marketing_crm_
+// interest_v1" were observed at the same timestamp for one lead. A plain
+// "query templateHistory, then later push to it" check has a window: if two
+// (or five) calls run concurrently, ALL of them can read "not sent yet"
+// before ANY of their writes land — each one honestly believes it's the
+// first. That's the identical class of race already found and fixed for the
+// same-day dedup (recordTemplateHistory was fire-and-forget) — this closes
+// the analogous gap for the PERMANENT, all-time guard.
+//
+// HOW IT'S ATOMIC: findOneAndUpdate's filter and update run as one operation
+// at the database level. Filtering on `"templateHistory.templateName": {$ne:
+// name}` means the push only happens if no entry with that name exists YET —
+// MongoDB guarantees only one concurrent writer can win this race; every
+// other concurrent caller's filter fails to match (because the winner's push
+// already landed) and gets `null` back, atomically, with no window for two
+// callers to both "win".
+//
+// The claimed entry starts as status "pending" — a placeholder, not a
+// finished send. If the actual MSG91/Meta send later fails, releaseSendClaim()
+// removes the placeholder so a future attempt can retry (a failed send must
+// not permanently block all future sends of that template to that lead). If
+// the send succeeds, finalizeSendClaim() updates that SAME entry's status to
+// "sent" and fills in its content — never a second push.
+async function claimTemplateSendOnce(leadId, templateName) {
+  if (!leadId || !templateName) return { claimed: true }; // nothing to check against — never block a send we can't verify
+  const name = String(templateName).trim();
   try {
-    const match = await Lead.findOne(
-      { _id: leadId, "templateHistory.templateName": String(templateName).trim() },
-      { _id: 1 }
-    ).lean();
-    return !!match;
+    const claimed = await Lead.findOneAndUpdate(
+      { _id: leadId, "templateHistory.templateName": { $ne: name } },
+      { $push: { templateHistory: { templateName: name, sentAt: new Date(), channel: "whatsapp", status: "pending", content: "" } } },
+      { new: false }
+    );
+    return { claimed: !!claimed };
   } catch (e) {
-    // A lookup failure must never itself cause an unwanted duplicate send —
-    // but it also must never be treated as "definitely already sent" (which
-    // would silently blackhole every future send for that lead). Log it and
-    // let the caller's OTHER dedup layers (same-day checks) still apply.
-    console.warn(`[autoTemplate] alreadySentThisTemplateEver lookup failed: ${e.message} — proceeding with other dedup checks only`);
-    return false;
+    // A DB failure here must not silently permit an unlimited-duplicate send,
+    // but it also must not be treated as "definitely already sent" (which
+    // would blackhole every future send). Log and allow this one attempt
+    // through — same fail-open philosophy as the old check.
+    console.warn(`[autoTemplate] claimTemplateSendOnce failed: ${e.message} — allowing this send through`);
+    return { claimed: true };
+  }
+}
+
+async function releaseSendClaim(leadId, templateName) {
+  if (!leadId || !templateName) return;
+  try {
+    await Lead.updateOne(
+      { _id: leadId },
+      { $pull: { templateHistory: { templateName: String(templateName).trim(), status: "pending" } } }
+    );
+  } catch (e) {
+    console.warn(`[autoTemplate] releaseSendClaim failed: ${e.message}`);
+  }
+}
+
+async function finalizeSendClaim(leadId, templateName, content = "") {
+  if (!leadId || !templateName) return;
+  const name = String(templateName).trim();
+  try {
+    await Lead.updateOne(
+      { _id: leadId, "templateHistory.templateName": name, "templateHistory.status": "pending" },
+      { $set: { "templateHistory.$.status": "sent", "templateHistory.$.content": content || "" } }
+    );
+  } catch (e) {
+    console.warn(`[autoTemplate] finalizeSendClaim failed: ${e.message}`);
   }
 }
 
@@ -318,22 +359,21 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
     templateName = corrected;
   }
 
-  // ── Permanent per-lead-per-template dedup — applies to EVERY caller ──────
-  // See alreadySentThisTemplateEver() above for the full reasoning. Checked
-  // here (not per-caller) so nurture, the new-lead welcome message, outcome
-  // automation, follow-up reminders, and the interested-blast all share the
-  // exact same guarantee with zero duplicated logic.
-  if (await alreadySentThisTemplateEver(lead?._id, templateName)) {
-    console.log(
-      `[autoTemplate] ⛔ Skipped — template "${templateName}" was already sent to lead ${lead?._id} ` +
-      `previously. Templates are never resent to the same lead once delivered.`
-    );
-    return {
-      channel: "whatsapp",
-      status: "skipped",
-      detail: `Template "${templateName}" already sent to this lead previously — not resending.`,
-    };
-  }
+  // ── Permanent per-lead-per-template dedup — ATOMIC, applies to EVERY caller
+  // See claimTemplateSendOnce() above for the full reasoning, including the
+  // exact 5-duplicate-send race this replaces a non-atomic version of.
+  //
+  // IMPORTANT — placement: the actual claim() calls are made further below,
+  // immediately before each provider's real network send attempt (MSG91 and
+  // Meta each have their own), NOT here. Every check between here and there
+  // (WhatsApp not configured, invalid phone, credentials missing, document
+  // header misconfigured) can still legitimately return "skipped" — claiming
+  // this early would push a permanent "pending" placeholder into
+  // templateHistory for those cases too, and since none of them ever call
+  // releaseSendClaim(), that placeholder would NEVER be cleared — permanently
+  // blocking this exact template from ever being sent to this lead again,
+  // even after the phone number or WhatsApp config gets fixed. The claim
+  // must only happen once we know we're actually about to attempt delivery.
 
   // Attribution for the ONE log row this function writes on a successful
   // send. Each caller passes its own values so the report shows who/what
@@ -487,6 +527,24 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
     };
 
     console.log(`[autoTemplate] 📤 WA MSG91 → phone=${cleanPhone} template="${templateName}"`);
+
+    // Claim right here — every earlier "skipped" return in this function has
+    // already happened, so from this point on we are genuinely about to
+    // attempt delivery. See the placement note above for why this can't live
+    // any earlier.
+    const { claimed: msg91Claimed } = await claimTemplateSendOnce(lead?._id, templateName);
+    if (!msg91Claimed) {
+      console.log(
+        `[autoTemplate] ⛔ Skipped — template "${templateName}" was already sent to lead ${lead?._id} ` +
+        `previously. Templates are never resent to the same lead once delivered.`
+      );
+      return {
+        channel: "whatsapp",
+        status: "skipped",
+        detail: `Template "${templateName}" already sent to this lead previously — not resending.`,
+      };
+    }
+
     try {
       const resp = await axios.post(
         "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
@@ -498,6 +556,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
       if (resp.data && (resp.data.status === "fail" || resp.data.hasError === true || resp.data.type === "error")) {
         const detail = JSON.stringify(resp.data.errors || resp.data.message || resp.data);
         console.error(`[autoTemplate] ❌ WA rejected by MSG91:`, detail);
+        await releaseSendClaim(lead?._id, templateName); // send failed — free the claim so a future attempt can retry
         return { channel: "whatsapp", status: "failed", detail: `MSG91 rejected the message: ${detail}` };
       }
       // ── Resolve the actual rendered content, best-effort ────────────────
@@ -514,12 +573,13 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
           ? `Message sent to ${components.body_1?.value || "the lead"} regarding ${components.body_2?.value || "their business"} (template: ${templateName})`
           : `Message sent to ${components.body_1?.value || "the lead"} (template: ${templateName})`,
       });
-      await recordTemplateHistory(lead, templateName, "sent", content);
+      await finalizeSendClaim(lead?._id, templateName, content); // finalize the atomic claim placeholder — never a second push
       void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} using template "${templateName}"`, content, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
       return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} using template "${templateName}"`, templateName, content };
     } catch (err) {
       const detail = JSON.stringify(err?.response?.data || err.message);
       console.error(`[autoTemplate] ❌ WA error:`, detail);
+      await releaseSendClaim(lead?._id, templateName); // send failed — free the claim so a future attempt can retry
       return { channel: "whatsapp", status: "failed", detail };
     }
 
@@ -535,6 +595,22 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
       type: "template",
       template: { name: templateName.trim(), language: { code: languageCode || "en" } },
     };
+
+    // Claim right here — see the placement note above the MSG91 branch's
+    // identical claim call for why this can't live any earlier in the function.
+    const { claimed: metaClaimed } = await claimTemplateSendOnce(lead?._id, templateName);
+    if (!metaClaimed) {
+      console.log(
+        `[autoTemplate] ⛔ Skipped — template "${templateName}" was already sent to lead ${lead?._id} ` +
+        `previously. Templates are never resent to the same lead once delivered.`
+      );
+      return {
+        channel: "whatsapp",
+        status: "skipped",
+        detail: `Template "${templateName}" already sent to this lead previously — not resending.`,
+      };
+    }
+
     try {
       const resp = await axios.post(apiUrl, metaPayload, {
         headers: { Authorization: `Bearer ${config.accessToken}`, "Content-Type": "application/json" },
@@ -546,12 +622,13 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         variables: { 1: lead.name || "" },
         fallbackText: `Message sent to ${lead.name || "the lead"} via Meta (template: ${templateName})`,
       });
-      await recordTemplateHistory(lead, templateName, "sent", content);
+      await finalizeSendClaim(lead?._id, templateName, content); // finalize the atomic claim placeholder — never a second push
       void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, content, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
       return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, templateName, content };
     } catch (err) {
       const detail = JSON.stringify(err?.response?.data || err.message);
       console.error(`[autoTemplate] ❌ WA Meta error:`, detail);
+      await releaseSendClaim(lead?._id, templateName); // send failed — free the claim so a future attempt can retry
       return { channel: "whatsapp", status: "failed", detail };
     }
   }
@@ -887,4 +964,11 @@ module.exports = {
   sendSmartEmail,
   sendAutoWhatsApp,
   sendAutoEmail,
+  // Exported so other send paths that don't go through sendAutoWhatsApp()
+  // (e.g. whatsappChatController.js's manual bulk-blast endpoint) can share
+  // the exact same "never send the same template to the same lead twice"
+  // atomic guarantee, instead of duplicating this logic.
+  claimTemplateSendOnce,
+  releaseSendClaim,
+  finalizeSendClaim,
 };
