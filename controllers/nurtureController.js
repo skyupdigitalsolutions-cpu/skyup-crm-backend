@@ -17,6 +17,7 @@
 
 const NurtureRule = require("../models/NurtureRule");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
+const WhatsAppSendLog = require("../models/WhatsAppSendLog");
 const { syncTemplatesForCompany, probeTemplateEndpoints, fetchRaw } = require("../services/msg91TemplateService");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { runNurtureSequenceCheck, triggerNurtureForLead } = require("../jobs/nurtureSequenceJob");
@@ -282,6 +283,112 @@ const triggerForLead = async (req, res) => {
   }
 };
 
+// ── GET /api/nurture/report ────────────────────────────────────────────────────
+// Sent / Failed / Skipped counts + a paginated log, scoped to nurture sends
+// only (channel: "nurture" — excludes manual blasts/campaigns, which have
+// their own reporting elsewhere).
+//
+// Query params (all optional):
+//   from, to     — ISO date strings, filters on createdAt
+//   status       — "sent" | "failed" | "skipped" (omit for all)
+//   ruleId       — filter to one nurture rule
+//   page, limit  — pagination for the log list (default page=1, limit=50)
+const getReport = async (req, res) => {
+  try {
+    const company = resolveCompany(req);
+    if (!company) return res.status(400).json({ message: "Company not resolved from token" });
+
+    const { from, to, status, ruleId } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page, 10)  || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+
+    const match = { company, channel: "nurture" };
+
+    if (status && ["sent", "failed", "skipped"].includes(status)) {
+      match.status = status;
+    }
+    if (ruleId) {
+      match.ruleId = ruleId;
+    }
+    if (from || to) {
+      match.createdAt = {};
+      if (from) match.createdAt.$gte = new Date(from);
+      if (to)   match.createdAt.$lte = new Date(to);
+    }
+
+    // ── Summary counts — always computed over the full date/rule filter,
+    //    ignoring the `status` filter itself, so the UI can show all three
+    //    tallies side-by-side regardless of which tab the user is viewing.
+    const summaryMatch = { ...match };
+    delete summaryMatch.status;
+
+    const summaryAgg = await WhatsAppSendLog.aggregate([
+      { $match: summaryMatch },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]);
+
+    const summary = { sent: 0, failed: 0, skipped: 0, total: 0 };
+    for (const row of summaryAgg) {
+      if (row._id in summary) summary[row._id] = row.count;
+      summary.total += row.count;
+    }
+
+    // ── Per-rule breakdown — helps spot which specific nurture rule is
+    //    failing, rather than just an undifferentiated company-wide total.
+    const byRuleAgg = await WhatsAppSendLog.aggregate([
+      { $match: summaryMatch },
+      {
+        $group: {
+          _id: { ruleId: "$ruleId", ruleName: "$ruleName", status: "$status" },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const byRuleMap = {};
+    for (const row of byRuleAgg) {
+      const key = String(row._id.ruleId || "unassigned");
+      if (!byRuleMap[key]) {
+        byRuleMap[key] = {
+          ruleId: row._id.ruleId,
+          ruleName: row._id.ruleName || "Unassigned",
+          sent: 0, failed: 0, skipped: 0, total: 0,
+        };
+      }
+      byRuleMap[key][row._id.status] = row.count;
+      byRuleMap[key].total += row.count;
+    }
+    const byRule = Object.values(byRuleMap).sort((a, b) => b.total - a.total);
+
+    // ── Paginated log list (respects the `status` filter, unlike summary) ──────
+    const [logs, totalMatching] = await Promise.all([
+      WhatsAppSendLog.find(match)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .select("lead phone name templateName content status reason ruleId ruleName sentByName createdAt")
+        .lean(),
+      WhatsAppSendLog.countDocuments(match),
+    ]);
+
+    res.json({
+      success: true,
+      summary,
+      byRule,
+      logs,
+      pagination: {
+        page,
+        limit,
+        total: totalMatching,
+        hasMore: page * limit < totalMatching,
+      },
+    });
+  } catch (err) {
+    console.error("[nurtureController.getReport]", err.message);
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   listRules,
   createRule,
@@ -293,4 +400,5 @@ module.exports = {
   rawTemplates,
   runNow,
   triggerForLead,
+  getReport,
 };
