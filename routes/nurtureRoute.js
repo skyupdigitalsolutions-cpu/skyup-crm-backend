@@ -15,6 +15,7 @@ const {
   rawTemplates,
   runNow,
   triggerForLead,
+  getReport,
 } = require("../controllers/nurtureController");
 
 // Admin-only, and gated by the same company-scoped entitlement the cron job
@@ -41,5 +42,9 @@ router.get("/templates/probe",  protectAdmin, requireFeature("leadNurtureSequenc
 //                             body: { status } — optional override
 router.post("/run",                protectAdmin, requireFeature("leadNurtureSequence"), runNow);
 router.post("/trigger/:leadId",    protectAdmin, requireFeature("leadNurtureSequence"), triggerForLead);
+
+// ── Sent / Failed / Skipped report ──────────────────────────────────────────
+// GET /report?from=&to=&status=&ruleId=&page=&limit=
+router.get("/report", protectAdmin, requireFeature("leadNurtureSequence"), getReport);
 
 module.exports = router;
