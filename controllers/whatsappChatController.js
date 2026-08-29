@@ -26,6 +26,7 @@ const Lead = require("../models/Leads");
 const { normalizePhone: _sharedNormalizePhone } = require("../utils/normalizePhone");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
 const { hmac } = require("../utils/fieldCrypto");
+const { claimTemplateSendOnce, releaseSendClaim, finalizeSendClaim } = require("../services/autoTemplateService");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // normalizePhone — WA-safe wrapper around the shared normaliser.
@@ -1203,6 +1204,27 @@ const bulkSendToLeads = async (req, res) => {
         failed++;
         continue;
       }
+
+      // ── Never send the same template to the same lead twice ────────────────
+      // This endpoint previously had NO deduplication at all — a double-submit
+      // of the blast button, a slow-network retry, or simply running the same
+      // blast filter twice would resend the exact same template to every
+      // matching lead again. Shares the same atomic, race-proof claim used by
+      // every other automated send path (services/autoTemplateService.js) —
+      // claim first, send, then finalize or release depending on outcome.
+      const { claimed } = await claimTemplateSendOnce(lead._id, templateName);
+      if (!claimed) {
+        results.push({
+          leadId: lead._id,
+          name: lead.name,
+          phone: cleanPhone,
+          status: "skipped",
+          reason: `Template "${templateName}" already sent to this lead previously — not resending.`,
+        });
+        await new Promise((r) => setTimeout(r, 150));
+        continue;
+      }
+
       try {
         const waMessageId = await _sendTemplateToPhone({
           cleanPhone,
@@ -1213,6 +1235,7 @@ const bulkSendToLeads = async (req, res) => {
           senderNumber,
           contactName: lead.name,
         });
+        const content = bulkBodyText ? substitute(bulkBodyText, { 1: lead.name || "" }) : "";
         await _saveConversationAndMessage({
           cleanPhone,
           contactName: lead.name,
@@ -1221,8 +1244,9 @@ const bulkSendToLeads = async (req, res) => {
           leadId: lead._id,
           templateName,
           waMessageId,
-          content: bulkBodyText ? substitute(bulkBodyText, { 1: lead.name || "" }) : "",
+          content,
         });
+        await finalizeSendClaim(lead._id, templateName, content); // finalize the claim placeholder — never a second push
         results.push({
           leadId: lead._id,
           name: lead.name,
@@ -1231,6 +1255,7 @@ const bulkSendToLeads = async (req, res) => {
         });
         sent++;
       } catch (err) {
+        await releaseSendClaim(lead._id, templateName); // send failed — free the claim so a future attempt can retry
         const errMsg = err.response?.data?.message || err.message;
         results.push({
           leadId: lead._id,
@@ -1311,6 +1336,31 @@ const bulkSendCSV = async (req, res) => {
         continue;
       }
       try {
+        // Resolve the matching lead BEFORE sending (not after, as before) —
+        // the atomic "never send this template to this lead twice" claim
+        // needs a leadId, so it must happen before the actual send attempt,
+        // not once we already know delivery succeeded.
+        const lead = await findLeadByPhoneDual(cleanPhone, companyId);
+
+        let claimedForLead = true; // recipients with no matching lead have no
+        // lead-level history to dedup against — sent through unguarded, same
+        // as before this fix; there is no way to track "already sent" without
+        // a lead record to attach it to.
+        if (lead?._id) {
+          const { claimed } = await claimTemplateSendOnce(lead._id, templateName);
+          claimedForLead = claimed;
+        }
+        if (!claimedForLead) {
+          results.push({
+            name: contactName,
+            phone: cleanPhone,
+            status: "skipped",
+            reason: `Template "${templateName}" already sent to this lead previously — not resending.`,
+          });
+          await new Promise((r) => setTimeout(r, 150));
+          continue;
+        }
+
         const waMessageId = await _sendTemplateToPhone({
           cleanPhone,
           templateName,
@@ -1320,8 +1370,7 @@ const bulkSendCSV = async (req, res) => {
           senderNumber,
           contactName,
         });
-        // Dual-phone lead lookup for CSV sends
-        const lead = await findLeadByPhoneDual(cleanPhone, companyId);
+        const content = csvBodyText ? substitute(csvBodyText, { 1: contactName || "" }) : "";
         await _saveConversationAndMessage({
           cleanPhone,
           contactName,
@@ -1330,11 +1379,18 @@ const bulkSendCSV = async (req, res) => {
           leadId: lead?._id || null,
           templateName,
           waMessageId,
-          content: csvBodyText ? substitute(csvBodyText, { 1: contactName || "" }) : "",
+          content,
         });
+        if (lead?._id) await finalizeSendClaim(lead._id, templateName, content);
         results.push({ name: contactName, phone: cleanPhone, status: "sent" });
         sent++;
       } catch (err) {
+        // lead may be out of scope here if findLeadByPhoneDual itself threw —
+        // re-resolve defensively so a failed send doesn't leave a stuck claim.
+        try {
+          const leadForRelease = await findLeadByPhoneDual(cleanPhone, companyId);
+          if (leadForRelease?._id) await releaseSendClaim(leadForRelease._id, templateName);
+        } catch { /* best-effort — never let cleanup failure mask the original error */ }
         const errMsg = err.response?.data?.message || err.message;
         results.push({
           name: contactName,
@@ -1584,6 +1640,22 @@ const employeeBulkSend = async (req, res) => {
         failed++;
         continue;
       }
+
+      // Same atomic, never-resend-the-same-template guard as bulkSendToLeads
+      // above — this endpoint had the identical gap.
+      const { claimed } = await claimTemplateSendOnce(lead._id, templateName);
+      if (!claimed) {
+        results.push({
+          leadId: lead._id,
+          name: lead.name,
+          phone: cleanPhone,
+          status: "skipped",
+          reason: `Template "${templateName}" already sent to this lead previously — not resending.`,
+        });
+        await new Promise((r) => setTimeout(r, 150));
+        continue;
+      }
+
       try {
         const waMessageId = await _sendTemplateToPhone({
           cleanPhone,
@@ -1594,6 +1666,7 @@ const employeeBulkSend = async (req, res) => {
           senderNumber,
           contactName: lead.name,
         });
+        const content = empBodyText ? substitute(empBodyText, { 1: lead.name || "" }) : "";
         await _saveConversationAndMessage({
           cleanPhone,
           contactName: lead.name,
@@ -1602,8 +1675,9 @@ const employeeBulkSend = async (req, res) => {
           leadId: lead._id,
           templateName,
           waMessageId,
-          content: empBodyText ? substitute(empBodyText, { 1: lead.name || "" }) : "",
+          content,
         });
+        await finalizeSendClaim(lead._id, templateName, content);
         results.push({
           leadId: lead._id,
           name: lead.name,
@@ -1612,6 +1686,7 @@ const employeeBulkSend = async (req, res) => {
         });
         sent++;
       } catch (err) {
+        await releaseSendClaim(lead._id, templateName);
         const errMsg = err.response?.data?.message || err.message;
         results.push({
           leadId: lead._id,
