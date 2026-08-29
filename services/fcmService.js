@@ -646,6 +646,123 @@ async function sendNoFollowUpAlert(user, leads) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  sendWhatsAppInboundNotification(companyId, { assignedAgentId, waPhone,
+//    contactName, leadName, body, conversationId, leadId })
+//
+//  Called from msg91WebhookController.processMSG91Payload() the moment a
+//  customer's WhatsApp message is saved. Socket.io already handles the
+//  in-app real-time update; this covers the case Socket.io can't — the app
+//  is backgrounded/killed and there's no live connection to emit to.
+//
+//  Sends to:
+//    • the assigned agent (User model), if the conversation has one
+//    • every admin/super_admin in the company (Admin model) — the WA admin
+//      app's "firehose" view, mirroring the wa_admin / wa_company_<id>
+//      socket rooms this same event already goes to
+//
+//  Fires all sends in parallel and never throws — a push failure must never
+//  block or fail the webhook response back to MSG91.
+// ─────────────────────────────────────────────────────────────────────────────
+async function sendWhatsAppInboundNotification(companyId, {
+  assignedAgentId, waPhone, contactName, leadName, body, conversationId, leadId,
+} = {}) {
+  const messaging = getMessaging();
+  if (!messaging) {
+    if (_initFailed) console.warn('[FCM] sendWhatsAppInboundNotification skipped — FCM not initialised:', _initError);
+    return;
+  }
+
+  try {
+    const displayName = contactName || leadName || waPhone || 'Customer';
+    const title = `💬 ${displayName}`;
+    const bodyText = (body || '').slice(0, 120) || 'Sent a new message';
+
+    const data = {
+      type:           'wa_inbound_message',
+      conversationId: String(conversationId || ''),
+      leadId:         String(leadId || ''),
+      waPhone:        waPhone || '',
+    };
+
+    const payloadFor = (token) => ({
+      token,
+      notification: { title, body: bodyText },
+      data,
+      android: {
+        priority: 'high',
+        notification: {
+          channelId:             'wa_message_channel_v1',
+          priority:              'max',
+          defaultSound:          true,
+          defaultVibrateTimings: true,
+          tag:                   `wa_conv_${conversationId || waPhone}`, // collapses repeat pushes for the same thread
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            alert: { title, body: bodyText },
+            sound: 'default',
+            'content-available': 1,
+          },
+        },
+        headers: { 'apns-priority': '10' },
+      },
+    });
+
+    // ── Collect recipient tokens ─────────────────────────────────────────────
+    const recipients = []; // { token, kind: 'admin' | 'agent', id }
+
+    const [admins, agent] = await Promise.all([
+      Admin.find({ company: companyId, role: { $in: ['admin', 'super_admin'] }, fcmToken: { $ne: null } })
+        .select('_id fcmToken').lean(),
+      assignedAgentId
+        ? User.findById(assignedAgentId).select('_id fcmToken').lean()
+        : Promise.resolve(null),
+    ]);
+
+    admins.forEach((a) => { if (a.fcmToken) recipients.push({ token: a.fcmToken, kind: 'admin', id: a._id }); });
+    if (agent?.fcmToken) recipients.push({ token: agent.fcmToken, kind: 'agent', id: agent._id });
+
+    if (recipients.length === 0) {
+      console.warn(`[FCM] sendWhatsAppInboundNotification: no registered tokens for company ${companyId}`);
+      return;
+    }
+
+    const results = await Promise.allSettled(
+      recipients.map((r) => messaging.send(payloadFor(r.token)))
+    );
+
+    let sent = 0;
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.status === 'fulfilled') {
+        sent++;
+        continue;
+      }
+      const err = r.reason;
+      const recipient = recipients[i];
+      if (
+        err?.code === 'messaging/registration-token-not-registered' ||
+        err?.code === 'messaging/invalid-registration-token'
+      ) {
+        if (recipient.kind === 'admin') {
+          await Admin.findByIdAndUpdate(recipient.id, { $set: { fcmToken: null } }).catch(() => {});
+        } else {
+          await User.findByIdAndUpdate(recipient.id, { $set: { fcmToken: null } }).catch(() => {});
+        }
+      } else {
+        console.error('[FCM] sendWhatsAppInboundNotification send error:', err?.message);
+      }
+    }
+
+    console.log(`[FCM] ✅ WhatsApp inbound push sent to ${sent}/${recipients.length} recipient(s) for company ${companyId}`);
+  } catch (err) {
+    console.error('[FCM] sendWhatsAppInboundNotification error:', err.message);
+  }
+}
+
 module.exports = {
   sendNewLeadNotification,
   sendReassignedLeadNotification,
@@ -654,5 +771,6 @@ module.exports = {
   sendFollowUpAlert,
   sendEscalationAlert,   // BUG 1 FIX — was missing, crashed leadAlertsJob every tick
   sendNoFollowUpAlert,
+  sendWhatsAppInboundNotification,
   checkFCMHealth,
 };
