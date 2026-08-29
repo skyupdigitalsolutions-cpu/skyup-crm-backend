@@ -313,7 +313,14 @@ const getReport = async (req, res) => {
     if (from || to) {
       match.createdAt = {};
       if (from) match.createdAt.$gte = new Date(from);
-      if (to)   match.createdAt.$lte = new Date(to);
+      // Extend a date-only "to" (e.g. "2026-08-29") to the end of that day —
+      // otherwise it parses as midnight UTC and excludes the entire day it's
+      // meant to include. Same fix already applied in bulkSendToLeads.
+      if (to) {
+        const end = new Date(to);
+        end.setHours(23, 59, 59, 999);
+        match.createdAt.$lte = end;
+      }
     }
 
     // ── Summary counts — always computed over the full date/rule filter,
