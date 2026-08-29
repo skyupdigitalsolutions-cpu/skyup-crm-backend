@@ -1175,6 +1175,25 @@ const syncWhatsAppTemplates = async (req, res) => {
   }
 };
 
+// ── GET /api/whatsapp/leads/sources — distinct Lead.source values ────────────
+// Powers the Blast screen's "Source" filter dropdown with real values instead
+// of a guessed/hardcoded list.
+const listLeadSources = async (req, res) => {
+  try {
+    const { companyId } = callerCtx(req);
+    if (!companyId) return res.status(400).json({ error: "Company not resolved from token" });
+
+    const sources = await Lead.distinct("source", {
+      company: companyId,
+      source: { $nin: [null, ""] },
+    });
+    res.json({ success: true, sources: (sources || []).filter(Boolean).sort() });
+  } catch (err) {
+    console.error("[whatsappChatController.listLeadSources]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 const bulkSendToLeads = async (req, res) => {
   try {
     const { templateName, languageCode = "en_US", campaign, filter: blastFilter } = req.body;
@@ -1203,7 +1222,12 @@ const bulkSendToLeads = async (req, res) => {
     // Apply optional blast filters (status, source, date range)
     if (blastFilter) {
       if (blastFilter.status) filter.status = blastFilter.status;
-      if (blastFilter.source) filter.campaign = blastFilter.source; // source maps to campaign field for Meta/Google/Website
+      // FIX: this used to overwrite filter.campaign with blastFilter.source,
+      // meaning "filter by source" silently never worked — it just clobbered
+      // any campaign filter instead. Lead.source is a real, distinct field
+      // ("Web Form", "Excel Import", Meta/Google ad names, etc.) separate
+      // from Lead.campaign, so it needs its own filter key.
+      if (blastFilter.source) filter.source = blastFilter.source;
       if (blastFilter.dateFrom || blastFilter.dateTo) {
         filter.createdAt = {};
         if (blastFilter.dateFrom) filter.createdAt.$gte = new Date(blastFilter.dateFrom);
@@ -2343,4 +2367,5 @@ module.exports = {
   getTemplateBody,
   listWhatsAppTemplates,
   syncWhatsAppTemplates,
+  listLeadSources,
 };
