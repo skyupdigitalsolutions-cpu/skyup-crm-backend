@@ -27,6 +27,7 @@ const User                 = require("../models/Users");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
 const { getCloudinaryForCompany } = require("../services/cloudinaryService");
 const { slug, SERVICES } = require("../utils/templateNameResolver");
+const { sendWhatsAppInboundNotification } = require("../services/fcmService");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // mirrorInboundMedia — make lead-sent media viewable in the CRM.
@@ -752,13 +753,16 @@ async function processMSG91Payload(rawBody, opts = {}) {
       $inc:             { unreadCount: 1 },
     });
 
+    // ── Resolve assigned agent once — used by both the socket emit below and
+    //    the FCM push, regardless of whether `io` is currently connected.
+    const freshConv           = await WhatsAppConversation.findById(conversation._id).lean();
+    const resolvedAssignedAgentId =
+      freshConv?.assignedAgent?.toString() || conversation.assignedAgent?.toString() || null;
+
     // ── Emit via Socket.io — this is what makes the message appear instantly ──
     const io = global._io;
     if (io) {
-      // Always re-fetch the conversation's assignedAgent from DB — it may have
-      // been updated by startConversation() after we read it above
-      const freshConv       = await WhatsAppConversation.findById(conversation._id).lean();
-      const assignedAgentId = freshConv?.assignedAgent?.toString() || conversation.assignedAgent?.toString();
+      const assignedAgentId = resolvedAssignedAgentId;
 
       const agentRooms = new Set();
       if (assignedAgentId) agentRooms.add(assignedAgentId);
@@ -815,6 +819,19 @@ async function processMSG91Payload(rawBody, opts = {}) {
     } else {
       console.warn("⚠️  global._io not set — socket not emitted");
     }
+
+    // ── FCM push — reaches admins/agent even if the app is backgrounded or
+    //    killed, unlike the socket emit above which only reaches an open
+    //    connection. Never allowed to throw or block the webhook response.
+    sendWhatsAppInboundNotification(config.company, {
+      assignedAgentId: resolvedAssignedAgentId,
+      waPhone,
+      contactName: contactName || conversation.contactName,
+      leadName:    lead?.name || conversation.leadName || null,
+      body:        msgBody,
+      conversationId: conversation._id.toString(),
+      leadId:      (lead?._id || conversation.lead)?.toString() || null,
+    }).catch((e) => console.error("[FCM] sendWhatsAppInboundNotification threw:", e.message));
 
     console.log(`✅ Inbound saved & pushed: ${waPhone} → "${msgBody.substring(0, 80)}" [${messageType}]`);
 
