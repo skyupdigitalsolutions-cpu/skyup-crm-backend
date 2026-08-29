@@ -18,7 +18,7 @@ const SmsLog         = require("../models/SmsLog");
 const Lead           = require("../models/Leads");
 const WhatsAppSendLog = require("../models/WhatsAppSendLog");
 const { resolveTemplateContent } = require("../utils/templateContentResolver");
-const { buildTemplateName, NICHE_TEMPLATE_PREFIX } = require("../utils/templateNameResolver");
+const { buildTemplateName, NICHE_TEMPLATE_PREFIX, resolveWithFallback } = require("../utils/templateNameResolver");
 
 // ── Guard against a static template name that belongs to a DIFFERENT
 // industry/service than the lead it's about to be sent to ────────────────────
@@ -42,28 +42,56 @@ const { buildTemplateName, NICHE_TEMPLATE_PREFIX } = require("../utils/templateN
 // look like they came from the industry×service library.
 const AUTO_LIB_NAME_RE = new RegExp(`_(awareness|interest|desire|action)_v(\\d+)$`, "i");
 
-function staticTemplateMismatchesLeadVertical(templateName, lead) {
+/**
+ * If `templateName` looks like a per-vertical auto-resolve name
+ * (…_<stage>_v<n>) but was WRONG for this specific lead (a static config
+ * value like "digital_marketing_crm_awareness_v2" being blindly applied to
+ * every lead regardless of their actual industry/service), compute the
+ * CORRECT name for THIS lead instead — via the same 3-tier fallback chain
+ * nurture uses (real industry×service library → service-matched niche →
+ * general niche) — rather than just blocking the send outright.
+ *
+ * This is what makes autoSendTemplates() (the "new lead" welcome message)
+ * send content actually relevant to each lead, instead of one static
+ * template — e.g. "digital_marketing_crm_awareness_v2" — going out to every
+ * single new lead regardless of their real industry or service.
+ *
+ * Returns:
+ *   { corrected: null }                 — name doesn't look like a per-vertical
+ *                                          name at all (e.g. "crm_followup_leads"),
+ *                                          or it's already correct for this lead.
+ *   { corrected: "<name>" }             — send this name instead.
+ */
+function resolveCorrectedTemplateForLead(templateName, lead) {
   const name = String(templateName || "").trim().toLowerCase();
   const match = AUTO_LIB_NAME_RE.exec(name);
-  if (!match) return false; // doesn't look like an auto-resolve library name — nothing to check
+  if (!match) return { corrected: null }; // not a per-vertical name — leave as configured
 
-  const [, stage, variation] = match;
+  const [, stage, variationStr] = match;
+  const variation = Number(variationStr) || 1;
 
   // Niche FALLBACK names (general_awareness_v1, website_awareness_v1,
-  // ai_automation_desire_v3 …) also end in _<stage>_v<n>, but they are NOT
-  // industry×service names — they're the correct, intended template for a
-  // lead that has no industry (or only a service). Comparing them against
-  // buildTemplateName() always fails, which made this guard block every
-  // single legitimate fallback send. Recognise them and let them through.
+  // ai_automation_desire_v3 …) end in _<stage>_v<n> too, but they're
+  // already correct for an untagged/service-only lead — buildTemplateName()
+  // would never match them (they're not industry×service names), so
+  // comparing directly would wrongly "correct" a name that's already right.
   const nichePrefixes = Object.values(NICHE_TEMPLATE_PREFIX || {});
   const stem = name.slice(0, name.lastIndexOf(`_${stage}_v${variation}`));
-  if (nichePrefixes.includes(stem)) return false;
+  if (nichePrefixes.includes(stem)) {
+    // Configured value IS a niche name — still worth checking whether it's
+    // the RIGHT niche for this lead's service (e.g. configured "website_..."
+    // but lead's service is "AI Automation") using the same 3-tier resolver.
+    const resolved = resolveWithFallback(lead, stage, variation);
+    return resolved.templateName === name ? { corrected: null } : { corrected: resolved.templateName };
+  }
 
   const expected = buildTemplateName(lead?.industry, lead?.service, stage, variation);
-  // expected === "" when the lead has no industry/service at all — that's
-  // still a mismatch (an industry-specific template can't be right for an
-  // untagged lead), same as expected being a different vertical entirely.
-  return expected !== name;
+  if (expected === name) return { corrected: null }; // already correct for this lead
+
+  // Wrong (or lead has no industry/service at all) — resolve what SHOULD go
+  // to this lead instead of blocking the send entirely.
+  const resolved = resolveWithFallback(lead, stage, variation);
+  return { corrected: resolved.templateName };
 }
 
 // Append a WhatsApp template send to the lead's templateHistory (shown in the
@@ -111,6 +139,40 @@ async function _logAutoTemplateSend({
 // send the SAME template to the SAME lead again seconds later. That produced
 // genuine duplicate WhatsApp messages (confirmed in MSG91's own delivery log
 // as two separate billed sends ~6s apart), not just duplicate log rows.
+// ── Permanent "never send the same template twice" guard ─────────────────────
+// Checks the lead's ENTIRE templateHistory (no date window — any time, ever),
+// not just today. This is stricter than the existing same-day dedup layers in
+// jobs/nurtureSequenceJob.js (which only prevent a duplicate WITHIN the same
+// day): once a specific template name has been sent to a specific lead, it
+// will never be sent to that lead again by ANY caller of sendAutoWhatsApp —
+// nurture, the new-lead welcome message, outcome automation, follow-up
+// reminders, or the interested-blast.
+//
+// This intentionally interacts with nurture's V1→V5 variation cycling: once a
+// lead has received all approved variations for a stage and the cycle wraps
+// around, the wrapped-around variation is now a REPEAT and gets skipped here
+// — so a lead that stays in one status for a very long time will stop
+// receiving further messages for that stage rather than looping the same
+// content again. That trade-off is intentional per explicit requirement: no
+// template is ever sent to the same lead more than once.
+async function alreadySentThisTemplateEver(leadId, templateName) {
+  if (!leadId || !templateName) return false;
+  try {
+    const match = await Lead.findOne(
+      { _id: leadId, "templateHistory.templateName": String(templateName).trim() },
+      { _id: 1 }
+    ).lean();
+    return !!match;
+  } catch (e) {
+    // A lookup failure must never itself cause an unwanted duplicate send —
+    // but it also must never be treated as "definitely already sent" (which
+    // would silently blackhole every future send for that lead). Log it and
+    // let the caller's OTHER dedup layers (same-day checks) still apply.
+    console.warn(`[autoTemplate] alreadySentThisTemplateEver lookup failed: ${e.message} — proceeding with other dedup checks only`);
+    return false;
+  }
+}
+
 async function recordTemplateHistory(lead, templateName, status = "sent", content = "") {
   try {
     if (!lead?._id || !templateName) return;
@@ -200,26 +262,76 @@ async function sendSmartEmail({ to, toName, subject, html, fromName, companyId }
 
 // ─── 1. WhatsApp ─────────────────────────────────────────────────────────────
 async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
-  const { templateName = "crm_followup_leads", languageCode = "en" } = whatsappSettings;
+  let { templateName = "crm_followup_leads", languageCode = "en" } = whatsappSettings;
 
-  // Block a configured static template that belongs to a different
-  // industry/service than this lead — see staticTemplateMismatchesLeadVertical
-  // above. Safe to apply to every caller including nurture's own
-  // auto-resolved sends: those names are built from THIS SAME lead's
-  // industry/service via the identical buildTemplateName() formula, so they
-  // can never mismatch themselves — this only ever fires for a static,
-  // admin-configured name that doesn't match.
-  if (staticTemplateMismatchesLeadVertical(templateName, lead)) {
-    console.warn(
-      `[autoTemplate] ⚠️ Blocked — configured template "${templateName}" belongs to a ` +
-      `different industry/service than lead ${lead?._id} (industry="${lead?.industry || "(none)"}", ` +
-      `service="${lead?.service || "(none)"}"). Check Communications → Auto-Template / ` +
-      `Interested-Blast / Follow-up settings for a misconfigured template name.`
+  // Auto-correct a configured static template that belongs to a DIFFERENT
+  // industry/service than this lead — see resolveCorrectedTemplateForLead()
+  // above. Previously this only BLOCKED the send (leaving the lead with
+  // nothing), which was correct for safety but meant a misconfigured
+  // Company.autoTemplate.whatsapp.templateName (e.g. accidentally set to
+  // "digital_marketing_crm_awareness_v2") caused every OTHER lead to get
+  // silently skipped rather than getting content actually relevant to them.
+  // Now it resolves and sends the CORRECT name for this lead instead —
+  // real industry×service template if tagged, service-matched niche if only
+  // the service is known, general niche otherwise — so every lead gets
+  // something relevant rather than either the wrong vertical or nothing.
+  //
+  // Safe for nurture's own auto-resolved sends too: those names are already
+  // built from THIS SAME lead's industry/service, so resolveCorrectedTemplateForLead
+  // always returns corrected:null for them (nothing to correct).
+  const { corrected } = resolveCorrectedTemplateForLead(templateName, lead);
+  if (corrected) {
+    // Only send the corrected name if it's actually approved for this
+    // company — a niche/industry template might not exist yet (e.g. still
+    // pending MSG91 approval). Skip cleanly with a clear reason rather than
+    // attempting a send that MSG91 would just reject. The ORIGINAL
+    // (mismatched) name is never used as a fallback — sending the wrong
+    // vertical's content is exactly what this whole correction step exists
+    // to prevent.
+    let correctedIsApproved = false;
+    try {
+      const cachedCorrected = await findTemplate(companyId, corrected);
+      correctedIsApproved = !!cachedCorrected &&
+        ["APPROVED", "ENABLED", "ACTIVE"].includes(String(cachedCorrected.status || "").toUpperCase());
+    } catch {
+      // Cache lookup failure — treat as not-yet-verified, skip rather than guess.
+    }
+
+    if (!correctedIsApproved) {
+      console.warn(
+        `[autoTemplate] ⚠️ Skipped — corrected template "${corrected}" for lead ${lead?._id} ` +
+        `is not approved/synced yet in MSG91 (original configured value was "${templateName}"). ` +
+        `Run the template sync, or create/approve this template in MSG91.`
+      );
+      return {
+        channel: "whatsapp",
+        status: "skipped",
+        detail: `Correct template for this lead ("${corrected}") is not yet approved in MSG91.`,
+      };
+    }
+
+    console.log(
+      `[autoTemplate] 🔀 Auto-corrected template for lead ${lead?._id}: ` +
+      `configured "${templateName}" → "${corrected}" (industry="${lead?.industry || "(none)"}", ` +
+      `service="${lead?.service || "(none)"}")`
+    );
+    templateName = corrected;
+  }
+
+  // ── Permanent per-lead-per-template dedup — applies to EVERY caller ──────
+  // See alreadySentThisTemplateEver() above for the full reasoning. Checked
+  // here (not per-caller) so nurture, the new-lead welcome message, outcome
+  // automation, follow-up reminders, and the interested-blast all share the
+  // exact same guarantee with zero duplicated logic.
+  if (await alreadySentThisTemplateEver(lead?._id, templateName)) {
+    console.log(
+      `[autoTemplate] ⛔ Skipped — template "${templateName}" was already sent to lead ${lead?._id} ` +
+      `previously. Templates are never resent to the same lead once delivered.`
     );
     return {
       channel: "whatsapp",
       status: "skipped",
-      detail: `Template "${templateName}" is from a different industry/service than this lead — check your automation settings.`,
+      detail: `Template "${templateName}" already sent to this lead previously — not resending.`,
     };
   }
 
