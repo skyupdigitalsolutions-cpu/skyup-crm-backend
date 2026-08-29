@@ -26,6 +26,8 @@ const {
   markConversationRead,
   getSendLogReport,
   getTemplateBody,
+  listWhatsAppTemplates,
+  syncWhatsAppTemplates,
 } = require("../controllers/whatsappChatController");
 const { makeCompanyUploadMiddleware } = require("../services/cloudinaryService");
 
@@ -86,6 +88,12 @@ router.delete("/conversations/:id", adminProtect, deleteConversation);
 
 // ─── Bulk send: all leads (or campaign-filtered leads) — whatsappBlast feature required ──
 router.post("/bulk-send",     adminProtect, requireFeature("whatsappBlast"), bulkSendToLeads);
+
+// ─── Templates for the Blast picker — sync from MSG91 / list cache ───────────
+// Gated by whatsappBlast (not leadNurtureSequence) so a company using Blast
+// without Nurture enabled can still populate and browse the template cache.
+router.get( "/templates",      adminProtect, requireFeature("whatsappBlast"), listWhatsAppTemplates);
+router.post("/templates/sync", adminProtect, requireFeature("whatsappBlast"), syncWhatsAppTemplates);
 
 // ─── Bulk send: arbitrary recipients from CSV — whatsappBlast feature required ──
 router.post("/bulk-send-csv", adminProtect, requireFeature("whatsappBlast"), bulkSendCSV);
