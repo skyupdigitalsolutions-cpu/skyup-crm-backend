@@ -389,6 +389,12 @@ async function getCompanyEntitlements(companyId) {
     callOutcomesReport:  false,
     metaConversionSync:  false,
     leadIntelligence:    false,   // AI Lead Intelligence page — enabled per-company
+    // LinkedIn Lead Sync API campaigns — requires LinkedIn's own Marketing
+    // Developer Platform approval externally before it can do anything
+    // useful, so this stays a devOverride-only toggle (same as
+    // leadNurtureSequence above) rather than a plan-level entitlement, until
+    // it's broadly available. See routes/linkedinConfig.js.
+    linkedInAds:         false,
     // Employee Excel / Google Sheet integration — AVAILABILITY flag. Turned ON
     // per-company by the Developer panel (devOverrides.featureToggles). This is
     // Layer 1 of the two-tier gate; Layer 2 is company.employeeSheetIntegration
