@@ -57,6 +57,10 @@ const chatRoutes = require('./routes/chatRoutes');
 const metaWebhookRoute = require('./routes/metaWebhook');
 const metaConfigRoute  = require('./routes/metaConfig');
 
+// ── LinkedIn Routes ───────────────────────────────────────────────────────────
+const linkedinWebhookRoute = require('./routes/linkedinWebhook');
+const linkedinConfigRoute  = require('./routes/linkedinConfig');
+
 // ── Razorpay Routes ───────────────────────────────────────────────────────────
 const razorpayRoute = require('./routes/razorpayRoute');
 
@@ -284,6 +288,7 @@ app.get('/api/health', (req, res) =>
 
 // ── Webhook Routes (public — no auth) ────────────────────────────────────────
 app.use('/meta',          metaWebhookRoute);
+app.use('/linkedin',      linkedinWebhookRoute);
 app.use('/msg91-webhook', msg91WebhookRoute);
 app.use('/wa-webhook',    whatsappRoutes);
 
@@ -311,6 +316,7 @@ const runMarketingRoleMigration = async () => {
 
 app.use('/api/marketing-panel',     require('./routes/marketingPanel'));
 app.use('/api/meta-config',         metaConfigRoute);
+app.use('/api/linkedin-config',     linkedinConfigRoute);
 app.use('/api/meta-qualification',  require('./routes/metaQualification'));
 app.use('/api/superadmin',          superAdminRoute);
 app.use('/api/developer',           developerRoutes);
