@@ -97,7 +97,7 @@ const leadSchema = mongoose.Schema(
     // Google Ads leadgenId (which is valid and expected in multi-tenant setups).
     leadgenId: { type: String, default: null },
     name:      { type: String, required: true, trim: true },
-    mobile:    { type: String, required: true },
+    mobile:    { type: String, default: "" },
     email:     { type: String, default: "", trim: true },
     // ── WhatsApp template trigger history (shown in the Update Lead popup) ─────
     // Every automated WhatsApp TEMPLATE actually sent to this lead is appended
