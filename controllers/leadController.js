@@ -1146,9 +1146,20 @@ const getMyLeads = async (req, res) => {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit || "200", 10)));
     const skip  = (page - 1) * limit;
 
+    // Admin/super_admin sessions arrive here via protectAny (mobile app now
+    // supports admin login too — see middlewares/authMiddleware.js's
+    // protectAny normalization). An admin has no single "assigned user" —
+    // they should see every lead across the whole company, matching their
+    // web dashboard's scope, not just leads assigned to their own account ID.
+    // Without this branch, `user: req.user._id` would be `user: undefined`
+    // for an admin session (protectAny's normalized req.user has no `_id`,
+    // only `userId`), which is undefined query behavior — this makes the
+    // scope explicit and correct for both session types instead.
+    const isAdminSession = req.user.role === "admin" || req.user.role === "super_admin";
+
     const query = {
       company:   getCompanyId(req),
-      user:      req.user._id,
+      ...(isAdminSession ? {} : { user: req.user.userId || req.user._id }),
       mergedInto: null,
       isClosed:  { $ne: true },
     };
