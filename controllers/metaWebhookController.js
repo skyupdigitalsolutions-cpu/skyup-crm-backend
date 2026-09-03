@@ -316,6 +316,7 @@ const receiveWebhook = async (req, res) => {
         const VALID_SERVICES = new Set([
           "SEO", "Paid Ads", "Website Design & Development", "AI Automation",
           "CRM", "Video Editing", "Graphic Design", "Social Media Marketing",
+          "AI Voice Agent",
         ]);
 
         // Try to extract industry from form fields
