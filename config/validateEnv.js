@@ -20,7 +20,13 @@ const REQUIRED = [
 
 // Recommended but not fatal — warn so gaps are visible in the deploy log.
 const RECOMMENDED = [
-  { key: "ENCRYPTION_KEY", note: "field-level encryption of lead PII" },
+  // FIX: this used to check "ENCRYPTION_KEY", but the field-encryption
+  // plugin that's actually used live (utils/fieldCrypto.js — encrypts
+  // MetaConfig/LinkedInConfig credentials, etc.) reads FIELD_ENCRYPTION_KEY,
+  // a DIFFERENT variable name. That meant this warning fired on every boot
+  // even when FIELD_ENCRYPTION_KEY was correctly set — a false alarm, not a
+  // real gap. Checking the actual variable name the code uses instead.
+  { key: "FIELD_ENCRYPTION_KEY", note: "field-level encryption (MetaConfig/LinkedInConfig credentials, etc. — see utils/fieldCrypto.js)" },
   { key: "ALLOWED_ORIGINS", note: "CORS allowlist" },
 ];
 
