@@ -10,11 +10,29 @@ const mongoose = require('mongoose');
 const crypto   = require('crypto');
 
 // ── Encryption helpers (AES-256-GCM) ─────────────────────────────────────────
-// Bot tokens are sensitive credentials. We encrypt at rest using the same
-// ENCRYPTION_KEY already required by the backend environment (used elsewhere
-// in fieldCrypto.js). Falls back gracefully if the key is not set (dev mode).
-const KEY = process.env.ENCRYPTION_KEY
-  ? Buffer.from(process.env.ENCRYPTION_KEY, 'hex')
+// Bot tokens are sensitive credentials. We encrypt at rest using the same key
+// utils/fieldCrypto.js already uses for other credential fields.
+//
+// FIX: this previously read process.env.ENCRYPTION_KEY based on a mistaken
+// assumption (per the old comment here) that it was "the same ENCRYPTION_KEY
+// already required... used elsewhere in fieldCrypto.js" — but fieldCrypto.js
+// actually reads FIELD_ENCRYPTION_KEY, a different variable name that was
+// never the same value. Since ENCRYPTION_KEY was never actually set in this
+// deployment, KEY below was always null, and encrypt()/decrypt() both
+// silently no-op when KEY is null — meaning every Daily Report bot token
+// saved through this model has been stored as PLAINTEXT, not encrypted,
+// despite the code appearing to implement encryption.
+//
+// Also matching fieldCrypto.js's exact key-derivation method, not just its
+// variable name: FIELD_ENCRYPTION_KEY is a PLAIN PASSPHRASE (any length),
+// hashed with SHA-256 to get a fixed 32-byte key — NOT raw hex bytes.
+// `Buffer.from(key, 'hex')` would only coincidentally work for a passphrase
+// that happens to look like valid hex; it would silently break (or throw)
+// for a normal, non-hex passphrase. Deriving it the same way fieldCrypto.js
+// does is the actually-correct fix, not just reading the right variable name.
+const RAW_KEY = process.env.FIELD_ENCRYPTION_KEY || "";
+const KEY = RAW_KEY
+  ? crypto.createHash('sha256').update(RAW_KEY).digest()
   : null;
 
 function encrypt(text) {
