@@ -32,6 +32,7 @@ const INDUSTRIES = [
 const SERVICES = [
   "SEO", "Paid Ads", "Website Design & Development", "AI Automation",
   "CRM", "Video Editing", "Graphic Design", "Social Media Marketing",
+  "AI Voice Agent",
 ];
 
 /**
@@ -135,6 +136,7 @@ const SERVICE_TO_NICHE = {
   "Video Editing":                  "video",
   "Graphic Design":                 "general",
   "Social Media Marketing":         "social",
+  "AI Voice Agent":                 "saanvi",  // → saanvi_voiceagent_<stage>_v<n>
 };
 
 // The MSG91 template names actually in use are NOT the plain niche id — they
