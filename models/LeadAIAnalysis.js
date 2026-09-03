@@ -33,7 +33,13 @@ const reasonSchema = new mongoose.Schema(
 
 const leadAIAnalysisSchema = new mongoose.Schema(
   {
-    leadId:    { type: mongoose.Schema.Types.ObjectId, ref: "Lead", required: true, index: true },
+    // FIX: removed the redundant `index: true` that was here — a full,
+    // more specific index already exists below (`leadAIAnalysisSchema.index(
+    // { leadId: 1 }, { unique: true })`), which also enforces uniqueness,
+    // something the inline `index: true` didn't. Having both caused Mongoose's
+    // "Duplicate schema index on {leadId:1}" warning on every boot — harmless,
+    // but noisy, and the fix is simply not declaring the same index twice.
+    leadId:    { type: mongoose.Schema.Types.ObjectId, ref: "Lead", required: true },
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: true, index: true },
 
     // ── Core outcome ──────────────────────────────────────────────────────────
