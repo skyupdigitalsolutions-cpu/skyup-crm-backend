@@ -353,7 +353,26 @@ const receiveWebhook = async (req, res) => {
             console.log(`   ⚠ Race-condition duplicate for ${leadPayload.mobile} — skipping`);
             continue;
           }
-          throw createErr;
+          // FIX: previously this re-threw ANY other error (e.g. the
+          // ValidationError that fired when `mobile` was required and this
+          // specific Meta form's phone field wasn't extracted) — which
+          // propagated up and lost the lead ENTIRELY (name, email, every
+          // answer they gave), not just the phone number. Since this loop
+          // processes potentially several leads from ONE webhook payload, a
+          // single bad lead could also abort processing of every OTHER lead
+          // still queued in the same batch.
+          //
+          // `mobile` is no longer a hard-required schema field (see
+          // models/Leads.js), so this specific failure mode shouldn't recur —
+          // but this is a safety net for any OTHER unexpected validation
+          // issue: log the full raw payload so the lead can be manually
+          // recovered from this log, then move on to the next lead instead
+          // of losing the whole batch.
+          console.error(
+            `❌ LEAD CREATE FAILED (not saved — recover manually from this log): ${createErr.message}\n` +
+            `   Raw leadPayload: ${JSON.stringify(leadPayload)}`
+          );
+          continue;
         }
 
         console.log(`\n✅ META LEAD SAVED — "${newLead.name}" | ${newLead.mobile} | campaign: "${config.campaignName}" | adset: "${config.adSetName}" | id: ${newLead._id}`);
