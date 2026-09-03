@@ -39,7 +39,7 @@ const {
   getLeadActionSummary,
 } = require("../controllers/leadController");
 
-const { protect } = require("../middlewares/authMiddleware");
+const { protect, protectAny } = require("../middlewares/authMiddleware");
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 const { protectSuperAdmin } = require("../middlewares/superAdminMiddleware");
 const { validateObjectId } = require("../middlewares/validateObjectId");
@@ -69,7 +69,7 @@ router.get("/admin/pending-notifications", protectAdmin, getPendingNotifications
 
 // ── GET ───────────────────────────────────────────────────────────────────────
 router.get("/admin/all", protectAdmin, adminGetAllLeads);
-router.get("/my-leads", protect, getMyLeads);
+router.get("/my-leads", protectAny, getMyLeads);
 router.get("/by-campaign", protectAdmin, getLeadsByCampaign);
 router.get("/distinct-campaigns", protectAdmin, getDistinctCampaigns);
 router.get("/", protect, getLeads);
