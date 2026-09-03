@@ -23,12 +23,12 @@ const recordingUpload = makeCompanyUploadMiddleware({
   allowedFormats: ['mp3', 'm4a', 'aac', 'wav', 'amr', '3gp', 'ogg', 'opus', 'mp4', '3g2'],
 });
 
-router.get('/match',        protect,    matchPhone);
+router.get('/match',        protectAny, matchPhone);
 router.get('/today',        protectAny, getTodayCallLogs);   // protectAny: agents see own, admins see all company
-router.get('/',             protect,    getCallLogs);        // supports ?date=YYYY-MM-DD
-router.post('/sync',        protect,    syncCallLogs);
-router.post('/recording',   protect,    recordingUpload, uploadRecording);
-router.post('/remark',      protect,    saveRemark);
+router.get('/',             protectAny, getCallLogs);        // supports ?date=YYYY-MM-DD
+router.post('/sync',        protectAny, syncCallLogs);
+router.post('/recording',   protectAny, recordingUpload, uploadRecording);
+router.post('/remark',      protectAny, saveRemark);
 router.post('/summarize-unmatched', protectAny, summarizeUnmatchedCall); // AI summary for non-lead calls
 router.get('/recordings',   protectAny, getCompanyRecordings);
 router.get('/all',          protectAny, getCompanyAllLogs);
