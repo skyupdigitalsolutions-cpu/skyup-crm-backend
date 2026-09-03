@@ -71,6 +71,18 @@ function maskLeadPII(lead, role, callerId) {
   const isSuperAdmin = role === 'super_admin' || role === 'superadmin';
   if (isSuperAdmin) return lead;
 
+  // FIX: a regular company admin (role === 'admin') fell through this and the
+  // "own lead" employee check below, landing on the masked-by-default return
+  // at the bottom — meaning admin saw every phone number masked, company-wide.
+  // That's already wrong on the web dashboard, but it's a hard BLOCKER for
+  // admin calling from mobile specifically: CallButton dials whatever string
+  // it's given via a tel: link, so a masked number like "98765XXXXX" isn't
+  // just unreadable, it's not a real number to dial at all. An admin manages
+  // their whole company's leads and needs real contact info the same way
+  // super_admin does — bypass masking for this role too.
+  const isAdmin = role === 'admin';
+  if (isAdmin) return lead;
+
   // Employees see full numbers for their own assigned leads —
   // they need the real number to make phone calls.
   const isEmployee = role === 'user' || role === 'employee';
