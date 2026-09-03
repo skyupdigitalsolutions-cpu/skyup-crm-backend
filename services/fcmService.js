@@ -709,6 +709,23 @@ async function sendWhatsAppInboundNotification(companyId, {
         },
         headers: { 'apns-priority': '10' },
       },
+      // ── Web push (browser/PWA clients) ──────────────────────────────────────
+      // FCM tokens from the web SDK are the same token format as mobile —
+      // no separate send path needed — but without this block, browser
+      // notifications fall back to defaults with no icon and no click
+      // behavior. fcm_options.link is what firebase-messaging-sw.js's
+      // notificationclick handler needs to open the right conversation.
+      webpush: {
+        notification: {
+          title,
+          body: bodyText,
+          icon: '/icons/icon-192.png',
+          tag: `wa_conv_${conversationId || waPhone}`,
+        },
+        fcmOptions: {
+          link: conversationId ? `/chat/${conversationId}` : '/',
+        },
+      },
     });
 
     // ── Collect recipient tokens ─────────────────────────────────────────────
