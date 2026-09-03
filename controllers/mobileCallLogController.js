@@ -31,7 +31,7 @@ const cloudinaryStorage = new CloudinaryStorage({
     // rather than the MIME header, which is more reliable when Android OEMs
     // send wrong MIME types (e.g. video/mp4 for .m4a files).
     resource_type:   'auto',
-    public_id:       `${req.user._id}_${Date.now()}`,
+    public_id:       `${(req.user.userId || req.user._id)}_${Date.now()}`,
     allowed_formats: ['mp3', 'm4a', 'aac', 'wav', 'amr', '3gp', 'ogg', 'opus', 'mp4', '3g2'],
   }),
 });
@@ -92,7 +92,7 @@ const syncCallLogs = async (req, res) => {
     // ── Company-level call-log sync gate ─────────────────────────────────────
     // Super admin can disable device call-log sync per company.
     const Company = require('../models/Company');
-    const company = await Company.findById(req.user.company)
+    const company = await Company.findById((req.user.companyId || req.user.company))
       .select('callLogSyncEnabled')
       .lean();
     if (company && company.callLogSyncEnabled === false) {
@@ -118,7 +118,7 @@ const syncCallLogs = async (req, res) => {
 
     // ── Load all company leads ONCE, build phone Maps (primary + secondary) ──
     const companyLeads = await Lead.find(
-      { company: req.user.company },
+      { company: (req.user.companyId || req.user.company) },
       { mobile: 1, primaryPhone: 1, secondaryPhone: 1, normalizedPhone: 1, normalizedSecondaryPhone: 1, _id: 1, name: 1, status: 1 }
     ).lean();
 
@@ -140,8 +140,8 @@ const syncCallLogs = async (req, res) => {
         leadMapBySecondary.get(normalized) ||
         null;
       return {
-        user:              req.user._id,
-        company:           req.user.company,
+        user:              (req.user.userId || req.user._id),
+        company:           (req.user.companyId || req.user.company),
         phoneNumber:       log.phoneNumber,
         callType:          log.callType || 'unknown',
         duration:          parseInt(log.duration || 0),
@@ -171,7 +171,7 @@ const syncCallLogs = async (req, res) => {
       const min = Math.floor(dur / 60), sec = dur % 60;
       const durStr = dur > 0 ? ` (${min > 0 ? min + 'm ' : ''}${sec}s)` : '';
       leadUpdates.get(id).push({
-        userId:   req.user._id,
+        userId:   (req.user.userId || req.user._id),
         userName: req.user.name || 'Mobile App',
         remark:   `${callTypeToOutcome(doc.callType)} from mobile app${durStr}`,
         outcome:  callTypeToOutcome(doc.callType),
@@ -242,7 +242,24 @@ const getCallLogs = async (req, res) => {
     const page  = parseInt(req.query.page  || 1);
     const limit = parseInt(req.query.limit || 50);
 
-    const filter = { user: req.user._id };
+    // Same admin-aware branching as getTodayCallLogs below — this route now
+    // accepts protectAny (admin login on mobile), so it needs the same
+    // "admin sees the whole company, agent sees only their own" scope.
+    // Without this, an admin session would silently get an empty/irrelevant
+    // list here (filtered to a call-log "user" matching their own admin ID,
+    // which normal call logs never have) instead of an error — worse,
+    // because it looks like "no calls" rather than a clear problem.
+    const isAdmin = !!(req.admin || req.callerCompany);
+    const company = req.callerCompany || req.user?.company;
+
+    const filter = isAdmin
+      ? { company, ...(req.query.userId ? { user: req.query.userId } : {}) }
+      : { user: (req.user.userId || req.user._id) };
+
+    if (isAdmin && !company) {
+      return res.status(400).json({ message: 'Company not resolved for admin token' });
+    }
+
     if (req.query.date) {
       const dayStart = new Date(req.query.date);
       dayStart.setHours(0, 0, 0, 0);
@@ -251,10 +268,15 @@ const getCallLogs = async (req, res) => {
       filter.timestamp = { $gte: dayStart, $lt: dayEnd };
     }
 
+    let logsQuery = MobileCallLog.find(filter)
+      .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
+      .populate('matchedLead', 'name mobile status');
+    // Only populate the caller's name/email when showing merged company-wide
+    // results (admin) — an agent already knows every log here is their own.
+    if (isAdmin) logsQuery = logsQuery.populate('user', 'name email');
+
     const [logs, total] = await Promise.all([
-      MobileCallLog.find(filter)
-        .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
-        .populate('matchedLead', 'name mobile status'),
+      logsQuery,
       MobileCallLog.countDocuments(filter),
     ]);
     res.json({ logs, page, total, totalPages: Math.ceil(total / limit) });
@@ -295,7 +317,7 @@ const getTodayCallLogs = async (req, res) => {
       if (req.query.userId) filter.user = req.query.userId;
     } else {
       // Regular agent: only their own logs
-      filter = { user: req.user._id, timestamp: { $gte: dayStart, $lte: dayEnd } };
+      filter = { user: (req.user.userId || req.user._id), timestamp: { $gte: dayStart, $lte: dayEnd } };
     }
 
     const logs = await MobileCallLog.find(filter)
@@ -321,7 +343,7 @@ const matchPhone = async (req, res) => {
     if (!phone) return res.status(400).json({ message: 'phone query param required' });
 
     const normalized = normalizePhone(phone);
-    const companyId  = req.user.company;
+    const companyId  = (req.user.companyId || req.user.company);
 
     const lead = await Lead.findOne(
       {
@@ -368,7 +390,7 @@ const uploadRecording = async (req, res) => {
 
     let resolvedLeadId = null;
     if (leadId) {
-      const lead = await Lead.findOne({ _id: leadId, company: req.user.company });
+      const lead = await Lead.findOne({ _id: leadId, company: (req.user.companyId || req.user.company) });
       if (lead) resolvedLeadId = lead._id;
     }
 
@@ -382,8 +404,8 @@ const uploadRecording = async (req, res) => {
     // the same file simultaneously.
     if (fileKey) {
       const existing = await MobileCallLog.findOne({
-        user:    req.user._id,
-        company: req.user.company,
+        user:    (req.user.userId || req.user._id),
+        company: (req.user.companyId || req.user.company),
         phoneNumber,
         'recordings.fileKey': fileKey,
       });
@@ -403,12 +425,12 @@ const uploadRecording = async (req, res) => {
     };
 
     const updated = await MobileCallLog.findOneAndUpdate(
-      { user: req.user._id, company: req.user.company, phoneNumber },
+      { user: (req.user.userId || req.user._id), company: (req.user.companyId || req.user.company), phoneNumber },
       {
         $push: { recordings: newRecording },
         $set: {
-          company:  req.user.company,
-          user:     req.user._id,
+          company:  (req.user.companyId || req.user.company),
+          user:     (req.user.userId || req.user._id),
           phoneNumber,
           ...(remark         ? { remark:      remark.trim()  } : {}),
           ...(resolvedLeadId ? { matchedLead: resolvedLeadId } : {}),
@@ -441,7 +463,7 @@ const uploadRecording = async (req, res) => {
             });
           } else {
             for (let i = lead.callHistory.length - 1; i >= 0; i--) {
-              if (String(lead.callHistory[i].userId) === String(req.user._id)) { idx = i; break; }
+              if (String(lead.callHistory[i].userId) === String((req.user.userId || req.user._id))) { idx = i; break; }
             }
           }
           if (idx >= 0) {
@@ -503,7 +525,7 @@ const saveRemark = async (req, res) => {
 
     const ts = timestamp ? new Date(parseInt(timestamp)) : null;
     const updated = await MobileCallLog.findOneAndUpdate(
-      { user: req.user._id, phoneNumber, ...(ts ? { timestamp: ts } : {}) },
+      { user: (req.user.userId || req.user._id), phoneNumber, ...(ts ? { timestamp: ts } : {}) },
       { $set: { remark: remark.trim(), ...(outcome ? { outcome } : {}) } },
       { sort: { timestamp: -1 }, new: true },
     );
@@ -522,7 +544,7 @@ const saveRemark = async (req, res) => {
             });
           } else {
             for (let i = lead.callHistory.length - 1; i >= 0; i--) {
-              if (String(lead.callHistory[i].userId) === String(req.user._id)) { idx = i; break; }
+              if (String(lead.callHistory[i].userId) === String((req.user.userId || req.user._id))) { idx = i; break; }
             }
           }
           if (idx >= 0) {
