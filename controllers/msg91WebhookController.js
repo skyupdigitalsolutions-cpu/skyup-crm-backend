@@ -739,7 +739,17 @@ async function processMSG91Payload(rawBody, opts = {}) {
         messageId:      savedMsg._id,
         conversationId: conversation._id,
         contentType,
-      }).catch(() => {});
+      }).catch((err) => {
+        // FIX: this used to be .catch(() => {}) — silently swallowing every
+        // failure of the FIRST, automatic mirror attempt with zero logging.
+        // The only mirror failures ever visible in logs were from the much
+        // later manual "retry" button, by which point the link had already
+        // expired — making every failure look like an expiry problem even
+        // when the real, original cause (bad Cloudinary creds, invalid WA
+        // token, network blip) was something completely different and
+        // invisible. Logging here is what actually lets this be diagnosed.
+        console.error(`[inboundMedia] ❌ automatic mirror failed for message ${savedMsg._id}:`, err.message);
+      });
     }
 
     // ── Update conversation ───────────────────────────────────────────────────
