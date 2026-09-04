@@ -70,6 +70,7 @@ const CAMPAIGN_SOURCES = new Set([
   'Meta',          // Facebook + Instagram Lead Ads (metaWebhookController)
   'Google Ads',    // Google Lead Form Extension (googleAdsHelper)
   'Website',       // Landing page / website tracking (websiteWebhookController)
+  'WhatsApp',      // First-time inbound WhatsApp message with no matching lead (msg91WebhookController)
 ]);
 
 // ── Platform label for notification message ───────────────────────────────────
@@ -77,6 +78,7 @@ function platformLabel(source) {
   if (source === 'Meta')       return 'Meta (Facebook/Instagram)';
   if (source === 'Google Ads') return 'Google Ads';
   if (source === 'Website')    return 'Website/Landing Page';
+  if (source === 'WhatsApp')   return 'WhatsApp (inbound)';
   return source;
 }
 
