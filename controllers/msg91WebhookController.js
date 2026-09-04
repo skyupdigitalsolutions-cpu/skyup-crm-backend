@@ -28,6 +28,7 @@ const { resolveCanonicalConversation } = require("../utils/conversationMerge");
 const { getCloudinaryForCompany } = require("../services/cloudinaryService");
 const { slug, SERVICES } = require("../utils/templateNameResolver");
 const { sendWhatsAppInboundNotification } = require("../services/fcmService");
+const { notifyAllAdminsCampaignLead } = require("../services/telegramService");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // mirrorInboundMedia — make lead-sent media viewable in the CRM.
@@ -547,8 +548,37 @@ async function processMSG91Payload(rawBody, opts = {}) {
     // the inbound webhook).
     const matchingLeads = await findLeadsByPhone(waPhone, config.company);
     const leadOwnerIds  = [...new Set(matchingLeads.map((l) => l.user?.toString()).filter(Boolean))];
-    const lead          = matchingLeads
+    let lead            = matchingLeads
       .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))[0] || null;
+
+    // ── Auto-create a Lead for a brand-new (unmatched) WhatsApp sender ────────
+    // Previously a first-time inbound message from an unknown number just sat
+    // in WhatsAppConversation with no Lead attached at all — it never showed
+    // up anywhere in the CRM's lead pipeline, and no one was ever notified.
+    // Fire-and-forget (doesn't block the webhook response); any failure here
+    // must never break normal message delivery.
+    if (!lead) {
+      try {
+        lead = await Lead.create({
+          name:    contactName || `WhatsApp ${waPhone}`,
+          mobile:  waPhone,
+          source:  "WhatsApp",
+          status:  "New",
+          date:    new Date(),
+          remark:  "Auto-created from inbound WhatsApp message",
+          initialRemark: "Auto-created from inbound WhatsApp message",
+          company: config.company,
+        });
+        console.log(`[WhatsApp] 🆕 Auto-created lead "${lead.name}" (${waPhone}) for company ${config.company}`);
+        notifyAllAdminsCampaignLead(lead, config.company).catch((e) =>
+          console.error("[Telegram] notifyAllAdminsCampaignLead (WhatsApp lead) failed:", e.message)
+        );
+      } catch (e) {
+        // e.g. a race with another inbound message from the same number
+        // creating the lead first — non-fatal, just proceed without one.
+        console.error("[WhatsApp] auto-create lead failed:", e.message);
+      }
+    }
     const leadOwnerId   = lead?.user?.toString() || null;
 
     // ── Find or create conversation ───────────────────────────────────────────
