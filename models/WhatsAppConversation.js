@@ -92,6 +92,17 @@ const whatsAppConversationSchema = new mongoose.Schema(
 // waPhoneHash instead of the plaintext waPhone — see the field comment above.
 whatsAppConversationSchema.index({ waPhoneHash: 1, company: 1 }, { unique: true });
 
+// FIX: getConversations (whatsappChatController.js) does
+// .find({ company }).sort({ lastMessageAt: -1 }) on every single Inbox
+// load — with no index supporting that exact filter+sort shape, MongoDB
+// falls back to a full collection scan (across ALL companies, not just
+// this one) plus an in-memory sort, on every request. This got slower as
+// more conversations accumulated over time — exactly the "why is it
+// taking longer and longer to load" symptom. This compound index lets
+// Mongo satisfy both the filter and the sort order directly from the
+// index itself.
+whatsAppConversationSchema.index({ company: 1, lastMessageAt: -1 });
+
 // ── Compute waPhoneHash BEFORE encryption runs ────────────────────────────────
 // Registered before encryptedFieldsPlugin below so it always sees the
 // PLAINTEXT waPhone — hook order follows registration order in Mongoose.
