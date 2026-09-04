@@ -26,6 +26,12 @@ const scheduledCallSchema = new mongoose.Schema(
     done:        { type: Boolean, default: false },
     doneAt:      { type: Date, default: null },
     note:        { type: String, default: "" },
+    // Precise, time-matched reminder (separate from the once-daily 9:30 AM
+    // digest in jobs/leadAlertsJob.js runFollowUpAlerts()). Tracks whether a
+    // push notification has already fired for THIS specific scheduled call,
+    // so the 5-minute scan in runScheduledCallReminders() never re-notifies
+    // for the same entry once it's been sent.
+    reminderSentAt: { type: Date, default: null },
   },
   { _id: false }
 );
