@@ -45,7 +45,7 @@ const cron  = require('node-cron');
 const Lead  = require('../models/Leads');
 const Admin = require('../models/Admin');
 const User  = require('../models/Users');
-const { sendNoActionAlert, sendFollowUpAlert, sendEscalationAlert, sendNoFollowUpAlert } = require('../services/fcmService');
+const { sendNoActionAlert, sendFollowUpAlert, sendEscalationAlert, sendNoFollowUpAlert, sendScheduledCallReminder } = require('../services/fcmService');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -426,6 +426,95 @@ async function runNoFollowUpDateCheck() {
   }
 }
 
+// ── 5. PRECISE SCHEDULED CALL-BACK REMINDER ────────────────────────────────────
+// Fires: every 5 minutes (cron: */5 * * * *)
+// Trigger: a scheduledCalls entry whose scheduledAt falls within the next 15
+// minutes, not yet done, and not already reminded (reminderSentAt is null).
+// Recipient: the lead's assigned employee.
+//
+// This is DELIBERATELY separate from the once-daily 9:30 AM runFollowUpAlerts()
+// digest above (alert type #4) — that one tells someone "you have N follow-ups
+// today," once, at a fixed time, regardless of when each is actually due. This
+// one is the precise, per-appointment reminder for "call back at 3pm" style
+// remarks — matching the SAME 15-minute lead-time convention the mobile app's
+// own on-device notification check already uses, so a manually-typed date and
+// time actually results in a ping near that moment, not just inclusion in a
+// morning summary that may already be hours stale or many hours early.
+async function runScheduledCallReminders() {
+  try {
+    const now     = new Date();
+    const in15Min = new Date(now.getTime() + 15 * 60 * 1000);
+
+    // $elemMatch is required here, not separate top-level dot-path
+    // conditions — without it, Mongo can match each condition against a
+    // DIFFERENT array element (e.g. one old, done entry satisfying
+    // "reminderSentAt: null" while a different, unrelated entry satisfies
+    // the time window), rather than requiring ONE SINGLE entry to satisfy
+    // all three simultaneously.
+    const leads = await Lead.find({
+      mergedInto: null,
+      isClosed:   { $ne: true },
+      user:       { $ne: null },
+      scheduledCalls: {
+        $elemMatch: {
+          scheduledAt:    { $gte: now, $lte: in15Min },
+          done:           { $ne: true },
+          reminderSentAt: null,
+        },
+      },
+    })
+      .select('_id name user company scheduledCalls')
+      .lean();
+
+    if (!leads.length) return;
+
+    // Batch-fetch every distinct assigned employee in one query, same
+    // pattern as runNoFollowUpDateCheck above.
+    const userIds = [...new Set(leads.map(l => String(l.user)))];
+    const users = await User.find(
+      { _id: { $in: userIds } },
+      { name: 1, fcmToken: 1, role: 1 },
+    ).lean();
+    const userMap = new Map(users.map(u => [String(u._id), u]));
+
+    let sentCount = 0;
+    for (const lead of leads) {
+      const user = userMap.get(String(lead.user));
+      if (!user) continue;
+
+      // A lead could in principle have more than one qualifying entry — loop
+      // all of them, not just the first, so none silently get skipped.
+      const dueEntries = (lead.scheduledCalls || []).filter(sc =>
+        !sc.done &&
+        !sc.reminderSentAt &&
+        sc.scheduledAt >= now &&
+        sc.scheduledAt <= in15Min
+      );
+
+      for (const entry of dueEntries) {
+        await sendScheduledCallReminder(user, lead, entry);
+        sentCount++;
+
+        // Positional update targeting ONLY this specific array entry —
+        // matched by its exact scheduledAt timestamp, since scheduledCalls
+        // has { _id: false } (see models/Leads.js) so there's no subdocument
+        // _id to match on instead.
+        await Lead.updateOne(
+          { _id: lead._id },
+          { $set: { 'scheduledCalls.$[elem].reminderSentAt': new Date() } },
+          { arrayFilters: [{ 'elem.scheduledAt': entry.scheduledAt, 'elem.done': { $ne: true } }] }
+        );
+      }
+    }
+
+    if (sentCount > 0) {
+      console.log(`[LeadAlertsJob] Scheduled call reminders: ${sentCount} sent across ${leads.length} lead(s).`);
+    }
+  } catch (err) {
+    console.error('[LeadAlertsJob] runScheduledCallReminders error:', err.message);
+  }
+}
+
 // ── Scheduler ─────────────────────────────────────────────────────────────────
 function startLeadAlertsJob() {
   // No-action + escalation check — every 15 minutes
@@ -445,10 +534,18 @@ function startLeadAlertsJob() {
     runFollowUpAlerts();
   }, { timezone: 'Asia/Kolkata' });
 
+  // Precise scheduled call-back reminder — every 5 minutes, catches anything
+  // landing in the next 15-minute window. Separate from the daily digest
+  // above — see the long comment on runScheduledCallReminders() for why.
+  cron.schedule('*/5 * * * *', () => {
+    runScheduledCallReminders();
+  });
+
   console.log('[LeadAlertsJob] ✅ Lead alert jobs started');
   console.log('  → No-action (admin 1h + 2h, super_admin 3h escalation): every 15 min');
   console.log('  → Missing follow-up date (employee, 24h+, re-fires 24h): every 15 min');
   console.log('  → Follow-up due (admin + employee):                      daily at 9:30 AM IST');
+  console.log('  → Scheduled call-back reminder (precise, 15-min lead-time): every 5 min');
 }
 
 module.exports = {
@@ -456,4 +553,5 @@ module.exports = {
   runFollowUpAlerts,
   runNewLeadNoActionCheck,
   runNoFollowUpDateCheck,
+  runScheduledCallReminders,
 };
