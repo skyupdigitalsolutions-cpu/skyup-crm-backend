@@ -182,7 +182,8 @@ const getConversations = async (req, res) => {
     const conversations = await WhatsAppConversation.find(filter)
       .populate("lead", "name mobile email status")
       .populate("assignedAgent", "name email")
-      .sort({ lastMessageAt: -1 });
+      .sort({ lastMessageAt: -1 })
+      .lean(); // read-only response — skips Mongoose document hydration overhead
 
     res.json({ success: true, conversations });
   } catch (err) {
