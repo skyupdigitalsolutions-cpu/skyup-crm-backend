@@ -310,6 +310,37 @@ const companySchema = mongoose.Schema(
       },
     },
 
+    // ── Festival Auto-Blast — flip ON once, no manual work per festival ──────
+    // When enabled, EVERY pre-approved template in utils/festivalTemplateCatalog.js
+    // (Ganesh Chaturthi, Diwali, Christmas, etc.) is sent automatically to this
+    // company's leads on its listed date — no need to create/schedule anything
+    // per festival. jobs/festivalCampaignJob.js reads this block directly; a
+    // FestivalAutoBlastLog row per (company, festivalKey, year) makes sure each
+    // festival only ever fires once per company per year, even across restarts.
+    festivalAutoBlast: {
+      enabled: { type: Boolean, default: false },
+      whatsapp: {
+        enabled:      { type: Boolean, default: true },
+        languageCode: { type: String,  default: "en" },
+      },
+      email: {
+        enabled:      { type: Boolean, default: false },
+        // {{festival}} is substituted with the festival name (e.g. "Diwali")
+        // BEFORE the usual {{name}}/{{mobile}}/{{campaign}} merge in sendAutoEmail.
+        subject:      { type: String, default: "Happy {{festival}}, {{name}}!" },
+        fromName:     { type: String, default: "" },
+        bodyTemplate: {
+          type:    String,
+          default: "<p>Hi {{name}},</p><p>Wishing you and your loved ones a very Happy {{festival}}!</p><p>Warm regards,<br/>The Team</p>",
+        },
+      },
+      // Default: every lead. Optionally restrict to specific statuses.
+      targetAudience: {
+        scope:    { type: String, enum: ["all", "byStatus"], default: "all" },
+        statuses: { type: [String], default: [] },
+      },
+    },
+
     // ── Auto-blast settings for Interested status leads ───────────────────────
     interestedBlast: {
       whatsapp: {
