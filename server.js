@@ -81,6 +81,7 @@ const projectRoute         = require('./routes/projectRoute');
 const attendanceRoute      = require('./routes/attendanceRoute');
 const emailCampaignRoute   = require('./routes/emailCampaign');
 const emailHistoryRoute    = require('./routes/emailHistory');
+const festivalCampaignRoute = require('./routes/festivalCampaignRoute'); // NEW — scheduled festive template blasts per company
 
 // ── Jobs ──────────────────────────────────────────────────────────────────────
 const { startSubscriptionExpiryJob } = require('./jobs/subscriptionExpiryJob');
@@ -98,6 +99,7 @@ const { startMetaAutoSyncJob }        = require('./jobs/metaAutoSyncJob'); // NE
 const { startTemplateSyncJob }        = require('./jobs/templateSyncJob'); // NEW — auto-syncs WhatsApp templates from MSG91
 const { startDailyReportJob }         = require('./jobs/dailyReportJob');
 const { startLeadAIAnalysisJob }      = require('./jobs/leadAIAnalysisJob');
+const { startFestivalCampaignJob }    = require('./jobs/festivalCampaignJob'); // NEW — fires scheduled festival template blasts on their due date
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute         = require('./routes/smsCampaign');
@@ -342,6 +344,7 @@ app.use('/api/website-config',      websiteConfigRoute);
 app.use('/api/chat',                chatRoutes);
 app.use('/api/email-campaign',      emailCampaignRoute);
 app.use('/api/email',               emailHistoryRoute);
+app.use('/api/festival-campaigns',  festivalCampaignRoute);
 app.use('/api/sms-campaign',          smsCampaignRoute);
 app.use('/api/sms-campaign/employee', smsCampaignEmployeeRoute);
 app.use('/api/sms',                 smsHistoryRoute);
@@ -494,6 +497,7 @@ connectDB().then(() => {
     startTemplateSyncJob();      // hourly — keeps WhatsApp template cache fresh from MSG91
     startDailyReportJob();         // Sends daily Telegram performance report at each company's configured time
     startLeadAIAnalysisJob();     // AI Lead Outcome Intelligence — processes pending analyses every 2 min
+    startFestivalCampaignJob();   // Festival Campaigns — checks every 15 min (IST) for scheduled festive blasts due today
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();
