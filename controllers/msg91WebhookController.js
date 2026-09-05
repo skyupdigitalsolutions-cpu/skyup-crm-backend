@@ -28,7 +28,7 @@ const { resolveCanonicalConversation } = require("../utils/conversationMerge");
 const { getCloudinaryForCompany } = require("../services/cloudinaryService");
 const { slug, SERVICES } = require("../utils/templateNameResolver");
 const { sendWhatsAppInboundNotification } = require("../services/fcmService");
-const { notifyAllAdminsCampaignLead } = require("../services/telegramService");
+const { notifyCampaignLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // mirrorInboundMedia — make lead-sent media viewable in the CRM.
@@ -570,6 +570,16 @@ async function processMSG91Payload(rawBody, opts = {}) {
           company: config.company,
         });
         console.log(`[WhatsApp] 🆕 Auto-created lead "${lead.name}" (${waPhone}) for company ${config.company}`);
+        // BUG FIX: this previously only called notifyAllAdminsCampaignLead
+        // (each admin's PERSONAL Telegram chat) and never notifyCampaignLead
+        // (the company's shared Telegram GROUP) — the only one of the three
+        // lead-source webhooks missing this call (website/meta both call
+        // both). That's why the company group never heard about new
+        // WhatsApp leads even with telegramEnabled + telegramChatId (group)
+        // configured correctly.
+        notifyCampaignLead(lead, config.company).catch((e) =>
+          console.error("[Telegram] notifyCampaignLead (WhatsApp lead) failed:", e.message)
+        );
         notifyAllAdminsCampaignLead(lead, config.company).catch((e) =>
           console.error("[Telegram] notifyAllAdminsCampaignLead (WhatsApp lead) failed:", e.message)
         );
