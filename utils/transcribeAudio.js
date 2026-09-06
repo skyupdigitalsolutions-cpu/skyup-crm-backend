@@ -32,11 +32,18 @@ const SARVAM_MODEL          = process.env.SARVAM_STT_MODEL || 'saaras:v3';
 const SARVAM_NUM_SPEAKERS   = parseInt(process.env.SARVAM_NUM_SPEAKERS || '2', 10); // agent + customer, the common case for this CRM
 const SARVAM_POLL_INTERVAL_MS = 5000;   // Sarvam's own SDK default (poll_interval=5s)
 const SARVAM_POLL_TIMEOUT_MS  = 10 * 60 * 1000; // Sarvam's own SDK default (timeout=600s) — long calls can take a while to process
+// ── Sarvam's exact supported MIME subtypes (confirmed from their docs +
+// live error responses). NOTE: 3GP/3GPP is NOT in this list — very common
+// for Android call-recorder apps, but Sarvam rejects it outright (400
+// invalid_request_error). Those get transcoded to WAV before upload; see
+// transcodeToSarvamSupportedFormat() below.
 const AUDIO_MIME_BY_EXT = {
-  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav',
-  amr: 'audio/amr', '3gp': 'audio/3gpp', '3g2': 'audio/3gpp2',
-  ogg: 'audio/ogg', opus: 'audio/opus', mp4: 'audio/mp4',
+  mp3: 'audio/mp3', wav: 'audio/wav', m4a: 'audio/x-m4a', aac: 'audio/aac',
+  amr: 'audio/amr', ogg: 'audio/ogg', opus: 'audio/opus', mp4: 'audio/mp4',
+  flac: 'audio/flac', aiff: 'audio/aiff', webm: 'audio/webm',
 };
+// Extensions Sarvam will accept as-is — anything else gets transcoded first.
+const SARVAM_NATIVE_EXTS = new Set(Object.keys(AUDIO_MIME_BY_EXT));
 // FIX: llama-3.1-8b-instant was deprecated by Groq on 2026-06-17 (same
 // deprecation batch as leadActionSummary.js's default model) and now 404s on
 // every call — see console.groq.com/docs/deprecations. Groq's own migration
@@ -171,6 +178,45 @@ function guessAudioMime(fileName) {
   return AUDIO_MIME_BY_EXT[ext] || 'application/octet-stream';
 }
 
+// ── Transcode unsupported formats (e.g. .3gp/.3g2 from Android call
+// recorders) to WAV before handing them to Sarvam. Sarvam's supported-format
+// list does NOT include 3GP at all — uploading one gets a flat 400
+// invalid_request_error, not a soft failure, so this has to happen up front
+// rather than as a retry-on-error path.
+const { execFile } = require('child_process');
+const ffmpegPath = require('ffmpeg-static');
+
+function transcodeToWav(inputPath) {
+  const outputPath = inputPath.replace(path.extname(inputPath), '') + '_converted.wav';
+  return new Promise((resolve, reject) => {
+    execFile(
+      ffmpegPath,
+      ['-y', '-i', inputPath, '-ar', '16000', '-ac', '1', outputPath],
+      (err, _stdout, stderr) => {
+        if (err) return reject(new Error(`ffmpeg transcode failed: ${stderr || err.message}`));
+        resolve(outputPath);
+      }
+    );
+  });
+}
+
+async function ensureSarvamCompatible(fileBuffer, fileName) {
+  const ext = path.extname(fileName || '').replace('.', '').toLowerCase();
+  if (SARVAM_NATIVE_EXTS.has(ext)) return { fileBuffer, fileName };
+
+  console.log(`[Sarvam] "${fileName}" (.${ext}) isn't in Sarvam's supported format list — transcoding to WAV first`);
+  const tmpIn = path.join(os.tmpdir(), `sarvam_in_${Date.now()}.${ext || 'bin'}`);
+  fs.writeFileSync(tmpIn, fileBuffer);
+  try {
+    const tmpOut = await transcodeToWav(tmpIn);
+    const wavBuffer = fs.readFileSync(tmpOut);
+    fs.unlinkSync(tmpOut);
+    return { fileBuffer: wavBuffer, fileName: fileName.replace(/\.[^.]+$/, '.wav') };
+  } finally {
+    fs.unlinkSync(tmpIn);
+  }
+}
+
 async function sarvamCreateJob(apiKey) {
   const resp = await axios.post(
     `${SARVAM_BASE_URL}/speech-to-text/job/v1`,
@@ -268,6 +314,10 @@ async function runSarvam(audioInput) {
     fileBuffer = fs.readFileSync(audioInput);
     fileName   = path.basename(audioInput);
   }
+
+  // FIX: transcode formats Sarvam doesn't accept (3GP being the one that
+  // was hard-failing with 400 invalid_request_error) to WAV before upload.
+  ({ fileBuffer, fileName } = await ensureSarvamCompatible(fileBuffer, fileName));
 
   let job, status, data;
   try {
