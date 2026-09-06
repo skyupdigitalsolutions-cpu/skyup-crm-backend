@@ -178,6 +178,22 @@ function guessAudioMime(fileName) {
   return AUDIO_MIME_BY_EXT[ext] || 'application/octet-stream';
 }
 
+// ── Content-based 3GP/MP4-family detection (belt-and-suspenders alongside
+// the extension check below). MP4-family containers (.mp4, .m4a, .3gp, .3g2,
+// .mov) all start with a 4-byte box size followed by the ASCII bytes "ftyp"
+// at offset 4, then a 4-byte "major brand" at offset 8 that identifies which
+// one it actually is. 3GP brands start with "3gp"/"3g2" — those are the ones
+// Sarvam rejects; mp4/m4a-branded files are fine and pass through as-is.
+// This catches a 3GP file even if the filename/extension we extracted from
+// the URL doesn't clearly say "3gp" for any reason.
+function sniffIsUnsupported3gp(buffer) {
+  if (!buffer || buffer.length < 12) return false;
+  const box = buffer.toString('ascii', 4, 8);
+  if (box !== 'ftyp') return false;
+  const brand = buffer.toString('ascii', 8, 12).toLowerCase();
+  return brand.startsWith('3gp') || brand.startsWith('3g2');
+}
+
 // ── Transcode unsupported formats (e.g. .3gp/.3g2 from Android call
 // recorders) to WAV before handing them to Sarvam. Sarvam's supported-format
 // list does NOT include 3GP at all — uploading one gets a flat 400
@@ -202,15 +218,24 @@ function transcodeToWav(inputPath) {
 
 async function ensureSarvamCompatible(fileBuffer, fileName) {
   const ext = path.extname(fileName || '').replace('.', '').toLowerCase();
-  if (SARVAM_NATIVE_EXTS.has(ext)) return { fileBuffer, fileName };
+  const extLooksNative = SARVAM_NATIVE_EXTS.has(ext);
+  const isActually3gp  = sniffIsUnsupported3gp(fileBuffer);
 
-  console.log(`[Sarvam] "${fileName}" (.${ext}) isn't in Sarvam's supported format list — transcoding to WAV first`);
+  // DEBUG: console.error (not .log) so this is guaranteed visible in
+  // error.log regardless of pm2's stdout/stderr split, until we've
+  // confirmed which branch is actually being taken in production.
+  console.error(`[Sarvam][debug] fileName="${fileName}" ext="${ext}" extLooksNative=${extLooksNative} sniffedAs3gp=${isActually3gp}`);
+
+  if (extLooksNative && !isActually3gp) return { fileBuffer, fileName };
+
+  console.log(`[Sarvam] "${fileName}" (.${ext}${isActually3gp ? ', sniffed as 3GP by content' : ''}) isn't in Sarvam's supported format list — transcoding to WAV first`);
   const tmpIn = path.join(os.tmpdir(), `sarvam_in_${Date.now()}.${ext || 'bin'}`);
   fs.writeFileSync(tmpIn, fileBuffer);
   try {
     const tmpOut = await transcodeToWav(tmpIn);
     const wavBuffer = fs.readFileSync(tmpOut);
     fs.unlinkSync(tmpOut);
+    console.error(`[Sarvam][debug] transcode succeeded, new size=${wavBuffer.length} bytes`);
     return { fileBuffer: wavBuffer, fileName: fileName.replace(/\.[^.]+$/, '.wav') };
   } finally {
     fs.unlinkSync(tmpIn);
@@ -315,9 +340,13 @@ async function runSarvam(audioInput) {
     fileName   = path.basename(audioInput);
   }
 
+  console.error(`[Sarvam][debug] resolved audioInput → fileName="${fileName}", size=${fileBuffer.length} bytes`);
+
   // FIX: transcode formats Sarvam doesn't accept (3GP being the one that
   // was hard-failing with 400 invalid_request_error) to WAV before upload.
   ({ fileBuffer, fileName } = await ensureSarvamCompatible(fileBuffer, fileName));
+
+  console.error(`[Sarvam][debug] after compatibility check → fileName="${fileName}", contentType="${guessAudioMime(fileName)}"`);
 
   let job, status, data;
   try {
