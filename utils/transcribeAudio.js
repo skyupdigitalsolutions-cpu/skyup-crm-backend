@@ -1,12 +1,19 @@
 // utils/transcribeAudio.js
 // ── Dual-engine transcription ─────────────────────────────────────────────────
-//   • ElevenLabs Scribe v2 → mixed / Indic / Hinglish audio
-//     - No chunking needed (handles full-length files)
-//     - Built-in diarization with detect_speaker_roles → auto-labels agent/customer
-//     - 90+ languages, word-level timestamps
-//   • Groq Whisper large-v3 → purely English audio (free tier)
+//   • Sarvam AI (Saaras v3, Batch API) → mixed / Indic / Hinglish audio
+//     - FIX: replaces the previous ElevenLabs engine, which was the engine
+//       failing in production. Sarvam is purpose-built for Indian languages
+//       and telephony-quality audio (8kHz call recordings), which is a better
+//       fit for this CRM's call recordings than a general-purpose engine.
+//     - Batch API job flow: create job → get upload URL → PUT audio →
+//       start job → poll status → get download URL → fetch transcript JSON.
+//     - Built-in diarization (with_diarization=true) → speaker_id "0"/"1"/...
+//       (unlike ElevenLabs, Sarvam doesn't auto-label agent/customer roles,
+//       so we map by first-appearance order, same fallback ElevenLabs used).
+//     - Chunk-level (sentence/phrase) timestamps, not word-level.
+//   • Groq Whisper large-v3 → purely English audio (free tier, unchanged)
 //
-// Routing: audioLang = 'english' → Groq | anything else → ElevenLabs
+// Routing: audioLang = 'english' → Groq | anything else → Sarvam AI
 // ─────────────────────────────────────────────────────────────────────────────
 
 const fs           = require('fs');
@@ -17,8 +24,19 @@ const FormData     = require('form-data');
 
 const GROQ_STT_URL       = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const GROQ_CHAT_URL      = 'https://api.groq.com/openai/v1/chat/completions';
-const ELEVENLABS_STT_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
 const WHISPER_MODEL      = 'whisper-large-v3';
+
+// ── Sarvam AI Batch Speech-to-Text ────────────────────────────────────────────
+const SARVAM_BASE_URL       = 'https://api.sarvam.ai';
+const SARVAM_MODEL          = process.env.SARVAM_STT_MODEL || 'saaras:v3';
+const SARVAM_NUM_SPEAKERS   = parseInt(process.env.SARVAM_NUM_SPEAKERS || '2', 10); // agent + customer, the common case for this CRM
+const SARVAM_POLL_INTERVAL_MS = 5000;   // Sarvam's own SDK default (poll_interval=5s)
+const SARVAM_POLL_TIMEOUT_MS  = 10 * 60 * 1000; // Sarvam's own SDK default (timeout=600s) — long calls can take a while to process
+const AUDIO_MIME_BY_EXT = {
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav',
+  amr: 'audio/amr', '3gp': 'audio/3gpp', '3g2': 'audio/3gpp2',
+  ogg: 'audio/ogg', opus: 'audio/opus', mp4: 'audio/mp4',
+};
 // FIX: llama-3.1-8b-instant was deprecated by Groq on 2026-06-17 (same
 // deprecation batch as leadActionSummary.js's default model) and now 404s on
 // every call — see console.groq.com/docs/deprecations. Groq's own migration
@@ -115,26 +133,132 @@ STRICT RULES:
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ELEVENLABS ENGINE  (mixed / Indic / Hinglish)
+// SARVAM AI ENGINE  (mixed / Indic / Hinglish) — Batch Speech-to-Text
 // ─────────────────────────────────────────────────────────────────────────────
-// Response shape (diarized):
+// Full job lifecycle (per Sarvam's Batch API — the only Sarvam API that
+// supports diarization, which we need for agent/customer separation):
+//   1. POST /speech-to-text/job/v1              → create job, get job_id
+//   2. POST /speech-to-text/job/v1/upload-files  → get a presigned upload URL
+//   3. PUT  <presigned URL>                      → upload the actual audio bytes
+//   4. POST /speech-to-text/job/v1/:job_id/start → kick off processing
+//   5. GET  /speech-to-text/job/v1/:job_id/status (poll until Completed/Failed)
+//   6. POST /speech-to-text/job/v1/download-files → get a presigned download URL
+//   7. GET  <presigned URL>                       → the actual transcript JSON
+//
+// Output JSON shape (diarized):
 // {
-//   text: string,                    // full transcript
-//   language_code: string,           // detected language
-//   words: [
-//     { text, start, end, type, speaker_id }
-//   ]
+//   "transcript": "Full transcript text...",
+//   "diarized_transcript": {
+//     "entries": [
+//       { "transcript": "...", "start_time_seconds": 0.01, "end_time_seconds": 2.5, "speaker_id": "0" },
+//       ...
+//     ]
+//   },
+//   "language_code": "hi-IN"
 // }
-// speaker_id will be "agent" or "customer" when detect_speaker_roles=true
+// speaker_id is a bare index ("0", "1", ...) — Sarvam doesn't auto-label
+// agent/customer roles the way ElevenLabs did, so we map by first-appearance
+// order (same fallback strategy the old ElevenLabs code already used for its
+// own "speaker_0"/"speaker_1" case).
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runElevenLabs(audioInput) {
-  const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-  if (!ELEVENLABS_API_KEY) throw new Error('ELEVENLABS_API_KEY is not set in your environment variables.');
+function sarvamHeaders(apiKey, extra = {}) {
+  return { 'api-subscription-key': apiKey, ...extra };
+}
 
-  // Resolve to buffer + filename
+function guessAudioMime(fileName) {
+  const ext = path.extname(fileName || '').replace('.', '').toLowerCase();
+  return AUDIO_MIME_BY_EXT[ext] || 'application/octet-stream';
+}
+
+async function sarvamCreateJob(apiKey) {
+  const resp = await axios.post(
+    `${SARVAM_BASE_URL}/speech-to-text/job/v1`,
+    {
+      job_parameters: {
+        model:            SARVAM_MODEL,
+        mode:             'transcribe',   // standard transcription in the original language (we romanize separately below)
+        language_code:    'unknown',      // auto-detect — audio is mixed/Indic/Hinglish, language isn't known up front
+        with_diarization: true,
+        num_speakers:     SARVAM_NUM_SPEAKERS,
+      },
+    },
+    { headers: sarvamHeaders(apiKey, { 'Content-Type': 'application/json' }) }
+  );
+  return resp.data; // { job_id, storage_container_type, job_parameters, job_state }
+}
+
+async function sarvamGetUploadUrl(apiKey, jobId, fileName) {
+  const resp = await axios.post(
+    `${SARVAM_BASE_URL}/speech-to-text/job/v1/upload-files`,
+    { job_id: jobId, files: [fileName] },
+    { headers: sarvamHeaders(apiKey, { 'Content-Type': 'application/json' }) }
+  );
+  const entry = resp.data?.upload_urls?.[fileName];
+  if (!entry?.file_url) throw new Error(`Sarvam did not return an upload URL for "${fileName}"`);
+  return entry.file_url;
+}
+
+async function sarvamUploadFile(uploadUrl, fileBuffer, fileName) {
+  // Presigned URLs are Azure Blob SAS URLs (storage_container_type: "Azure_V1")
+  // — a block-blob PUT needs this header or Azure rejects the upload.
+  await axios.put(uploadUrl, fileBuffer, {
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type':   guessAudioMime(fileName),
+    },
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+  });
+}
+
+async function sarvamStartJob(apiKey, jobId) {
+  await axios.post(
+    `${SARVAM_BASE_URL}/speech-to-text/job/v1/${jobId}/start`,
+    {},
+    { headers: sarvamHeaders(apiKey) }
+  );
+}
+
+async function sarvamPollStatus(apiKey, jobId) {
+  const deadline = Date.now() + SARVAM_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const resp = await axios.get(
+      `${SARVAM_BASE_URL}/speech-to-text/job/v1/${jobId}/status`,
+      { headers: sarvamHeaders(apiKey) }
+    );
+    const status = resp.data;
+    console.log(`[Sarvam] Job ${jobId} → ${status.job_state}`);
+
+    if (status.job_state === 'Completed' || status.job_state === 'PartiallyCompleted') return status;
+    if (status.job_state === 'Failed') {
+      throw new Error(`Sarvam job failed: ${status.error_message || 'unknown error'}`);
+    }
+    // Still Accepted/Pending/Running — wait and poll again.
+    await new Promise((r) => setTimeout(r, SARVAM_POLL_INTERVAL_MS));
+  }
+  throw new Error(`Sarvam job ${jobId} timed out after ${SARVAM_POLL_TIMEOUT_MS / 1000}s`);
+}
+
+async function sarvamDownloadTranscript(apiKey, jobId, outputFileName) {
+  const resp = await axios.post(
+    `${SARVAM_BASE_URL}/speech-to-text/job/v1/download-files`,
+    { job_id: jobId, files: [outputFileName] },
+    { headers: sarvamHeaders(apiKey, { 'Content-Type': 'application/json' }) }
+  );
+  const entry = resp.data?.download_urls?.[outputFileName];
+  if (!entry?.file_url) throw new Error(`Sarvam did not return a download URL for "${outputFileName}"`);
+
+  const fileResp = await axios.get(entry.file_url);
+  return fileResp.data; // { transcript, diarized_transcript, language_code, ... }
+}
+
+async function runSarvam(audioInput) {
+  const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
+  if (!SARVAM_API_KEY) throw new Error('SARVAM_API_KEY is not set in your environment variables.');
+
+  // Resolve to buffer + filename (same input handling as before)
   let fileBuffer, fileName;
-
   if (typeof audioInput === 'string' && audioInput.startsWith('http')) {
     const response = await axios.get(audioInput, { responseType: 'arraybuffer' });
     fileBuffer = Buffer.from(response.data);
@@ -145,108 +269,62 @@ async function runElevenLabs(audioInput) {
     fileName   = path.basename(audioInput);
   }
 
-  const form = new FormData();
-  form.append('file', fileBuffer, { filename: fileName });
-  form.append('model_id', 'scribe_v2');
-  // diarize=true → separate speakers
-  // detect_speaker_roles=true → auto-label as "agent" / "customer"
-  form.append('diarize', 'true');
-  form.append('detect_speaker_roles', 'true');
-  form.append('timestamps_granularity', 'word');
-  // tag_audio_events=false → skip [laughter] [music] tags in transcript
-  form.append('tag_audio_events', 'false');
-
-  let data;
+  let job, status, data;
   try {
-    const resp = await axios.post(ELEVENLABS_STT_URL, form, {
-      headers: {
-        'xi-api-key': ELEVENLABS_API_KEY,
-        ...form.getHeaders(),
-      },
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity,
-    });
-    data = resp.data;
+    job = await sarvamCreateJob(SARVAM_API_KEY);
+    console.log(`[Sarvam] Created job ${job.job_id}`);
+
+    const uploadUrl = await sarvamGetUploadUrl(SARVAM_API_KEY, job.job_id, fileName);
+    await sarvamUploadFile(uploadUrl, fileBuffer, fileName);
+    console.log(`[Sarvam] Uploaded "${fileName}" (${fileBuffer.length} bytes)`);
+
+    await sarvamStartJob(SARVAM_API_KEY, job.job_id);
+    status = await sarvamPollStatus(SARVAM_API_KEY, job.job_id);
+
+    const outputFile = status.job_details?.[0]?.outputs?.[0]?.file_name;
+    if (!outputFile) throw new Error('Sarvam job completed but returned no output file');
+
+    data = await sarvamDownloadTranscript(SARVAM_API_KEY, job.job_id, outputFile);
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    throw new Error(`ElevenLabs STT failed (${err.response?.status ?? 'network'}): ${detail}`);
+    throw new Error(`Sarvam STT failed (${err.response?.status ?? 'network'}): ${detail}`);
   }
 
-  if (!data?.words || data.words.length === 0) {
-    // Fall back to flat transcript if no word data
-    return { text: data?.text?.trim() || '', durationSec: 0 };
+  const entries = data?.diarized_transcript?.entries;
+  if (!entries || entries.length === 0) {
+    // Fall back to flat transcript if diarization returned nothing
+    return { text: (data?.transcript || '').trim(), durationSec: 0 };
   }
 
-  const lang = data.language_code || 'unknown';
-  console.log(`[ElevenLabs] Detected language: ${lang}`);
-  console.log(`[ElevenLabs] Total words: ${data.words.length}`);
+  console.log(`[Sarvam] Detected language: ${data.language_code || 'unknown'}`);
+  console.log(`[Sarvam] Total diarized segments: ${entries.length}`);
 
-  // ── Build dialog from word-level speaker turns ──────────────────────────────
-  // ElevenLabs returns speaker_id as:
-  //   "agent" / "customer"  → when detect_speaker_roles succeeds (best case)
-  //   "speaker_0" / "speaker_1" → when role detection is uncertain (fallback)
-  //
-  // Strategy:
-  //   1. If we see "agent"/"customer" labels → use them directly
-  //   2. Otherwise → map by first-appearance order: first speaker = Employee, second = Client
-
-  // Fixed role labels (ElevenLabs detect_speaker_roles output)
-  const ROLE_MAP = { agent: 'Employee', customer: 'Client' };
-
-  // Dynamic fallback map built on first-appearance order
-  const dynamicMap   = {};   // e.g. { speaker_0: 'Employee', speaker_1: 'Client' }
-  const ROLE_ORDER   = ['Employee', 'Client', 'Speaker 3', 'Speaker 4'];
-
+  // Map bare speaker indices ("0", "1", ...) to Employee/Client by
+  // first-appearance order — Sarvam has no built-in agent/customer role label.
+  const dynamicMap = {};
+  const ROLE_ORDER = ['Employee', 'Client', 'Speaker 3', 'Speaker 4'];
   function resolveLabel(spk) {
-    if (ROLE_MAP[spk]) return ROLE_MAP[spk];           // agent/customer → direct
-    if (dynamicMap[spk]) return dynamicMap[spk];       // already assigned
+    if (dynamicMap[spk]) return dynamicMap[spk];
     const role = ROLE_ORDER[Object.keys(dynamicMap).length] || `Speaker ${spk}`;
     dynamicMap[spk] = role;
-    console.log(`[ElevenLabs] Speaker mapping: ${spk} → ${role}`);
+    console.log(`[Sarvam] Speaker mapping: ${spk} → ${role}`);
     return role;
   }
 
-  const lines    = [];
-  let curSpeaker = null;
-  let curWords   = [];
-  let curStart   = 0;
-
-  for (const word of data.words) {
-    // Skip non-word tokens (spaces, punctuation events)
-    if (word.type !== 'word') continue;
-
-    const spk = word.speaker_id || 'unknown';
-
-    if (spk !== curSpeaker) {
-      // Flush previous turn
-      if (curWords.length > 0) {
-        lines.push(`[${formatTime(curStart)}] ${resolveLabel(curSpeaker)}: ${curWords.join(' ').trim()}`);
-      }
-      curSpeaker = spk;
-      curWords   = [word.text];
-      curStart   = word.start || 0;
-    } else {
-      curWords.push(word.text);
-    }
-  }
-
-  // Flush last turn
-  if (curWords.length > 0) {
-    lines.push(`[${formatTime(curStart)}] ${resolveLabel(curSpeaker)}: ${curWords.join(' ').trim()}`);
-  }
-
+  const lines = entries.map(
+    (e) => `[${formatTime(e.start_time_seconds || 0)}] ${resolveLabel(e.speaker_id ?? 'unknown')}: ${(e.transcript || '').trim()}`
+  );
   const rawTranscript = lines.join('\n');
-  console.log(`[ElevenLabs] Raw transcript (first 200 chars): ${rawTranscript.slice(0, 200)}`);
+  console.log(`[Sarvam] Raw transcript (first 200 chars): ${rawTranscript.slice(0, 200)}`);
 
-  // Audio duration = the end timestamp of the last spoken word (seconds).
-  // Used for minute-based billing in the transcription controller.
+  // Duration = the latest end_time_seconds across all segments (chunk-level, not word-level).
   let durationSec = 0;
-  for (const w of data.words) {
-    if (typeof w.end === 'number' && w.end > durationSec) durationSec = w.end;
+  for (const e of entries) {
+    if (typeof e.end_time_seconds === 'number' && e.end_time_seconds > durationSec) durationSec = e.end_time_seconds;
   }
-  console.log(`[ElevenLabs] Audio duration: ${durationSec.toFixed(1)}s`);
+  console.log(`[Sarvam] Audio duration: ${durationSec.toFixed(1)}s`);
 
-  // Romanize any native-script (Devanagari etc.) words → Roman phonetic
+  // Romanize any native-script (Devanagari etc.) words → Roman phonetic (unchanged from before)
   const transcript = await romanizeTranscript(rawTranscript);
   return { text: transcript, durationSec };
 }
@@ -318,8 +396,8 @@ async function transcribeAudio(audioInput, audioLang = 'mixed') {
     console.log('[Transcription] Engine → Groq Whisper large-v3 (English, free)');
     return runGroqWhisper(audioInput);
   }
-  console.log('[Transcription] Engine → ElevenLabs Scribe v2 (mixed/Indic, diarized)');
-  return runElevenLabs(audioInput);
+  console.log('[Transcription] Engine → Sarvam AI Saaras v3 Batch (mixed/Indic, diarized)');
+  return runSarvam(audioInput);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
