@@ -37,7 +37,7 @@ function getCaller(req) {
 // Enforces the monthly Call Transcription limit. If the company also has the
 // AI Summary feature with remaining summary quota, a summary is generated and
 // counted separately; otherwise only the transcript is produced.
-const transcribeMobileCall = async (req, res) => {
+const transcribeMobileCall = async (req, res, next) => {
   const { callLogId, recordingId } = req.params;
   const caller    = getCaller(req);
   const audioLang = req.body.audioLang || 'mixed';
@@ -140,12 +140,12 @@ const transcribeMobileCall = async (req, res) => {
         if (rec) { rec.transcribeStatus = 'failed'; await log.save({ validateBeforeSave: false }); }
       }
     } catch { /* ignore */ }
-    res.status(500).json({ message: err.message || 'Transcription failed' });
+    next(err);
   }
 };
 
 // ── GET /api/transcription/mobile/:callLogId/:recordingId ─────────────────────
-const getMobileTranscription = async (req, res) => {
+const getMobileTranscription = async (req, res, next) => {
   const caller = getCaller(req);
   try {
     const query = caller.isAdmin
@@ -164,12 +164,12 @@ const getMobileTranscription = async (req, res) => {
       summary:    recording.summary    || null,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/transcription/lead/:leadId/summary ───────────────────────────────
-const getLeadCombinedSummary = async (req, res) => {
+const getLeadCombinedSummary = async (req, res, next) => {
   const { leadId } = req.params;
   const caller = getCaller(req);
 
@@ -226,7 +226,7 @@ const getLeadCombinedSummary = async (req, res) => {
     });
   } catch (err) {
     console.error('[getLeadCombinedSummary] error:', err.message);
-    res.status(500).json({ message: err.message || 'Failed to generate combined summary' });
+    next(err);
   }
 };
 
