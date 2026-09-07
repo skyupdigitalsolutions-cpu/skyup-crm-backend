@@ -84,18 +84,18 @@ async function seedDefaultsIfEmpty() {
   console.log('[planController] Backfilled plans:', toInsert.map(p => p.planKey).join(", "));
 }
 // ── GET /api/developer/plans ──────────────────────────────────────────────────
-const getPlans = async (req, res) => {
+const getPlans = async (req, res, next) => {
   try {
     await seedDefaultsIfEmpty();
     const plans = await PlanConfig.find().sort({ sortOrder: 1, createdAt: 1 });
     res.json({ success: true, plans });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/developer/plans ─────────────────────────────────────────────────
-const createPlan = async (req, res) => {
+const createPlan = async (req, res, next) => {
   try {
     const { planKey, name, description, color, price, maxUsers, maxAdmins, maxLeads, features, sortOrder, isActive } = req.body;
 
@@ -133,12 +133,12 @@ const createPlan = async (req, res) => {
     if (err.code === 11000) {
       return res.status(400).json({ success: false, message: 'A plan with this key already exists.' });
     }
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /api/developer/plans/:id ──────────────────────────────────────────────
-const updatePlan = async (req, res) => {
+const updatePlan = async (req, res, next) => {
   try {
     const plan = await PlanConfig.findById(req.params.id);
     if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
@@ -185,30 +185,30 @@ const updatePlan = async (req, res) => {
     await plan.save();
     res.json({ success: true, plan });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── DELETE /api/developer/plans/:id ──────────────────────────────────────────
-const deletePlan = async (req, res) => {
+const deletePlan = async (req, res, next) => {
   try {
     const plan = await PlanConfig.findById(req.params.id);
     if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
     await plan.deleteOne();
     res.json({ success: true, message: `Plan "${plan.name}" deleted.` });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/developer/plans/:id ─────────────────────────────────────────────
-const getPlan = async (req, res) => {
+const getPlan = async (req, res, next) => {
   try {
     const plan = await PlanConfig.findById(req.params.id);
     if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
     res.json({ success: true, plan });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
@@ -219,7 +219,7 @@ const getPlan = async (req, res) => {
 //   { basic: { name, monthlyPrice, yearlyPrice, maxUsers, maxLeads, maxAdmins, features }, ... }
 // This is the shape PlanCustomization.jsx expects.
 // ─────────────────────────────────────────────────────────────────────────────
-const getPlansConfig = async (req, res) => {
+const getPlansConfig = async (req, res, next) => {
   try {
     await seedDefaultsIfEmpty();
     const dbPlans = await PlanConfig.find({ isActive: true }).sort({ sortOrder: 1, createdAt: 1 });
@@ -261,7 +261,7 @@ const getPlansConfig = async (req, res) => {
     res.json(config);
   } catch (err) {
     console.error('[getPlansConfig]', err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
@@ -272,7 +272,7 @@ const getPlansConfig = async (req, res) => {
 // plan into PlanConfig. Creates the plan if it doesn't exist.
 // Body: { basic: { name, monthlyPrice, yearlyPrice, maxUsers, maxLeads, maxAdmins, features }, ... }
 // ─────────────────────────────────────────────────────────────────────────────
-const savePlansConfig = async (req, res) => {
+const savePlansConfig = async (req, res, next) => {
   try {
     const body = req.body;
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -345,7 +345,7 @@ const savePlansConfig = async (req, res) => {
     res.json({ success: true, saved: results.length });
   } catch (err) {
     console.error('[savePlansConfig]', err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
