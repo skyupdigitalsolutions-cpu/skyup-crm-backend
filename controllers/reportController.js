@@ -20,7 +20,7 @@ const { getAdminLeadScope } = require('../utils/adminLeadScope');
 // ── GET /api/reports/daily ────────────────────────────────────────────────────
 // Works for both admin (req.admin) and user (req.user) tokens.
 // Admins see all employees; users see only their own leads.
-const dailyReport = async (req, res) => {
+const dailyReport = async (req, res, next) => {
   try {
     // Resolve caller identity — protectAny sets either req.admin or req.user
     const isAdmin   = !!req.admin;
@@ -59,7 +59,7 @@ const dailyReport = async (req, res) => {
     res.json({ success: true, ...report });
   } catch (err) {
     console.error('[reportController.dailyReport]', err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -69,7 +69,7 @@ const dailyReport = async (req, res) => {
 // per-admin/own-leads scoping as every other lead-list endpoint via
 // getAdminLeadScope — nothing new is exposed that the caller couldn't already
 // see through the existing Leads page.
-const leadInsights = async (req, res) => {
+const leadInsights = async (req, res, next) => {
   try {
     const isAdmin = !!req.admin;
     const company = req.callerCompany || req.admin?.company?._id || req.user?.company;
@@ -104,13 +104,13 @@ const leadInsights = async (req, res) => {
     res.json({ success: true, ...report });
   } catch (err) {
     console.error('[reportController.leadInsights]', err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/reports/employee ─────────────────────────────────────────────────
 // Admin-only: per-employee breakdown for a date range.
-const employeeReport = async (req, res) => {
+const employeeReport = async (req, res, next) => {
   try {
     const company  = req.callerCompany || req.admin?.company?._id;
     if (!company) return res.status(400).json({ message: 'Company not resolved' });
@@ -122,12 +122,12 @@ const employeeReport = async (req, res) => {
     res.json({ success: true, ...report });
   } catch (err) {
     console.error('[reportController.employeeReport]', err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/reports/campaign ─────────────────────────────────────────────────
-const campaignReport = async (req, res) => {
+const campaignReport = async (req, res, next) => {
   try {
     const company = req.callerCompany || req.admin?.company?._id || req.user?.company;
     if (!company) return res.status(400).json({ message: 'Company not resolved' });
@@ -139,7 +139,7 @@ const campaignReport = async (req, res) => {
     res.json({ success: true, ...report });
   } catch (err) {
     console.error('[reportController.campaignReport]', err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -174,7 +174,7 @@ function maskEmail(email) {
 // ── GET /api/reports/non-conversion ───────────────────────────────────────────
 // Admin-only. Analyses WHY leads didn't convert (derived from status + remarks
 // + call summaries) and returns reason breakdown + AI improvement suggestions.
-const nonConversionReport = async (req, res) => {
+const nonConversionReport = async (req, res, next) => {
   try {
     const company = req.callerCompany || req.admin?.company?._id || req.user?.company;
     if (!company) return res.status(400).json({ message: 'Company not resolved' });
@@ -187,7 +187,7 @@ const nonConversionReport = async (req, res) => {
     const report = await getNonConversionReport({ company, from, to, withAI, leadScope });
     res.json(report);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -196,7 +196,7 @@ const nonConversionReport = async (req, res) => {
 // CALLS MADE that day (callHistory.calledAt), not leads created that day.
 // Works for both admin (req.admin) and user (req.user) tokens, same as
 // dailyReport above.
-const dailyOutcomesReport = async (req, res) => {
+const dailyOutcomesReport = async (req, res, next) => {
   try {
     const isAdmin = !!req.admin;
     const company = req.callerCompany || req.admin?.company?._id || req.user?.company;
@@ -227,7 +227,7 @@ const dailyOutcomesReport = async (req, res) => {
     res.json({ success: true, ...report });
   } catch (err) {
     console.error('[reportController.dailyOutcomesReport]', err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
