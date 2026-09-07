@@ -32,7 +32,7 @@ function isExempt(role) {
 
 // ── GET /api/terms/current ────────────────────────────────────────────────────
 // Returns the active terms document and whether the current user must accept it.
-const getCurrentTerms = async (req, res) => {
+const getCurrentTerms = async (req, res, next) => {
   try {
     const role = req.user?.role || "user";
 
@@ -60,13 +60,13 @@ const getCurrentTerms = async (req, res) => {
       mustAccept: !already, // frontend gate uses this
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/terms/accept ────────────────────────────────────────────────────
 // Records that the current user accepted the active version.
-const acceptTerms = async (req, res) => {
+const acceptTerms = async (req, res, next) => {
   try {
     const role = req.user?.role || "user";
 
@@ -116,26 +116,26 @@ const acceptTerms = async (req, res) => {
   } catch (err) {
     // Duplicate key (already accepted) is fine.
     if (err.code === 11000) return res.json({ ok: true, alreadyAccepted: true });
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/terms/admin/list (developer) ─────────────────────────────────────
-const listTermsVersions = async (req, res) => {
+const listTermsVersions = async (req, res, next) => {
   try {
     const versions = await TermsAndConditions.find()
       .sort({ version: -1 })
       .lean();
     res.json(versions);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/terms/admin/publish (developer) ─────────────────────────────────
 // Publishes a NEW version. Auto-increments version, deactivates the old active
 // one. Body: { title, effectiveDate, intro, sections: [{heading, body}] }.
-const publishTerms = async (req, res) => {
+const publishTerms = async (req, res, next) => {
   try {
     const { title, effectiveDate, intro, sections } = req.body;
 
@@ -162,7 +162,7 @@ const publishTerms = async (req, res) => {
 
     res.status(201).json({ ok: true, version: created.version, terms: created });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
