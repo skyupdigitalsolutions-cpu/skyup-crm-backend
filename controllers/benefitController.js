@@ -16,7 +16,7 @@ function getActor(req) {
 
 // ── GET /api/benefits/:companyId ──────────────────────────────────────────────
 // List all benefits for a company, newest first.
-const listBenefits = async (req, res) => {
+const listBenefits = async (req, res, next) => {
   try {
     const { companyId } = req.params;
 
@@ -30,7 +30,7 @@ const listBenefits = async (req, res) => {
     res.json({ success: true, companyId, companyName: company.name, benefits });
   } catch (err) {
     console.error("[listBenefits]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
@@ -38,7 +38,7 @@ const listBenefits = async (req, res) => {
 // Grant a benefit to a company (developer/superadmin only).
 // Body: { benefitType, quantity?, validDays?, notes? }
 //   validDays: number of days the benefit is valid (omit for permanent)
-const grantBenefit = async (req, res) => {
+const grantBenefit = async (req, res, next) => {
   try {
     const { companyId } = req.params;
     const { benefitType, quantity = 1, validDays, notes = "" } = req.body;
@@ -80,14 +80,14 @@ const grantBenefit = async (req, res) => {
     res.status(201).json({ success: true, benefit });
   } catch (err) {
     console.error("[grantBenefit]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /api/benefits/:benefitId/extend ───────────────────────────────────────
 // Extend the validUntil of an existing benefit.
 // Body: { validDays, reason? }  — adds validDays to current validUntil (or now)
-const extendBenefit = async (req, res) => {
+const extendBenefit = async (req, res, next) => {
   try {
     const { benefitId } = req.params;
     const { validDays, reason = "" } = req.body;
@@ -126,14 +126,14 @@ const extendBenefit = async (req, res) => {
     res.json({ success: true, benefit });
   } catch (err) {
     console.error("[extendBenefit]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── DELETE /api/benefits/:benefitId ──────────────────────────────────────────
 // Deactivate a benefit (soft delete — sets active: false).
 // Body: { reason? }
-const deactivateBenefit = async (req, res) => {
+const deactivateBenefit = async (req, res, next) => {
   try {
     const { benefitId } = req.params;
     const { reason = "" } = req.body;
@@ -159,7 +159,7 @@ const deactivateBenefit = async (req, res) => {
     res.json({ success: true, message: "Benefit deactivated", benefit });
   } catch (err) {
     console.error("[deactivateBenefit]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
