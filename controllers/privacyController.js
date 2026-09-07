@@ -8,7 +8,7 @@ const {
 } = require("../utils/bip39Helper");
 
 // ── Generate 12-word phrase for a company (called once on first setup) ────────
-const setupEncryption = async (req, res) => {
+const setupEncryption = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id || req.admin.company;
 
@@ -43,12 +43,12 @@ const setupEncryption = async (req, res) => {
       message:  "Encryption enabled. Store your 12-word phrase safely offline.",
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── Verify client's mnemonic phrase is correct ────────────────────────────────
-const verifyKey = async (req, res) => {
+const verifyKey = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id || req.admin.company;
     const { mnemonic } = req.body;
@@ -78,12 +78,12 @@ const verifyKey = async (req, res) => {
         : "❌ Incorrect phrase. Please check your 12-word recovery phrase.",
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── Get encryption + subscription status ──────────────────────────────────────
-const getEncryptionStatus = async (req, res) => {
+const getEncryptionStatus = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id || req.admin.company;
     const company   = await Company.findById(companyId).select(
@@ -114,12 +114,12 @@ const getEncryptionStatus = async (req, res) => {
       // ⚠️ encryptionKeyHash is NEVER returned — security layer
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── Disable encryption (SuperAdmin emergency use only) ────────────────────────
-const disableEncryption = async (req, res) => {
+const disableEncryption = async (req, res, next) => {
   try {
     const company = await Company.findById(req.params.companyId);
     if (!company) {
@@ -136,12 +136,12 @@ const disableEncryption = async (req, res) => {
       warning: "⚠️ Previously encrypted data may not be readable without the original phrase.",
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── Reset encryption — generate new phrase after disable (SuperAdmin only) ────
-const resetEncryption = async (req, res) => {
+const resetEncryption = async (req, res, next) => {
   try {
     const { companyId } = req.body;
     if (!companyId) {
@@ -168,7 +168,7 @@ const resetEncryption = async (req, res) => {
       warning:  "⚠️ New phrase generated. Old encrypted data is permanently unreadable. Save this phrase now!",
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
