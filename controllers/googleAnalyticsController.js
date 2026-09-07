@@ -28,7 +28,7 @@ const adminIdOf = (req) => {
 const loadConfig = (companyId) => GoogleAnalyticsConfig.findOne({ company: companyId });
 
 // GET /api/google-analytics/status
-const getStatus = async (req, res) => {
+const getStatus = async (req, res, next) => {
   try {
     const cfg = await loadConfig(companyOf(req)).lean();
     const connected = !!(cfg && cfg.connected && cfg.refreshToken);
@@ -41,12 +41,12 @@ const getStatus = async (req, res) => {
       oauthConfigured: ga4.isConfigured(cfg),
       oauthSource:     ga4.configHasCreds(cfg) ? "db" : (ga4.envConfigured() ? "env" : null),
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // GET /api/google-analytics/oauth-config
 // Returns the current OAuth app credentials (client secret is never returned).
-const getOAuthConfig = async (req, res) => {
+const getOAuthConfig = async (req, res, next) => {
   try {
     const cfg = await loadConfig(companyOf(req)).lean();
     const fromDb = ga4.configHasCreds(cfg);
@@ -61,12 +61,12 @@ const getOAuthConfig = async (req, res) => {
       // env creds can only be changed on the server; DB creds are editable here.
       editable:    true,
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // POST /api/google-analytics/oauth-config  { clientId, clientSecret, redirectUri }
 // Saves per-company OAuth app credentials (overrides env). Secret encrypted at rest.
-const saveOAuthConfig = async (req, res) => {
+const saveOAuthConfig = async (req, res, next) => {
   try {
     const body = req.body || {};
     const clientId    = typeof body.clientId    === "string" ? body.clientId.trim()    : "";
@@ -114,11 +114,11 @@ const saveOAuthConfig = async (req, res) => {
       hasSecret:   !!cfg.oauthClientSecret,
       editable:    true,
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // DELETE /api/google-analytics/oauth-config  → clear per-company creds (revert to env)
-const clearOAuthConfig = async (req, res) => {
+const clearOAuthConfig = async (req, res, next) => {
   try {
     const companyId = companyOf(req);
     await GoogleAnalyticsConfig.findOneAndUpdate(
@@ -130,11 +130,11 @@ const clearOAuthConfig = async (req, res) => {
       configured:  ga4.isConfigured(cfg),
       source:      ga4.envConfigured() ? "env" : null,
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // GET /api/google-analytics/connect-url  → returns the Google consent URL
-const getConnectUrl = async (req, res) => {
+const getConnectUrl = async (req, res, next) => {
   try {
     const companyId = companyOf(req);
     const cfg = await loadConfig(companyId).lean();
@@ -146,7 +146,7 @@ const getConnectUrl = async (req, res) => {
     res.json({ url: ga4.buildAuthUrl(state, creds) });
   } catch (err) {
     if (err.code === "OAUTH_NOT_CONFIGURED") return res.status(503).json({ message: err.message });
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -202,7 +202,7 @@ const oauthCallback = async (req, res) => {
 };
 
 // GET /api/google-analytics/properties  → list GA4 properties for connected account
-const listProperties = async (req, res) => {
+const listProperties = async (req, res, next) => {
   try {
     const cfg = await loadConfig(companyOf(req));
     if (!cfg || !cfg.refreshToken) return res.status(400).json({ message: "Not connected" });
@@ -219,12 +219,12 @@ const listProperties = async (req, res) => {
     const apiMsg = typeof fbErr === "string"
       ? (fbData.error_description || fbErr)
       : (fbErr && fbErr.message) || null;
-    res.status(500).json({ message: apiMsg || err.message });
+    next(err);
   }
 };
 
 // POST /api/google-analytics/property  { propertyId, propertyName }
-const saveProperty = async (req, res) => {
+const saveProperty = async (req, res, next) => {
   try {
     const body = req.body || {};
     const { propertyId, propertyName } = body;
@@ -236,11 +236,11 @@ const saveProperty = async (req, res) => {
     );
     if (!cfg) return res.status(404).json({ message: "Not connected — please reconnect Google Analytics first." });
     res.json({ propertyId: cfg.propertyId, propertyName: cfg.propertyName });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // DELETE /api/google-analytics  → disconnect (keeps OAuth app creds intact)
-const disconnect = async (req, res) => {
+const disconnect = async (req, res, next) => {
   try {
     // Only clear the connection/tokens; keep oauth app creds so they can reconnect.
     await GoogleAnalyticsConfig.findOneAndUpdate(
@@ -252,11 +252,11 @@ const disconnect = async (req, res) => {
       }
     );
     res.json({ message: "Disconnected" });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // GET /api/google-analytics/dashboard?from=&to=&ai=
-const getDashboard = async (req, res) => {
+const getDashboard = async (req, res, next) => {
   try {
     const cfg = await loadConfig(companyOf(req));
     if (!cfg || !cfg.connected || !cfg.refreshToken) return res.status(400).json({ message: "Google Analytics is not connected.", code: "NOT_CONNECTED" });
@@ -291,7 +291,7 @@ const getDashboard = async (req, res) => {
     const apiMsg = typeof fbErr === "string"
       ? (fbData.error_description || fbErr)
       : (fbErr && fbErr.message) || null;
-    res.status(500).json({ message: apiMsg || err.message });
+    next(err);
   }
 };
 
