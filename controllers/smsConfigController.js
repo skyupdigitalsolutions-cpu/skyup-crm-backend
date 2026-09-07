@@ -6,19 +6,19 @@ const SmsConfig = require("../models/SmsConfig");
 
 // GET /api/sms-config
 // Returns this company's saved SMS config (auth key is returned for editing)
-const getSmsConfig = async (req, res) => {
+const getSmsConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const config = await SmsConfig.findOne({ company: companyId });
     res.json({ success: true, data: config || null });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // PUT /api/sms-config
 // Save (upsert) MSG91 credentials for this company
-const saveSmsConfig = async (req, res) => {
+const saveSmsConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const {
@@ -51,7 +51,7 @@ const saveSmsConfig = async (req, res) => {
 
     res.json({ success: true, data: config });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
