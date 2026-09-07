@@ -26,7 +26,7 @@ function sanitizeNurtureTag(rawValue, validSet) {
 // GET - All campaign connections for the admin's company (token hidden)
 // BUG FIX: also returns real lead counts so the Campaigns page card shows the
 // correct number instead of always "0".
-const getAllConfigs = async (req, res) => {
+const getAllConfigs = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const configs = await MetaConfig.find({ company: companyId })
@@ -88,12 +88,12 @@ const getAllConfigs = async (req, res) => {
 
     res.json({ success: true, data: enriched });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // GET - Single config by ID
-const getConfigById = async (req, res) => {
+const getConfigById = async (req, res, next) => {
   try {
     const config = await MetaConfig.findById(req.params.id)
       .populate("company", "name")
@@ -101,13 +101,13 @@ const getConfigById = async (req, res) => {
     if (!config) return res.status(404).json({ message: "Config not found" });
     res.json({ success: true, data: config });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // POST - Connect a new Meta campaign
 // company is always derived from the authenticated admin — never trusted from the client
-const addConfig = async (req, res) => {
+const addConfig = async (req, res, next) => {
   try {
     const {
       campaignName,
@@ -194,12 +194,12 @@ const addConfig = async (req, res) => {
 
     res.status(201).json({ success: true, data: config });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // PUT - Update a campaign config
-const updateConfig = async (req, res) => {
+const updateConfig = async (req, res, next) => {
   try {
     // Prevent accidental overwrite of round-robin pointer via PUT
     delete req.body.roundRobinIndex;
@@ -227,12 +227,12 @@ const updateConfig = async (req, res) => {
     if (!updated) return res.status(404).json({ message: "Config not found" });
     res.json({ success: true, data: updated });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // PATCH - Toggle active/inactive
-const toggleConfig = async (req, res) => {
+const toggleConfig = async (req, res, next) => {
   try {
     const config = await MetaConfig.findById(req.params.id);
     if (!config) return res.status(404).json({ message: "Config not found" });
@@ -248,25 +248,25 @@ const toggleConfig = async (req, res) => {
       isActive: config.isActive,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // DELETE - Disconnect a campaign
-const deleteConfig = async (req, res) => {
+const deleteConfig = async (req, res, next) => {
   try {
     const config = await MetaConfig.findByIdAndDelete(req.params.id);
     if (!config) return res.status(404).json({ message: "Config not found" });
     res.json({ success: true, message: "Campaign disconnected successfully" });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // GET /api/meta-config/insights?from=&to=
 // Ad performance report (spend, CPM, CPC, CTR, reach) + cost-per-lead + setup
 // issue detection, per campaign/ad set, for the admin's company.
-const getAdLevelInsights = async (req, res) => {
+const getAdLevelInsights = async (req, res, next) => {
   try {
     const companyId = req.admin && req.admin.company ? (req.admin.company._id || req.admin.company) : null;
     if (!companyId) return res.status(400).json({ message: "Company not resolved" });
@@ -278,11 +278,11 @@ const getAdLevelInsights = async (req, res) => {
     });
     res.json(report);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const getInsights = async (req, res) => {
+const getInsights = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId) return res.status(400).json({ message: "Company not resolved" });
@@ -300,7 +300,7 @@ const getInsights = async (req, res) => {
     // trace anywhere except the generic message in the browser. Log the full
     // stack so the next occurrence is traceable from EB/CloudWatch logs.
     console.error("[Meta Insights] getInsights error:", err);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -309,7 +309,7 @@ const getInsights = async (req, res) => {
 // Campaigns UI posts { adminId, configId } to /meta-config/claim-ownership.
 // Without this export the route handler was undefined and the server crashed
 // on boot ("argument handler must be a function" at routes/metaConfig.js).
-const claimMetaConfigOwnership = async (req, res) => {
+const claimMetaConfigOwnership = async (req, res, next) => {
   try {
     const isSuperAdmin = req.admin && (req.admin.role === "super_admin" || req.admin.role === "superadmin" || req.admin.isSuperAdmin);
     if (!isSuperAdmin) return res.status(403).json({ message: "Super admin only." });
@@ -324,7 +324,7 @@ const claimMetaConfigOwnership = async (req, res) => {
       : { company: companyId, $or: [{ createdBy: null }, { createdBy: { $exists: false } }] };
     const result = await MetaConfig.updateMany(matchQuery, { $set: { createdBy: adminId } });
     return res.json({ message: "Ownership assigned to " + targetAdmin.name, updated: result.modifiedCount });
-  } catch (err) { return res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 module.exports = {
