@@ -24,7 +24,7 @@ const adminIdOf = (req) => {
 const loadConfig = (companyId) => GoogleAdsApiConfig.findOne({ company: companyId });
 
 // GET /api/google-ads-api/status
-const getStatus = async (req, res) => {
+const getStatus = async (req, res, next) => {
   try {
     const cfg = await loadConfig(companyOf(req)).lean();
     const connected = !!(cfg && cfg.connected && cfg.refreshToken);
@@ -42,11 +42,11 @@ const getStatus = async (req, res) => {
       loginCustomerId: cfg && cfg.loginCustomerId ? cfg.loginCustomerId : null,
       apiVersion: ads.apiVersion(),
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // GET /api/google-ads-api/oauth-config
-const getOAuthConfig = async (req, res) => {
+const getOAuthConfig = async (req, res, next) => {
   try {
     const cfg = await loadConfig(companyOf(req)).lean();
     const fromDb = ads.configHasCreds(cfg);
@@ -62,11 +62,11 @@ const getOAuthConfig = async (req, res) => {
       loginCustomerId: cfg && cfg.loginCustomerId ? cfg.loginCustomerId : "",
       editable: true,
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // POST /api/google-ads-api/oauth-config { clientId, clientSecret, redirectUri }
-const saveOAuthConfig = async (req, res) => {
+const saveOAuthConfig = async (req, res, next) => {
   try {
     const body = req.body || {};
     const clientId    = typeof body.clientId    === "string" ? body.clientId.trim()    : "";
@@ -107,21 +107,21 @@ const saveOAuthConfig = async (req, res) => {
       hasSecret: !!cfg.oauthClientSecret, hasDeveloperToken: !!cfg.developerToken,
       loginCustomerId: cfg.loginCustomerId || "", editable: true,
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // DELETE /api/google-ads-api/oauth-config
-const clearOAuthConfig = async (req, res) => {
+const clearOAuthConfig = async (req, res, next) => {
   try {
     const companyId = companyOf(req);
     await GoogleAdsApiConfig.findOneAndUpdate({ company: companyId }, { oauthClientId: null, oauthClientSecret: null, oauthRedirectUri: null, developerToken: null, loginCustomerId: null });
     const cfg = await loadConfig(companyId).lean();
     res.json({ configured: ads.isConfigured(cfg), source: ads.envConfigured() ? "env" : null });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // GET /api/google-ads-api/connect-url
-const getConnectUrl = async (req, res) => {
+const getConnectUrl = async (req, res, next) => {
   try {
     const companyId = companyOf(req);
     const cfg = await loadConfig(companyId).lean();
@@ -130,7 +130,7 @@ const getConnectUrl = async (req, res) => {
     res.json({ url: ads.buildAuthUrl(state, creds) });
   } catch (err) {
     if (err.code === "OAUTH_NOT_CONFIGURED") return res.status(503).json({ message: err.message });
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -178,7 +178,7 @@ const oauthCallback = async (req, res) => {
 };
 
 // GET /api/google-ads-api/accounts  → list accessible Google Ads accounts
-const listAccounts = async (req, res) => {
+const listAccounts = async (req, res, next) => {
   try {
     const cfg = await loadConfig(companyOf(req));
     if (!cfg || !cfg.refreshToken) return res.status(400).json({ message: "Not connected" });
@@ -204,12 +204,12 @@ const listAccounts = async (req, res) => {
         }
       }
     } catch (e) { /* ignore */ }
-    res.status(500).json({ message: apiMsg || err.message, googleError: gStatus, code: "ACCOUNTS_FAILED" });
+    next(err);
   }
 };
 
 // POST /api/google-ads-api/account { customerId, customerName, loginCustomerId }
-const saveAccount = async (req, res) => {
+const saveAccount = async (req, res, next) => {
   try {
     const body = req.body || {};
     if (!body.customerId) return res.status(400).json({ message: "customerId required" });
@@ -222,11 +222,11 @@ const saveAccount = async (req, res) => {
     );
     if (!cfg) return res.status(404).json({ message: "Not connected" });
     res.json({ customerId: cfg.customerId, customerName: cfg.customerName });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // POST /api/google-ads-api/sync?from=&to=  → pull live metrics into GoogleAdsConfig
-const sync = async (req, res) => {
+const sync = async (req, res, next) => {
   try {
     const cfg = await loadConfig(companyOf(req));
     if (!cfg || !cfg.connected || !cfg.refreshToken) return res.status(400).json({ message: "Google Ads is not connected.", code: "NOT_CONNECTED" });
@@ -238,12 +238,12 @@ const sync = async (req, res) => {
     if (code === "NO_DEV_TOKEN") return res.status(503).json({ message: err.message, code: code });
     if (code === "NOT_CONNECTED" || code === "NO_ACCOUNT") return res.status(400).json({ message: err.message, code: code });
     const apiMsg = err && err.response && err.response.data && err.response.data.error ? err.response.data.error.message : null;
-    res.status(500).json({ message: apiMsg || err.message });
+    next(err);
   }
 };
 
 // GET /api/google-ads-api/report?from=&to=  → raw live report (campaigns/devices/daily)
-const getReport = async (req, res) => {
+const getReport = async (req, res, next) => {
   try {
     const cfg = await loadConfig(companyOf(req));
     if (!cfg || !cfg.connected || !cfg.refreshToken) return res.status(400).json({ message: "Google Ads is not connected.", code: "NOT_CONNECTED" });
@@ -255,12 +255,12 @@ const getReport = async (req, res) => {
     if (code === "NO_DEV_TOKEN") return res.status(503).json({ message: err.message, code: code });
     if (code === "NOT_CONNECTED" || code === "NO_ACCOUNT" || code === "REAUTH_REQUIRED") return res.status(400).json({ message: err.message, code: code });
     const apiMsg = err && err.response && err.response.data && err.response.data.error ? err.response.data.error.message : null;
-    res.status(500).json({ message: apiMsg || err.message });
+    next(err);
   }
 };
 
 // DELETE /api/google-ads-api  → disconnect (keeps oauth app creds)
-const disconnect = async (req, res) => {
+const disconnect = async (req, res, next) => {
   try {
     await GoogleAdsApiConfig.findOneAndUpdate(
       { company: companyOf(req) },
@@ -269,7 +269,7 @@ const disconnect = async (req, res) => {
         connected: false, connectedAt: null, lastSyncedAt: null, connectedBy: null }
     );
     res.json({ message: "Disconnected" });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 module.exports = {
