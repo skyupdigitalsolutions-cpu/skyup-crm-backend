@@ -160,7 +160,7 @@ function publicConnection(conn) {
 // GET /api/sheet-integration/status
 // Soft endpoint (no hard gate) so the frontend can decide whether to show the
 // panel option at all. Returns access flags + whether a connection exists.
-const getStatus = async (req, res) => {
+const getStatus = async (req, res, next) => {
   try {
     const companyId  = req.user?.company?._id || req.user?.company || req.companyId;
     const employeeId = req.user?._id;
@@ -195,12 +195,12 @@ const getStatus = async (req, res) => {
     });
   } catch (err) {
     console.error("[sheet:getStatus]", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
 // GET /api/sheet-integration/me — this employee's connection (masked)
-const getMyConnection = async (req, res) => {
+const getMyConnection = async (req, res, next) => {
   try {
     const conn = await SheetConnection.findOne({
       company:  req.sheetCompanyId,
@@ -214,7 +214,7 @@ const getMyConnection = async (req, res) => {
     });
   } catch (err) {
     console.error("[sheet:getMyConnection]", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
@@ -262,7 +262,7 @@ const testConnection = async (req, res) => {
 // POST /api/sheet-integration/connect (create) — allowConnect
 // PUT  /api/sheet-integration/connection (edit) — allowEdit
 // body: { sheetName, googleSheetId, appsScriptUrl, secretKey?, columnMapping?, defaultStatus?, defaultRemark? }
-const saveConnection = async (req, res) => {
+const saveConnection = async (req, res, next) => {
   try {
     const {
       sheetName = "", googleSheetId: rawSheetId = "", appsScriptUrl = "",
@@ -313,12 +313,12 @@ const saveConnection = async (req, res) => {
     if (err.code === 11000) {
       return res.status(409).json({ success: false, message: "A connection already exists for this employee." });
     }
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
 // PUT /api/sheet-integration/mapping — save column mapping (allowEdit)
-const saveMapping = async (req, res) => {
+const saveMapping = async (req, res, next) => {
   try {
     const { columnMapping } = req.body || {};
     if (!Array.isArray(columnMapping)) {
@@ -338,7 +338,7 @@ const saveMapping = async (req, res) => {
     return res.json({ success: true, message: "Column mapping saved.", connection: publicConnection(conn) });
   } catch (err) {
     console.error("[sheet:saveMapping]", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
@@ -482,7 +482,7 @@ const syncNow = async (req, res) => {
 };
 
 // DELETE /api/sheet-integration/connection — Disconnect (allowDisconnect)
-const disconnect = async (req, res) => {
+const disconnect = async (req, res, next) => {
   try {
     const r = await SheetConnection.deleteOne({
       company: req.sheetCompanyId, employee: req.sheetEmployeeId,
@@ -491,7 +491,7 @@ const disconnect = async (req, res) => {
     return res.json({ success: true, message: "Disconnected. Synced leads are kept." });
   } catch (err) {
     console.error("[sheet:disconnect]", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
@@ -500,7 +500,7 @@ const disconnect = async (req, res) => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 // GET /api/sheet-integration/admin/settings
-const getAdminSettings = async (req, res) => {
+const getAdminSettings = async (req, res, next) => {
   try {
     const companyId = req.sheetCompanyId;
     const company = await Company.findById(companyId).select("employeeSheetIntegration").lean();
@@ -520,13 +520,13 @@ const getAdminSettings = async (req, res) => {
     });
   } catch (err) {
     console.error("[sheet:getAdminSettings]", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
 // PUT /api/sheet-integration/admin/settings
 // body: { enabled?, allowConnect?, allowEdit?, allowDisconnect?, allowManualSync? }
-const updateAdminSettings = async (req, res) => {
+const updateAdminSettings = async (req, res, next) => {
   try {
     const companyId = req.sheetCompanyId;
     const body = req.body || {};
@@ -561,12 +561,12 @@ const updateAdminSettings = async (req, res) => {
     });
   } catch (err) {
     console.error("[sheet:updateAdminSettings]", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
 // GET /api/sheet-integration/admin/connections — oversight list (company-scoped)
-const adminListConnections = async (req, res) => {
+const adminListConnections = async (req, res, next) => {
   try {
     const companyId = req.sheetCompanyId;
     const conns = await SheetConnection.find({ company: companyId })
@@ -592,7 +592,7 @@ const adminListConnections = async (req, res) => {
     });
   } catch (err) {
     console.error("[sheet:adminListConnections]", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
