@@ -227,7 +227,7 @@ async function runCampaignInBackground({
 // ✅ FIXED: responds immediately with total count, then processes in background.
 // Previously this awaited every Brevo call sequentially — with 500 leads the
 // request would hang for minutes. Now the HTTP response returns in <100ms.
-const sendBulkEmails = async (req, res) => {
+const sendBulkEmails = async (req, res, next) => {
   try {
     const { campaign, subject, bodyTemplate, fromName } = req.body;
 
@@ -271,12 +271,12 @@ const sendBulkEmails = async (req, res) => {
     });
   } catch (err) {
     console.error("Email campaign error:", err);
-    res.status(500).json({ message: "Server error", error: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/email-campaign/preview ──────────────────────────────────────────
-const previewCampaign = async (req, res) => {
+const previewCampaign = async (req, res, next) => {
   try {
     const { campaign } = req.query;
     if (!campaign)
@@ -289,7 +289,7 @@ const previewCampaign = async (req, res) => {
     }, previewScope));
     res.json({ campaign, leadCount: count });
   } catch (err) {
-    res.status(500).json({ message: "Server error", error: err.message });
+    next(err);
   }
 };
 
@@ -530,19 +530,19 @@ const getDistinctCampaigns = async (req, res) => {
 };
 
 // GET /api/email-campaign/brevo-status
-const getBrevoStatus = async (req, res) => {
+const getBrevoStatus = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     // Check your existing email config model / Company model for brevoApiKey
     const company = await Company.findById(companyId).select("brevoApiKey").lean();
     res.json({ connected: !!(company?.brevoApiKey) });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // GET /api/email-campaign/msg91-email-status
-const getMsg91EmailStatus = async (req, res) => {
+const getMsg91EmailStatus = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { configured, remaining, company } = await checkMsg91EmailStatus(companyId);
@@ -554,7 +554,7 @@ const getMsg91EmailStatus = async (req, res) => {
       domain: company?.msg91EmailDomain || "",
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
