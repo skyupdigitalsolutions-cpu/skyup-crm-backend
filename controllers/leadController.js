@@ -2548,7 +2548,7 @@ const getPendingNotifications = async (req, res) => {
 };
 // Add or replace the secondary (additional) phone on a lead.
 // Enforces: max one additional number, uniqueness across all leads in company.
-const addSecondaryPhone = async (req, res) => {
+const addSecondaryPhone = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { secondaryPhone } = req.body;
@@ -2621,13 +2621,13 @@ const addSecondaryPhone = async (req, res) => {
 
     return res.status(200).json({ success: true, lead: updated });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── DELETE /lead/:id/secondary-phone ──────────────────────────────────────────
 // Remove the additional phone from a lead. Logs the action.
-const removeSecondaryPhone = async (req, res) => {
+const removeSecondaryPhone = async (req, res, next) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
@@ -2663,13 +2663,13 @@ const removeSecondaryPhone = async (req, res) => {
 
     return res.status(200).json({ success: true, lead: updated });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /lead/:id/swap-phones ─────────────────────────────────────────────────
 // Swap primary and secondary phone numbers. Maintains full audit history.
-const swapPhones = async (req, res) => {
+const swapPhones = async (req, res, next) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
@@ -2715,7 +2715,7 @@ const swapPhones = async (req, res) => {
 
     return res.status(200).json({ success: true, lead: updated });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -2730,7 +2730,7 @@ const swapPhones = async (req, res) => {
 //   3. If `sourceLeadId` is provided, marks that lead as mergedInto the target
 //      so it stops appearing as an active lead after page refresh.
 //   4. Returns the updated target lead.
-const mergeLead = async (req, res) => {
+const mergeLead = async (req, res, next) => {
   try {
     const { id } = req.params;                       // SURVIVOR: the lead we keep (its number stays primary)
     const { secondaryPhone, sourceName, sourceMobile, sourceLeadId } = req.body;
@@ -2905,7 +2905,7 @@ const mergeLead = async (req, res) => {
       dataOnlyMerge: !addingNewNumber,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
