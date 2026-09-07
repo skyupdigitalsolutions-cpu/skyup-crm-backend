@@ -16,16 +16,16 @@ const { sendAutoWhatsApp, sendAutoEmail } = require("../services/autoTemplateSer
 // ── GET /api/festival-campaigns/catalog ───────────────────────────────────────
 // Read-only reference list of pre-approved festival templates + their dates,
 // so the "New Campaign" form can offer a pick-list instead of free typing.
-const getCatalog = async (req, res) => {
+const getCatalog = async (req, res, next) => {
   try {
     res.json({ success: true, catalog: getFestivalCatalog() });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/festival-campaigns ───────────────────────────────────────────────
-const listCampaigns = async (req, res) => {
+const listCampaigns = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const campaigns = await FestivalCampaign.find({ company: companyId })
@@ -33,19 +33,19 @@ const listCampaigns = async (req, res) => {
       .lean();
     res.json({ success: true, campaigns });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/festival-campaigns/:id ───────────────────────────────────────────
-const getCampaign = async (req, res) => {
+const getCampaign = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const campaign = await FestivalCampaign.findOne({ _id: req.params.id, company: companyId }).lean();
     if (!campaign) return res.status(404).json({ success: false, message: "Campaign not found" });
     res.json({ success: true, campaign });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
@@ -55,7 +55,7 @@ const getCampaign = async (req, res) => {
 //   targetAudience?: { scope: 'all'|'byStatus', statuses?: [] },
 //   channels: { whatsapp: { enabled, templateName, languageCode }, email?: {...} }
 // }
-const createCampaign = async (req, res) => {
+const createCampaign = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const { festivalKey, festivalName, sendDate, targetAudience, channels } = req.body;
@@ -111,14 +111,14 @@ const createCampaign = async (req, res) => {
 
     res.status(201).json({ success: true, campaign });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /api/festival-campaigns/:id ───────────────────────────────────────────
 // Only campaigns that haven't started sending yet can be edited. Enable/
 // disable and cancel are allowed at any time (see toggleCampaign/cancelCampaign).
-const updateCampaign = async (req, res) => {
+const updateCampaign = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const campaign = await FestivalCampaign.findOne({ _id: req.params.id, company: companyId });
@@ -170,13 +170,13 @@ const updateCampaign = async (req, res) => {
     await campaign.save();
     res.json({ success: true, campaign });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── PATCH /api/festival-campaigns/:id/toggle ──────────────────────────────────
 // Pause/resume a still-scheduled campaign without deleting it.
-const toggleCampaign = async (req, res) => {
+const toggleCampaign = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const campaign = await FestivalCampaign.findOne({ _id: req.params.id, company: companyId });
@@ -188,12 +188,12 @@ const toggleCampaign = async (req, res) => {
     await campaign.save();
     res.json({ success: true, campaign });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── DELETE /api/festival-campaigns/:id ────────────────────────────────────────
-const deleteCampaign = async (req, res) => {
+const deleteCampaign = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const campaign = await FestivalCampaign.findOne({ _id: req.params.id, company: companyId });
@@ -204,12 +204,12 @@ const deleteCampaign = async (req, res) => {
     await campaign.deleteOne();
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/festival-campaigns/:id/cancel ───────────────────────────────────
-const cancelCampaign = async (req, res) => {
+const cancelCampaign = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const campaign = await FestivalCampaign.findOneAndUpdate(
@@ -220,7 +220,7 @@ const cancelCampaign = async (req, res) => {
     if (!campaign) return res.status(400).json({ success: false, message: "Only a still-scheduled campaign can be cancelled" });
     res.json({ success: true, campaign });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
@@ -228,7 +228,7 @@ const cancelCampaign = async (req, res) => {
 // Sends this campaign's content to ONE real lead right now (synchronously),
 // so the admin can see exactly what goes out before the scheduled date.
 // Body: { leadId? } — defaults to the company's most recently created lead.
-const testCampaign = async (req, res) => {
+const testCampaign = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const campaign = await FestivalCampaign.findOne({ _id: req.params.id, company: companyId }).lean();
@@ -251,7 +251,7 @@ const testCampaign = async (req, res) => {
 
     res.json({ success: true, lead: { _id: lead._id, name: lead.name, mobile: lead.mobile, email: lead.email }, results });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
