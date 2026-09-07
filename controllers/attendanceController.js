@@ -171,7 +171,7 @@ function haversineMetres(lat1, lon1, lat2, lon2) {
 // ── USER: Clock In ────────────────────────────────────────────────────────────
 const DEVICE_FIELDS_ATT = ["appName", "appVersion", "platform", "deviceModel", "osVersion", "fcmToken"];
 
-const clockIn = async (req, res) => {
+const clockIn = async (req, res, next) => {
   try {
     const userId    = req.user._id;
     const companyId = req.user.company;
@@ -346,11 +346,11 @@ const clockIn = async (req, res) => {
       address:   req.body?.address,
     });
     res.status(200).json(record);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── USER: Clock Out ───────────────────────────────────────────────────────────
-const clockOut = async (req, res) => {
+const clockOut = async (req, res, next) => {
   try {
     const date   = todayStr();
     const record = await Attendance.findOne({ user: req.user._id, date });
@@ -399,7 +399,7 @@ const clockOut = async (req, res) => {
       address:   req.body?.address,
     });
     res.status(200).json(record);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // Same cutoff used by markIdleJob.js and the admin live-status view — kept
@@ -408,7 +408,7 @@ const clockOut = async (req, res) => {
 const IDLE_CUTOFF_MS = 5 * 60 * 1000;
 
 // ── USER: Start Break ─────────────────────────────────────────────────────────
-const startBreak = async (req, res) => {
+const startBreak = async (req, res, next) => {
   try {
     const { reason = "Manual Break" } = req.body;
     const date   = todayStr();
@@ -447,11 +447,11 @@ const startBreak = async (req, res) => {
     await record.save();
     emitAttendanceUpdate(req, record);
     res.status(200).json(record);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── USER: End Break ───────────────────────────────────────────────────────────
-const endBreak = async (req, res) => {
+const endBreak = async (req, res, next) => {
   try {
     const date   = todayStr();
     const record = await Attendance.findOne({ user: req.user._id, date });
@@ -468,11 +468,11 @@ const endBreak = async (req, res) => {
     await record.save();
     emitAttendanceUpdate(req, record);
     res.status(200).json(record);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── USER: Ping Activity ───────────────────────────────────────────────────────
-const pingActivity = async (req, res) => {
+const pingActivity = async (req, res, next) => {
   try {
     const date   = todayStr();
     const record = await Attendance.findOne({ user: req.user._id, date });
@@ -511,7 +511,7 @@ const pingActivity = async (req, res) => {
     if (wasIdle) emitAttendanceUpdate(req, record);
 
     res.status(200).json({ ok: true, status: record.status });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── USER: Save/skip an idle remark ────────────────────────────────────────────
@@ -524,7 +524,7 @@ const pingActivity = async (req, res) => {
 // stays visible next time the popup shows.
 // Body: { remark, breakIndex? }  — empty/missing remark = explicit skip
 // (re-affirms "pending" rather than leaving it in whatever state it was).
-const saveIdleRemark = async (req, res) => {
+const saveIdleRemark = async (req, res, next) => {
   try {
     const { remark, breakIndex } = req.body || {};
     const date   = todayStr();
@@ -549,16 +549,16 @@ const saveIdleRemark = async (req, res) => {
     await record.save();
     emitAttendanceUpdate(req, record);
     res.status(200).json(record);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── USER: Get today's record ──────────────────────────────────────────────────
-const getMyToday = async (req, res) => {
+const getMyToday = async (req, res, next) => {
   try {
     const record = await Attendance.findOne({ user: req.user._id, date: todayStr() });
     if (!record) return res.status(200).json(null);
     res.status(200).json(record);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── Save ideal working time + reason for today (employee, from mobile app) ────
@@ -577,7 +577,7 @@ const getMyToday = async (req, res) => {
 // Company.attendanceConfig that already powers the "late" threshold and the
 // Attendance Settings admin page (adminController.js getAttendanceConfig) —
 // this just exposes the shift-window portion of it to non-admin callers.
-const getShiftConfig = async (req, res) => {
+const getShiftConfig = async (req, res, next) => {
   try {
     const companyId = req.user.company;
     const company = await Company.findById(companyId).select("attendanceConfig").lean();
@@ -589,12 +589,12 @@ const getShiftConfig = async (req, res) => {
       shiftEndMinute:    cfg.shiftEndMinute   ?? 0,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── ADMIN: Mark idle users ────────────────────────────────────────────────────
-const markIdleUsers = async (req, res) => {
+const markIdleUsers = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const date      = todayStr();
@@ -614,11 +614,11 @@ const markIdleUsers = async (req, res) => {
       marked++;
     }
     res.status(200).json({ marked });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── ADMIN: Get company attendance for a single date (live dashboard) ──────────
-const getCompanyAttendance = async (req, res) => {
+const getCompanyAttendance = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const { date = todayStr() } = req.query;
@@ -658,11 +658,11 @@ const getCompanyAttendance = async (req, res) => {
     });
 
     res.status(200).json(result);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── ADMIN: Get attendance with date range + filters (Attendance Management page) ─
-const getAttendanceReport = async (req, res) => {
+const getAttendanceReport = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const {
@@ -774,11 +774,11 @@ const getAttendanceReport = async (req, res) => {
       page    : Number(page),
       pages   : Math.ceil((total + absentRows.length) / limit),
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── ADMIN: Edit attendance record ─────────────────────────────────────────────
-const editAttendance = async (req, res) => {
+const editAttendance = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { loginTime, logoutTime, crmStatus, remarks, idealTime, idealRemark } = req.body;
@@ -807,14 +807,14 @@ const editAttendance = async (req, res) => {
 
     await record.save();
     res.status(200).json(record);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── Admin: create OR update attendance for an employee+date ───────────────────
 // Used when an employee has no record for the day yet (an "Absent" /
 // not-logged-in synthetic row). Upserts by { company, user, date } so admins
 // can set status, login/logout, ideal time and remarks for anyone.
-const adminUpsertAttendance = async (req, res) => {
+const adminUpsertAttendance = async (req, res, next) => {
   try {
     const { user, date, loginTime, logoutTime, crmStatus, remarks, idealTime, idealRemark } = req.body;
     if (!user || !date) {
@@ -849,12 +849,12 @@ const adminUpsertAttendance = async (req, res) => {
     await record.save();
     res.status(200).json(record);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── ADMIN: Delete attendance record ──────────────────────────────────────────
-const deleteAttendance = async (req, res) => {
+const deleteAttendance = async (req, res, next) => {
   try {
     const { id } = req.params;
     const record = await Attendance.findById(id);
@@ -865,11 +865,11 @@ const deleteAttendance = async (req, res) => {
 
     await record.deleteOne();
     res.status(200).json({ message: "Deleted." });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── ADMIN: Export attendance data (returns JSON — frontend builds xlsx) ────────
-const exportAttendance = async (req, res) => {
+const exportAttendance = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const { startDate, endDate, userId, crmStatus } = req.query;
@@ -935,11 +935,11 @@ const exportAttendance = async (req, res) => {
     if (crmStatus) enriched = enriched.filter(r => r.status === crmStatus);
 
     res.status(200).json(enriched);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── ADMIN: Get company users list (for employee filter dropdown) ───────────────
-const getCompanyUsers = async (req, res) => {
+const getCompanyUsers = async (req, res, next) => {
   try {
     // Scope: super_admin sees all users; regular admin sees only their own users
     const userQuery = { company: req.admin.company._id };
@@ -949,7 +949,7 @@ const getCompanyUsers = async (req, res) => {
     const users = await User.find(userQuery)
       .select("name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory createdAt").lean();
     res.status(200).json(users);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // Helper
@@ -961,7 +961,7 @@ function formatWorkHours(mins) {
 // ── POST /attendance/request-meeting-permission ───────────────────────────────
 // Employee requests remote clock-in (client meeting).
 // Stores the request on the User document and emits a socket event to the admin.
-const requestMeetingPermission = async (req, res) => {
+const requestMeetingPermission = async (req, res, next) => {
   try {
     const userId    = req.user._id;
     const companyId = req.user.company;
@@ -1002,13 +1002,13 @@ const requestMeetingPermission = async (req, res) => {
 
     res.json({ message: 'Request sent to admin. You will be notified once approved.', status: 'pending' });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── GET /attendance/meeting-permission-status ─────────────────────────────────
 // Employee polls their permission status (approved / pending / denied)
-const getMeetingPermissionStatus = async (req, res) => {
+const getMeetingPermissionStatus = async (req, res, next) => {
   try {
     const user = await User.findById(req.user._id)
       .select('clientMeetingPermission clientMeetingPermissionGrantedAt meetingPermissionStatus meetingPermissionRequested')
@@ -1027,7 +1027,7 @@ const getMeetingPermissionStatus = async (req, res) => {
       isPending:     user.meetingPermissionRequested && user.meetingPermissionStatus === 'pending',
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -1037,7 +1037,7 @@ const getMeetingPermissionStatus = async (req, res) => {
 // Silently rejects if:
 //   - company.meetingLocationTrackingEnabled is false
 //   - employee does not have active (< 24h) clientMeetingPermission
-const locationPing = async (req, res) => {
+const locationPing = async (req, res, next) => {
   try {
     const userId    = req.user._id;
     const companyId = req.user.company;
@@ -1105,14 +1105,14 @@ const locationPing = async (req, res) => {
 
     res.json({ stored: true, pingId: ping._id });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── GET /attendance/live-locations ────────────────────────────────────────────
 // Admin/superadmin fetches today's location trail for all employees with
 // meeting permission. Returns the last N pings per employee.
-const getLiveLocations = async (req, res) => {
+const getLiveLocations = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const date      = todayStr();
@@ -1130,7 +1130,7 @@ const getLiveLocations = async (req, res) => {
 
     res.json({ pings, date, total: pings.length });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -1141,7 +1141,7 @@ const getLiveLocations = async (req, res) => {
 // clocked-in employee LEAVES the premises and auto-start field-work location
 // tracking. Also returns the tracking interval so breadcrumb frequency matches
 // the meeting-tracking setting. Safe to expose to employees (no secrets).
-const getGeofenceConfig = async (req, res) => {
+const getGeofenceConfig = async (req, res, next) => {
   try {
     const company = await Company.findById(req.user.company)
       .select('clockInLocationEnabled clockInLatitude clockInLongitude clockInRadiusMeters meetingLocationIntervalMinutes')
@@ -1154,11 +1154,11 @@ const getGeofenceConfig = async (req, res) => {
       intervalMinutes: company?.meetingLocationIntervalMinutes || 15,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const getMeetingTrackingConfig = async (req, res) => {
+const getMeetingTrackingConfig = async (req, res, next) => {
   try {
     const company = await Company.findById(req.user.company)
       .select('meetingLocationTrackingEnabled meetingLocationIntervalMinutes')
@@ -1168,13 +1168,13 @@ const getMeetingTrackingConfig = async (req, res) => {
       intervalMinutes:  company?.meetingLocationIntervalMinutes || 15,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /admin/company/meeting-tracking ───────────────────────────────────────
 // Admin sets the meeting location tracking toggle + interval
-const saveMeetingTrackingConfig = async (req, res) => {
+const saveMeetingTrackingConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { enabled, intervalMinutes } = req.body;
@@ -1187,7 +1187,7 @@ const saveMeetingTrackingConfig = async (req, res) => {
     await Company.findByIdAndUpdate(companyId, { $set: update });
     res.json({ message: 'Meeting tracking config saved.', ...update });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -1196,7 +1196,7 @@ const saveMeetingTrackingConfig = async (req, res) => {
 // Reads the append-only ClockLocationLog (never expires), scoped like the
 // attendance report: super_admin sees all users; a regular admin sees only the
 // users they created.
-const getClockLocationHistory = async (req, res) => {
+const getClockLocationHistory = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { userId, from, to, type, page = 1, limit = 100 } = req.query;
@@ -1236,7 +1236,7 @@ const getClockLocationHistory = async (req, res) => {
 
     res.json({ records, total, page: Number(page), pages: Math.ceil(total / lim) || 1 });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
