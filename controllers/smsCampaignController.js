@@ -203,7 +203,7 @@ async function runSmsInBackground({
 }
 
 // ── POST /api/sms-campaign/send ───────────────────────────────────────────────
-const sendBulkSms = async (req, res) => {
+const sendBulkSms = async (req, res, next) => {
   try {
     const { campaign, message, templateId, senderId } = req.body;
     if (!campaign || !message) {
@@ -252,12 +252,12 @@ const sendBulkSms = async (req, res) => {
     });
   } catch (err) {
     console.error("sendBulkSms error:", err);
-    res.status(500).json({ message: "Internal server error", error: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/sms-campaign/send-single ───────────────────────────────────────
-const sendSingleSms = async (req, res) => {
+const sendSingleSms = async (req, res, next) => {
   try {
     const { name, mobile, message, templateId, senderId } = req.body;
     if (!mobile || !message) {
@@ -311,7 +311,7 @@ const sendSingleSms = async (req, res) => {
       errorMessage:  err.message,
       companyId:     req.admin.company._id,
     });
-    res.status(500).json({ message: err.message, error: err.message });
+    next(err);
   }
 };
 
@@ -505,7 +505,7 @@ const employeeGetMyCampaigns = async (req, res) => {
 
 // ── POST /api/sms-campaign/employee/send ─────────────────────────────────────
 // Blast SMS to all the employee's assigned leads (optionally filtered by campaign).
-const employeeSendBulkSms = async (req, res) => {
+const employeeSendBulkSms = async (req, res, next) => {
   try {
     const { campaign, message, templateId, senderId } = req.body;
     if (!message) return res.status(400).json({ message: "message is required" });
@@ -556,12 +556,12 @@ const employeeSendBulkSms = async (req, res) => {
     });
   } catch (err) {
     console.error("employeeSendBulkSms error:", err);
-    res.status(500).json({ message: "Internal server error", error: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/sms-campaign/employee/send-single ───────────────────────────────
-const employeeSendSingleSms = async (req, res) => {
+const employeeSendSingleSms = async (req, res, next) => {
   try {
     const { name, mobile, message, templateId, senderId } = req.body;
     if (!mobile || !message) {
@@ -616,7 +616,7 @@ const employeeSendSingleSms = async (req, res) => {
       errorMessage:  err.message,
       companyId:     getEmployeeCompanyId(req),
     });
-    res.status(500).json({ message: err.message, error: err.message });
+    next(err);
   }
 };
 
