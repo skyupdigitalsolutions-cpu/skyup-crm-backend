@@ -454,7 +454,7 @@ const updateSubscription = async (req, res) => {
 
 // ── GET /api/developer/companies/:id/details ──────────────────────────────────
 // Full company details page: subscription + usage + addons + benefits + AI credits + audit log
-const getCompanyDetails = async (req, res) => {
+const getCompanyDetails = async (req, res, next) => {
   try {
     const companyId = req.params.id;
 
@@ -506,13 +506,13 @@ const getCompanyDetails = async (req, res) => {
     });
   } catch (err) {
     console.error("[getCompanyDetails]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /api/developer/companies/:id/override ─────────────────────────────────
 // Save resource overrides + feature toggles to company.devOverrides
-const applyDevOverride = async (req, res) => {
+const applyDevOverride = async (req, res, next) => {
   try {
     const companyId = req.params.id;
     const { featureToggles, limitMeta, reason = "" } = req.body;
@@ -680,13 +680,13 @@ const applyDevOverride = async (req, res) => {
     });
   } catch (err) {
     console.error("[applyDevOverride]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/developer/companies/:id/ai-credits ─────────────────────────────
 // Add AI transcription / summary / voiceBot credits via a new free addon entry
-const addAiCredits = async (req, res) => {
+const addAiCredits = async (req, res, next) => {
   try {
     const companyId = req.params.id;
     const { creditType, quantity = 1, reason = "" } = req.body;
@@ -730,13 +730,13 @@ const addAiCredits = async (req, res) => {
     res.status(201).json({ success: true, addon });
   } catch (err) {
     console.error("[addAiCredits]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /api/developer/companies/:id/status ───────────────────────────────────
 // Pause / resume / suspend a company's subscription
-const changeSubscriptionStatus = async (req, res) => {
+const changeSubscriptionStatus = async (req, res, next) => {
   try {
     const companyId = req.params.id;
     const { status, reason = "" } = req.body;
@@ -769,13 +769,13 @@ const changeSubscriptionStatus = async (req, res) => {
     res.json({ success: true, company: { _id: company._id, subscriptionStatus: status, isActive: company.isActive } });
   } catch (err) {
     console.error("[changeSubscriptionStatus]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/developer/companies/:id/audit ────────────────────────────────────
 // Paginated audit log for a company
-const getAuditLogs = async (req, res) => {
+const getAuditLogs = async (req, res, next) => {
   try {
     const companyId = req.params.id;
     const page  = Math.max(1, parseInt(req.query.page  || "1",  10));
@@ -798,13 +798,13 @@ const getAuditLogs = async (req, res) => {
     });
   } catch (err) {
     console.error("[getAuditLogs]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/developer/companies/:id/grant-addon ─────────────────────────────
 // Convenience wrapper: grant free addon from developer panel
-const grantFreeAddon = async (req, res) => {
+const grantFreeAddon = async (req, res, next) => {
   // Delegate to addonController.grantAddon logic inline to avoid circular deps
   try {
     const companyId = req.params.id;
@@ -846,13 +846,13 @@ const grantFreeAddon = async (req, res) => {
     res.status(201).json({ success: true, addon });
   } catch (err) {
     console.error("[grantFreeAddon]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/developer/companies/:id/grant-benefit ──────────────────────────
 // Convenience wrapper: grant benefit from developer panel
-const grantBenefit = async (req, res) => {
+const grantBenefit = async (req, res, next) => {
   try {
     const companyId = req.params.id;
     const { benefitType, quantity = 1, validDays, notes = "" } = req.body;
@@ -890,7 +890,7 @@ const grantBenefit = async (req, res) => {
     res.status(201).json({ success: true, benefit });
   } catch (err) {
     console.error("[grantBenefit]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
@@ -898,7 +898,7 @@ const grantBenefit = async (req, res) => {
 // ── GET /api/developer/companies/:id/payments ─────────────────────────────────
 // Returns all payment invoices for a specific company (developer-only)
 // Also returns company customer details so the frontend can render/download PDFs
-const getCompanyPayments = async (req, res) => {
+const getCompanyPayments = async (req, res, next) => {
   try {
     const { id: companyId } = req.params;
 
@@ -942,7 +942,7 @@ const getCompanyPayments = async (req, res) => {
     return res.status(200).json({ success: true, invoices, customer });
   } catch (err) {
     console.error("[getCompanyPayments]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
@@ -951,7 +951,7 @@ const getCompanyPayments = async (req, res) => {
 // Body: { enabled, cloudName, apiKey, apiSecret }
 // When enabled + all three set, this company's media uploads go to its OWN
 // Cloudinary account; otherwise the platform's global account is used.
-const setCompanyCloudinary = async (req, res) => {
+const setCompanyCloudinary = async (req, res, next) => {
   try {
     const companyId = req.params.id;
     const { enabled, cloudName, apiKey, apiSecret } = req.body;
@@ -992,7 +992,7 @@ const setCompanyCloudinary = async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
