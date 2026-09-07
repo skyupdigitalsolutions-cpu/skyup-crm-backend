@@ -15,7 +15,7 @@ function sanitizeNurtureTag(rawValue, validSet) {
 }
 
 // GET - all LinkedIn campaign connections for the admin's company (secrets hidden)
-const getAllConfigs = async (req, res) => {
+const getAllConfigs = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const configs = await LinkedInConfig.find({ company: companyId })
@@ -53,12 +53,12 @@ const getAllConfigs = async (req, res) => {
 
     res.json({ success: true, data: enriched });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // GET - single config by ID
-const getConfigById = async (req, res) => {
+const getConfigById = async (req, res, next) => {
   try {
     const config = await LinkedInConfig.findById(req.params.id)
       .populate("company", "name")
@@ -66,13 +66,13 @@ const getConfigById = async (req, res) => {
     if (!config) return res.status(404).json({ message: "Config not found" });
     res.json({ success: true, data: config });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // POST - connect a new LinkedIn campaign
 // company always derived from the authenticated admin — never trusted from the client
-const addConfig = async (req, res) => {
+const addConfig = async (req, res, next) => {
   try {
     const {
       campaignName,
@@ -137,12 +137,12 @@ const addConfig = async (req, res) => {
 
     res.status(201).json({ success: true, data: safe });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // PUT - update an existing config
-const updateConfig = async (req, res) => {
+const updateConfig = async (req, res, next) => {
   try {
     // Prevent overwriting fields that must stay server-controlled via this route.
     delete req.body.roundRobinIndex;
@@ -171,12 +171,12 @@ const updateConfig = async (req, res) => {
     if (!updated) return res.status(404).json({ message: "Config not found" });
     res.json({ success: true, data: updated });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // PATCH - toggle active/paused
-const toggleConfig = async (req, res) => {
+const toggleConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const config = await LinkedInConfig.findOne({ _id: req.params.id, company: companyId });
@@ -187,19 +187,19 @@ const toggleConfig = async (req, res) => {
 
     res.json({ success: true, data: { _id: config._id, isActive: config.isActive } });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // DELETE
-const deleteConfig = async (req, res) => {
+const deleteConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const deleted = await LinkedInConfig.findOneAndDelete({ _id: req.params.id, company: companyId });
     if (!deleted) return res.status(404).json({ message: "Config not found" });
     res.json({ success: true, message: "LinkedIn campaign disconnected" });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
