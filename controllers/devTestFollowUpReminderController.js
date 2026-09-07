@@ -23,7 +23,7 @@ const { runFollowUpReminderCheck } = require("../jobs/followUpReminderJob");
 
 // GET /api/developer/test-followup-reminder?slot=morning
 // slot: "morning" | "evening" (defaults to "morning")
-const testFollowUpReminder = async (req, res) => {
+const testFollowUpReminder = async (req, res, next) => {
   try {
     const slot = req.query.slot === "evening" ? "evening" : "morning";
     console.log(`[devTest] Manually triggering follow-up reminder check — slot="${slot}"`);
@@ -42,7 +42,7 @@ const testFollowUpReminder = async (req, res) => {
     });
   } catch (err) {
     console.error("[devTest] testFollowUpReminder error:", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
