@@ -575,18 +575,18 @@ const getDashboardStats = async (req, res) => {
 };
 
 // ── GET /api/admin/company/auto-template ─────────────────────────────────────
-const getAutoTemplateSettings = async (req, res) => {
+const getAutoTemplateSettings = async (req, res, next) => {
   try {
     const company = await Company.findById(req.admin.company._id).select("autoTemplate");
     if (!company) return res.status(404).json({ message: "Company not found" });
     res.json({ autoTemplate: company.autoTemplate || {} });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /api/admin/company/auto-template ─────────────────────────────────────
-const updateAutoTemplateSettings = async (req, res) => {
+const updateAutoTemplateSettings = async (req, res, next) => {
   try {
     const { whatsapp, email, sms } = req.body;
     const update = {};
@@ -628,23 +628,23 @@ const updateAutoTemplateSettings = async (req, res) => {
     );
     res.json({ success: true, autoTemplate: company.autoTemplate });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/admin/company/interested-blast ───────────────────────────────────
-const getInterestedBlastSettings = async (req, res) => {
+const getInterestedBlastSettings = async (req, res, next) => {
   try {
     const company = await Company.findById(req.admin.company._id).select("interestedBlast");
     if (!company) return res.status(404).json({ message: "Company not found" });
     res.json({ interestedBlast: company.interestedBlast || {} });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /api/admin/company/interested-blast ───────────────────────────────────
-const updateInterestedBlastSettings = async (req, res) => {
+const updateInterestedBlastSettings = async (req, res, next) => {
   try {
     const { whatsapp, email, sms } = req.body;
     const update = {};
@@ -681,7 +681,7 @@ const updateInterestedBlastSettings = async (req, res) => {
     );
     res.json({ success: true, interestedBlast: company.interestedBlast });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -692,7 +692,7 @@ const updateInterestedBlastSettings = async (req, res) => {
 // recently created lead in the company).
 const { autoSendTemplates, sendInterestedBlast } = require("../services/autoTemplateService");
 
-const testAutoTemplate = async (req, res) => {
+const testAutoTemplate = async (req, res, next) => {
   try {
     const companyId = req.admin.company?._id || req.admin.company;
     const { leadId } = req.body || {};
@@ -709,14 +709,14 @@ const testAutoTemplate = async (req, res) => {
       results,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/admin/company/interested-blast/test ─────────────────────────────
 // Same as above but for the Interested blast. Bypasses the once-per-lead guard
 // (it's a test) and does NOT mark the lead as blasted.
-const testInterestedBlast = async (req, res) => {
+const testInterestedBlast = async (req, res, next) => {
   try {
     const companyId = req.admin.company?._id || req.admin.company;
     const { leadId } = req.body || {};
@@ -733,12 +733,12 @@ const testInterestedBlast = async (req, res) => {
       results,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── Company Branding ──────────────────────────────────────────────────────────
-const getCompanyBrand = async (req, res) => {
+const getCompanyBrand = async (req, res, next) => {
   try {
     const raw =
       req.companyId ||
@@ -756,7 +756,7 @@ const getCompanyBrand = async (req, res) => {
       headerLogoUrl: company?.headerLogoUrl || "",
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -819,7 +819,7 @@ const deleteCompanyLogo = async (req, res) => {
 };
 
 // ── Brevo config ──────────────────────────────────────────────────────────────
-const getBrevoConfig = async (req, res) => {
+const getBrevoConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const company   = await Company.findById(companyId).select("+brevoApiKey brevoSenderEmail brevoSenderName").lean();
@@ -829,11 +829,11 @@ const getBrevoConfig = async (req, res) => {
       senderName:  company?.brevoSenderName  || "",
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const saveBrevoFullConfig = async (req, res) => {
+const saveBrevoFullConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { apiKey, senderEmail, senderName } = req.body;
@@ -846,22 +846,22 @@ const saveBrevoFullConfig = async (req, res) => {
     });
     res.json({ success: true, connected: true, senderEmail: senderEmail.trim(), senderName: (senderName || "CRM").trim() });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const deleteBrevoConfig = async (req, res) => {
+const deleteBrevoConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     await Company.findByIdAndUpdate(companyId, { brevoApiKey: "", brevoSenderEmail: "", brevoSenderName: "" });
     res.json({ success: true, connected: false });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── MSG91 config ──────────────────────────────────────────────────────────────
-const getMsg91Config = async (req, res) => {
+const getMsg91Config = async (req, res, next) => {
   try {
     const companyId      = req.admin?.company?._id || req.admin?.company;
     const WhatsAppConfig = require("../models/WhatsAppConfig");
@@ -878,11 +878,11 @@ const getMsg91Config = async (req, res) => {
       authKeySet:       hasAuthKey,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const saveMsg91Config = async (req, res) => {
+const saveMsg91Config = async (req, res, next) => {
   try {
     const companyId      = req.admin?.company?._id || req.admin?.company;
     const { authKey, integratedNumber, namespace, brochureUrl } = req.body;
@@ -904,11 +904,11 @@ const saveMsg91Config = async (req, res) => {
     );
     res.json({ success: true, connected: true, integratedNumber: integratedNumber.trim(), brochureUrl: (brochureUrl || "").trim(), authKeySet: true });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const deleteMsg91Config = async (req, res) => {
+const deleteMsg91Config = async (req, res, next) => {
   try {
     const companyId      = req.admin?.company?._id || req.admin?.company;
     const WhatsAppConfig = require("../models/WhatsAppConfig");
@@ -917,11 +917,11 @@ const deleteMsg91Config = async (req, res) => {
     await SmsConfig.findOneAndUpdate({ company: companyId }, { msg91AuthKey: "", isActive: false });
     res.json({ success: true, connected: false });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const registerMsg91Webhook = async (req, res) => {
+const registerMsg91Webhook = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const WhatsAppConfig = require("../models/WhatsAppConfig");
@@ -998,12 +998,12 @@ const registerMsg91Webhook = async (req, res) => {
     });
   } catch (err) {
     console.error("❌ MSG91 webhook registration error:", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── Telegram config ───────────────────────────────────────────────────────────
-const getTelegramConfig = async (req, res) => {
+const getTelegramConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const company = await Company.findById(companyId)
@@ -1015,11 +1015,11 @@ const getTelegramConfig = async (req, res) => {
       hasToken:        !!(company.telegramBotToken),
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const saveTelegramConfig = async (req, res) => {
+const saveTelegramConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { telegramBotToken, telegramChatId, telegramEnabled } = req.body;
@@ -1032,11 +1032,11 @@ const saveTelegramConfig = async (req, res) => {
     await Company.findByIdAndUpdate(companyId, { $set: update });
     res.json({ message: 'Telegram settings saved.' });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const testTelegramConfig = async (req, res) => {
+const testTelegramConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const company   = await Company.findById(companyId)
@@ -1048,12 +1048,12 @@ const testTelegramConfig = async (req, res) => {
     await sendTestNotification(company.telegramBotToken, company.telegramChatId, company.name);
     res.json({ message: 'Test message sent! Check your Telegram group.' });
   } catch (err) {
-    res.status(500).json({ message: err.message || 'Failed to send test — check token and chat ID.' });
+    next(err);
   }
 };
 
 // ── MSG91 Email config ────────────────────────────────────────────────────────
-const getMsg91EmailConfig = async (req, res) => {
+const getMsg91EmailConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const company   = await Company.findById(companyId)
@@ -1072,11 +1072,11 @@ const getMsg91EmailConfig = async (req, res) => {
       remaining:   Math.max(0, MSG91_EMAIL_DAILY_LIMIT - count),
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const saveMsg91EmailConfig = async (req, res) => {
+const saveMsg91EmailConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { apiKey, domain, senderEmail, senderName } = req.body;
@@ -1091,11 +1091,11 @@ const saveMsg91EmailConfig = async (req, res) => {
     });
     res.json({ success: true, connected: true, domain: domain.trim(), senderEmail: senderEmail.trim(), senderName: (senderName || "CRM").trim() });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const deleteMsg91EmailConfig = async (req, res) => {
+const deleteMsg91EmailConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     await Company.findByIdAndUpdate(companyId, {
@@ -1103,12 +1103,12 @@ const deleteMsg91EmailConfig = async (req, res) => {
     });
     res.json({ success: true, connected: false });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── Admin Telegram config ─────────────────────────────────────────────────────
-const getAdminsTelegramConfig = async (req, res) => {
+const getAdminsTelegramConfig = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const admins = await Admin.find({ company: companyId })
@@ -1122,11 +1122,11 @@ const getAdminsTelegramConfig = async (req, res) => {
       telegramNotificationsEnabled: a.telegramNotificationsEnabled !== false,
     })));
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const saveAdminTelegramConfig = async (req, res) => {
+const saveAdminTelegramConfig = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const { adminId } = req.params;
@@ -1142,11 +1142,11 @@ const saveAdminTelegramConfig = async (req, res) => {
       telegramNotificationsEnabled: target.telegramNotificationsEnabled,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
-const testAdminTelegramConfig = async (req, res) => {
+const testAdminTelegramConfig = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const { adminId } = req.params;
@@ -1182,11 +1182,11 @@ const testAdminTelegramConfig = async (req, res) => {
     });
     res.json({ message: `Test sent to ${target.name}! Check their Telegram.` });
   } catch (err) {
-    res.status(500).json({ message: err.message || "Test failed — check token & chat ID." });
+    next(err);
   }
 };
 
-const updateUserTelegram = async (req, res) => {
+const updateUserTelegram = async (req, res, next) => {
   try {
     const { id }             = req.params;
     const { telegramChatId } = req.body;
@@ -1197,12 +1197,12 @@ const updateUserTelegram = async (req, res) => {
     await user.save();
     res.json({ message: 'Telegram chat ID updated.', telegramChatId: user.telegramChatId });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── Clock-in location ─────────────────────────────────────────────────────────
-const getClockInLocation = async (req, res) => {
+const getClockInLocation = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const company   = await Company.findById(companyId)
@@ -1214,10 +1214,10 @@ const getClockInLocation = async (req, res) => {
       longitude: company.clockInLongitude || null,
       radius:    100, // office geofence radius is fixed at 100m
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
-const saveClockInLocation = async (req, res) => {
+const saveClockInLocation = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { enabled, latitude, longitude, radius } = req.body;
@@ -1228,10 +1228,10 @@ const saveClockInLocation = async (req, res) => {
     update.clockInRadiusMeters = 100; // office geofence radius is fixed at 100m
     await Company.findByIdAndUpdate(companyId, { $set: update });
     res.json({ message: 'Clock-in location settings saved.' });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
-const updateMeetingPermission = async (req, res) => {
+const updateMeetingPermission = async (req, res, next) => {
   try {
     const { id }    = req.params;
     const companyId = req.admin?.company?._id || req.admin?.company;
@@ -1258,11 +1258,11 @@ const updateMeetingPermission = async (req, res) => {
       granted:   user.clientMeetingPermission,
       grantedAt: user.clientMeetingPermissionGrantedAt,
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // ── Attendance config ─────────────────────────────────────────────────────────
-const getAttendanceConfig = async (req, res) => {
+const getAttendanceConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const company   = await Company.findById(companyId).select('attendanceConfig').lean();
@@ -1280,10 +1280,10 @@ const getAttendanceConfig = async (req, res) => {
       weeklyOffDays:     cfg.weeklyOffDays       ?? [0],
       holidays:          cfg.holidays            ?? [],
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
-const saveAttendanceConfig = async (req, res) => {
+const saveAttendanceConfig = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const b = req.body || {};
@@ -1304,11 +1304,11 @@ const saveAttendanceConfig = async (req, res) => {
     };
     await Company.findByIdAndUpdate(companyId, { $set: { attendanceConfig } });
     res.json({ message: 'Attendance settings saved.', attendanceConfig });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 
-const getMarketingDashboard = async (req, res) => {
+const getMarketingDashboard = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id || req.admin.company;
     const { getMarketingDashboard: svc } = require("../services/marketingDashboardService");
@@ -1316,7 +1316,7 @@ const getMarketingDashboard = async (req, res) => {
     const data = await svc({ company: companyId, query: req.query, leadScope });
     res.json(data);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -1355,7 +1355,7 @@ function generateSecurePassword() {
 // PATCH /api/admin/:id/reset-password — reset another ADMIN's password
 // (super_admin only — an admin resetting another admin's password is a
 // privileged action).
-const resetAdminPassword = async (req, res) => {
+const resetAdminPassword = async (req, res, next) => {
   try {
     if (req.admin.role !== "super_admin") {
       return res.status(403).json({ message: "Only a super admin can reset another admin's password" });
@@ -1376,13 +1376,13 @@ const resetAdminPassword = async (req, res) => {
       newPassword, // one-time reveal only, never persisted
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // PATCH /api/admin/user/:id/reset-password — reset an EMPLOYEE's password
 // (admin or super_admin, scoped to their own company).
-const resetUserPassword = async (req, res) => {
+const resetUserPassword = async (req, res, next) => {
   try {
     const companyId = req.admin.company?._id || req.admin.company;
     const target = await User.findOne({ _id: req.params.id, company: companyId });
@@ -1398,7 +1398,7 @@ const resetUserPassword = async (req, res) => {
       newPassword, // one-time reveal only, never persisted
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
