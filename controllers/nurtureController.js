@@ -27,7 +27,7 @@ function resolveCompany(req) {
 }
 
 // ── GET /api/nurture/rules ────────────────────────────────────────────────────
-const listRules = async (req, res) => {
+const listRules = async (req, res, next) => {
   try {
     const company = resolveCompany(req);
     if (!company) return res.status(400).json({ message: "Company not resolved from token" });
@@ -36,12 +36,12 @@ const listRules = async (req, res) => {
     res.json({ success: true, rules });
   } catch (err) {
     console.error("[nurtureController.listRules]", err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/nurture/rules ───────────────────────────────────────────────────
-const createRule = async (req, res) => {
+const createRule = async (req, res, next) => {
   try {
     const company = resolveCompany(req);
     if (!company) return res.status(400).json({ message: "Company not resolved from token" });
@@ -84,12 +84,12 @@ const createRule = async (req, res) => {
     res.status(201).json({ success: true, rule, warning });
   } catch (err) {
     console.error("[nurtureController.createRule]", err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── PATCH /api/nurture/rules/:id ──────────────────────────────────────────────
-const updateRule = async (req, res) => {
+const updateRule = async (req, res, next) => {
   try {
     const company = resolveCompany(req);
     if (!company) return res.status(400).json({ message: "Company not resolved from token" });
@@ -121,12 +121,12 @@ const updateRule = async (req, res) => {
     res.json({ success: true, rule, warning });
   } catch (err) {
     console.error("[nurtureController.updateRule]", err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // ── DELETE /api/nurture/rules/:id ─────────────────────────────────────────────
-const deleteRule = async (req, res) => {
+const deleteRule = async (req, res, next) => {
   try {
     const company = resolveCompany(req);
     if (!company) return res.status(400).json({ message: "Company not resolved from token" });
@@ -137,7 +137,7 @@ const deleteRule = async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("[nurtureController.deleteRule]", err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -165,7 +165,7 @@ const syncTemplates = async (req, res) => {
 //   ?stage=awareness      only that funnel stage
 //   ?nurtureOnly=true     exclude legacy templates
 //   ?search=healthcare    substring match on name
-const listTemplates = async (req, res) => {
+const listTemplates = async (req, res, next) => {
   try {
     const company = resolveCompany(req);
     if (!company) return res.status(400).json({ message: "Company not resolved from token" });
@@ -202,7 +202,7 @@ const listTemplates = async (req, res) => {
     res.json({ success: true, stats, templates });
   } catch (err) {
     console.error("[nurtureController.listTemplates]", err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -213,18 +213,18 @@ const listTemplates = async (req, res) => {
 // ── GET /api/nurture/templates/raw ────────────────────────────────────────────
 // Returns the complete raw MSG91 response so we can see the exact shape and
 // tune the parser. Remove or gate behind isDev after the shape is confirmed.
-const rawTemplates = async (req, res) => {
+const rawTemplates = async (req, res, next) => {
   try {
     const company = resolveCompany(req);
     if (!company) return res.status(400).json({ message: "Company not resolved" });
     const result = await fetchRaw(company);
     res.json({ success: true, result });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
-const probeTemplates = async (req, res) => {
+const probeTemplates = async (req, res, next) => {
   try {
     const company = resolveCompany(req);
     if (!company) return res.status(400).json({ message: "Company not resolved from token" });
@@ -241,7 +241,7 @@ const probeTemplates = async (req, res) => {
     });
   } catch (err) {
     console.error("[nurtureController.probeTemplates]", err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -249,13 +249,13 @@ const probeTemplates = async (req, res) => {
 // Manually runs the full nurture cron check right now — useful for testing
 // without waiting until 11:00 AM IST. Only works for the enabled company
 // (6a22662b7aea6e4034f44aae); all others are silently no-ops inside the job.
-const runNow = async (req, res) => {
+const runNow = async (req, res, next) => {
   try {
     const result = await runNurtureSequenceCheck();
     res.json({ success: true, sent: result.sent });
   } catch (err) {
     console.error("[nurtureController.runNow]", err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -264,7 +264,7 @@ const runNow = async (req, res) => {
 // current status. Useful for debugging leads that didn't get nurtured after a
 // status change. Body: { status } — override the status to test (optional;
 // defaults to the lead's current status in the DB).
-const triggerForLead = async (req, res) => {
+const triggerForLead = async (req, res, next) => {
   try {
     const { leadId } = req.params;
     const Lead = require("../models/Leads");
@@ -279,7 +279,7 @@ const triggerForLead = async (req, res) => {
     res.json({ success: true, leadId, status });
   } catch (err) {
     console.error("[nurtureController.triggerForLead]", err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -293,7 +293,7 @@ const triggerForLead = async (req, res) => {
 //   status       — "sent" | "failed" | "skipped" (omit for all)
 //   ruleId       — filter to one nurture rule
 //   page, limit  — pagination for the log list (default page=1, limit=50)
-const getReport = async (req, res) => {
+const getReport = async (req, res, next) => {
   try {
     const company = resolveCompany(req);
     if (!company) return res.status(400).json({ message: "Company not resolved from token" });
@@ -392,7 +392,7 @@ const getReport = async (req, res) => {
     });
   } catch (err) {
     console.error("[nurtureController.getReport]", err.message);
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
