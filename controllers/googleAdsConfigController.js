@@ -15,7 +15,7 @@ const { getAdminConfigScope, resolveAdminId } = require("../utils/adminLeadScope
 // calls (see metaConfigController.getAllConfigs); this brings Google in line
 // with that pattern so the frontend can read cfg.leads/cfg.converted directly
 // and skip the extra fetch entirely.
-const getConfigs = async (req, res) => {
+const getConfigs = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id || req.admin.company;
     const configs = await GoogleAdsConfig.find({ company: companyId, ...getAdminConfigScope(req) })
@@ -34,7 +34,7 @@ const getConfigs = async (req, res) => {
 
     res.json({ data: enriched });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -94,7 +94,7 @@ const updateConfig = async (req, res) => {
 };
 
 // PATCH toggle active/pause
-const toggleConfig = async (req, res) => {
+const toggleConfig = async (req, res, next) => {
   try {
     const config = await GoogleAdsConfig.findOneAndUpdate(
       { _id: req.params.id, company: req.admin.company, ...getAdminConfigScope(req) },
@@ -104,24 +104,24 @@ const toggleConfig = async (req, res) => {
     if (!config) return res.status(404).json({ message: "Not found" });
     res.json({ data: config });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // DELETE — disconnect
-const deleteConfig = async (req, res) => {
+const deleteConfig = async (req, res, next) => {
   try {
     await GoogleAdsConfig.findOneAndDelete({ _id: req.params.id, company: req.admin.company, ...getAdminConfigScope(req) });
     res.json({ message: "Disconnected" });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // GET /api/google-ads-config/insights?from=&to=&ai=
 // Google Ads performance report — built from CRM lead data (source "Google Ads")
 // grouped per campaign, joined with the manual cost field for cost-per-lead.
-const getInsights = async (req, res) => {
+const getInsights = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId) return res.status(400).json({ message: "Company not resolved" });
@@ -135,14 +135,14 @@ const getInsights = async (req, res) => {
     });
     res.json(report);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 // GET /api/google-ads-config/dashboard?from=&to=&campaign=&salesperson=&status=&ai=
 // Full business-performance dashboard (KPIs, campaigns, funnel, CRM sales,
 // sales team, AI) built from CRM lead data + manually-entered ad metrics.
-const getDashboard = async (req, res) => {
+const getDashboard = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId) return res.status(400).json({ message: "Company not resolved" });
@@ -159,13 +159,13 @@ const getDashboard = async (req, res) => {
     });
     res.json(report);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
 
 // ── Claim ownership of legacy (createdBy=null) Google Ads configs ─────────────
-const claimGoogleConfigOwnership = async (req, res) => {
+const claimGoogleConfigOwnership = async (req, res, next) => {
   try {
     const isSuperAdmin = req.admin && (req.admin.role === "super_admin" || req.admin.role === "superadmin" || req.admin.isSuperAdmin);
     if (!isSuperAdmin) return res.status(403).json({ message: "Super admin only." });
@@ -180,7 +180,7 @@ const claimGoogleConfigOwnership = async (req, res) => {
       : { company: companyId, $or: [{ createdBy: null }, { createdBy: { $exists: false } }] };
     const result = await GoogleAdsConfig.updateMany(matchQuery, { $set: { createdBy: adminId } });
     return res.json({ message: "Ownership assigned to " + targetAdmin.name, updated: result.modifiedCount });
-  } catch (err) { return res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 module.exports = { getConfigs, createConfig, updateConfig, toggleConfig, deleteConfig, getInsights, getDashboard, claimGoogleConfigOwnership };
