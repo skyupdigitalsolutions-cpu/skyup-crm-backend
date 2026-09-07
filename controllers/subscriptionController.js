@@ -305,7 +305,7 @@ const getPlans = async (req, res) => {
 };
 
 // ── GET /api/subscription/all ─────────────────────────────────────────────────
-const getAllSubscriptions = async (req, res) => {
+const getAllSubscriptions = async (req, res, next) => {
   try {
     const page   = Math.max(1, parseInt(req.query.page  || "1",  10));
     const limit  = Math.min(100, parseInt(req.query.limit || "50", 10));
@@ -368,13 +368,13 @@ const getAllSubscriptions = async (req, res) => {
     });
   } catch (err) {
     console.error("[getAllSubscriptions]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/subscription/activate/:companyId ────────────────────────────────
 // Extended: supports "suspended"/"paused" status + grants demo credits on first activation
-const activateSubscription = async (req, res) => {
+const activateSubscription = async (req, res, next) => {
   try {
     const { companyId } = req.params;
     const { plan, billing = "monthly", durationMonths, status: targetStatus } = req.body;
@@ -475,12 +475,12 @@ const activateSubscription = async (req, res) => {
     });
   } catch (err) {
     console.error("[activateSubscription]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /api/subscription/features/:companyId ─────────────────────────────────
-const updatePlanFeatures = async (req, res) => {
+const updatePlanFeatures = async (req, res, next) => {
   try {
     const { companyId } = req.params;
     const { features }  = req.body;
@@ -512,12 +512,12 @@ const updatePlanFeatures = async (req, res) => {
     });
   } catch (err) {
     console.error("[updatePlanFeatures]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/subscription/cancel/:companyId ─────────────────────────────────
-const cancelSubscription = async (req, res) => {
+const cancelSubscription = async (req, res, next) => {
   try {
     const { companyId } = req.params;
     const { reason }    = req.body;
@@ -541,12 +541,12 @@ const cancelSubscription = async (req, res) => {
 
     res.json({ success: true, message: `Subscription cancelled for ${company.name}` });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/subscription/extend-trial/:companyId ───────────────────────────
-const extendTrial = async (req, res) => {
+const extendTrial = async (req, res, next) => {
   try {
     const { companyId } = req.params;
     const days = Math.max(1, parseInt(req.body.days || 7, 10));
@@ -582,13 +582,13 @@ const extendTrial = async (req, res) => {
       daysRemaining: calcDaysRemaining(company),
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/subscription/status — for admin panel (backward compat) ──────────
 // Now returns full entitlements object from entitlementService
-const getMySubscriptionStatus = async (req, res) => {
+const getMySubscriptionStatus = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id ?? req.admin?.company;
     const company   = await Company.findById(companyId)
@@ -631,12 +631,12 @@ const getMySubscriptionStatus = async (req, res) => {
       resolvedFeatures: resolvePlanFeatures(company.plan, company.planFeatures),
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/subscription/my/entitlements — full entitlements for calling company ──
-const getMyEntitlements = async (req, res) => {
+const getMyEntitlements = async (req, res, next) => {
   try {
     const companyId =
       req.admin?.company?._id ??
@@ -683,12 +683,12 @@ const getMyEntitlements = async (req, res) => {
 
     res.json({ success: true, entitlements, remaining, plan, addons });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/subscription/:companyId ─────────────────────────────────────────
-const getCompanySubscription = async (req, res) => {
+const getCompanySubscription = async (req, res, next) => {
   try {
     const company = await Company.findById(req.params.companyId)
       .select("name plan subscriptionStatus subscriptionExpiry trialEndsAt isActive planFeatures");
@@ -709,13 +709,13 @@ const getCompanySubscription = async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /api/subscription/override/:companyId ─────────────────────────────────
 // NEW: Store devOverrides on company (resource limits + feature toggles)
-const applyDevOverride = async (req, res) => {
+const applyDevOverride = async (req, res, next) => {
   try {
     // Developer route uses :id; subscription route uses :companyId — support both
     const companyId = req.params.id || req.params.companyId;
@@ -771,13 +771,13 @@ const applyDevOverride = async (req, res) => {
     res.json({ success: true, devOverrides: newOverrides, entitlements });
   } catch (err) {
     console.error("[applyDevOverride]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── GET /api/subscription/full/:companyId — for Developer Panel ───────────────
 // Returns subscription + usage + addons + benefits + audit log summary
-const getCompanyFullDetails = async (req, res) => {
+const getCompanyFullDetails = async (req, res, next) => {
   try {
     const { companyId } = req.params;
 
@@ -812,7 +812,7 @@ const getCompanyFullDetails = async (req, res) => {
     });
   } catch (err) {
     console.error("[getCompanyFullDetails]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
