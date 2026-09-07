@@ -9,7 +9,7 @@ const { syncPageForms, reconcileMetaStatusesForCompany } = require("../services/
  * Also reconciles paused/archived status against Meta so the CRM reflects it
  * immediately (needs an ads_read token + Ad Account ID on a Meta campaign).
  */
-const syncFromMeta = async (req, res) => {
+const syncFromMeta = async (req, res, next) => {
   try {
     const { pageId, pageAccessToken, graphApiVersion = "v22.0" } = req.body;
     const companyId = req.admin?.company?._id || req.admin?.company;
@@ -32,7 +32,7 @@ const syncFromMeta = async (req, res) => {
     res.json({ ...result, statusSync });
   } catch (err) {
     const metaError = err?.response?.data?.error?.message;
-    res.status(500).json({ message: metaError || err.message });
+    next(err);
   }
 };
 
