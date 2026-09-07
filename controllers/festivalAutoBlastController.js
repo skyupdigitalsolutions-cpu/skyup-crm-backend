@@ -15,19 +15,19 @@ const { getFestivalCatalog } = require("../utils/festivalTemplateCatalog");
 const { sendAutoWhatsApp, sendAutoEmail } = require("../services/autoTemplateService");
 
 // ── GET /api/festival-campaigns/auto-blast ────────────────────────────────────
-const getSettings = async (req, res) => {
+const getSettings = async (req, res, next) => {
   try {
     const company = await Company.findById(req.admin.company._id).select("festivalAutoBlast");
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
     res.json({ success: true, festivalAutoBlast: company.festivalAutoBlast || {}, catalog: getFestivalCatalog() });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /api/festival-campaigns/auto-blast ────────────────────────────────────
 // Body: { enabled?, whatsapp?: {enabled, languageCode}, email?: {enabled, subject, fromName, bodyTemplate}, targetAudience?: {scope, statuses} }
-const updateSettings = async (req, res) => {
+const updateSettings = async (req, res, next) => {
   try {
     const { enabled, whatsapp, email, targetAudience } = req.body;
     const update = {};
@@ -57,14 +57,14 @@ const updateSettings = async (req, res) => {
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
     res.json({ success: true, festivalAutoBlast: company.festivalAutoBlast });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── POST /api/festival-campaigns/auto-blast/test ──────────────────────────────
 // Synchronously sends ONE catalog festival's content to ONE real lead, so the
 // admin can preview it without waiting for the actual date. Body: { festivalKey, leadId? }
-const testSettings = async (req, res) => {
+const testSettings = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
     const { festivalKey, leadId } = req.body || {};
@@ -98,7 +98,7 @@ const testSettings = async (req, res) => {
 
     res.json({ success: true, festival: entry.festivalName, lead: { _id: lead._id, name: lead.name, mobile: lead.mobile, email: lead.email }, results });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
