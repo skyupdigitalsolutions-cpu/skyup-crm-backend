@@ -77,7 +77,7 @@ const receiveWebsiteWebhook = async (req, res) => {
         `previousSecrets once these warnings stop.`
       );
     }
-    if (!config) return console.error(`❌ No WebsiteConfig found for secret: "${webhook_secret}"`);
+    if (!config) return console.error(`❌ No WebsiteConfig found for secret: ****${String(webhook_secret).slice(-4)}`);
     if (!config.isActive) return console.warn(`⚠️  WebsiteConfig "${config.sourceName}" is PAUSED`);
 
     // normalizePhone is the single canonical normaliser — do not fall back to
