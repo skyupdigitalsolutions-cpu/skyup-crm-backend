@@ -395,7 +395,7 @@ const updateDevice = async (req, res) => {
 };
 
 // ── PATCH /auth/my-telegram — employee self-updates their Telegram chat ID ────
-const updateMyTelegram = async (req, res) => {
+const updateMyTelegram = async (req, res, next) => {
   try {
     const userId         = req.user?._id;
     const { telegramChatId } = req.body;
@@ -409,7 +409,7 @@ const updateMyTelegram = async (req, res) => {
 
     res.json({ message: 'Telegram chat ID updated.', telegramChatId: user.telegramChatId });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
