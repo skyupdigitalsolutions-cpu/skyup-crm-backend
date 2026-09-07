@@ -140,7 +140,7 @@ const saveSettings = async (req, res) => {
 // ── POST /daily-report/test ───────────────────────────────────────────────────
 const _testCooldown = new Map();
 
-const sendTest = async (req, res) => {
+const sendTest = async (req, res, next) => {
   try {
     const companyId = getCompanyId(req);
     if (!companyId) return res.status(400).json({ message: 'Company context required' });
@@ -170,14 +170,14 @@ const sendTest = async (req, res) => {
     res.json({ message: 'Test report sent successfully', ...result });
   } catch (err) {
     console.error('[DailyReport] sendTest error:', err.message);
-    res.status(500).json({ message: err.message || 'Failed to send test report' });
+    next(err);
   }
 };
 
 // ── POST /daily-report/send-now ───────────────────────────────────────────────
 const _sendNowCooldown = new Map();
 
-const sendNow = async (req, res) => {
+const sendNow = async (req, res, next) => {
   try {
     const companyId = getCompanyId(req);
     if (!companyId) return res.status(400).json({ message: 'Company context required' });
@@ -213,7 +213,7 @@ const sendNow = async (req, res) => {
     res.json({ message: 'Report sent successfully', ...result });
   } catch (err) {
     console.error('[DailyReport] sendNow error:', err.message);
-    res.status(500).json({ message: err.message || 'Failed to send report' });
+    next(err);
   }
 };
 
