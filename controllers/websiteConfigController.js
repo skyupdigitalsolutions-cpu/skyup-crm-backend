@@ -6,7 +6,7 @@ const { getAdminConfigScope, resolveAdminId } = require("../utils/adminLeadScope
 // counts server-side with cheap countDocuments() instead of leaving the
 // frontend to fetch a full Lead.find()+populate per website source on every
 // page load. See the comment there for the full explanation.
-const getConfigs = async (req, res) => {
+const getConfigs = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id || req.admin.company;
     const configs = await WebsiteConfig.find({ company: companyId, ...getAdminConfigScope(req) })
@@ -21,7 +21,7 @@ const getConfigs = async (req, res) => {
     );
 
     res.json({ data: enriched });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 const createConfig = async (req, res) => {
@@ -55,7 +55,7 @@ const updateConfig = async (req, res) => {
   } catch (err) { res.status(400).json({ message: err.message }); }
 };
 
-const toggleConfig = async (req, res) => {
+const toggleConfig = async (req, res, next) => {
   try {
     const config = await WebsiteConfig.findOneAndUpdate(
       { _id: req.params.id, company: req.admin.company, ...getAdminConfigScope(req) },
@@ -64,20 +64,20 @@ const toggleConfig = async (req, res) => {
     );
     if (!config) return res.status(404).json({ message: "Not found" });
     res.json({ data: config });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
-const deleteConfig = async (req, res) => {
+const deleteConfig = async (req, res, next) => {
   try {
     await WebsiteConfig.findOneAndDelete({ _id: req.params.id, company: req.admin.company, ...getAdminConfigScope(req) });
     res.json({ message: "Disconnected" });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 // GET /api/website-config/insights?from=&to=&ai=
 // Website performance report — built from CRM lead data (source "Website")
 // grouped per configured source. No ad spend, so this is lead/conversion analytics.
-const getInsights = async (req, res) => {
+const getInsights = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId) return res.status(400).json({ message: "Company not resolved" });
@@ -90,12 +90,12 @@ const getInsights = async (req, res) => {
       withAI: req.query.ai !== "false",
     });
     res.json(report);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 
 // ── Claim ownership of legacy (createdBy=null) Website configs ────────────────
-const claimWebsiteConfigOwnership = async (req, res) => {
+const claimWebsiteConfigOwnership = async (req, res, next) => {
   try {
     const isSuperAdmin = req.admin && (req.admin.role === "super_admin" || req.admin.role === "superadmin" || req.admin.isSuperAdmin);
     if (!isSuperAdmin) return res.status(403).json({ message: "Super admin only." });
@@ -110,7 +110,7 @@ const claimWebsiteConfigOwnership = async (req, res) => {
       : { company: companyId, $or: [{ createdBy: null }, { createdBy: { $exists: false } }] };
     const result = await WebsiteConfig.updateMany(matchQuery, { $set: { createdBy: adminId } });
     return res.json({ message: "Ownership assigned to " + targetAdmin.name, updated: result.modifiedCount });
-  } catch (err) { return res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 module.exports = { getConfigs, createConfig, updateConfig, toggleConfig, deleteConfig, getInsights, claimWebsiteConfigOwnership };
