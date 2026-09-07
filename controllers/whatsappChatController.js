@@ -165,7 +165,7 @@ async function findLeadByPhoneDual(cleanPhone, companyId) {
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/whatsapp/conversations
 // ─────────────────────────────────────────────────────────────────────────────
-const getConversations = async (req, res) => {
+const getConversations = async (req, res, next) => {
   try {
     const { companyId, userId, role } = callerCtx(req);
     const filter = { company: companyId };
@@ -188,14 +188,14 @@ const getConversations = async (req, res) => {
     res.json({ success: true, conversations });
   } catch (err) {
     console.error("getConversations error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/whatsapp/conversations/:conversationId/messages
 // ─────────────────────────────────────────────────────────────────────────────
-const getMessages = async (req, res) => {
+const getMessages = async (req, res, next) => {
   try {
     const { conversationId } = req.params;
     const { companyId, userId, role } = callerCtx(req);
@@ -271,14 +271,14 @@ const getMessages = async (req, res) => {
     res.json({ success: true, messages, conversation, hasMore: recentDesc.length === limit });
   } catch (err) {
     console.error("getMessages error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/whatsapp/send
 // ─────────────────────────────────────────────────────────────────────────────
-const sendMessage = async (req, res) => {
+const sendMessage = async (req, res, next) => {
   try {
     const { conversationId, text } = req.body;
     const { companyId, userId, role } = callerCtx(req);
@@ -423,14 +423,14 @@ const sendMessage = async (req, res) => {
     res.json({ success: true, message: savedMsg });
   } catch (err) {
     console.error("sendMessage error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/whatsapp/send-template
 // ─────────────────────────────────────────────────────────────────────────────
-const sendTemplate = async (req, res) => {
+const sendTemplate = async (req, res, next) => {
   try {
     const {
       conversationId,
@@ -573,11 +573,11 @@ const sendTemplate = async (req, res) => {
     res.json({ success: true, message: savedMsg });
   } catch (err) {
     console.error("sendTemplate error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-const assignConversation = async (req, res) => {
+const assignConversation = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { agentId } = req.body;
@@ -594,11 +594,11 @@ const assignConversation = async (req, res) => {
       });
     res.json({ success: true, conversation: updated });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-const closeConversation = async (req, res) => {
+const closeConversation = async (req, res, next) => {
   try {
     const { id } = req.params;
     const updated = await WhatsAppConversation.findByIdAndUpdate(
@@ -608,11 +608,11 @@ const closeConversation = async (req, res) => {
     );
     res.json({ success: true, conversation: updated });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-const deleteConversation = async (req, res) => {
+const deleteConversation = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { role } = callerCtx(req);
@@ -624,11 +624,11 @@ const deleteConversation = async (req, res) => {
     await WhatsAppConversation.findByIdAndDelete(id);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-const saveConfig = async (req, res) => {
+const saveConfig = async (req, res, next) => {
   try {
     const {
       provider = "msg91",
@@ -691,11 +691,11 @@ const saveConfig = async (req, res) => {
     if (safeConfig.accessToken) safeConfig.accessToken = "***hidden***";
     res.json({ success: true, config: safeConfig });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-const getConfig = async (req, res) => {
+const getConfig = async (req, res, next) => {
   try {
     const { companyId } = callerCtx(req);
     const config = await WhatsAppConfig.findOne({ company: companyId });
@@ -718,7 +718,7 @@ const getConfig = async (req, res) => {
       }),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -726,7 +726,7 @@ const getConfig = async (req, res) => {
 // POST /api/whatsapp/start-conversation
 // Uses dual-phone lookup to find existing lead
 // ─────────────────────────────────────────────────────────────────────────────
-const startConversation = async (req, res) => {
+const startConversation = async (req, res, next) => {
   try {
     const {
       phone,
@@ -962,7 +962,7 @@ const startConversation = async (req, res) => {
     res.json({ success: true, conversation, message: savedMsg });
   } catch (err) {
     console.error("startConversation error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -1138,7 +1138,7 @@ const _saveConversationAndMessage = async ({
 // gated by the "whatsappBlast" feature instead of "leadNurtureSequence" — a
 // company can have Blast enabled without Nurture, and previously had no way
 // to sync/list templates for it at all.
-const listWhatsAppTemplates = async (req, res) => {
+const listWhatsAppTemplates = async (req, res, next) => {
   try {
     const { companyId } = callerCtx(req);
     if (!companyId) return res.status(400).json({ error: "Company not resolved from token" });
@@ -1156,7 +1156,7 @@ const listWhatsAppTemplates = async (req, res) => {
     });
   } catch (err) {
     console.error("[whatsappChatController.listWhatsAppTemplates]", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -1179,7 +1179,7 @@ const syncWhatsAppTemplates = async (req, res) => {
 // ── GET /api/whatsapp/leads/sources — distinct Lead.source values ────────────
 // Powers the Blast screen's "Source" filter dropdown with real values instead
 // of a guessed/hardcoded list.
-const listLeadSources = async (req, res) => {
+const listLeadSources = async (req, res, next) => {
   try {
     const { companyId } = callerCtx(req);
     if (!companyId) return res.status(400).json({ error: "Company not resolved from token" });
@@ -1191,11 +1191,11 @@ const listLeadSources = async (req, res) => {
     res.json({ success: true, sources: (sources || []).filter(Boolean).sort() });
   } catch (err) {
     console.error("[whatsappChatController.listLeadSources]", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-const bulkSendToLeads = async (req, res) => {
+const bulkSendToLeads = async (req, res, next) => {
   try {
     const { templateName, languageCode = "en_US", campaign, filter: blastFilter } = req.body;
     const { companyId, userId } = callerCtx(req);
@@ -1328,7 +1328,7 @@ const bulkSendToLeads = async (req, res) => {
     res.json({ success: true, sent, failed, total: leads.length, results });
   } catch (err) {
     console.error("bulkSendToLeads error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -1336,7 +1336,7 @@ const bulkSendToLeads = async (req, res) => {
 // POST /api/whatsapp/bulk-send-csv
 // Uses dual-phone lookup to match recipients to existing leads
 // ─────────────────────────────────────────────────────────────────────────────
-const bulkSendCSV = async (req, res) => {
+const bulkSendCSV = async (req, res, next) => {
   try {
     const { recipients, templateName, languageCode = "en_US" } = req.body;
     const { companyId, userId } = callerCtx(req);
@@ -1434,7 +1434,7 @@ const bulkSendCSV = async (req, res) => {
     });
   } catch (err) {
     console.error("bulkSendCSV error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -1442,7 +1442,7 @@ const bulkSendCSV = async (req, res) => {
 // GET /api/whatsapp/leads
 // Returns leads with both primary and secondary phone info
 // ─────────────────────────────────────────────────────────────────────────────
-const getLeadsForWhatsApp = async (req, res) => {
+const getLeadsForWhatsApp = async (req, res, next) => {
   try {
     const isAdmin = !!req.admin;
     const companyId = isAdmin
@@ -1499,14 +1499,14 @@ const getLeadsForWhatsApp = async (req, res) => {
     res.json({ success: true, leads: result });
   } catch (err) {
     console.error("getLeadsForWhatsApp error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/whatsapp/conversation-by-lead/:leadId
 // ─────────────────────────────────────────────────────────────────────────────
-const getConversationByLead = async (req, res) => {
+const getConversationByLead = async (req, res, next) => {
   try {
     const { leadId } = req.params;
     const { companyId, userId, role } = callerCtx(req);
@@ -1579,11 +1579,11 @@ const getConversationByLead = async (req, res) => {
     res.json({ success: true, conversation });
   } catch (err) {
     console.error("getConversationByLead error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-const employeeBulkSend = async (req, res) => {
+const employeeBulkSend = async (req, res, next) => {
   try {
     const { templateName, languageCode = "en_US" } = req.body;
     // FIX: this was destructuring `{ _id, company }` off callerCtx's return
@@ -1706,7 +1706,7 @@ const employeeBulkSend = async (req, res) => {
     res.json({ success: true, sent, failed, total: leads.length, results });
   } catch (err) {
     console.error("employeeBulkSend error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -1744,7 +1744,7 @@ function callerCtx(req) {
 // Returned as two maps so the UI can match either way:
 //   byLead  → { "<leadId>": 3 }
 //   byPhone → { "<last10digits>": 3 }   (covers convs not yet linked to a lead)
-const getUnreadCounts = async (req, res) => {
+const getUnreadCounts = async (req, res, next) => {
   try {
     const { companyId, userId, role } = callerCtx(req);
     if (!companyId) return res.json({ success: true, byLead: {}, byPhone: {} });
@@ -1825,7 +1825,7 @@ const getUnreadCounts = async (req, res) => {
     });
   } catch (err) {
     console.error("getUnreadCounts error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -1851,7 +1851,7 @@ function waMediaTypeFor(mimetype = "", originalname = "") {
   return "document";
 }
 
-const sendMedia = async (req, res) => {
+const sendMedia = async (req, res, next) => {
   try {
     const { conversationId, caption } = req.body;
     const { companyId, userId } = callerCtx(req);
@@ -2063,7 +2063,7 @@ const sendMedia = async (req, res) => {
     res.json({ success: true, message: savedMsg });
   } catch (err) {
     console.error("sendMedia error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -2079,7 +2079,7 @@ const sendMedia = async (req, res) => {
 // Inbound (lead) messages are deliberately NOT editable: rewriting what a
 // customer said would falsify the record.
 // ─────────────────────────────────────────────────────────────────────────────
-const editMessage = async (req, res) => {
+const editMessage = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { text } = req.body;
@@ -2120,7 +2120,7 @@ const editMessage = async (req, res) => {
     res.json({ success: true, message: msg });
   } catch (err) {
     console.error("editMessage error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -2133,7 +2133,7 @@ const editMessage = async (req, res) => {
 // Cloudinary config, or no usable credential), this lets the agent retry from
 // the chat and reports the specific reason on failure.
 // ─────────────────────────────────────────────────────────────────────────────
-const refreshMedia = async (req, res) => {
+const refreshMedia = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { companyId } = callerCtx(req);
@@ -2181,7 +2181,7 @@ const refreshMedia = async (req, res) => {
     res.json({ success: true, mediaUrl: updated.mediaUrl });
   } catch (err) {
     console.error("refreshMedia error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -2196,7 +2196,7 @@ const refreshMedia = async (req, res) => {
 // red badge that only disappeared after a full page refresh. The chat window
 // calls this whenever it displays a message for the open conversation.
 // ─────────────────────────────────────────────────────────────────────────────
-const markConversationRead = async (req, res) => {
+const markConversationRead = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { companyId } = callerCtx(req);
@@ -2211,7 +2211,7 @@ const markConversationRead = async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("markConversationRead error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -2223,7 +2223,7 @@ const markConversationRead = async (req, res) => {
 // their own sends (channel "employee-blast" where sentByUser === them).
 // Query params: page, limit, channel, status, dateFrom, dateTo, search
 // ─────────────────────────────────────────────────────────────────────────────
-const getSendLogReport = async (req, res) => {
+const getSendLogReport = async (req, res, next) => {
   try {
     const { companyId, userId, role } = callerCtx(req);
     if (!companyId) return res.status(401).json({ error: "No company context" });
@@ -2300,7 +2300,7 @@ const getSendLogReport = async (req, res) => {
     });
   } catch (err) {
     console.error("getSendLogReport error:", err.message);
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -2311,7 +2311,7 @@ const getSendLogReport = async (req, res) => {
 // tracking — so even old records can show what the template generally says,
 // instead of just its internal name.
 // ─────────────────────────────────────────────────────────────────────────────
-const getTemplateBody = async (req, res) => {
+const getTemplateBody = async (req, res, next) => {
   try {
     const { companyId } = callerCtx(req);
     const name = String(req.query.name || "").trim();
@@ -2339,7 +2339,7 @@ const getTemplateBody = async (req, res) => {
     return res.json({ success: true, body, source });
   } catch (err) {
     console.error("getTemplateBody error:", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
