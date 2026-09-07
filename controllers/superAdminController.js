@@ -392,7 +392,7 @@ const getAllAdminsWithStats = async (req, res) => {
 // getCompanyEntitlementDetails
 // GET /api/superadmin/companies/:id/entitlements
 // ─────────────────────────────────────────────────────────────────────────────
-const getCompanyEntitlementDetails = async (req, res) => {
+const getCompanyEntitlementDetails = async (req, res, next) => {
   try {
     const companyId = req.params.id;
     const now   = new Date();
@@ -423,7 +423,7 @@ const getCompanyEntitlementDetails = async (req, res) => {
     });
   } catch (err) {
     console.error("[getCompanyEntitlementDetails]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
@@ -433,7 +433,7 @@ const getCompanyEntitlementDetails = async (req, res) => {
 // Returns companies whose subscriptionEnd falls within the next N days (max 90).
 // Used by NotificationProvider on mount to populate the bell icon alerts.
 // ─────────────────────────────────────────────────────────────────────────────
-const getExpiringSubscriptions = async (req, res) => {
+const getExpiringSubscriptions = async (req, res, next) => {
   try {
     const days   = Math.min(parseInt(req.query.days) || 30, 90);
     const now    = new Date();
@@ -454,14 +454,14 @@ const getExpiringSubscriptions = async (req, res) => {
     res.json({ success: true, count: results.length, companies: results });
   } catch (err) {
     console.error("[getExpiringSubscriptions]", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
 // ── PUT /superadmin/company/:id/call-log-sync ─────────────────────────────────
 // Super admin enables or disables device call-log sync for a specific company.
 // When disabled, the backend rejects all /call-logs/sync requests from that company.
-const toggleCallLogSync = async (req, res) => {
+const toggleCallLogSync = async (req, res, next) => {
   try {
     const { id }     = req.params;
     const { enabled } = req.body;
@@ -476,7 +476,7 @@ const toggleCallLogSync = async (req, res) => {
       companyId:          company._id,
       companyName:        company.name,
     });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 
@@ -485,7 +485,7 @@ const toggleCallLogSync = async (req, res) => {
 // Creates / lists / toggles / deletes Admin records with marketingAccess=true
 // ─────────────────────────────────────────────────────────────────────────────
 
-const createMarketingUser = async (req, res) => {
+const createMarketingUser = async (req, res, next) => {
   try {
     const companyId = req.companyId;
     if (!companyId) return res.status(400).json({ message: "Company context missing" });
@@ -510,10 +510,10 @@ const createMarketingUser = async (req, res) => {
       metadata: { createdEmail: admin.email, createdRole: "marketing_user" },
     });
     res.status(201).json({ _id: admin._id, name: admin.name, email: admin.email, marketingAccess: admin.marketingAccess, isActive: admin.isActive, createdAt: admin.createdAt });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
-const listMarketingUsers = async (req, res) => {
+const listMarketingUsers = async (req, res, next) => {
   try {
     const companyId = req.companyId;
     if (!companyId) return res.status(400).json({ message: "Company context missing" });
@@ -528,10 +528,10 @@ const listMarketingUsers = async (req, res) => {
       $or: [{ role: "marketing_user" }, { marketingAccess: true }],
     }).select("-password -resetOtp").lean();
     res.json(users);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
-const toggleMarketingAccess = async (req, res) => {
+const toggleMarketingAccess = async (req, res, next) => {
   try {
     const companyId = req.companyId;
     const admin = await Admin.findOne({ _id: req.params.id, company: companyId });
@@ -553,10 +553,10 @@ const toggleMarketingAccess = async (req, res) => {
     });
 
     res.json({ _id: admin._id, marketingAccess: admin.marketingAccess });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
-const deleteMarketingUser = async (req, res) => {
+const deleteMarketingUser = async (req, res, next) => {
   try {
     const companyId = req.companyId;
     const admin = await Admin.findOne({ _id: req.params.id, company: companyId, marketingAccess: true });
@@ -573,7 +573,7 @@ const deleteMarketingUser = async (req, res) => {
     });
 
     res.json({ deleted: true });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { next(err); }
 };
 
 module.exports = {
