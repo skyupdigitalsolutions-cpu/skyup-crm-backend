@@ -9,7 +9,7 @@ const { scoreQualification } = require("../utils/qualificationScorer");
  * GET /api/meta-qualification/:adSetId
  * Returns the saved qualification rules for an ad set (if any).
  */
-const getRules = async (req, res) => {
+const getRules = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const doc = await MetaQualification.findOne({
@@ -31,7 +31,7 @@ const getRules = async (req, res) => {
       validation,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -44,7 +44,7 @@ const getRules = async (req, res) => {
  * field_data (qualificationBreakdown) so scores reflect the new rules
  * without waiting for new webhooks.
  */
-const saveRules = async (req, res) => {
+const saveRules = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { adSetId } = req.params;
@@ -99,7 +99,7 @@ const saveRules = async (req, res) => {
 
     res.json({ success: true, data: doc });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -180,7 +180,7 @@ async function rescoreLeadsForAdSet(qualDoc, adSetName, companyId) {
  * ad set config (uses formId + pageAccessToken stored in MetaConfig).
  * Returns: { questions: [ { key, label, options: string[] } ] }
  */
-const getFormQuestions = async (req, res) => {
+const getFormQuestions = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     const { adSetId } = req.params;
@@ -231,7 +231,7 @@ const getFormQuestions = async (req, res) => {
 
     res.json({ success: true, questions });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
