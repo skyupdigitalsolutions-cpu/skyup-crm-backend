@@ -111,7 +111,7 @@ async function activatePlan(company, planId, billing, paymentId, orderId) {
 }
 
 // ─── GET /api/trial/status ────────────────────────────────────────────────────
-const getTrialStatus = async (req, res) => {
+const getTrialStatus = async (req, res, next) => {
   try {
     const company = await Company.findById(_companyId(req))
       .select(
@@ -151,7 +151,7 @@ const getTrialStatus = async (req, res) => {
     });
   } catch (err) {
     console.error("[Trial] status error:", err);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 };
 
