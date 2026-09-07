@@ -419,13 +419,13 @@ const addMeetingRemark = (req, res) => {
 
     } catch (err) {
       console.error('[meetingRemarkController] addMeetingRemark error:', err);
-      return res.status(500).json({ message: err.message || 'Internal server error.' });
+      return next(err);
     }
   });
 };
 
 // ── GET /lead/:id/meeting-remarks ─────────────────────────────────────────────
-const getMeetingRemarks = async (req, res) => {
+const getMeetingRemarks = async (req, res, next) => {
   try {
     const { id }      = req.params;
     const companyId   = getCompanyId(req);
@@ -444,14 +444,14 @@ const getMeetingRemarks = async (req, res) => {
     return res.json({ meetingRemarks: sorted });
   } catch (err) {
     console.error('[meetingRemarkController] getMeetingRemarks error:', err);
-    return res.status(500).json({ message: err.message || 'Internal server error.' });
+    return next(err);
   }
 };
 
 // ── POST /lead/:id/meeting-whatsapp ───────────────────────────────────────────
 // Sends the `client_meeting_reminder` WhatsApp template to the lead's phone.
 // Body: { meetingDate, meetingTime, meetingMode, agentName }
-const sendMeetingWhatsApp = async (req, res) => {
+const sendMeetingWhatsApp = async (req, res, next) => {
   try {
     const { id }    = req.params;
     const companyId = getCompanyId(req);
@@ -484,7 +484,7 @@ const sendMeetingWhatsApp = async (req, res) => {
     });
   } catch (err) {
     console.error('[meetingRemarkController] sendMeetingWhatsApp error:', err);
-    return res.status(500).json({ success: false, message: err.message || 'Internal server error.' });
+    return next(err);
   }
 };
 
@@ -531,13 +531,13 @@ const addWhatsAppScreenshot = (req, res) => {
       });
     } catch (err) {
       console.error('[meetingRemarkController] addWhatsAppScreenshot error:', err);
-      return res.status(500).json({ message: err.message || 'Internal server error.' });
+      return next(err);
     }
   });
 };
 
 // ── GET /lead/:id/whatsapp-screenshots ────────────────────────────────────────
-const getWhatsAppScreenshots = async (req, res) => {
+const getWhatsAppScreenshots = async (req, res, next) => {
   try {
     const { id }    = req.params;
     const companyId = getCompanyId(req);
@@ -556,7 +556,7 @@ const getWhatsAppScreenshots = async (req, res) => {
     return res.json({ screenshots: sorted });
   } catch (err) {
     console.error('[meetingRemarkController] getWhatsAppScreenshots error:', err);
-    return res.status(500).json({ message: err.message || 'Internal server error.' });
+    return next(err);
   }
 };
 
