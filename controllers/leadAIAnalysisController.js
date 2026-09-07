@@ -95,7 +95,7 @@ const createAIAnalysis = async (req, res) => {
 // Same as POST but always resets to pending even if done.
 // Also triggers a sync re-run so the user doesn't wait for the next cron tick.
 // ─────────────────────────────────────────────────────────────────────────────
-const reanalyzeAIAnalysis = async (req, res) => {
+const reanalyzeAIAnalysis = async (req, res, next) => {
   try {
     const companyId = getCompanyId(req);
     if (!companyId) return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -127,7 +127,7 @@ const reanalyzeAIAnalysis = async (req, res) => {
     });
   } catch (err) {
     console.error("[leadAI:reanalyze]", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
@@ -135,7 +135,7 @@ const reanalyzeAIAnalysis = async (req, res) => {
 // GET /api/leads/ai-report
 // Management report: overview across all leads in the company.
 // ─────────────────────────────────────────────────────────────────────────────
-const getAIReport = async (req, res) => {
+const getAIReport = async (req, res, next) => {
   try {
     const companyId = getCompanyId(req);
     if (!companyId) return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -202,7 +202,7 @@ const getAIReport = async (req, res) => {
     });
   } catch (err) {
     console.error("[leadAI:report]", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
