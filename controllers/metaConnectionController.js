@@ -29,7 +29,7 @@ function describeGraphError(err) {
 // Body: { pageId, pageAccessToken, adAccountId?, adsToken?, graphApiVersion? }
 // Verifies each provided credential and returns a per-check result so the user
 // sees exactly what works and what doesn't BEFORE/AFTER saving.
-const testConnection = async (req, res) => {
+const testConnection = async (req, res, next) => {
   try {
     const { pageId, pageAccessToken, adAccountId, adsToken, graphApiVersion } = req.body;
     const ver  = graphApiVersion || DEFAULT_VER;
@@ -92,14 +92,14 @@ const testConnection = async (req, res) => {
       checks,
     });
   } catch (err) {
-    res.status(500).json({ ok: false, message: err.message });
+    next(err);
   }
 };
 
 // ── GET /meta-config/:id/discover ─────────────────────────────────────────────
 // Live-discover ad sets + lead forms for a saved config (uses its stored
 // credentials), so the UI can offer pickers instead of manual ID entry.
-const discover = async (req, res) => {
+const discover = async (req, res, next) => {
   try {
     const cfg = await MetaConfig.findById(req.params.id);
     if (!cfg) return res.status(404).json({ message: "Config not found" });
@@ -129,7 +129,7 @@ const discover = async (req, res) => {
 
     res.json(out);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -137,7 +137,7 @@ const discover = async (req, res) => {
 // For each config in the company, return a connection status the cards can show
 // as a badge. Verifies the page token live (cheap call) and reports whether
 // metrics creds exist. Cached-lightweight: one /me-style call per config.
-const connectionStatus = async (req, res) => {
+const connectionStatus = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId) return res.status(400).json({ message: "Company not resolved" });
@@ -164,7 +164,7 @@ const connectionStatus = async (req, res) => {
 
     res.json({ statuses: results });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
@@ -172,7 +172,7 @@ const connectionStatus = async (req, res) => {
 // Page-level lead summary: total leads for a page, broken down by ad set.
 // Combines DB grouping (leads we already have, keyed by metaConfigId/adSetName/
 // formId) with the configs registered for that page so empty ad sets still show.
-const pageLeads = async (req, res) => {
+const pageLeads = async (req, res, next) => {
   try {
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId) return res.status(400).json({ message: "Company not resolved" });
@@ -215,7 +215,7 @@ const pageLeads = async (req, res) => {
 
     res.json({ pageId, totalLeads, adsetCount: adsets.length, adsets });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    next(err);
   }
 };
 
