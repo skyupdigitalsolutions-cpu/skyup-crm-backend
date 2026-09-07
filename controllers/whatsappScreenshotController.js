@@ -180,7 +180,7 @@ function parseExtractedTime(timeStr, dateStr) {
 // POST /api/whatsapp/screenshot/extract
 // Body: multipart/form-data with field "screenshot" (image file)
 // ─────────────────────────────────────────────────────────────────────────────
-const extractScreenshot = async (req, res) => {
+const extractScreenshot = async (req, res, next) => {
   try {
     const companyId = getCompanyId(req);
     if (!companyId) return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -193,7 +193,7 @@ const extractScreenshot = async (req, res) => {
       imageUrl = await uploadScreenshotToCloudinary(req.file.buffer, req.file.mimetype, companyId);
     } catch (err) {
       console.error("[screenshotExtract] Cloudinary upload failed:", err.message);
-      return res.status(500).json({ success: false, message: "Image upload failed: " + err.message });
+      return next(err);
     }
 
     // 2. Run GPT-4o Vision
@@ -202,7 +202,7 @@ const extractScreenshot = async (req, res) => {
       extracted = await extractFromVision(imageUrl);
     } catch (err) {
       console.error("[screenshotExtract] Vision extraction failed:", err.message);
-      return res.status(500).json({ success: false, message: "AI extraction failed: " + err.message });
+      return next(err);
     }
 
     // 3. Validate structure
@@ -222,7 +222,7 @@ const extractScreenshot = async (req, res) => {
     });
   } catch (err) {
     console.error("[screenshotExtract] Error:", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
@@ -231,7 +231,7 @@ const extractScreenshot = async (req, res) => {
 // POST /api/whatsapp/screenshot/import
 // Body: multipart/form-data: "screenshot" (image) + "leadId" (text)
 // ─────────────────────────────────────────────────────────────────────────────
-const importScreenshot = async (req, res) => {
+const importScreenshot = async (req, res, next) => {
   try {
     const companyId = getCompanyId(req);
     if (!companyId) return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -251,7 +251,7 @@ const importScreenshot = async (req, res) => {
     try {
       imageUrl = await uploadScreenshotToCloudinary(req.file.buffer, req.file.mimetype, companyId);
     } catch (err) {
-      return res.status(500).json({ success: false, message: "Image upload failed: " + err.message });
+      return next(err);
     }
 
     // 2. Extract via Vision
@@ -259,7 +259,7 @@ const importScreenshot = async (req, res) => {
     try {
       extracted = await extractFromVision(imageUrl);
     } catch (err) {
-      return res.status(500).json({ success: false, message: "AI extraction failed: " + err.message });
+      return next(err);
     }
 
     const messages = Array.isArray(extracted.messages) ? extracted.messages : [];
@@ -351,7 +351,7 @@ const importScreenshot = async (req, res) => {
     });
   } catch (err) {
     console.error("[screenshotImport] Error:", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 };
 
