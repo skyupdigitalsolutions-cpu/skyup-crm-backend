@@ -172,6 +172,13 @@ const loginUnified = async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    // FIX (forced re-login on every clock-in): the mobile app sends a
+    // `platform` field (iOS/Android) on every login; the web admin dashboard
+    // never does. Use that as the signal to issue the longer-lived mobile
+    // token — see the doc comment on generateToken() for why this is safe.
+    const isMobileLogin = !!req.body.platform;
+    const tokenExpiry   = isMobileLogin ? "30d" : "24h";
+
     // 1) Check Developer
     const dev = await Developer.findOne({ email });
     if (dev && (await dev.matchPassword(password))) {
@@ -240,7 +247,7 @@ const loginUnified = async (req, res) => {
         companyId: admin.company._id,
         companyName: admin.company.name,
         brandLogoUrl: admin.company.brandLogoUrl,
-        token: generateToken(admin._id, admin.role),
+        token: generateToken(admin._id, admin.role, tokenExpiry),
         companyKey: await _getCompanyKey(admin.company._id),
       });
     }
@@ -276,7 +283,7 @@ const loginUnified = async (req, res) => {
         role: user.role || "employee",
         companyId: user.company._id,
         createdBy: user.createdBy,
-        token: generateToken(user._id, user.role || "employee"),
+        token: generateToken(user._id, user.role || "employee", tokenExpiry),
         companyKey: await _getCompanyKey(user.company._id),
       });
     }
