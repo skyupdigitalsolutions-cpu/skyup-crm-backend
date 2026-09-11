@@ -1,4 +1,5 @@
 // controllers/nurtureController.js
+const mongoose = require("mongoose");
 // ─────────────────────────────────────────────────────────────────────────────
 // Admin CRUD for NurtureRule. Every query/write is scoped to req.admin's own
 // company — there is no cross-company listing here, by design (mirrors the
@@ -328,6 +329,18 @@ const getReport = async (req, res, next) => {
     //    tallies side-by-side regardless of which tab the user is viewing.
     const summaryMatch = { ...match };
     delete summaryMatch.status;
+
+    // BUG FIX (same class as the Communications Reports tab bug): Mongoose
+    // auto-casts a string company ID to ObjectId for .find()/.countDocuments(),
+    // but .aggregate()'s $match stage does NOT — it's raw MongoDB with no
+    // schema-aware casting. resolveCompany() above can return either a real
+    // ObjectId or a plain string depending on which auth path set
+    // req.callerCompany. When it's a string, this aggregate silently matched
+    // ZERO documents, so Sent/Failed/Skipped always showed 0 here too,
+    // regardless of how much real nurture-send data existed.
+    if (summaryMatch.company && mongoose.Types.ObjectId.isValid(summaryMatch.company)) {
+      summaryMatch.company = new mongoose.Types.ObjectId(summaryMatch.company);
+    }
 
     const summaryAgg = await WhatsAppSendLog.aggregate([
       { $match: summaryMatch },
