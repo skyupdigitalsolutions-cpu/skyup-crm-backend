@@ -1,6 +1,7 @@
 // controllers/whatsappChatController.js
 // API endpoints used by the CRM frontend (agents + admin)
 
+const mongoose = require("mongoose");
 const axios = require("axios");
 const WhatsAppConfig = require("../models/WhatsAppConfig");
 const WhatsAppConversation = require("../models/WhatsAppConversation");
@@ -2252,6 +2253,26 @@ const getSendLogReport = async (req, res, next) => {
         { phone: { $regex: s, $options: "i" } },
         { templateName: { $regex: s, $options: "i" } },
       ];
+    }
+
+    // BUG FIX (Reports tab always shows Sent/Failed/Skipped as 0): Mongoose
+    // auto-casts a string ObjectId in .find()/.countDocuments() filters to
+    // match the schema's ObjectId field type — but .aggregate()'s $match
+    // stage is raw MongoDB with NO schema-aware casting at all. companyId
+    // (and userId) here come from callerCtx(), which can hand back either a
+    // real ObjectId or a plain string depending on which auth middleware ran
+    // (see the FIX comment on callerCtx itself). When it's a string, `.find()`
+    // matched documents fine (which is why individual rows / the per-template
+    // breakdown always looked correct), but `.aggregate([{ $match: filter }])`
+    // compared a BSON ObjectId against a plain string and matched NOTHING —
+    // so the summary counts were silently always zero regardless of how much
+    // real data existed. Casting explicitly here fixes it for every query
+    // built from `filter`, not just the aggregate.
+    if (filter.company && mongoose.Types.ObjectId.isValid(filter.company)) {
+      filter.company = new mongoose.Types.ObjectId(filter.company);
+    }
+    if (filter.sentByUser && mongoose.Types.ObjectId.isValid(filter.sentByUser)) {
+      filter.sentByUser = new mongoose.Types.ObjectId(filter.sentByUser);
     }
 
     const [rows, total, summaryAgg] = await Promise.all([
