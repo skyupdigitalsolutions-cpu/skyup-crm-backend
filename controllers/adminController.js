@@ -4,6 +4,7 @@ const Admin   = require("../models/Admin");
 const User    = require("../models/Users");
 const Lead    = require("../models/Leads");
 const Company = require("../models/Company");
+const WhatsAppConversation = require("../models/WhatsAppConversation");
 const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
 const { looksLikeAutoResolvedName } = require("../utils/templateNameResolver");
 const { logAuditEvent } = require("../utils/auditLogger");
@@ -417,18 +418,57 @@ const updateUserLanguages = async (req, res) => {
 
 const deleteCompanyUser = async (req, res) => {
   try {
-    const query = { _id: req.params.id, company: req.admin.company._id };
-    if (req.admin.role !== "super_admin") query.createdBy = req.admin._id;
-    const user = await User.findOne(query);
-    if (!user) return res.status(404).json({ message: "User not found" });
+    // FIX (silent-failure bug): previously, if a non-super-admin tried to
+    // delete an employee THEY DIDN'T CREATE, the ownership filter below
+    // silently found nothing and returned a generic "User not found" — easy
+    // to misread as "already deleted" rather than "you're not allowed to
+    // delete this one." Split into two queries so we can tell the caller
+    // exactly which case happened, instead of one ambiguous 404 either way.
+    const existsAtAll = await User.findOne({ _id: req.params.id, company: req.admin.company._id });
+    if (!existsAtAll) {
+      return res.status(404).json({ message: "User not found." });
+    }
+    if (req.admin.role !== "super_admin" && String(existsAtAll.createdBy) !== String(req.admin._id)) {
+      return res.status(403).json({
+        message: "You can only delete employees you created yourself. Ask a super admin to remove this one.",
+      });
+    }
+    const user = existsAtAll;
     await User.findByIdAndDelete(req.params.id);
+
+    // FIX (stale name in Communications/Inbox after deletion): deleting the
+    // User document doesn't retroactively touch any WhatsAppConversation
+    // still pointing at them via assignedAgent — Mongo populate correctly
+    // returns null for a dangling ref on the NEXT fetch, but any admin
+    // dashboard already holding that conversation in memory (loaded before
+    // the deletion, updated only via socket pushes since) has no signal that
+    // anything changed, and can keep showing the deleted employee's name
+    // indefinitely until a manual page reload. Two-part fix: (1) actually
+    // clear the dangling reference server-side so the data itself is
+    // correct, not just eventually-consistent on next fetch; (2) push a
+    // socket event so any already-open dashboard refreshes those
+    // conversations live instead of silently going stale.
+    const affected = await WhatsAppConversation.find({ assignedAgent: req.params.id }).select("_id company").lean();
+    if (affected.length) {
+      await WhatsAppConversation.updateMany({ assignedAgent: req.params.id }, { $set: { assignedAgent: null } });
+      const io = global._io;
+      if (io) {
+        for (const conv of affected) {
+          io.to(`wa_company_${conv.company}`).emit("wa_conversation_reassigned", {
+            conversationId: conv._id.toString(),
+            assignedAgent: null,
+            reason: "employee_deleted",
+          });
+        }
+      }
+    }
 
     logAuditEvent({
       action: "delete", resourceType: "User", req,
       actorId: req.admin?._id, actorModel: "Admin", actorEmail: req.admin?.email,
       actorRole: req.admin?.role, company: req.admin?.company?._id,
       resourceId: user._id, statusCode: 200,
-      metadata: { deletedEmail: user.email, deletedRole: user.role },
+      metadata: { deletedEmail: user.email, deletedRole: user.role, reassignedConversations: affected.length },
     });
 
     res.status(200).json({ message: "User deleted successfully" });
