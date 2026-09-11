@@ -221,6 +221,44 @@ const io = new Server(server, {
   pingInterval: 25000,
 });
 
+// ── Redis adapter — makes Socket.IO events work across MULTIPLE processes ────
+// FIX ("fix all problems" — the PM2 restart gap): a plain `pm2 restart` on a
+// single fork-mode process always has a few-second gap where nothing is
+// listening (Nginx correctly returns "no live upstreams"/503 during that
+// window — this is not a bug, just unavoidable with exactly one process).
+// The real fix is PM2 cluster mode with multiple instances, so PM2 can
+// restart them one at a time (zero-downtime `pm2 reload`) — but Socket.IO
+// by default only knows about connections on ITS OWN process, so a message
+// emitted on instance A would never reach a client connected to instance B.
+// This adapter fixes that by using Redis pub/sub to broadcast Socket.IO
+// events to ALL instances, regardless of which one a given client is
+// attached to — a hard requirement before cluster mode can work correctly
+// for this app's real-time WhatsApp/lead notifications.
+//
+// Fails open like every other Redis use in this codebase: if Redis is down
+// or the adapter package isn't installed yet, Socket.IO just runs in its
+// default single-process mode — fine for fork mode, a real limitation only
+// once you actually switch to cluster mode.
+(async () => {
+  try {
+    const { createAdapter } = require('@socket.io/redis-adapter');
+    const { redisClient } = require('./middlewares/rateLimiter');
+    const pubClient = redisClient.duplicate();
+    const subClient = redisClient.duplicate();
+    await Promise.all([pubClient.connect(), subClient.connect()]);
+    io.adapter(createAdapter(pubClient, subClient));
+    console.log('✅ Socket.IO Redis adapter attached — safe for PM2 cluster mode');
+  } catch (err) {
+    console.warn(
+      '⚠️  Socket.IO Redis adapter not attached (Redis unavailable, or run `npm install` to' +
+      ' pick up @socket.io/redis-adapter) — falling back to single-process mode. This is fine' +
+      ' under PM2 fork mode (one instance); do NOT switch to PM2 cluster mode until this' +
+      ' attaches successfully, or real-time events will randomly miss clients on other instances.',
+      err.message,
+    );
+  }
+})();
+
 // ── Public website-lead webhook — accepts leads from ANY landing-page origin ──
 // MUST be registered BEFORE the global allowlisted CORS below. Landing pages
 // live on arbitrary customer domains, so this endpoint sets permissive CORS

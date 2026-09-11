@@ -270,8 +270,14 @@ async function fetchFromMsg91({ authKey, integratedNumber }) {
   }
   throw new Error(
     "No MSG91 template endpoint worked. Attempts:\n  " + errors.join("\n  ") +
-    "\n\nAsk MSG91 support for the correct 'get templates' URL, then set " +
-    "MSG91_TEMPLATES_API_URL in Render."
+    "\n\nThis needs one piece of information no amount of endpoint-guessing can" +
+    " supply: MSG91's public API docs render their reference with JavaScript," +
+    " so the real 'get templates' path was never confirmed. Two ways to get it:" +
+    "\n  1. Ask MSG91 support directly for the exact 'list/get WhatsApp templates' endpoint." +
+    "\n  2. Log into MSG91's own dashboard, open your browser's DevTools → Network tab," +
+    " and view your templates there — the exact URL their own frontend calls will be visible." +
+    "\nOnce you have it, set MSG91_TEMPLATES_API_URL in this server's .env (not Render — this fix" +
+    " assumes you're now on your own host) and restart the process."
   );
 }
 
