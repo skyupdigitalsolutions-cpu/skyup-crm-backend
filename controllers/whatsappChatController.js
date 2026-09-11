@@ -2168,6 +2168,11 @@ const refreshMedia = async (req, res, next) => {
       messageId:      msg._id,
       conversationId: msg.conversation,
       contentType:    msg.messageType,
+      // FIX (garbled/extensionless downloads): best-effort filename for the
+      // manual-retry path too — msg.body often holds the original filename
+      // for document messages (see the webhook's mediaFilename fix), so use
+      // it unless it's just the generic "📄 Document" fallback label.
+      filename:       (msg.mediaCaption || (msg.body && msg.body !== "📄 Document" ? msg.body : null)) || null,
     });
 
     const updated = await WhatsAppMessage.findById(id).select("mediaUrl").lean();

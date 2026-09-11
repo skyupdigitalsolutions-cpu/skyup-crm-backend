@@ -30,6 +30,35 @@ const { slug, SERVICES } = require("../utils/templateNameResolver");
 const { sendWhatsAppInboundNotification } = require("../services/fcmService");
 const { notifyCampaignLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
 
+// Maps a downloaded file's Content-Type to a safe extension, used as a
+// fallback when WhatsApp didn't supply an original filename (see the
+// `mediaFilename` fix below) — without SOME extension, Cloudinary raw
+// uploads download as an unopenable, iconless file with a random name.
+function extensionFromContentType(ct) {
+  const map = {
+    "application/pdf": ".pdf",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/zip": ".zip",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "video/mp4": ".mp4",
+    "audio/ogg": ".ogg",
+    "audio/mpeg": ".mp3",
+    "audio/amr": ".amr",
+  };
+  const base = String(ct || "").split(";")[0].trim().toLowerCase();
+  return map[base] || "";
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // mirrorInboundMedia — make lead-sent media viewable in the CRM.
 //
@@ -40,7 +69,7 @@ const { notifyCampaignLead, notifyAllAdminsCampaignLead } = require("../services
 // credential we hold) and re-upload it to Cloudinary, producing a public URL
 // the UI can display. Runs in the background so the webhook still replies fast.
 // ─────────────────────────────────────────────────────────────────────────────
-async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conversationId, contentType }) {
+async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conversationId, contentType, filename }) {
   try {
     if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return;
 
@@ -86,6 +115,7 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
 
     let buffer = null;
     let usedName = null;
+    let downloadedContentType = "";
     const attemptErrors = [];
     for (const a of attempts) {
       try {
@@ -106,6 +136,7 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
         }
         buffer = Buffer.from(resp.data);
         usedName = a.name;
+        downloadedContentType = ct;
         break;
       } catch (e) {
         let body = "";
@@ -132,9 +163,45 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
       : (contentType === "video" || contentType === "sticker") ? "video"
       : "raw";
 
+    // BUG FIX (garbled/extensionless downloaded filenames — see the
+    // `mediaFilename` doc comment in the webhook handler above): Cloudinary
+    // auto-generates a random public_id with NO extension for "raw" uploads
+    // (documents) unless told otherwise, which is exactly what produced
+    // downloads like "d8qehidnpooji2awktng" with no file-type icon and no
+    // way for the OS to open it. Fixed by explicitly deriving a real
+    // filename + extension and passing it through:
+    //   1. Prefer WhatsApp's own filename (e.g. "Invoice_March.pdf") if it
+    //      was captured.
+    //   2. Otherwise fall back to an extension guessed from the actual
+    //      downloaded Content-Type (e.g. "application/pdf" → ".pdf") so the
+    //      file is at least openable, even without the original name.
+    //   3. `use_filename` + `unique_filename: false` tells Cloudinary to use
+    //      OUR chosen name as the public_id instead of generating a random
+    //      one, and `resource_type: raw` requires the extension be part of
+    //      the public_id itself (Cloudinary does not append it separately
+    //      for raw assets the way it sometimes does for images).
+    const detectedExt = extensionFromContentType(downloadedContentType);
+    const safeBase = filename
+      ? filename.replace(/\.[^./\\]+$/, "").replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 80) || "document"
+      : `inbound_${String(messageId)}`;
+    const ext = (filename && /\.[a-zA-Z0-9]{2,5}$/.test(filename))
+      ? filename.match(/\.[a-zA-Z0-9]{2,5}$/)[0]
+      : (detectedExt || "");
+    const publicId = resourceType === "raw" ? `${safeBase}${ext}` : safeBase;
+
     const uploaded = await new Promise((resolve, reject) => {
       const stream = instance.uploader.upload_stream(
-        { folder: `skyup-crm/whatsapp-inbound/${companyId}`, resource_type: resourceType },
+        {
+          folder: `skyup-crm/whatsapp-inbound/${companyId}`,
+          resource_type: resourceType,
+          public_id: publicId,
+          use_filename: true,
+          unique_filename: false,
+          // Forces a real "Save As" download with the original filename
+          // (via Content-Disposition) instead of the browser guessing one
+          // from the URL — this is what the chat UI's document link opens.
+          ...(resourceType === "raw" ? { flags: "attachment" } : {}),
+        },
         (err, result) => (err ? reject(err) : resolve(result)),
       );
       stream.end(buffer);
@@ -633,6 +700,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
     let messageType = "text";
     let mediaId     = null;
     let mediaCaption = null;
+    let mediaFilename = null;
 
     // Friendly labels shown when a message carries no readable text (media,
     // reactions, polls, view-once, etc.). Avoids surfacing scary raw tags like
@@ -655,6 +723,14 @@ async function processMSG91Payload(rawBody, opts = {}) {
       // back to whatever ID was provided.
       const p = item.payload || {};
       const typed = item[contentType] || p[contentType] || {};
+      // BUG FIX (garbled/extensionless downloaded filenames): WhatsApp sends
+      // the ORIGINAL filename for document messages (e.g. "Invoice_March.pdf")
+      // in this `filename` field — it was never being read anywhere. Without
+      // it, the file was mirrored to Cloudinary with an auto-generated random
+      // public_id and no extension, so every download landed on disk as
+      // something like "d8qehidnpooji2awktng" with no icon and no way to open
+      // it. Captured here and threaded through to mirrorInboundMedia() below.
+      mediaFilename = typed.filename || item.filename || p.filename || null;
       const candidates = [
         item.attachment_url, p.attachment_url, typed.attachment_url,
         item.url,   p.url,   typed.url,
@@ -674,7 +750,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
         (httpUrl ? "" : ` | raw keys: ${Object.keys(item).join(",")}`)
       );
 
-      msgBody = mediaCaption || MEDIA_LABEL[contentType] || "📎 Attachment";
+      msgBody = mediaCaption || mediaFilename || MEDIA_LABEL[contentType] || "📎 Attachment";
     } else if (contentType === "location") {
       messageType = "location";
       msgBody     = `📍 Location: ${item.latitude || "?"}, ${item.longitude || "?"}`;
@@ -779,6 +855,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
         messageId:      savedMsg._id,
         conversationId: conversation._id,
         contentType,
+        filename:       mediaFilename,
       }).catch((err) => {
         // FIX: this used to be .catch(() => {}) — silently swallowing every
         // failure of the FIRST, automatic mirror attempt with zero logging.
