@@ -102,12 +102,33 @@ function makeCompanyUploadMiddleware({ field, folderBase = 'skyup-crm/recordings
 
       const storage = new CloudinaryStorage({
         cloudinary: instance,
-        params: async (req2, file) => ({
-          folder:          `${folderBase}/${companyId || 'unknown'}`,
-          resource_type:   'auto',
-          public_id:       `${req2.user?._id || 'u'}_${Date.now()}`,
-          allowed_formats: allowedFormats,
-        }),
+        params: async (req2, file) => {
+          // BUG FIX (garbled/extensionless downloads — same root cause as the
+          // inbound WhatsApp media bug, but this is the OUTBOUND path: any
+          // file YOU send via /whatsapp/send-media, or a call-recording
+          // upload). public_id was just `${userId}_${timestamp}` — no
+          // extension at all. For 'auto' resource type, Cloudinary resolves
+          // documents/zips/etc. to 'raw' under the hood, and raw assets do
+          // NOT get an extension auto-appended to the delivered URL the way
+          // images/video sometimes do — so every non-image/video attachment
+          // downloaded as an unopenable, iconless file with a random name.
+          // Now: derive the real extension from the uploaded file's own
+          // name (multer's `file.originalname`) and bake it into public_id,
+          // with use_filename/unique_filename telling Cloudinary to respect
+          // it instead of generating its own random id.
+          const original = file?.originalname || "";
+          const extMatch = original.match(/\.[a-zA-Z0-9]{2,5}$/);
+          const ext = extMatch ? extMatch[0] : "";
+          const safeBase = (original.replace(/\.[^./\\]+$/, "").replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 60) || "file");
+          return {
+            folder:           `${folderBase}/${companyId || 'unknown'}`,
+            resource_type:    'auto',
+            public_id:        `${safeBase}_${req2.user?._id || 'u'}_${Date.now()}${ext}`,
+            use_filename:     true,
+            unique_filename:  false,
+            allowed_formats:  allowedFormats,
+          };
+        },
       });
 
       const handler = multer({
