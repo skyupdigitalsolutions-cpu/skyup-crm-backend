@@ -986,6 +986,47 @@ const adminUpdateLead = async (req, res) => {
       .populate("user", "name email")
       .populate("previousAgents", "name email");
 
+    // BUG FIX (logic gap): status changes made here — e.g. dragging a card
+    // on the admin Pipeline Board, which calls this exact endpoint — never
+    // triggered nurture sequences or the Meta Conversions API send-back.
+    // patchLead (the EMPLOYEE-facing update endpoint) already does both of
+    // these on every status change; this admin-facing endpoint silently
+    // skipped them entirely, so the identical action (changing a lead's
+    // status) behaved differently depending on who did it. Both are
+    // fire-and-forget and self-gate (nurture checks the company entitlement
+    // internally; CAPI checks metaConversionSync below) — exactly mirroring
+    // patchLead's versions of these same two triggers.
+    //
+    // NOT replicated here: patchLead's "interested blast" and per-outcome
+    // WhatsApp/email automation. Those are tied to an agent-logged call
+    // `outcome` value that has no equivalent concept in an admin drag-and-
+    // drop status change, so porting them as-is would be guessing at
+    // behavior rather than fixing a clear gap — flagging as a separate,
+    // deliberate follow-up decision rather than bundling it in blind.
+    if (updatedLead && safeBody.status !== undefined && safeBody.status !== lead.status) {
+      const newStatus = safeBody.status;
+
+      triggerNurtureForLead(String(updatedLead._id), newStatus).catch((err) =>
+        console.error("[nurtureSequence] adminUpdateLead trigger error:", err.message)
+      );
+
+      const capiCompanyId = lead.company?._id || lead.company || companyId;
+      if (capiCompanyId) {
+        getCompanyEntitlements(capiCompanyId)
+          .then((ent) => {
+            if (!ent?.metaConversionSync) return;
+            return sendMetaConversionEvent(updatedLead, newStatus).then((result) => {
+              if (result.sent) {
+                console.log(`[metaConversionSync] "${result.eventName}" sent for lead ${updatedLead._id} (via adminUpdateLead)`);
+              } else {
+                console.log(`[metaConversionSync] Skipped for lead ${updatedLead._id} (via adminUpdateLead): ${result.reason}`);
+              }
+            });
+          })
+          .catch((err) => console.error("[metaConversionSync] adminUpdateLead trigger error:", err.message));
+      }
+    }
+
     if (newUserId) {
       const _io = global._io;
       if (_io) {
