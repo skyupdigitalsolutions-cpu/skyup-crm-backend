@@ -3,7 +3,7 @@
 // WEBHOOK-ONLY MODE — polling is disabled.
 //
 // All inbound WhatsApp messages are received via MSG91's push webhook:
-//   POST https://skyup-crm-backend.onrender.com/msg91-webhook
+//   POST https://skyupcrm-backend.duckdns.org/msg91-webhook
 //
 // When MSG91 receives a lead reply, it POSTs the payload directly to this
 // server within 1-2 seconds. The server saves it to DB and emits via Socket.io
@@ -15,7 +15,7 @@
 //   Option B (manual):    MSG91 dashboard → WhatsApp → Integrated Numbers
 //                         → click your number → Settings
 //                         → Response Webhook URL → paste:
-//                            https://skyup-crm-backend.onrender.com/msg91-webhook
+//                            https://skyupcrm-backend.duckdns.org/msg91-webhook
 //                         → Save
 //
 // The webhook endpoint is at:  POST /msg91-webhook  (any sub-path works)
@@ -27,7 +27,7 @@ function startMsg91InboundPollJob() {
   console.log("   Lead replies arrive via POST /msg91-webhook in <2 seconds.");
   console.log("   To activate: MSG91 dashboard → WhatsApp → Integrated Numbers");
   console.log("   → your number → Settings → Response Webhook URL →");
-  console.log("   → paste: https://skyup-crm-backend.onrender.com/msg91-webhook");
+  console.log("   → paste: https://skyupcrm-backend.duckdns.org/msg91-webhook");
 }
 
 async function pollOnce() {
