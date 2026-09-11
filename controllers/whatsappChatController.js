@@ -386,11 +386,24 @@ const sendMessage = async (req, res, next) => {
       waTimestamp: new Date(),
     });
 
+    // BUG FIX (the "green dot lies about session state" glitch): this used to
+    // extend sessionExpiresAt by a fresh 24h every time an AGENT sent a
+    // message. WhatsApp's actual 24-hour customer-service window is anchored
+    // to the CUSTOMER's last inbound message — a business's own reply does
+    // NOT extend it (elsewhere in this file, sendTemplate/start-conversation/
+    // bulk-send all correctly leave sessionExpiresAt untouched for exactly
+    // this reason — this function was the one place that didn't match that).
+    // Extending it here made the UI show "open"/session-valid for a full new
+    // 24h right after you replied, even when WhatsApp's real window (counted
+    // from the customer's message) was about to expire or already had — so
+    // the CRM would let you type a free-form message that WhatsApp itself
+    // would then reject, with no warning beforehand.
     await WhatsAppConversation.findByIdAndUpdate(conversationId, {
       lastMessage: text.trim(),
       lastMessageAt: new Date(),
       status: "open",
-      sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      // sessionExpiresAt intentionally NOT changed — only an inbound
+      // customer message may extend it (see msg91WebhookController.js).
     });
 
     const io = global._io;
@@ -2031,11 +2044,14 @@ const sendMedia = async (req, res, next) => {
       waTimestamp:  new Date(),
     });
 
+    // BUG FIX: same session-window bug as sendMessage — see the detailed
+    // comment there. An agent-sent attachment must not extend the 24h
+    // customer-service window either.
     await WhatsAppConversation.findByIdAndUpdate(conversationId, {
       lastMessage:      preview,
       lastMessageAt:    new Date(),
       status:           "open",
-      sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      // sessionExpiresAt intentionally NOT changed.
     });
 
     const io = global._io;
