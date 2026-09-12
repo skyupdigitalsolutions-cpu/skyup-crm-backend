@@ -3,6 +3,7 @@ const User          = require("../models/Users");
 const Company       = require("../models/Company");
 const LiveLocation   = require("../models/LiveLocation");
 const ClockLocationLog = require("../models/ClockLocationLog");
+const { refreshActivity, clearActivity } = require("../services/liveActivityService");
 
 // ── Socket helper — emits attendance:updated to the user's private room ───────
 // The room name is `att:<userId>`. Both web and mobile join this room on mount.
@@ -23,18 +24,24 @@ function emitAttendanceUpdate(req, record) {
 // Writes to ClockLocationLog so the location survives even if the daily
 // Attendance record is later edited or deleted. Fire-and-forget: a logging
 // failure must never block the clock-in/out itself.
-async function logClockLocation({ record, type, latitude, longitude, accuracy, address }) {
+async function logClockLocation({ record, user, company, date, type, latitude, longitude, accuracy, address, distanceMetres, radiusMetres }) {
   try {
     if (latitude == null || longitude == null) return;
     await ClockLocationLog.create({
-      user:      record.user,
-      company:   record.company,
-      type,                                // 'clock_in' | 'clock_out'
-      date:      record.date,
+      // FIX: accepts either a saved Attendance `record` (the normal
+      // clock_in/clock_out case) OR raw user/company/date directly — a
+      // rejected out-of-geofence attempt never creates an Attendance record
+      // at all, so there's nothing to read those fields off of in that case.
+      user:      record ? record.user    : user,
+      company:   record ? record.company : company,
+      type,                                // 'clock_in' | 'clock_out' | 'clock_in_rejected'
+      date:      record ? record.date     : date,
       latitude:  Number(latitude),
       longitude: Number(longitude),
       accuracy:  accuracy != null ? Number(accuracy) : null,
       address:   address || null,
+      distanceMetres: distanceMetres != null ? Number(distanceMetres) : null,
+      radiusMetres:   radiusMetres   != null ? Number(radiusMetres)   : null,
     });
   } catch (e) {
     console.error("[attendance] logClockLocation error:", e.message);
@@ -235,6 +242,26 @@ const clockIn = async (req, res, next) => {
         const allowed   = radius + accSlack;
 
         if (dist > allowed) {
+          // FIX (missing audit trail): log the rejected attempt's actual
+          // location before returning the error — previously this data was
+          // just discarded the instant the request failed, giving admins no
+          // visibility into out-of-office clock-in attempts at all. This
+          // does NOT affect the rejection itself (the 403 below still
+          // happens exactly as before) — it only adds a permanent record of
+          // the attempt alongside it.
+          logClockLocation({
+            user:    userId,
+            company: companyId,
+            date:    todayStr(),
+            type:    "clock_in_rejected",
+            latitude:  Number(latitude),
+            longitude: Number(longitude),
+            accuracy:  req.body?.accuracy,
+            address:   req.body?.address,
+            distanceMetres: Math.round(dist),
+            radiusMetres:   radius,
+          }).catch(() => {});
+
           return res.status(403).json({
             message: `You are ${Math.round(dist)}m from the office. Clock-in is only allowed within ${radius}m. If you are at a client meeting, request remote clock-in permission from your admin.`,
             code:          'outside_radius',
@@ -345,6 +372,8 @@ const clockIn = async (req, res, next) => {
       accuracy:  req.body?.accuracy,
       address:   req.body?.address,
     });
+    // Start the live-activity clock the moment someone clocks in.
+    refreshActivity(String(req.user._id)).catch(() => {});
     res.status(200).json(record);
   } catch (err) { next(err); }
 };
@@ -381,6 +410,11 @@ const clockOut = async (req, res, next) => {
     }
 
     await record.save();
+
+    // Stop the live-activity clock — clocking out should never trigger a
+    // spurious "went idle" event a few minutes later for someone who's
+    // already properly signed off.
+    clearActivity(String(req.user._id)).catch(() => {});
 
     emitAttendanceUpdate(req, record);
     emitClockLocationToAdmins(req, {
@@ -445,6 +479,10 @@ const startBreak = async (req, res, next) => {
     record.activeBreakIndex = record.breaks.length - 1;
     record.status = reason === "Auto Idle" ? "idle" : "on_break";
     await record.save();
+    // Either way (manual break or idle), the live-activity clock should
+    // stop — neither state should keep counting as "active" for the
+    // Redis-based fast-path idle detector.
+    clearActivity(String(req.user._id)).catch(() => {});
     emitAttendanceUpdate(req, record);
     res.status(200).json(record);
   } catch (err) { next(err); }
@@ -466,6 +504,8 @@ const endBreak = async (req, res, next) => {
     record.status            = "active";
     record.lastActivity      = new Date();
     await record.save();
+    // Resuming from a break restarts the live-activity clock.
+    refreshActivity(String(req.user._id)).catch(() => {});
     emitAttendanceUpdate(req, record);
     res.status(200).json(record);
   } catch (err) { next(err); }
@@ -479,8 +519,39 @@ const pingActivity = async (req, res, next) => {
     if (!record || !record.loginTime || record.logoutTime)
       return res.status(200).json({ ok: true });
 
-    record.lastActivity = new Date();
+    // PRODUCTION FIX: refresh the Redis-backed live-activity key on every
+    // heartbeat instead of writing to MongoDB every time. Fails open — if
+    // Redis is down, refreshActivity() is a silent no-op and the logic
+    // below still keeps MongoDB's own lastActivity fresh enough on its own
+    // for the cron fallback (markIdleJob.js) to keep working correctly.
+    refreshActivity(String(req.user._id)).catch(() => {});
+
     const wasIdle = record.status === "idle";
+
+    // MONGODB WRITE REDUCTION ("only store what's actually necessary"):
+    // this used to write lastActivity to MongoDB on EVERY ping — every ~60s,
+    // per active employee, all day — purely so the fallback cron had a
+    // freshness signal to check. Redis is now that signal for the normal
+    // case; MongoDB's own copy only needs to be "fresh enough" that the
+    // 5-minute cron fallback still works correctly if Redis is ever down.
+    // So: skip the database write entirely unless one of two things is true:
+    //   1. A real state change is happening (resuming from idle) — that's
+    //      actual data that must be durably persisted, not just a liveness
+    //      signal, and it needs to close out the open break entry.
+    //   2. MongoDB's own lastActivity has gone stale past a safety margin
+    //      (2 min — well inside the 5-min idle cutoff) — refreshed just
+    //      often enough that the fallback cron never sees more than a
+    //      couple of minutes of extra staleness if Redis fails mid-day,
+    //      without needing a write on literally every single heartbeat.
+    const MONGO_REFRESH_MARGIN_MS = 2 * 60 * 1000;
+    const mongoStale = !record.lastActivity ||
+      (Date.now() - record.lastActivity.getTime()) > MONGO_REFRESH_MARGIN_MS;
+
+    if (!wasIdle && !mongoStale) {
+      return res.status(200).json({ ok: true, status: record.status });
+    }
+
+    record.lastActivity = new Date();
     if (wasIdle) {
       if (record.activeBreakIndex !== null) {
         const br = record.breaks[record.activeBreakIndex];
@@ -1207,7 +1278,7 @@ const getClockLocationHistory = async (req, res, next) => {
       if (from) query.date.$gte = from;
       if (to)   query.date.$lte = to;
     }
-    if (type === "clock_in" || type === "clock_out") query.type = type;
+    if (["clock_in", "clock_out", "clock_in_rejected"].includes(type)) query.type = type;
 
     // Scope non-super-admins to their own users.
     if (req.admin.role !== "super_admin") {
@@ -1240,11 +1311,45 @@ const getClockLocationHistory = async (req, res, next) => {
   }
 };
 
+// PRODUCTION FEATURE: called by liveActivityService's Redis keyspace-
+// notification subscriber the instant a user's activity key expires (i.e.
+// no heartbeat for 5 minutes). Mirrors the per-record logic in
+// markIdleJob.js's bulk cron scan, but for exactly one user, triggered
+// immediately instead of waiting for the next 2-minute scan. Deliberately
+// re-checks lastActivity itself before acting — a heartbeat could have
+// landed in MongoDB in the last few milliseconds even though the Redis key
+// juuust expired, and this must not fight that.
+async function markSingleUserIdle(userId) {
+  const date   = todayStr();
+  const cutoff = new Date(Date.now() - 5 * 60 * 1000);
+  const record = await Attendance.findOne({
+    user: userId,
+    date,
+    status:       "active",
+    loginTime:    { $exists: true, $ne: null },
+    logoutTime:   null,
+    lastActivity: { $lt: cutoff },
+  });
+  if (!record) return; // already handled (e.g. by a just-landed heartbeat) — nothing to do
+
+  record.breaks.push({ startTime: new Date(), reason: "Auto Idle", remarkStatus: "pending" });
+  record.activeBreakIndex  = record.breaks.length - 1;
+  record.status            = "idle";
+  record.totalBreakMinutes = calcBreakMinutes(record.breaks);
+  await record.save();
+
+  const io = global._io;
+  if (io) io.to(`att:${userId}`).emit("attendance:updated", record);
+
+  console.log(`[liveActivityService] User ${userId} marked idle in real time (Redis expiry)`);
+}
+
 module.exports = {
   clockIn, clockOut, startBreak, endBreak, pingActivity, getMyToday,
   getShiftConfig,
   saveIdleRemark,
   getCompanyAttendance, markIdleUsers,
+  markSingleUserIdle,
   adminUpsertAttendance,
   getAttendanceReport, editAttendance, deleteAttendance, exportAttendance,
   getCompanyUsers,
