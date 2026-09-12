@@ -35,9 +35,30 @@ const meetingStorage = new CloudinaryStorage({
   cloudinary,
   params: async (req, file) => {
     const isAudio = file.fieldname === 'recording';
+
+    // BUG FIX ("file format error" on document upload): resource_type was
+    // always 'auto' here, even for real documents (PDF/DOC/DOCX/XLS/XLSX).
+    // Cloudinary's 'auto' detection is really designed to distinguish
+    // image vs video content by sniffing the file — it is NOT reliable for
+    // arbitrary binary/office documents, and DOCX/XLSX specifically are
+    // internally ZIP archives, which 'auto' detection can misidentify or
+    // outright reject as an invalid format, even though the extension is
+    // in allowed_formats below. Cloudinary's own guidance is to use
+    // resource_type: 'raw' explicitly for non-image/video files rather
+    // than relying on 'auto' to guess correctly for every case.
+    //
+    // The "documents"/"document"/"proposalDocument" fields in this app can
+    // contain a MIX of real documents and images in the same field (the
+    // frontend's file picker accepts both), so this can't be a single
+    // fixed resource_type for the whole field — it's decided per file,
+    // based on the actual file extension.
+    const DOCUMENT_EXTENSIONS = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt'];
+    const ext = (file.originalname || '').split('.').pop()?.toLowerCase();
+    const isDocument = !isAudio && DOCUMENT_EXTENSIONS.includes(ext);
+
     return {
       folder:        isAudio ? 'skyup-crm/meeting-recordings' : 'skyup-crm/meeting-docs',
-      resource_type: 'auto',
+      resource_type: isAudio ? 'auto' : (isDocument ? 'raw' : 'auto'),
       public_id:     `${req.user._id || req.user.userId}_${Date.now()}_${file.fieldname}_${file.originalname?.replace(/[^a-zA-Z0-9._-]/g, '_') || ''}`,
       allowed_formats: isAudio
         ? ['mp3', 'm4a', 'aac', 'wav', 'amr', '3gp', 'ogg', 'opus', 'mp4']
