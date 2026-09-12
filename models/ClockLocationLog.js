@@ -19,8 +19,13 @@ const clockLocationLogSchema = new mongoose.Schema(
     user:    { type: mongoose.Schema.Types.ObjectId, ref: "User",    required: true, index: true },
     company: { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: true, index: true },
 
-    // 'clock_in' | 'clock_out'
-    type: { type: String, enum: ["clock_in", "clock_out"], required: true },
+    // 'clock_in' | 'clock_out' | 'clock_in_rejected'
+    // FIX (missing audit trail): an out-of-geofence clock-in attempt was
+    // rejected with a 403 and the location the employee tried from was
+    // simply discarded — no record of it anywhere. That's actual, useful
+    // data (who tried to clock in from where, and got blocked) that admins
+    // reasonably want visibility into, distinct from a real clock-in.
+    type: { type: String, enum: ["clock_in", "clock_out", "clock_in_rejected"], required: true },
 
     // Attendance day this event belongs to ("YYYY-MM-DD")
     date: { type: String, required: true },
@@ -32,6 +37,12 @@ const clockLocationLogSchema = new mongoose.Schema(
 
     // Optional reverse-geocoded address (if the client sends one)
     address: { type: String, default: null, trim: true },
+
+    // Only set for type: "clock_in_rejected" — how far outside the allowed
+    // radius this attempt was, so admins reviewing the log don't have to
+    // recompute it themselves.
+    distanceMetres: { type: Number, default: null },
+    radiusMetres:   { type: Number, default: null },
 
     capturedAt: { type: Date, default: Date.now },
   },
