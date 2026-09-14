@@ -598,6 +598,81 @@ async function fireRule(rule, lead, company, todayKey) {
 
 // ── Cron run ──────────────────────────────────────────────────────────────────
 
+// ── IN-BETWEEN "GREETINGS" TEMPLATE ─────────────────────────────────────────
+// FEATURE: an extra, hardcoded WhatsApp send inserted between the normal
+// nurture stage messages — fires exactly 1 day after a lead's last nurture
+// stage message, regardless of whether that lead's own stage cycle is 3
+// days (New→Awareness) or 2 days (In Progress/Interested→Interest/Desire).
+// "1 day after the last message, before the next one is due" is what stays
+// correct across every stage's own cadence, rather than hardcoding "day 1
+// of a 3-day gap" specifically. Uses forceSend:true because — unlike a
+// normal template — this one is DESIGNED to repeat every cycle, not just
+// send once ever per lead; the permanent per-lead-per-template dedup that
+// every other send in this codebase relies on would otherwise block it
+// after the very first send.
+const GREETING_TEMPLATE_NAME = "greetings";
+
+// Finds, for a lead's CURRENT status, the rule that governs that stage (if
+// any) and returns how many days ago that rule last fired for this lead —
+// or null if no rule matches this lead's status at all, or it's never fired.
+function daysSinceLastStageMessage(rules, lead, todayKey) {
+  for (const rule of rules) {
+    if (!ruleMatchesStatus(rule, lead)) continue;
+    const sentMap = lead.nurtureSent instanceof Map
+      ? lead.nurtureSent
+      : new Map(Object.entries(lead.nurtureSent || {}));
+    const entry = sentMap.get(String(rule._id));
+    if (!entry) continue;
+    const lastFired = typeof entry === "string" ? entry : entry?.lastFiredDate;
+    if (!lastFired) continue;
+    return dayDiffKeys(lastFired, todayKey);
+  }
+  return null;
+}
+
+async function maybeSendInBetweenGreeting(lead, rules, company, todayKey) {
+  // Audience: any lead currently in an active nurture sequence — i.e. at
+  // least one enabled rule matches their current status — including the
+  // "In Progress" and "Interested" stages specifically.
+  const daysSinceLast = daysSinceLastStageMessage(rules, lead, todayKey);
+  if (daysSinceLast !== 1) return; // only exactly the day after the last stage message
+
+  if (lead.nurtureGreetingLastSent === todayKey) return; // already sent today — once per day per lead
+
+  // Atomic claim on the SAME day-key field, same pattern as fireRule's claim
+  // above — prevents two concurrent cron passes (or a retry) from double-
+  // sending this to the same lead on the same day.
+  const claimed = await Lead.findOneAndUpdate(
+    {
+      _id: lead._id,
+      nurtureGreetingLastSent: { $ne: todayKey },
+    },
+    { $set: { nurtureGreetingLastSent: todayKey } },
+    { new: false }
+  );
+  if (!claimed) return; // another pass already claimed today's greeting for this lead
+
+  const result = await sendAutoWhatsApp({
+    companyId: company._id,
+    lead,
+    forceSend: true, // this template is DESIGNED to repeat every cycle — see comment above
+    whatsappSettings: {
+      templateName:  GREETING_TEMPLATE_NAME,
+      languageCode:  "en",
+      logChannel:    "nurture",
+      logSentByName: "Nurture automation (in-between greeting)",
+      logRuleId:     null,
+      logRuleName:   "In-between greeting",
+    },
+  }).catch((err) => ({ channel: "whatsapp", status: "failed", detail: err.message }));
+
+  if (result?.status === "sent") {
+    console.log(`[nurtureSequence] 👋 In-between greeting sent to lead ${lead._id} (1 day after last stage message)`);
+  } else if (result?.status === "failed") {
+    console.warn(`[nurtureSequence] ⚠️ In-between greeting failed for lead ${lead._id}: ${result.detail}`);
+  }
+}
+
 async function runNurtureSequenceCheck() {
   const now      = new Date();
   const todayKey = istDayKey(now);
@@ -626,7 +701,7 @@ async function runNurtureSequenceCheck() {
       status:     { $nin: ["Not Interested"] },
       mergedInto: null,
     })
-      .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent user industry service businessName campaign adSetName")
+      .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent nurtureGreetingLastSent user industry service businessName campaign adSetName")
       .lean();
 
     for (const lead of leads) {
@@ -641,6 +716,12 @@ async function runNurtureSequenceCheck() {
         _logNurtureResult(lead, rule, result); // fire-and-forget, never blocks the cron loop
         if (result.status === "sent") totalSent++;
       }
+
+      // In-between greeting — checked once per lead per day, independent of
+      // which specific rule (if any) fired above this same tick.
+      await maybeSendInBetweenGreeting(lead, rules, company, todayKey).catch((err) =>
+        console.error(`[nurtureSequence] in-between greeting error for lead ${lead._id}:`, err.message)
+      );
     }
   }
 
