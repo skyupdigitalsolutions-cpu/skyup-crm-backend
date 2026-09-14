@@ -11,8 +11,10 @@
 
 const Company  = require("../models/Company");
 const Lead     = require("../models/Leads");
+const FestivalAutoBlastLog = require("../models/FestivalAutoBlastLog");
 const { getFestivalCatalog } = require("../utils/festivalTemplateCatalog");
 const { sendAutoWhatsApp, sendAutoEmail } = require("../services/autoTemplateService");
+const { retryFailedForBlastLog } = require("../jobs/festivalCampaignJob");
 
 // ── GET /api/festival-campaigns/auto-blast ────────────────────────────────────
 const getSettings = async (req, res, next) => {
@@ -102,4 +104,41 @@ const testSettings = async (req, res, next) => {
   }
 };
 
-module.exports = { getSettings, updateSettings, testSettings };
+// ── GET /api/festival-campaigns/auto-blast/history ────────────────────────────
+// Lets an admin see every past auto-blast run for their company — including
+// its outcome (sent/failed/skipped counts) — so a failed run (like the one
+// this endpoint pair was built to recover from) is actually visible and
+// actionable, not just a silent aggregate the admin has no way to inspect.
+const getBlastHistory = async (req, res, next) => {
+  try {
+    const logs = await FestivalAutoBlastLog.find({ company: req.admin.company._id })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    res.json({ success: true, history: logs });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── POST /api/festival-campaigns/auto-blast/:logId/retry ──────────────────────
+// Re-sends to every lead in this campaign's target audience who doesn't
+// already have a confirmed successful send logged against it — see
+// jobs/festivalCampaignJob.js's retryFailedForBlastLog for the full reasoning
+// on why this is safer than trusting a stored "who failed" list.
+const retryBlast = async (req, res, next) => {
+  try {
+    const log = await FestivalAutoBlastLog.findOne({
+      _id: req.params.logId,
+      company: req.admin.company._id, // company-scoped — an admin can only retry their OWN company's campaigns
+    });
+    if (!log) return res.status(404).json({ success: false, message: "Campaign log not found for your company." });
+
+    const result = await retryFailedForBlastLog(log._id);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getSettings, updateSettings, testSettings, getBlastHistory, retryBlast };
