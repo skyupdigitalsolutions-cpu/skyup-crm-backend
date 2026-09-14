@@ -338,6 +338,18 @@ async function retryFailedForBlastLog(blastLogId) {
     channels,
     festivalName: log.festivalName,
     ruleId: log._id, // same ruleId — these sends attach to the SAME campaign log for reporting continuity
+    // BUG FIX: runSendLoop calls onProgress unconditionally (no guard for it
+    // being undefined) — every other caller passes one, this one didn't,
+    // which crashed the retry immediately with "onProgress is not a
+    // function" before a single lead was even attempted. Persists live
+    // progress on a SEPARATE field (retryStats, not stats) so an in-flight
+    // retry's partial progress doesn't get confused with the original run's
+    // final numbers if something inspects the log mid-retry; the final
+    // merge into `stats` still happens below once the whole loop completes.
+    onProgress: async ({ totalLeads, sent, failed, skipped }) => {
+      log.retryStats = { totalLeads, sent, failed, skipped };
+      await log.save();
+    },
   });
 
   // Merge retry stats into the existing log rather than overwriting it, so
