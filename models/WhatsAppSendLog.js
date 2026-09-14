@@ -42,7 +42,17 @@ const whatsAppSendLogSchema = new mongoose.Schema(
 
     channel: {
       type: String,
-      enum: ["blast", "blast-csv", "employee-blast", "nurture", "manual"],
+      // BUG FIX (silent logging failure): "festival-campaign" was never
+      // added to this list, even though jobs/festivalCampaignJob.js has
+      // been passing it since the feature was built. Every single write
+      // attempt for a festival campaign send — success AND failure alike —
+      // was silently failing Mongoose validation and getting swallowed by
+      // _logAutoTemplateSend's try/catch (which only console.warns, never
+      // throws further). This is why the original "Ganesh Chaturthi"
+      // campaign had ZERO usable send records to check against when
+      // building the retry feature — nothing had ever actually been
+      // written for this channel, for any festival campaign, ever.
+      enum: ["blast", "blast-csv", "employee-blast", "nurture", "manual", "festival-campaign"],
       required: true,
       index: true,
     },
