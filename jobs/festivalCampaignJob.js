@@ -47,13 +47,14 @@ function summarizeOutcome(results) {
   return "skipped";
 }
 
-async function sendToOneLead({ companyId, lead, channels, festivalName, ruleId }) {
+async function sendToOneLead({ companyId, lead, channels, festivalName, ruleId, forceSend = false }) {
   const results = [];
   try {
     if (channels?.whatsapp?.enabled) {
       results.push(await sendAutoWhatsApp({
         companyId,
         lead,
+        forceSend,
         whatsappSettings: {
           ...channels.whatsapp,
           logChannel:    "festival-campaign",
@@ -78,7 +79,7 @@ async function sendToOneLead({ companyId, lead, channels, festivalName, ruleId }
 // CONCURRENCY, calling `onProgress(stats)` after each page of LEAD_PAGE_SIZE
 // so the caller can persist partial progress as it goes (safe against a
 // mid-run crash). Returns the final stats object.
-async function runSendLoop({ companyId, leadQuery, channels, festivalName, ruleId, onProgress }) {
+async function runSendLoop({ companyId, leadQuery, channels, festivalName, ruleId, onProgress, forceSend = false }) {
   const totalLeads = await Lead.countDocuments(leadQuery);
   let sent = 0, failed = 0, skipped = 0;
 
@@ -94,7 +95,7 @@ async function runSendLoop({ companyId, leadQuery, channels, festivalName, ruleI
     for (let i = 0; i < leads.length; i += CONCURRENCY) {
       const chunk = leads.slice(i, i + CONCURRENCY);
       const outcomes = await Promise.all(
-        chunk.map((lead) => sendToOneLead({ companyId, lead, channels, festivalName, ruleId }))
+        chunk.map((lead) => sendToOneLead({ companyId, lead, channels, festivalName, ruleId, forceSend }))
       );
       for (const outcome of outcomes) {
         if (outcome === "sent")        sent++;
@@ -380,4 +381,69 @@ function startFestivalCampaignJob() {
   console.log("✅ Festival campaign job started (checks every 15 min, IST calendar day match — auto-blast + manual campaigns).");
 }
 
-module.exports = { startFestivalCampaignJob, runTick, retryFailedForBlastLog };
+// ═══════════════════════════════════════════════════════════════════════════
+// FORCE RESEND — deliberately re-sends to EVERY targeted lead, INCLUDING
+// those who already successfully received it. Explicit, human-confirmed
+// duplicate send — kept completely separate from retryFailedForBlastLog
+// above (which never messages someone twice) so that safe default behavior
+// can never accidentally pick up this one's bypass. Only ever invoked from
+// scripts/forceResendFestivalBlast.js, which requires BOTH --force and
+// --send flags before anything is sent.
+async function forceResendForBlastLog(blastLogId) {
+  const log = await FestivalAutoBlastLog.findById(blastLogId);
+  if (!log) throw new Error(`FestivalAutoBlastLog ${blastLogId} not found.`);
+
+  const company = await Company.findById(log.company);
+  if (!company) throw new Error(`Company ${log.company} not found.`);
+
+  const catalog = getFestivalCatalog();
+  const catalogEntry = catalog.find((c) => c.key === log.festivalKey);
+  if (!catalogEntry) {
+    throw new Error(`Festival catalog entry "${log.festivalKey}" no longer exists — cannot determine the template to resend.`);
+  }
+
+  const cfg = company.festivalAutoBlast || {};
+  const channels = {
+    whatsapp: {
+      enabled:      cfg.whatsapp?.enabled !== false,
+      templateName: catalogEntry.templateName,
+      languageCode: cfg.whatsapp?.languageCode || "en",
+    },
+    email: cfg.email?.enabled
+      ? {
+          enabled:      true,
+          subject:      (cfg.email.subject      || "Happy {{festival}}, {{name}}!").replace(/{{festival}}/g, catalogEntry.festivalName),
+          fromName:     cfg.email.fromName      || "",
+          bodyTemplate: (cfg.email.bodyTemplate || "").replace(/{{festival}}/g, catalogEntry.festivalName),
+        }
+      : { enabled: false },
+  };
+
+  console.log(`[festivalCampaign] ⚠️  FORCE RESEND "${log.festivalName}" for company ${log.company} — sending to EVERY targeted lead, including previously-successful ones.`);
+
+  const stats = await runSendLoop({
+    companyId: log.company,
+    leadQuery: buildLeadQuery(log.company, cfg.targetAudience),
+    channels,
+    festivalName: log.festivalName,
+    ruleId: log._id,
+    forceSend: true,
+    onProgress: async ({ totalLeads, sent, failed, skipped }) => {
+      log.retryStats = { totalLeads, sent, failed, skipped };
+      await log.save();
+    },
+  });
+
+  log.stats = {
+    totalLeads: stats.totalLeads,
+    sent:       (log.stats?.sent    || 0) + stats.sent,
+    failed:     stats.failed,
+    skipped:    (log.stats?.skipped || 0) + stats.skipped,
+  };
+  log.lastError = stats.failed > 0 ? `Force resend: ${stats.failed} lead(s) failed.` : "";
+  await log.save();
+
+  return stats;
+}
+
+module.exports = { startFestivalCampaignJob, runTick, retryFailedForBlastLog, forceResendForBlastLog };
