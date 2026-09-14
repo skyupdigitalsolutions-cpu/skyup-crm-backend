@@ -302,7 +302,7 @@ async function sendSmartEmail({ to, toName, subject, html, fromName, companyId }
 }
 
 // ─── 1. WhatsApp ─────────────────────────────────────────────────────────────
-async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
+async function sendAutoWhatsApp({ companyId, lead, whatsappSettings, forceSend = false }) {
   let { templateName = "crm_followup_leads", languageCode = "en" } = whatsappSettings;
 
   // Auto-correct a configured static template that belongs to a DIFFERENT
@@ -553,7 +553,13 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
     // already happened, so from this point on we are genuinely about to
     // attempt delivery. See the placement note above for why this can't live
     // any earlier.
-    const { claimed: msg91Claimed } = await claimTemplateSendOnce(lead?._id, templateName);
+    // FIX (explicit force-resend support): forceSend deliberately bypasses
+    // the once-only claim — used ONLY by scripts/forceResendFestivalBlast.js
+    // for an intentional, human-confirmed duplicate send. Never set true by
+    // any normal automation path.
+    const { claimed: msg91Claimed } = forceSend
+      ? { claimed: true }
+      : await claimTemplateSendOnce(lead?._id, templateName);
     if (!msg91Claimed) {
       console.log(
         `[autoTemplate] ⛔ Skipped — template "${templateName}" was already sent to lead ${lead?._id} ` +
@@ -602,7 +608,11 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
           ? `Message sent to ${components.body_1?.value || "the lead"} regarding ${components.body_2?.value || "their business"} (template: ${templateName})`
           : `Message sent to ${components.body_1?.value || "the lead"} (template: ${templateName})`,
       });
-      await finalizeSendClaim(lead?._id, templateName, content); // finalize the atomic claim placeholder — never a second push
+      // forceSend skipped the claim push, so there is no "pending" entry
+      // to finalize — record a fresh history entry directly instead, so a
+      // forced resend still shows up in the lead's real history.
+      if (forceSend) await recordTemplateHistory(lead, templateName, "sent", content);
+      else await finalizeSendClaim(lead?._id, templateName, content); // finalize the atomic claim placeholder — never a second push
       void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} using template "${templateName}"`, content, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
       return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} using template "${templateName}"`, templateName, content };
     } catch (err) {
@@ -628,7 +638,9 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
 
     // Claim right here — see the placement note above the MSG91 branch's
     // identical claim call for why this can't live any earlier in the function.
-    const { claimed: metaClaimed } = await claimTemplateSendOnce(lead?._id, templateName);
+    const { claimed: metaClaimed } = forceSend
+      ? { claimed: true }
+      : await claimTemplateSendOnce(lead?._id, templateName);
     if (!metaClaimed) {
       console.log(
         `[autoTemplate] ⛔ Skipped — template "${templateName}" was already sent to lead ${lead?._id} ` +
@@ -652,7 +664,11 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         variables: { 1: lead.name || "" },
         fallbackText: `Message sent to ${lead.name || "the lead"} via Meta (template: ${templateName})`,
       });
-      await finalizeSendClaim(lead?._id, templateName, content); // finalize the atomic claim placeholder — never a second push
+      // forceSend skipped the claim push, so there is no "pending" entry
+      // to finalize — record a fresh history entry directly instead, so a
+      // forced resend still shows up in the lead's real history.
+      if (forceSend) await recordTemplateHistory(lead, templateName, "sent", content);
+      else await finalizeSendClaim(lead?._id, templateName, content); // finalize the atomic claim placeholder — never a second push
       void _logAutoTemplateSend({ lead, companyId, templateName, status: 'sent', detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, content, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
       return { channel: "whatsapp", status: "sent", detail: `Sent to ${cleanPhone} via Meta using template "${templateName}"`, templateName, content };
     } catch (err) {
