@@ -524,6 +524,15 @@ const leadSchema = mongoose.Schema(
     // Backward-compatible: old string values (plain date) are handled in nurtureSequenceJob.
     nurtureSent: { type: Map, of: mongoose.Schema.Types.Mixed, default: () => ({}) },
 
+    // FEATURE: in-between "greetings" template — an extra, hardcoded WhatsApp
+    // send inserted between the normal 3-day nurture stage messages (day 1 of
+    // each 3-day gap), independent of any specific NurtureRule. Tracked
+    // separately from nurtureSent (which is per-rule) since this greeting
+    // isn't tied to any one rule and needs its own once-per-day guard. See
+    // jobs/nurtureSequenceJob.js's runNurtureSequenceCheck for the actual
+    // send logic.
+    nurtureGreetingLastSent: { type: String, default: "" }, // IST day key, e.g. "2026-09-14"
+
     // ── No-action 3h escalation guard (super_admin dedup) ────────────────────
     // BUG 2 FIX — without this field the 3h escalation guard in leadAlertsJob
     // never sticks: the query finds the same leads every 15-min tick and the
