@@ -32,6 +32,7 @@ const Company              = require("../models/Company");
 const Lead                 = require("../models/Leads");
 const FestivalCampaign     = require("../models/FestivalCampaign");
 const FestivalAutoBlastLog = require("../models/FestivalAutoBlastLog");
+const WhatsAppSendLog      = require("../models/WhatsAppSendLog");
 const { getFestivalCatalog }      = require("../utils/festivalTemplateCatalog");
 const { istDayKey, IST_TIMEZONE } = require("../utils/istDate");
 const { sendAutoWhatsApp, sendAutoEmail } = require("../services/autoTemplateService");
@@ -262,6 +263,97 @@ async function runManualCampaignsTick(todayKey) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// RETRY — re-send to leads a past auto-blast run never successfully reached
+// ═══════════════════════════════════════════════════════════════════════════
+// FIX (support request): a company's festival campaign had every send fail
+// because of the localizable_params bug (now fixed in autoTemplateService.js)
+// — but the FestivalAutoBlastLog claim for that (company, festival, year) was
+// already created and marked "sent" the moment the send loop finished, even
+// though every individual lead inside it failed. That claim is permanent —
+// the unique index means this exact festival can never fire again for this
+// company this year via the normal cron path. This is the recovery path.
+//
+// Rather than trusting a stored list of "who failed" (failures weren't even
+// being logged to WhatsAppSendLog until the fix alongside this function —
+// see autoTemplateService.js), this determines who still needs the message
+// the more robust way: re-run the SAME lead-targeting query the original
+// blast used, then exclude anyone who already has a logged SUCCESSFUL send
+// for this specific campaign (ruleId = the FestivalAutoBlastLog's own _id).
+// That correctly catches leads that failed OR were skipped OR were simply
+// never logged at all (pre-fix), without needing to trust any specific
+// failure record to exist.
+async function retryFailedForBlastLog(blastLogId) {
+  const log = await FestivalAutoBlastLog.findById(blastLogId);
+  if (!log) throw new Error(`FestivalAutoBlastLog ${blastLogId} not found.`);
+
+  const company = await Company.findById(log.company);
+  if (!company) throw new Error(`Company ${log.company} not found.`);
+
+  const catalog = getFestivalCatalog();
+  const catalogEntry = catalog.find((c) => c.key === log.festivalKey);
+  if (!catalogEntry) {
+    throw new Error(`Festival catalog entry "${log.festivalKey}" no longer exists — cannot determine the template to resend.`);
+  }
+
+  const cfg = company.festivalAutoBlast || {};
+  const channels = {
+    whatsapp: {
+      enabled:      cfg.whatsapp?.enabled !== false,
+      templateName: catalogEntry.templateName,
+      languageCode: cfg.whatsapp?.languageCode || "en",
+    },
+    email: cfg.email?.enabled
+      ? {
+          enabled:      true,
+          subject:      (cfg.email.subject      || "Happy {{festival}}, {{name}}!").replace(/{{festival}}/g, catalogEntry.festivalName),
+          fromName:     cfg.email.fromName      || "",
+          bodyTemplate: (cfg.email.bodyTemplate || "").replace(/{{festival}}/g, catalogEntry.festivalName),
+        }
+      : { enabled: false },
+  };
+
+  // Everyone the campaign SHOULD have reached, using today's targeting config
+  // (the closest available approximation of what was used originally, since
+  // the exact criteria at send-time isn't stored on the log row itself).
+  const allTargetLeads = await Lead.find(buildLeadQuery(log.company, cfg.targetAudience)).select("_id").lean();
+  const allTargetIds = allTargetLeads.map((l) => String(l._id));
+
+  // Leads that ALREADY have a successful send logged against this specific
+  // campaign — these must NOT be re-sent to (avoids double-messaging anyone
+  // the original run actually did reach successfully).
+  const alreadySent = await WhatsAppSendLog.find({ ruleId: log._id, status: "sent" }).select("lead").lean();
+  const alreadySentIds = new Set(alreadySent.map((s) => String(s.lead)));
+
+  const retryLeadIds = allTargetIds.filter((id) => !alreadySentIds.has(id));
+  if (retryLeadIds.length === 0) {
+    return { retried: 0, sent: 0, failed: 0, skipped: 0, message: "Nothing to retry — every targeted lead already has a successful send logged." };
+  }
+
+  console.log(`[festivalCampaign] 🔁 Retrying "${log.festivalName}" for company ${log.company} — ${retryLeadIds.length} lead(s) without a confirmed successful send.`);
+
+  const stats = await runSendLoop({
+    companyId: log.company,
+    leadQuery: { _id: { $in: retryLeadIds } },
+    channels,
+    festivalName: log.festivalName,
+    ruleId: log._id, // same ruleId — these sends attach to the SAME campaign log for reporting continuity
+  });
+
+  // Merge retry stats into the existing log rather than overwriting it, so
+  // the row still reflects the campaign's true total history.
+  log.stats = {
+    totalLeads: (log.stats?.totalLeads || 0), // unchanged — same target audience
+    sent:       (log.stats?.sent    || 0) + stats.sent,
+    failed:     stats.failed, // reflects the retry's own outcome, not additive — failed count from a stale run isn't meaningful to keep summing
+    skipped:    (log.stats?.skipped || 0) + stats.skipped,
+  };
+  log.lastError = stats.failed > 0 ? `Retry: ${stats.failed} lead(s) still failed.` : "";
+  await log.save();
+
+  return { retried: retryLeadIds.length, ...stats };
+}
+
 async function runTick() {
   const todayKey = istDayKey(new Date());
   await runAutoBlastTick(todayKey).catch((err) => console.error("[festivalCampaign] auto-blast tick error:", err.message));
@@ -276,4 +368,4 @@ function startFestivalCampaignJob() {
   console.log("✅ Festival campaign job started (checks every 15 min, IST calendar day match — auto-blast + manual campaigns).");
 }
 
-module.exports = { startFestivalCampaignJob, runTick };
+module.exports = { startFestivalCampaignJob, runTick, retryFailedForBlastLog };
