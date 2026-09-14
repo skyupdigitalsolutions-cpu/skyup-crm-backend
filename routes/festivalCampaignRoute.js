@@ -22,6 +22,8 @@ const {
   getSettings: getAutoBlastSettings,
   updateSettings: updateAutoBlastSettings,
   testSettings: testAutoBlastSettings,
+  getBlastHistory,
+  retryBlast,
 } = require("../controllers/festivalAutoBlastController");
 
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
@@ -37,6 +39,12 @@ router.use(protectAdmin, requireFeature("whatsappBlast"));
 router.get("/auto-blast",       getAutoBlastSettings);
 router.put("/auto-blast",       updateAutoBlastSettings);
 router.post("/auto-blast/test", testAutoBlastSettings);
+// History + retry — lets an admin see past auto-blast runs and re-send to
+// leads a run never successfully reached (e.g. after a bug like the
+// localizable_params mismatch is fixed, the original campaign's own claim
+// can never re-fire automatically — this is the manual recovery path).
+router.get("/auto-blast/history",           getBlastHistory);
+router.post("/auto-blast/:logId/retry",     retryBlast);
 
 router.get("/catalog",        getCatalog);
 router.get("/",                listCampaigns);
