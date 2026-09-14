@@ -36,6 +36,18 @@ const festivalAutoBlastLogSchema = new mongoose.Schema(
       skipped:    { type: Number, default: 0 },
     },
 
+    // Live progress for an in-flight RETRY specifically (see
+    // jobs/festivalCampaignJob.js's retryFailedForBlastLog) — kept separate
+    // from `stats` above so a retry's partial, in-progress numbers are never
+    // confused with the original run's final, completed numbers if the log
+    // row is inspected mid-retry.
+    retryStats: {
+      totalLeads: { type: Number, default: 0 },
+      sent:       { type: Number, default: 0 },
+      failed:     { type: Number, default: 0 },
+      skipped:    { type: Number, default: 0 },
+    },
+
     startedAt: { type: Date, default: Date.now },
     sentAt:    { type: Date, default: null },
     lastError: { type: String, default: "" },
