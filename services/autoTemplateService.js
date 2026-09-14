@@ -459,8 +459,34 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
       };
     }
 
+    // BUG FIX (Festival Campaign failure — "localizable_params (1) does not
+    // match expected (0)"): body_1 was attached to EVERY send unconditionally,
+    // on the assumption that "almost every template has at least {{1}}" — true
+    // for the nurture/follow-up templates this function was originally built
+    // for, but festival-greeting templates are often a completely static
+    // message with ZERO body variables. MSG91/Meta rejects a send whose
+    // parameter count doesn't match the template in EITHER direction (already
+    // handled below for body_2, just never for body_1 itself). Moved the
+    // cached-template lookup up here so BOTH body_1 and body_2 can be decided
+    // from the real, known variable count — not just body_2.
+    //
+    // Fails open safely: if the cache lookup itself fails, defaults to
+    // "needs body_1" (the previous, always-on behavior) rather than "needs
+    // none" — a cache outage should never silently make a real nurture/
+    // follow-up template start failing with too FEW params; it can only ever
+    // affect templates we couldn't confirm one way or the other.
+    let bodyVariableCount = null;
+    try {
+      const cachedForCount = await findTemplate(companyId, templateName.trim());
+      if (cachedForCount) bodyVariableCount = Number(cachedForCount.bodyVariableCount);
+    } catch (e) {
+      // Lookup failing is handled by the null fallback below — never blocks a send.
+    }
+    const wantsBodyParam1 = bodyVariableCount === null ? true : bodyVariableCount >= 1;
+
     // EXACT same component format as the proven-working chat/bulk sender:
-    //   • body_1   → positional {{1}} body variable (the lead's name)
+    //   • body_1   → positional {{1}} body variable (the lead's name) — ONLY
+    //                when the template actually declares one (see fix above)
     //   • header_1 → document header, included ONLY when the template needs it
     const components = {
       ...(needsDocHdr && brochureUrl
@@ -472,10 +498,14 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
             },
           }
         : {}),
-      body_1: {
-        type:  "text",
-        value: (lead.name || "").trim() || "there",
-      },
+      ...(wantsBodyParam1
+        ? {
+            body_1: {
+              type:  "text",
+              value: (lead.name || "").trim() || "there",
+            },
+          }
+        : {}),
     };
 
     // ── {{2}} = the lead's BUSINESS name — ONLY when the template wants it ──
@@ -489,18 +519,9 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
     // services/msg91TemplateService.js) and attach body_2 only when it needs
     // one. If the template isn't in the cache yet we fall back to the name
     // pattern, since every nurture-library name ends in _<stage>_v<n>.
-    let wantsBusinessName = false;
-    try {
-      const cached = await findTemplate(companyId, templateName.trim());
-      if (cached) {
-        wantsBusinessName = Number(cached.bodyVariableCount) >= 2;
-      } else {
-        wantsBusinessName = /_(awareness|interest|desire|action)_v\d+$/i.test(templateName.trim());
-      }
-    } catch (e) {
-      // Cache lookup must never block a send — fall back to the name pattern.
-      wantsBusinessName = /_(awareness|interest|desire|action)_v\d+$/i.test(templateName.trim());
-    }
+    const wantsBusinessName = bodyVariableCount === null
+      ? /_(awareness|interest|desire|action)_v\d+$/i.test(templateName.trim())
+      : bodyVariableCount >= 2;
 
     if (wantsBusinessName) {
       components.body_2 = {
