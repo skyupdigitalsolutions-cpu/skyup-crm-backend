@@ -1,860 +1,295 @@
-// services/fcmService.js
-// ─────────────────────────────────────────────────────────────────────────────
-//  FCM PUSH NOTIFICATION SERVICE
-//
-//  ── One-time setup ───────────────────────────────────────────────────────────
-//  1. npm install firebase-admin
-//  2. Go to Firebase Console → Project Settings → Service Accounts
-//     → Generate new private key  → save the JSON file
-//  3. Set this env var on your server / Render dashboard:
-//
-//       FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"..."}
-//
-//     Paste the ENTIRE contents of the downloaded JSON as the value.
-//     Alternatively set GOOGLE_APPLICATION_CREDENTIALS to the absolute path
-//     of the JSON file (local dev only — Render uses the JSON string approach).
-//
-//  FIX BUG 3: The previous implementation silently returned null when credentials
-//  were missing, making it impossible to distinguish "FCM configured but broken"
-//  from "FCM never configured". Every sendNewLeadNotification call would silently
-//  no-op without any visible error after the initial startup warn.
-//
-//  New behaviour:
-//    • On startup, immediately try to initialise Firebase Admin.
-//    • If credentials are missing: log a clear WARNING (not a crash — the server
-//      can still run for non-FCM features). _initFailed is set so every send
-//      call logs a visible per-call warning instead of silently returning.
-//    • Call checkFCMHealth() from server.js during startup to surface the
-//      problem clearly in the logs before any HTTP traffic starts.
-// ─────────────────────────────────────────────────────────────────────────────
+// src/services/fcmTokenService.js
 
-const User  = require('../models/Users');
-const Admin = require('../models/Admin');
 
-// ── Lazy Firebase init ────────────────────────────────────────────────────────
-let _messaging  = null;
-let _initFailed = false;
-let _initError  = null;   // store the reason so per-send logs are useful
+import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import api from './api';
 
-function getMessaging() {
-  if (_messaging)  return _messaging;
-  if (_initFailed) return null;
+const FCM_TOKEN_STORAGE_KEY   = 'registered_fcm_token';
+// Separate flag that marks the token was CONFIRMED saved on the backend.
+// If sendTokenToBackend() fails (e.g. 403), we never set this flag, so the
+// next app launch will retry instead of silently skipping.
+const FCM_TOKEN_CONFIRMED_KEY = 'registered_fcm_token_confirmed';
 
-  try {
-    const admin = require('firebase-admin');
-
-    if (!admin.apps.length) {
-      const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-
-      if (serviceAccountJson) {
-        let parsed;
-        try {
-          parsed = JSON.parse(serviceAccountJson);
-        } catch (parseErr) {
-          _initError  = `FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON: ${parseErr.message}`;
-          _initFailed = true;
-          console.error('[FCM] ❌', _initError);
-          return null;
-        }
-
-        admin.initializeApp({
-          credential: admin.credential.cert(parsed),
-        });
-        console.log('[FCM] ✅ Firebase Admin initialized from FIREBASE_SERVICE_ACCOUNT_JSON');
-
-      } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-        admin.initializeApp({
-          credential: admin.credential.applicationDefault(),
-        });
-        console.log('[FCM] ✅ Firebase Admin initialized from GOOGLE_APPLICATION_CREDENTIALS');
-
-      } else {
-        _initError = (
-          'Neither FIREBASE_SERVICE_ACCOUNT_JSON nor GOOGLE_APPLICATION_CREDENTIALS is set.\n' +
-          '  → Push notifications are DISABLED.\n' +
-          '  → Set FIREBASE_SERVICE_ACCOUNT_JSON in your Render environment variables.\n' +
-          '  → Value = entire contents of the Firebase service account JSON file.'
-        );
-        _initFailed = true;
-        console.error('[FCM] ❌', _initError);
-        return null;
-      }
-    }
-
-    _messaging = admin.messaging();
-    return _messaging;
-  } catch (err) {
-    _initError  = err.message;
-    _initFailed = true;
-    console.error('[FCM] ❌ Firebase Admin init failed:', err.message);
-    return null;
-  }
+// ── Safe import — app will not crash if firebase is not installed yet ─────────
+let messaging = null;
+try {
+  messaging = require('@react-native-firebase/messaging').default;
+} catch (e) {
+  console.warn(
+    '[FCMToken] @react-native-firebase/messaging not installed.\n' +
+    'Run: npm install @react-native-firebase/app @react-native-firebase/messaging\n' +
+    'Then add google-services.json to android/app/ and apply the google-services plugin.\n' +
+    'Error:', e.message
+  );
 }
 
-// ── Health check — call this from server.js after connectDB() ─────────────────
-// Prints a clear startup message so the problem is visible in Render logs
-// without having to wait for the first notification attempt.
-//
-// Usage in server.js (add after startSubscriptionExpiryJob()):
-//   const { checkFCMHealth } = require('./services/fcmService');
-//   checkFCMHealth();
-function checkFCMHealth() {
-  const m = getMessaging();
-  if (m) {
-    console.log('[FCM] ✅ Health check passed — push notifications are active.');
-  } else {
+// ── Register FCM token with backend ──────────────────────────────────────────
+async function sendTokenToBackend(token) {
+  try {
+    await api.patch('/auth/update-device', { fcmToken: token });
+    await AsyncStorage.setItem(FCM_TOKEN_STORAGE_KEY, token);
+    await AsyncStorage.setItem(FCM_TOKEN_CONFIRMED_KEY, 'true');
+    console.log('[FCMToken] ✅ Token registered with backend:', token.slice(0, 20) + '...');
+  } catch (err) {
+    // ── Detailed error log so you can see the exact HTTP status in Logcat ────
+    // If you see 403 here → the JWT role is not "user"/"employee" — fix
+    //   authMiddleware.js to allow your role, or check the user's role in DB.
+    // If you see 401 → token expired or not attached — check api.js interceptor.
+    // If you see Network Error → backend is unreachable.
     console.error(
-      '[FCM] ❌ Health check FAILED — push notifications will not be sent.\n' +
-      '  Reason:', _initError || 'unknown'
+      '[FCMToken] ❌ Failed to send token to backend.' ,
+      'Status:', err.response?.status,
+      'Body:', JSON.stringify(err.response?.data),
+      'Message:', err.message,
     );
+    // Do NOT set FCM_TOKEN_STORAGE_KEY or FCM_TOKEN_CONFIRMED_KEY here.
+    // This forces a retry on the next registerFCMToken() call instead of
+    // silently assuming the backend has the token when it doesn't.
   }
 }
 
-// ── Clear a stale token from the DB ──────────────────────────────────────────
-async function clearStaleToken(userId) {
-  await User.findByIdAndUpdate(userId, { $set: { fcmToken: null } }).catch(() => {});
-  console.warn(`[FCM] Cleared stale FCM token for user ${userId}`);
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  sendNewLeadNotification(userId, lead)
-//  Called when a NEW lead is created and assigned to an agent.
-// ─────────────────────────────────────────────────────────────────────────────
-async function sendNewLeadNotification(userId, lead) {
-  const messaging = getMessaging();
-  if (!messaging) {
-    if (_initFailed) {
-      console.warn('[FCM] sendNewLeadNotification skipped — FCM not initialised:', _initError);
-    }
-    return;
-  }
+export async function registerFCMToken() {
+  if (!messaging) return;
 
   try {
-    const user = await User.findById(userId).select('fcmToken name').lean();
-    if (!user?.fcmToken) {
-      console.warn(`[FCM] sendNewLeadNotification: user ${userId} has no fcmToken — mobile app may not have registered yet`);
+    // ── Request permission (required on iOS and Android 13+) ────────────────
+    const authStatus = await messaging().requestPermission();
+    const enabled =
+      authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+      authStatus === messaging.AuthorizationStatus.PROVISIONAL;
+
+    if (!enabled) {
+      console.warn('[FCMToken] Notification permission not granted (status:', authStatus, ')');
+      // Don't return — on Android < 13 permission is implicitly granted and
+      // requestPermission() may return AUTHORIZED even without a user prompt.
+    }
+
+    // ── Get FCM token ────────────────────────────────────────────────────────
+    const token = await messaging().getToken();
+    if (!token) {
+      console.warn('[FCMToken] getToken() returned null — is google-services.json present?');
       return;
     }
 
-    const leadName   = lead.name   || 'New Lead';
-    const leadSource = lead.source || 'Web Form';
-    const campaign   = lead.campaign ? ` · ${lead.campaign}` : '';
+    // ── Only send if token changed AND was previously confirmed on backend ───
+    // Old logic: skip if storedToken === token (even if backend never got it).
+    // New logic: also require FCM_TOKEN_CONFIRMED_KEY === 'true', so a previous
+    // failed sendTokenToBackend() always retries on next login.
+    const storedToken = await AsyncStorage.getItem(FCM_TOKEN_STORAGE_KEY);
+    const confirmed   = await AsyncStorage.getItem(FCM_TOKEN_CONFIRMED_KEY);
 
-    await messaging.send({
-      token: user.fcmToken,
-      notification: {
-        title: '📋 New Lead Assigned',
-        body:  `${leadName} — ${leadSource}${campaign}`,
-      },
-      data: {
-        type:       'new_lead',
-        leadId:     String(lead._id),
-        leadName:   leadName,
-        leadMobile: lead.mobile   || '',
-        leadSource: leadSource,
-        campaign:   lead.campaign || '',
-        status:     lead.status   || 'New',
-      },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId:             'new_lead_channel_v2',
-          priority:              'max',
-          defaultSound:          true,
-          defaultVibrateTimings: true,
-        },
-      },
-      apns: {
-        payload: {
-          aps: {
-            alert: { title: '📋 New Lead Assigned', body: `${leadName} — ${leadSource}${campaign}` },
-            sound: 'default',
-            badge: 1,
-            'content-available': 1,
-          },
-        },
-        headers: { 'apns-priority': '10' },
-      },
-    });
+    if (storedToken === token && confirmed === 'true') {
+      console.log('[FCMToken] Token confirmed on backend — skipping update');
+      return;
+    }
 
-    console.log(`[FCM] ✅ Push sent to "${user.name}" for lead "${leadName}"`);
+    await sendTokenToBackend(token);
   } catch (err) {
-    if (
-      err.code === 'messaging/registration-token-not-registered' ||
-      err.code === 'messaging/invalid-registration-token'
-    ) {
-      await clearStaleToken(userId);
-    } else {
-      console.error('[FCM] sendNewLeadNotification error:', err.message);
-    }
+    console.warn('[FCMToken] registerFCMToken error:', err.message);
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  sendReassignedLeadNotification(userId, lead)
-//  Called when a lead is REASSIGNED to a different agent.
-// ─────────────────────────────────────────────────────────────────────────────
-async function sendReassignedLeadNotification(userId, lead) {
-  const messaging = getMessaging();
-  if (!messaging) {
-    if (_initFailed) {
-      console.warn('[FCM] sendReassignedLeadNotification skipped — FCM not initialised:', _initError);
-    }
-    return;
-  }
 
+export function startFCMTokenRefreshListener() {
+  if (!messaging) return () => {};
+
+  const unsubscribe = messaging().onTokenRefresh(async (newToken) => {
+    console.log('[FCMToken] Token refreshed — updating backend');
+    // Clear confirmed flag so sendTokenToBackend runs unconditionally
+    await AsyncStorage.removeItem(FCM_TOKEN_CONFIRMED_KEY).catch(() => {});
+    await sendTokenToBackend(newToken);
+  });
+
+  return unsubscribe;
+}
+
+
+export async function clearFCMToken() {
   try {
-    const user = await User.findById(userId).select('fcmToken name').lean();
-    if (!user?.fcmToken) {
-      console.warn(`[FCM] sendReassignedLeadNotification: user ${userId} has no fcmToken`);
-      return;
-    }
+    await AsyncStorage.multiRemove([FCM_TOKEN_STORAGE_KEY, FCM_TOKEN_CONFIRMED_KEY]);
+  } catch {}
+}
 
-    const leadName = lead.name || 'Lead';
 
-    await messaging.send({
-      token: user.fcmToken,
-      notification: {
+// FIX: exported so index.js background handler can call it when app is killed.
+// Previously private (_displayFCMNotification) — background handler had no way
+// to call it, so killed-app notifications were silently dropped.
+export async function displayFCMNotification(data) {
+  if (!data?.type) return;
+  try {
+    let notifee = null;
+    let AndroidImportance = null;
+    try {
+      const mod = require('@notifee/react-native');
+      notifee = mod.default ?? mod;
+      AndroidImportance = mod.AndroidImportance ?? mod.default?.AndroidImportance;
+    } catch { return; }
+
+    if (typeof notifee?.displayNotification !== 'function') return;
+
+    const IMPORTANCE_HIGH = AndroidImportance?.HIGH ?? 4;
+
+    if (data.type === 'new_lead') {
+      await notifee.displayNotification({
+        id:    `fcm_new_lead_${data.leadId}`,
+        title: '🎯 New Lead Assigned',
+        body:  `${data.leadName}${data.leadSource ? ' via ' + data.leadSource : ''}`,
+        // FIX: previously no `data` was attached — notifee's own press
+        // handler (notificationService.js) had nothing to navigate with
+        // except brittle id-string prefix matching, which didn't even match
+        // this id format. Attaching the real type/leadId lets the shared
+        // getFCMNavigationTarget() resolver handle this correctly.
+        data: { type: data.type, leadId: data.leadId },
+        android: {
+          channelId:    'new_lead_channel_v2',
+          importance:   IMPORTANCE_HIGH,
+          smallIcon:    'ic_notification',
+          pressAction:  { id: 'open_leads' },
+        },
+        ios: {
+          sound: 'default',
+          foregroundPresentationOptions: { alert: true, sound: true, badge: false },
+        },
+      });
+    } else if (data.type === 'reassigned_lead') {
+      await notifee.displayNotification({
+        id:    `fcm_reassigned_${data.leadId}`,
         title: '🔄 Lead Reassigned to You',
-        body:  `${leadName} has been assigned to you`,
-      },
-      data: {
-        type:       'reassigned_lead',
-        leadId:     String(lead._id),
-        leadName:   leadName,
-        leadMobile: lead.mobile   || '',
-        leadSource: lead.source   || '',
-        campaign:   lead.campaign || '',
-        status:     lead.status   || '',
-      },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId:             'new_lead_channel_v2',
-          priority:              'max',
-          defaultSound:          true,
-          defaultVibrateTimings: true,
+        body:  `${data.leadName} has been assigned to you`,
+        data: { type: data.type, leadId: data.leadId },
+        android: {
+          channelId:    'new_lead_channel_v2',
+          importance:   IMPORTANCE_HIGH,
+          smallIcon:    'ic_notification',
+          pressAction:  { id: 'open_leads' },
         },
-      },
-      apns: {
-        payload: {
-          aps: {
-            alert: { title: '🔄 Lead Reassigned to You', body: `${leadName} has been assigned to you` },
-            sound: 'default',
-            badge: 1,
-            'content-available': 1,
-          },
+        ios: {
+          sound: 'default',
+          foregroundPresentationOptions: { alert: true, sound: true, badge: false },
         },
-        headers: { 'apns-priority': '10' },
-      },
-    });
-
-    console.log(`[FCM] ✅ Reassign push sent to "${user.name}" for lead "${leadName}"`);
-  } catch (err) {
-    if (
-      err.code === 'messaging/registration-token-not-registered' ||
-      err.code === 'messaging/invalid-registration-token'
-    ) {
-      await clearStaleToken(userId);
-    } else {
-      console.error('[FCM] sendReassignedLeadNotification error:', err.message);
-    }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  notifySuperAdminReassignment(companyId, { lead, fromAdminName, toUserName, reason })
-//
-//  Called by adminUpdateLead whenever an admin manually reassigns a lead to a
-//  different employee.  Finds the super_admin of the company and notifies via:
-//    1. Socket.IO  → room  "superadmin:<superAdminId>"  (instant in-app)
-//    2. FCM push   → Admin.fcmToken  (mobile / background tab)
-// ─────────────────────────────────────────────────────────────────────────────
-async function notifySuperAdminReassignment(companyId, { lead, fromAdminName, toUserName, reason }) {
-  try {
-    // Find the super_admin for this company
-    const superAdmin = await Admin.findOne({ company: companyId, role: 'super_admin' })
-      .select('_id name fcmToken')
-      .lean();
-    if (!superAdmin) return; // No super_admin configured — silently skip
-
-    const leadName   = lead.name   || 'Lead';
-    const reasonText = reason      ? ` — Reason: ${reason}` : '';
-    const body       = `${leadName} reassigned from ${fromAdminName} to ${toUserName}${reasonText}`;
-
-    // ── 1. Socket push ────────────────────────────────────────────────────────
-    const _io = global._io;
-    if (_io) {
-      _io.to(`superadmin:${superAdmin._id}`).emit('lead_reassigned_notify', {
-        leadId:        String(lead._id),
-        leadName,
-        fromAdminName,
-        toUserName,
-        reason:        reason || '',
-        timestamp:     new Date().toISOString(),
       });
+
     }
-
-    // ── 2. FCM push ───────────────────────────────────────────────────────────
-    const messaging = getMessaging();
-    if (!messaging || !superAdmin.fcmToken) return;
-
-    await messaging.send({
-      token: superAdmin.fcmToken,
-      notification: {
-        title: '🔄 Lead Reassigned',
-        body,
-      },
-      data: {
-        type:          'lead_reassigned_notify',
-        leadId:        String(lead._id),
-        leadName,
-        fromAdminName,
-        toUserName,
-        reason:        reason || '',
-      },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId:             'new_lead_channel_v2',
-          priority:              'max',
-          defaultSound:          true,
-          defaultVibrateTimings: true,
-        },
-      },
-      apns: {
-        payload: {
-          aps: {
-            alert: { title: '🔄 Lead Reassigned', body },
-            sound: 'default',
-            badge: 1,
-            'content-available': 1,
-          },
-        },
-        headers: { 'apns-priority': '10' },
-      },
-    });
-
-    console.log(`[FCM] ✅ Reassign alert sent to super_admin "${superAdmin.name}" for lead "${leadName}"`);
-  } catch (err) {
-    if (
-      err.code === 'messaging/registration-token-not-registered' ||
-      err.code === 'messaging/invalid-registration-token'
-    ) {
-      await Admin.findByIdAndUpdate(
-        (await Admin.findOne({ company: companyId, role: 'super_admin' }).select('_id').lean())?._id,
-        { $set: { fcmToken: null } }
-      ).catch(() => {});
-      console.warn('[FCM] Cleared stale FCM token for super_admin');
-    } else {
-      console.error('[FCM] notifySuperAdminReassignment error:', err.message);
-    }
+  } catch (e) {
+    console.warn('[FCMToken] _displayFCMNotification error:', e.message);
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  sendNoActionAlert(recipient, leads, threshold)
-//
-//  Notifies an admin or superadmin that certain leads were assigned but have
-//  had zero agent interaction (empty callHistory) for more than 24 hours.
-//  recipientModel: 'Admin' (covers both admin and super_admin roles)
-// ─────────────────────────────────────────────────────────────────────────────
-async function sendNoActionAlert(recipient, leads, threshold = 'daily') {
-  try {
-    const messaging = getMessaging();
-    const count     = leads.length;
+export function handleFCMBackgroundMessages() {
+  // ✅ FIX ISSUE 3: Background handler is now registered in index.js at the
+  // module level — that is the ONLY place Firebase allows it to be registered.
+  // Calling setBackgroundMessageHandler() here (inside a component or service)
+  // would silently overwrite the index.js handler with a no-op, causing
+  // background notifications to stop working.
+  // This function is kept as a no-op so existing App.js call doesn't break.
+  if (!messaging) return;
+  console.log('[FCMToken] Background handler is managed by index.js — skipping duplicate registration');
+}
 
-    const thresholdLabel = threshold === '1h' ? '1 hour' : threshold === '2h' ? '2 hours' : '24 hours';
-    const urgency        = threshold === '2h' ? '🚨' : threshold === '1h' ? '⚠️' : '⚠️';
-    const title = `${urgency} ${count} Lead${count > 1 ? 's' : ''} — No Action in ${thresholdLabel}`;
-    const body  = count === 1
-      ? `"${leads[0].name}" was assigned ${thresholdLabel} ago with no call or remark yet.`
-      : `${count} leads assigned ${thresholdLabel} ago — still no agent activity.`;
 
-    // ── Socket ────────────────────────────────────────────────────────────────
-    const _io = global._io;
-    if (_io && recipient._id) {
-      const room = recipient.role === 'super_admin'
-        ? `superadmin:${recipient._id}`
-        : `admin:${recipient._id}`;
-      _io.to(room).emit('no_action_alert', {
-        count,
-        threshold,
-        leads: leads.map(l => ({ leadId: String(l._id), leadName: l.name, assignedTo: l.user?.name || '' })),
-        timestamp: new Date().toISOString(),
-      });
-    }
+export function startFCMForegroundListener() {
+  if (!messaging) return () => {};
 
-    // ── FCM ───────────────────────────────────────────────────────────────────
-    if (!messaging || !recipient.fcmToken) return;
-    await messaging.send({
-      token: recipient.fcmToken,
-      notification: { title, body },
-      data: {
-        type:    'no_action_alert',
-        threshold,
-        count:   String(count),
-        leadIds: leads.map(l => String(l._id)).join(','),
-      },
-      android: {
-        priority: 'high',
-        notification: { channelId: 'new_lead_channel_v2', priority: 'max', defaultSound: true, defaultVibrateTimings: true },
-      },
-      apns: {
-        payload: { aps: { alert: { title, body }, sound: 'default', badge: count, 'content-available': 1 } },
-        headers: { 'apns-priority': '10' },
-      },
-    });
-    console.log(`[FCM] ✅ No-action alert sent to "${recipient.name}" — ${count} lead(s)`);
-  } catch (err) {
-    if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
-      // Clear stale token — check both Admin and User collections
-      const role = String(recipient.role || '').toLowerCase();
-      if (role === 'user' || role === 'employee') {
-        const UserModel = require('../models/Users');
-        await UserModel.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
-      } else {
-        await Admin.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
-      }
-      console.warn(`[FCM] Cleared stale FCM token for "${recipient.name}" (role: ${recipient.role})`);
-    } else {
-      console.error('[FCM] sendNoActionAlert error:', err.message);
-    }
-  }
+  const unsubscribe = messaging().onMessage(async (remoteMessage) => {
+    console.log('[FCMToken] Foreground FCM message received:', remoteMessage.data?.type);
+    // Display via notifee — same as background handler
+    await displayFCMNotification(remoteMessage.data);
+  });
+
+  return unsubscribe;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  sendFollowUpAlert(recipient, leads, type)
+// BUG FIX (notifications received but tapping them doesn't navigate anywhere):
 //
-//  Notifies an admin or superadmin that certain leads have overdue or
-//  today-due scheduled follow-up calls that haven't been marked done.
-// ─────────────────────────────────────────────────────────────────────────────
-async function sendFollowUpAlert(recipient, leads, type = 'due') {
-  try {
-    const messaging = getMessaging();
-    const count     = leads.length;
-    const isOverdue = type === 'overdue';
-    const title     = isOverdue
-      ? `🔴 ${count} Overdue Follow-Up${count > 1 ? 's' : ''}`
-      : `🟡 ${count} Follow-Up${count > 1 ? 's' : ''} Due Today`;
-    const body = count === 1
-      ? `"${leads[0].name}" — ${isOverdue ? 'overdue follow-up missed' : 'follow-up due today'}.`
-      : `${count} leads need follow-up ${isOverdue ? '(overdue)' : 'today'}.`;
+// The backend (services/fcmService.js) sends FIVE distinct push types —
+// new_lead, reassigned_lead, lead_reassigned_notify, no_action_alert, and
+// follow_up_alert — every one of them with a `notification: {title, body}`
+// block, meaning Android/iOS displays them via the OS notification tray
+// automatically, independent of this app's own notifee display logic.
+//
+// Tapping an OS-displayed FCM notification is handled by TWO specific
+// Firebase Messaging lifecycle callbacks:
+//   - messaging().onNotificationOpenedApp() — app was BACKGROUNDED, user tapped
+//   - messaging().getInitialNotification()  — app was fully KILLED, the tap is
+//     what launched it; must be checked once at cold-start
+//
+// Neither of these existed anywhere in this app. Only onMessage() (foreground
+// arrival) and notifee's own local onForegroundEvent/onBackgroundEvent (which
+// only fire for notifee-DISPLAYED notifications, i.e. new_lead/reassigned_lead
+// re-displayed via displayFCMNotification below — NOT the OS-level tray
+// notification that's actually what gets tapped in the background/killed
+// case) were wired up. So a follow-up/no-action/reassignment push would
+// arrive and show correctly, but tapping it just opened the app to wherever
+// it last was — never the relevant lead.
+//
+// getFCMNavigationTarget() below is the single source of truth for "given
+// this push's data payload, where should tapping it go" — used by the new
+// registerFCMNotificationOpenHandlers() function, and reusable by notifee's
+// own press handler in notificationService.js for the two types that are
+// ALSO re-displayed locally.
+export function getFCMNavigationTarget(data) {
+  if (!data?.type) return null;
 
-    // ── Socket ────────────────────────────────────────────────────────────────
-    const _io = global._io;
-    if (_io && recipient._id) {
-      // FIX: employees (role='user') join 'agent:id' rooms, not 'admin:id'
-      const role = String(recipient.role || '').toLowerCase();
-      const room = role === 'super_admin' || role === 'superadmin'
-        ? `superadmin:${recipient._id}`
-        : role === 'user' || role === 'employee'
-          ? `agent:${recipient._id}`
-          : `admin:${recipient._id}`;
-      _io.to(room).emit('follow_up_alert', {
-        type,
-        count,
-        leads: leads.map(l => ({ leadId: String(l._id), leadName: l.name })),
-        timestamp: new Date().toISOString(),
-      });
+  switch (data.type) {
+    case 'new_lead':
+    case 'reassigned_lead':
+    case 'lead_reassigned_notify':
+      // Single-lead types — go straight to that lead if we have an id,
+      // otherwise fall back to the leads list.
+      return data.leadId
+        ? { screen: 'LeadDetail', params: { leadId: data.leadId } }
+        : { screen: 'Leads' };
+
+    case 'follow_up_alert':
+    case 'no_action_alert': {
+      // Multi-lead types — data.leadIds is a comma-separated string. Go
+      // straight to the single lead if there's exactly one, otherwise the
+      // leads list (no dedicated "filtered by these ids" screen exists yet).
+      const ids = String(data.leadIds || '').split(',').map((s) => s.trim()).filter(Boolean);
+      return ids.length === 1
+        ? { screen: 'LeadDetail', params: { leadId: ids[0] } }
+        : { screen: 'Leads' };
     }
 
-    // ── FCM ───────────────────────────────────────────────────────────────────
-    if (!messaging || !recipient.fcmToken) return;
-    await messaging.send({
-      token: recipient.fcmToken,
-      notification: { title, body },
-      data: {
-        type:    'follow_up_alert',
-        subType: type,
-        count:   String(count),
-        leadIds: leads.map(l => String(l._id)).join(','),
-      },
-      android: {
-        priority: 'high',
-        notification: { channelId: 'new_lead_channel_v2', priority: 'max', defaultSound: true, defaultVibrateTimings: true },
-      },
-      apns: {
-        payload: { aps: { alert: { title, body }, sound: 'default', badge: count, 'content-available': 1 } },
-        headers: { 'apns-priority': '10' },
-      },
-    });
-    console.log(`[FCM] ✅ Follow-up alert (${type}) sent to "${recipient.name}" — ${count} lead(s)`);
-  } catch (err) {
-    if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
-      // Clear stale token — check both Admin and User collections
-      const role = String(recipient.role || '').toLowerCase();
-      if (role === 'user' || role === 'employee') {
-        const UserModel = require('../models/Users');
-        await UserModel.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
-      } else {
-        await Admin.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
-      }
-      console.warn(`[FCM] Cleared stale FCM token for "${recipient.name}" (role: ${recipient.role})`);
-    } else {
-      console.error('[FCM] sendFollowUpAlert error:', err.message);
-    }
+    default:
+      return null;
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  sendEscalationAlert(superAdmin, adminBreakdown, totalCount)           BUG 1 FIX
-//
-//  Called by leadAlertsJob when leads have had zero agent action for 3+ hours.
-//  Unlike sendNoActionAlert (which targets one admin's own leads), this sends
-//  a cross-admin summary to the super_admin so they can see which admin's queue
-//  is stalled.
-//
-//  superAdmin      — Admin document with _id, name, fcmToken
-//  adminBreakdown  — Array of { adminName, count, leads[] }
-//  totalCount      — Sum of all counts across the breakdown
-// ─────────────────────────────────────────────────────────────────────────────
-async function sendEscalationAlert(superAdmin, adminBreakdown, totalCount) {
-  try {
-    const title = `🚨 ${totalCount} Lead${totalCount > 1 ? 's' : ''} — No Action (3h Escalation)`;
-    const body  = adminBreakdown
-      .map(a => `${a.adminName}: ${a.count} lead${a.count > 1 ? 's' : ''} unactioned`)
-      .join(' | ');
+// Registers the two missing tap-handlers. Call once at app startup, passing
+// the same navigationRef already used by registerNotificationHandlers() in
+// notificationService.js — both ultimately call nav.navigate the same way.
+export function registerFCMNotificationOpenHandlers(navigationRef) {
+  if (!messaging) return () => {};
 
-    // ── Socket ────────────────────────────────────────────────────────────────
-    const _io = global._io;
-    if (_io && superAdmin._id) {
-      _io.to(`superadmin:${superAdmin._id}`).emit('no_action_alert', {
-        count:     totalCount,
-        threshold: '3h',
-        leads:     adminBreakdown.flatMap(a =>
-          a.leads.map(l => ({
-            leadId:     String(l._id),
-            leadName:   l.name,
-            assignedTo: a.adminName,
-          }))
-        ),
-        timestamp: new Date().toISOString(),
-      });
+  const navigate = (screen, params) => {
+    const nav = navigationRef?.current;
+    if (!nav) return;
+    nav.navigate('Main');
+    if (screen !== 'Main') {
+      setTimeout(() => nav.navigate(screen, params), 120);
     }
+  };
 
-    // ── FCM ───────────────────────────────────────────────────────────────────
-    const messaging = getMessaging();
-    if (!messaging || !superAdmin.fcmToken) return;
+  const handleOpen = (remoteMessage) => {
+    const target = getFCMNavigationTarget(remoteMessage?.data);
+    if (target) navigate(target.screen, target.params);
+  };
 
-    await messaging.send({
-      token: superAdmin.fcmToken,
-      notification: { title, body },
-      data: {
-        type:  'escalation_alert',
-        count: String(totalCount),
-      },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId:             'new_lead_channel_v2',
-          priority:              'max',
-          defaultSound:          true,
-          defaultVibrateTimings: true,
-        },
-      },
-      apns: {
-        payload: {
-          aps: {
-            alert: { title, body },
-            sound: 'default',
-            badge: totalCount,
-            'content-available': 1,
-          },
-        },
-        headers: { 'apns-priority': '10' },
-      },
-    });
+  // App was backgrounded (not killed) and the user tapped the notification.
+  const unsubscribeOpened = messaging().onNotificationOpenedApp(handleOpen);
 
-    console.log(`[FCM] ✅ Escalation alert sent to super_admin "${superAdmin.name}" — ${totalCount} lead(s)`);
-  } catch (err) {
-    if (
-      err.code === 'messaging/registration-token-not-registered' ||
-      err.code === 'messaging/invalid-registration-token'
-    ) {
-      await Admin.findByIdAndUpdate(superAdmin._id, { $set: { fcmToken: null } }).catch(() => {});
-      console.warn(`[FCM] Cleared stale FCM token for super_admin "${superAdmin.name}"`);
-    } else {
-      console.error('[FCM] sendEscalationAlert error:', err.message);
-    }
-  }
+  // App was fully killed — the tap is what launched it. Only fires once,
+  // checked here at registration time (called from App.js on mount).
+  messaging()
+    .getInitialNotification()
+    .then((remoteMessage) => {
+      if (remoteMessage) handleOpen(remoteMessage);
+    })
+    .catch((e) => console.warn('[FCMToken] getInitialNotification error:', e.message));
+
+  return unsubscribeOpened;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  sendNoFollowUpAlert(user, leads)
-//
-//  Notifies the ASSIGNED EMPLOYEE (User model, not Admin) that one or more of
-//  their leads have gone 24h+ since creation with no follow-up date ever set.
-//  Called by leadAlertsJob.runNoFollowUpDateCheck() every 15 minutes; re-fires
-//  every 24h per lead until the employee finally adds a follow-up.
-//
-//  user  — User document with _id, name, fcmToken
-//  leads — array of lead docs { _id, name, mobile, status, date }
-// ─────────────────────────────────────────────────────────────────────────────
-async function sendNoFollowUpAlert(user, leads) {
-  if (!user?._id || !leads?.length) return;
-
-  try {
-    const count = leads.length;
-    const title = `🔔 ${count} Lead${count > 1 ? 's' : ''} — No Follow-Up Date Set`;
-    const body  = count === 1
-      ? `"${leads[0].name}" has had no follow-up scheduled for 24+ hours.`
-      : `${count} of your leads have no follow-up date set (24+ hours old).`;
-
-    // ── Socket — employee's personal room, same one used for new_lead_assigned ─
-    const _io = global._io;
-    if (_io) {
-      _io.to(`agent:${user._id}`).emit('no_followup_alert', {
-        count,
-        leads: leads.map(l => ({ leadId: String(l._id), leadName: l.name, mobile: l.mobile || '' })),
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    // ── FCM ───────────────────────────────────────────────────────────────────
-    const messaging = getMessaging();
-    if (!messaging) {
-      if (_initFailed) console.warn('[FCM] sendNoFollowUpAlert skipped — FCM not initialised:', _initError);
-      return;
-    }
-    if (!user.fcmToken) return; // not registered — socket event above still fires
-
-    await messaging.send({
-      token: user.fcmToken,
-      notification: { title, body },
-      data: {
-        type:    'no_followup_alert',
-        count:   String(count),
-        leadIds: leads.map(l => String(l._id)).join(','),
-      },
-      android: {
-        priority: 'high',
-        notification: { channelId: 'new_lead_channel_v2', priority: 'max', defaultSound: true, defaultVibrateTimings: true },
-      },
-      apns: {
-        payload: { aps: { alert: { title, body }, sound: 'default', badge: count, 'content-available': 1 } },
-        headers: { 'apns-priority': '10' },
-      },
-    });
-    console.log(`[FCM] ✅ No-follow-up alert sent to "${user.name}" — ${count} lead(s)`);
-  } catch (err) {
-    if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
-      await clearStaleToken(user._id);
-    } else {
-      console.error('[FCM] sendNoFollowUpAlert error:', err.message);
-    }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  sendWhatsAppInboundNotification(companyId, { assignedAgentId, waPhone,
-//    contactName, leadName, body, conversationId, leadId })
-//
-//  Called from msg91WebhookController.processMSG91Payload() the moment a
-//  customer's WhatsApp message is saved. Socket.io already handles the
-//  in-app real-time update; this covers the case Socket.io can't — the app
-//  is backgrounded/killed and there's no live connection to emit to.
-//
-//  Sends to:
-//    • the assigned agent (User model), if the conversation has one
-//    • every admin/super_admin in the company (Admin model) — the WA admin
-//      app's "firehose" view, mirroring the wa_admin / wa_company_<id>
-//      socket rooms this same event already goes to
-//
-//  Fires all sends in parallel and never throws — a push failure must never
-//  block or fail the webhook response back to MSG91.
-// ─────────────────────────────────────────────────────────────────────────────
-async function sendWhatsAppInboundNotification(companyId, {
-  assignedAgentId, waPhone, contactName, leadName, body, conversationId, leadId,
-} = {}) {
-  const messaging = getMessaging();
-  if (!messaging) {
-    if (_initFailed) console.warn('[FCM] sendWhatsAppInboundNotification skipped — FCM not initialised:', _initError);
-    return;
-  }
-
-  try {
-    const displayName = contactName || leadName || waPhone || 'Customer';
-    const title = `💬 ${displayName}`;
-    const bodyText = (body || '').slice(0, 120) || 'Sent a new message';
-
-    const data = {
-      type:           'wa_inbound_message',
-      conversationId: String(conversationId || ''),
-      leadId:         String(leadId || ''),
-      waPhone:        waPhone || '',
-    };
-
-    const payloadFor = (token) => ({
-      token,
-      notification: { title, body: bodyText },
-      data,
-      android: {
-        priority: 'high',
-        notification: {
-          channelId:             'wa_message_channel_v1',
-          priority:              'max',
-          defaultSound:          true,
-          defaultVibrateTimings: true,
-          tag:                   `wa_conv_${conversationId || waPhone}`, // collapses repeat pushes for the same thread
-        },
-      },
-      apns: {
-        payload: {
-          aps: {
-            alert: { title, body: bodyText },
-            sound: 'default',
-            'content-available': 1,
-          },
-        },
-        headers: { 'apns-priority': '10' },
-      },
-      // ── Web push (browser/PWA clients) ──────────────────────────────────────
-      // FCM tokens from the web SDK are the same token format as mobile —
-      // no separate send path needed — but without this block, browser
-      // notifications fall back to defaults with no icon and no click
-      // behavior. fcm_options.link is what firebase-messaging-sw.js's
-      // notificationclick handler needs to open the right conversation.
-      webpush: {
-        notification: {
-          title,
-          body: bodyText,
-          icon: '/icons/icon-192.png',
-          tag: `wa_conv_${conversationId || waPhone}`,
-        },
-        fcmOptions: {
-          link: conversationId ? `/chat/${conversationId}` : '/',
-        },
-      },
-    });
-
-    // ── Collect recipient tokens ─────────────────────────────────────────────
-    const recipients = []; // { token, kind: 'admin' | 'agent', id }
-
-    const [admins, agent] = await Promise.all([
-      Admin.find({ company: companyId, role: { $in: ['admin', 'super_admin'] }, fcmToken: { $ne: null } })
-        .select('_id fcmToken').lean(),
-      assignedAgentId
-        ? User.findById(assignedAgentId).select('_id fcmToken').lean()
-        : Promise.resolve(null),
-    ]);
-
-    admins.forEach((a) => { if (a.fcmToken) recipients.push({ token: a.fcmToken, kind: 'admin', id: a._id }); });
-    if (agent?.fcmToken) recipients.push({ token: agent.fcmToken, kind: 'agent', id: agent._id });
-
-    if (recipients.length === 0) {
-      console.warn(`[FCM] sendWhatsAppInboundNotification: no registered tokens for company ${companyId}`);
-      return;
-    }
-
-    const results = await Promise.allSettled(
-      recipients.map((r) => messaging.send(payloadFor(r.token)))
-    );
-
-    let sent = 0;
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      if (r.status === 'fulfilled') {
-        sent++;
-        continue;
-      }
-      const err = r.reason;
-      const recipient = recipients[i];
-      if (
-        err?.code === 'messaging/registration-token-not-registered' ||
-        err?.code === 'messaging/invalid-registration-token'
-      ) {
-        if (recipient.kind === 'admin') {
-          await Admin.findByIdAndUpdate(recipient.id, { $set: { fcmToken: null } }).catch(() => {});
-        } else {
-          await User.findByIdAndUpdate(recipient.id, { $set: { fcmToken: null } }).catch(() => {});
-        }
-      } else {
-        console.error('[FCM] sendWhatsAppInboundNotification send error:', err?.message);
-      }
-    }
-
-    console.log(`[FCM] ✅ WhatsApp inbound push sent to ${sent}/${recipients.length} recipient(s) for company ${companyId}`);
-  } catch (err) {
-    console.error('[FCM] sendWhatsAppInboundNotification error:', err.message);
-  }
-}
-
-// ── Precise, time-matched reminder for a manually-scheduled follow-up/call-back ──
-// Distinct from sendFollowUpAlert() above, which is the once-daily 9:30 AM
-// digest of everything due/overdue that day. This fires close to the EXACT
-// date+time an employee typed in when adding a remark (e.g. "call back
-// today at 3pm") — see jobs/leadAlertsJob.js runScheduledCallReminders(),
-// which scans every 5 minutes for entries landing in the next 15-minute
-// window, matching the same lead-time convention the mobile app's own local
-// notification check already uses (services/notificationService.js on the
-// mobile side) — this is the SERVER-GUARANTEED equivalent, so the reminder
-// still fires even if the employee's phone was off or unsynced at that
-// moment, which a purely local, on-device check can't guarantee.
-async function sendScheduledCallReminder(recipient, lead, scheduledCall) {
-  try {
-    const messaging = getMessaging();
-    const minutesUntil = Math.round((new Date(scheduledCall.scheduledAt) - Date.now()) / 60000);
-    const whenLabel = minutesUntil <= 0 ? 'now' : `in ${minutesUntil} min`;
-    const title = `📞 Call back — "${lead.name}"`;
-    const body  = `Scheduled for ${whenLabel}${scheduledCall.note ? ` — ${scheduledCall.note}` : ''}`;
-
-    const _io = global._io;
-    if (_io && recipient._id) {
-      const role = String(recipient.role || '').toLowerCase();
-      const room = role === 'super_admin' || role === 'superadmin'
-        ? `superadmin:${recipient._id}`
-        : role === 'user' || role === 'employee'
-          ? `agent:${recipient._id}`
-          : `admin:${recipient._id}`;
-      _io.to(room).emit('scheduled_call_reminder', {
-        leadId: String(lead._id),
-        leadName: lead.name,
-        scheduledAt: scheduledCall.scheduledAt,
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    if (!messaging || !recipient.fcmToken) return;
-    await messaging.send({
-      token: recipient.fcmToken,
-      notification: { title, body },
-      data: { type: 'scheduled_call_reminder', leadId: String(lead._id) },
-      android: {
-        priority: 'high',
-        notification: { channelId: 'new_lead_channel_v2', priority: 'max', defaultSound: true, defaultVibrateTimings: true },
-      },
-      apns: {
-        payload: { aps: { alert: { title, body }, sound: 'default', 'content-available': 1 } },
-        headers: { 'apns-priority': '10' },
-      },
-    });
-    console.log(`[FCM] ✅ Scheduled call reminder sent to "${recipient.name}" for lead "${lead.name}"`);
-  } catch (err) {
-    if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
-      const role = String(recipient.role || '').toLowerCase();
-      if (role === 'user' || role === 'employee') {
-        const UserModel = require('../models/Users');
-        await UserModel.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
-      } else {
-        const Admin = require('../models/Admin');
-        await Admin.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
-      }
-    } else {
-      console.error(`[FCM] ❌ sendScheduledCallReminder failed for "${recipient.name}":`, err.message);
-    }
-  }
-}
-
-module.exports = {
-  sendNewLeadNotification,
-  sendReassignedLeadNotification,
-  notifySuperAdminReassignment,
-  sendNoActionAlert,
-  sendFollowUpAlert,
-  sendEscalationAlert,   // BUG 1 FIX — was missing, crashed leadAlertsJob every tick
-  sendNoFollowUpAlert,
-  sendWhatsAppInboundNotification,
-  sendScheduledCallReminder,
-  checkFCMHealth,
-};
