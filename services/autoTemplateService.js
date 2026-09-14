@@ -578,6 +578,14 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
         const detail = JSON.stringify(resp.data.errors || resp.data.message || resp.data);
         console.error(`[autoTemplate] ❌ WA rejected by MSG91:`, detail);
         await releaseSendClaim(lead?._id, templateName); // send failed — free the claim so a future attempt can retry
+        // BUG FIX (couldn't identify which leads failed a campaign):
+        // failures were never logged to WhatsAppSendLog at all — only the
+        // 'sent' branch below did. This meant there was no per-lead record
+        // to find "who actually failed" after the fact, only an aggregate
+        // count on the campaign's own summary row. Logging it here (and in
+        // the catch block below) is what makes a proper "retry failed
+        // leads" feature possible at all.
+        void _logAutoTemplateSend({ lead, companyId, templateName, status: 'failed', detail: `MSG91 rejected the message: ${detail}`, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
         return { channel: "whatsapp", status: "failed", detail: `MSG91 rejected the message: ${detail}` };
       }
       // ── Resolve the actual rendered content, best-effort ────────────────
@@ -601,6 +609,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
       const detail = JSON.stringify(err?.response?.data || err.message);
       console.error(`[autoTemplate] ❌ WA error:`, detail);
       await releaseSendClaim(lead?._id, templateName); // send failed — free the claim so a future attempt can retry
+      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'failed', detail, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
       return { channel: "whatsapp", status: "failed", detail };
     }
 
@@ -650,6 +659,7 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings }) {
       const detail = JSON.stringify(err?.response?.data || err.message);
       console.error(`[autoTemplate] ❌ WA Meta error:`, detail);
       await releaseSendClaim(lead?._id, templateName); // send failed — free the claim so a future attempt can retry
+      void _logAutoTemplateSend({ lead, companyId, templateName, status: 'failed', detail, channel: logChannel, sentByName: logSentByName, ruleId: logRuleId, ruleName: logRuleName });
       return { channel: "whatsapp", status: "failed", detail };
     }
   }
