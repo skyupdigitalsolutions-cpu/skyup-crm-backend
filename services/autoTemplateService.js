@@ -19,6 +19,7 @@ const Lead           = require("../models/Leads");
 const WhatsAppSendLog = require("../models/WhatsAppSendLog");
 const { resolveTemplateContent } = require("../utils/templateContentResolver");
 const { buildTemplateName, NICHE_TEMPLATE_PREFIX, resolveWithFallback } = require("../utils/templateNameResolver");
+const { isRealName } = require("../utils/getLeadDisplayName");
 
 // ── Guard against a static template name that belongs to a DIFFERENT
 // industry/service than the lead it's about to be sent to ────────────────────
@@ -502,7 +503,11 @@ async function sendAutoWhatsApp({ companyId, lead, whatsappSettings, forceSend =
         ? {
             body_1: {
               type:  "text",
-              value: (lead.name || "").trim() || "there",
+              // Use the lead's real name only when it looks like a genuine person's
+              // name. For inbound WhatsApp leads whose number was auto-created
+              // without a name (or with a garbled system token), fall back to
+              // "Sir/Madam" so the greeting in the template is always polite.
+              value: isRealName(lead.name) ? lead.name.trim() : "Sir/Madam",
             },
           }
         : {}),
@@ -787,7 +792,7 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
     return { channel: "sms", status: "skipped", detail: `Lead has an invalid phone number ("${lead.mobile || ""}")` };
   }
 
-  const leadName = (lead.name || "there").trim();
+  const leadName = isRealName(lead.name) ? lead.name.trim() : "Sir/Madam";
   const payload = {
     flow_id:   resolvedTemplateId,
     sender:    resolvedSenderId,
