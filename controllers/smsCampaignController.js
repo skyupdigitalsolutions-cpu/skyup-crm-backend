@@ -10,6 +10,7 @@ const Lead      = require("../models/Leads");
 const SmsLog    = require("../models/SmsLog");
 const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
 const SmsConfig = require("../models/SmsConfig");
+const { isRealName } = require("../utils/getLeadDisplayName");
 
 // ── Helper: get auth key + sender ID for a company ───────────────────────────
 async function getCompanySmsCredentials(companyId) {
@@ -66,7 +67,7 @@ const sendViaMSG91 = async ({ mobile, name, templateId, senderId, authKey }) => 
     short_url: "0",
     route:     "1",  // ✅ Promotional route (was "4" transactional — caused all SMS to fail)
     mobiles:   phone,
-    VAR1:      name || "there",       // fills ##alphanumeric## slot in the DLT template
+    VAR1:      isRealName(name) ? name : "Sir/Madam",       // fills ##alphanumeric## slot in the DLT template
   };
 
   let data;
@@ -162,7 +163,7 @@ async function runSmsInBackground({
         try {
           const requestId = await sendViaMSG91({
             mobile:     lead.mobile,
-            name:       lead.name || "there",   // VAR1 = name fills ##alphanumeric## slot
+            name:       isRealName(lead.name) ? lead.name : "Sir/Madam",   // VAR1 = name fills ##alphanumeric## slot
             templateId,
             senderId,
             authKey,
@@ -279,14 +280,15 @@ const sendSingleSms = async (req, res, next) => {
 
     const requestId = await sendViaMSG91({
       mobile,
-      name:       name || "there",   // VAR1 = name fills ##alphanumeric## in DLT template
+      name:       isRealName(name) ? name : "Sir/Madam",   // VAR1 = name fills ##alphanumeric## in DLT template
       templateId: resolvedTemplateId,
       senderId:   senderId || creds.senderId,
       authKey,
     });
 
     // Log the actual template message text for records
-    const logMessage = `Hi ${name || "there"}, thank you for contacting SKYUP Digital Solutions LLP! Our Services:SEO Services, Social Media & GBP Management, Google & Meta Ads, Website Design & Development, AI Automation & Machine Learning, Chatbot & WhatsApp Automation. One of our team members will connect with you shortly. Phone: +91 88678 67775 Website: SKYUP Digital Solutions LLP`;
+    const resolvedName = isRealName(name) ? name : "Sir/Madam";
+    const logMessage = `Hi ${resolvedName}, thank you for contacting SKYUP Digital Solutions LLP! Our Services:SEO Services, Social Media & GBP Management, Google & Meta Ads, Website Design & Development, AI Automation & Machine Learning, Chatbot & WhatsApp Automation. One of our team members will connect with you shortly. Phone: +91 88678 67775 Website: SKYUP Digital Solutions LLP`;
 
     await saveLog({
       to:             mobile,
@@ -581,7 +583,7 @@ const employeeSendSingleSms = async (req, res, next) => {
 
     const requestId = await sendViaMSG91({
       mobile,
-      name:       name || "there",
+      name:       isRealName(name) ? name : "Sir/Madam",
       templateId: resolvedTemplateId,
       senderId:   senderId || creds.senderId,
       authKey:    creds.authKey,
