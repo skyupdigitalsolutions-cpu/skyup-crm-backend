@@ -10,6 +10,7 @@ const User                   = require("../models/Users");
 const { acquireWaDedupLock } = require("../middlewares/rateLimiter"); // ✅ Redis dedup
 const { hmac } = require("../utils/fieldCrypto");
 const { processMSG91Payload, looksLikeMsg91Payload } = require("./msg91WebhookController");
+const { getLeadDisplayName, isRealName } = require("../utils/getLeadDisplayName");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /wa-webhook  — Meta's one-time verification handshake
@@ -213,11 +214,18 @@ async function handleInboundMessage(msg, value, config) {
 
   // ── Update conversation metadata ──────────────────────────────────────────
   const sessionExpiry = new Date(timestamp.getTime() + 24 * 60 * 60 * 1000);
+  // Use real name from WhatsApp profile if present; keep existing if it's real;
+  // otherwise fall back to "Sir/Madam" for an unknown/nameless inbound number.
+  const resolvedContactName =
+    (isRealName(contactName) && contactName.trim()) ||
+    (isRealName(conversation.contactName) && conversation.contactName) ||
+    "Sir/Madam";
+
   await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
     lastMessage:      body,
     lastMessageAt:    timestamp,
     status:           "waiting",  // agent needs to reply
-    contactName:      contactName || conversation.contactName,
+    contactName:      resolvedContactName,
     sessionExpiresAt: sessionExpiry,
     $inc: { unreadCount: 1 },
   });
@@ -237,7 +245,7 @@ async function handleInboundMessage(msg, value, config) {
         status:      "delivered",
       },
       waPhone,
-      contactName:    contactName || conversation.contactName,
+      contactName:    resolvedContactName,
       companyId:      config.company.toString(),
       assignedAgent:  conversation.assignedAgent?.toString(),
     };
