@@ -11,6 +11,7 @@ const WhatsAppSendLog  = require("../models/WhatsAppSendLog");
 const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 const { extractBodyText, substitute } = require("../utils/templateContentResolver");
 const { fetchLiveTemplateBody, syncTemplatesForCompany } = require("../services/msg91TemplateService");
+const { getLeadDisplayName, isRealName } = require("../utils/getLeadDisplayName");
 
 // ── Resolve a template's cached body text ONCE per batch, so every recipient
 // in a bulk/CSV/employee blast just does a cheap string substitution instead
@@ -51,8 +52,9 @@ function safeWaPhone(stored) {
 // when we don't have a contact/lead name. Templates like `crm_followup_leads`
 // REQUIRE this parameter — sending zero params makes WhatsApp reject the message
 // with "number of localizable_params (0) does not match the expected number of
-// params (1)". Change this default if your template's {{1}} isn't a name.
-const DEFAULT_TEMPLATE_BODY_PARAM = "there";
+// params (1)". "Sir/Madam" is used as a polite, gender-neutral salutation for
+// inbound WhatsApp leads whose real name is not yet known.
+const DEFAULT_TEMPLATE_BODY_PARAM = "Sir/Madam";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TEMPLATES_WITH_DOC_HEADER — templates that carry a MEDIA (document) header.
@@ -70,6 +72,10 @@ const TEMPLATES_WITH_DOC_HEADER = new Set(["crm_followup_leads"]);
 // document header ONLY when the template actually needs one.
 function buildMsg91Components({ templateName, brochureUrl, bodyParam }) {
   const needsDocHdr = TEMPLATES_WITH_DOC_HEADER.has((templateName || "").trim());
+  // Use bodyParam only when it looks like a real person's name. If it's blank,
+  // a raw phone number, or a system token (e.g. "SJSJASSS"), fall back to
+  // "Sir/Madam" so the template greeting is always polite and legible.
+  const resolvedBodyParam = isRealName(bodyParam) ? bodyParam.trim() : DEFAULT_TEMPLATE_BODY_PARAM;
   return {
     ...(needsDocHdr && brochureUrl
       ? {
@@ -83,7 +89,7 @@ function buildMsg91Components({ templateName, brochureUrl, bodyParam }) {
     // Always include the {{1}} body param — the template requires it.
     body_1: {
       type: "text",
-      value: bodyParam?.trim() || DEFAULT_TEMPLATE_BODY_PARAM,
+      value: resolvedBodyParam,
     },
   };
 }
