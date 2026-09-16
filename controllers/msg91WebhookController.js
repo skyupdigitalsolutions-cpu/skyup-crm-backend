@@ -29,6 +29,7 @@ const { getCloudinaryForCompany } = require("../services/cloudinaryService");
 const { slug, SERVICES } = require("../utils/templateNameResolver");
 const { sendWhatsAppInboundNotification } = require("../services/fcmService");
 const { notifyCampaignLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
+const { getLeadDisplayName, isRealName } = require("../utils/getLeadDisplayName");
 
 // Maps a downloaded file's Content-Type to a safe extension, used as a
 // fallback when WhatsApp didn't supply an original filename (see the
@@ -626,8 +627,16 @@ async function processMSG91Payload(rawBody, opts = {}) {
     // must never break normal message delivery.
     if (!lead) {
       try {
+        // Use the real contact name if it looks like a genuine person's name;
+        // otherwise fall back to "Sir/Madam" so the lead card in the CRM
+        // displays a polite salutation instead of a raw phone number or a
+        // garbled system token like "SJSJASSS".
+        const autoLeadName = isRealName(contactName)
+          ? contactName.trim()
+          : `Sir/Madam (${waPhone})`;
+
         lead = await Lead.create({
-          name:    contactName || `WhatsApp ${waPhone}`,
+          name:    autoLeadName,
           mobile:  waPhone,
           source:  "WhatsApp",
           status:  "New",
@@ -871,11 +880,21 @@ async function processMSG91Payload(rawBody, opts = {}) {
 
     // ── Update conversation ───────────────────────────────────────────────────
     const sessionExpiry = new Date(timestamp.getTime() + 24 * 60 * 60 * 1000);
+    // Resolve the best display name for this contact. If WhatsApp sent a real
+    // name use it; if the existing conversation already has one keep it; otherwise
+    // fall back to "Sir/Madam" so the chat list shows a polite salutation instead
+    // of a blank or a raw phone number.
+    const resolvedContactName =
+      (isRealName(contactName) && contactName.trim()) ||
+      (isRealName(conversation.contactName) && conversation.contactName) ||
+      lead?.name ||
+      "Sir/Madam";
+
     await WhatsAppConversation.findByIdAndUpdate(conversation._id, {
       lastMessage:      msgBody,
       lastMessageAt:    timestamp,
       status:           "waiting",
-      contactName:      contactName || conversation.contactName,
+      contactName:      resolvedContactName,
       sessionExpiresAt: sessionExpiry,
       $inc:             { unreadCount: 1 },
     });
@@ -910,7 +929,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
           status:      "delivered",
         },
         waPhone,
-        contactName:   contactName || conversation.contactName,
+        contactName:   resolvedContactName,
         leadName:      lead?.name || conversation.leadName || null,
         companyId:     config.company.toString(),
         assignedAgent: assignedAgentId,
@@ -953,7 +972,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
     sendWhatsAppInboundNotification(config.company, {
       assignedAgentId: resolvedAssignedAgentId,
       waPhone,
-      contactName: contactName || conversation.contactName,
+      contactName: resolvedContactName,
       leadName:    lead?.name || conversation.leadName || null,
       body:        msgBody,
       conversationId: conversation._id.toString(),
