@@ -22,13 +22,15 @@ const axios                = require("axios");
 const WhatsAppConfig       = require("../models/WhatsAppConfig");
 const WhatsAppConversation = require("../models/WhatsAppConversation");
 const WhatsAppMessage      = require("../models/WhatsAppMessage");
+const WhatsAppSendLog      = require("../models/WhatsAppSendLog");
+const { hmac }             = require("../utils/fieldCrypto");
 const Lead                 = require("../models/Leads");
 const User                 = require("../models/Users");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
 const { getCloudinaryForCompany } = require("../services/cloudinaryService");
 const { slug, SERVICES } = require("../utils/templateNameResolver");
 const { sendWhatsAppInboundNotification } = require("../services/fcmService");
-const { notifyCampaignLead, notifyAllAdminsCampaignLead } = require("../services/telegramService");
+const { notifyWhatsAppNewLead, notifyWhatsAppInbound, notifyWhatsAppOptOut } = require("../services/telegramService");
 const { getLeadDisplayName, isRealName } = require("../utils/getLeadDisplayName");
 
 // Maps a downloaded file's Content-Type to a safe extension, used as a
@@ -609,6 +611,16 @@ async function processMSG91Payload(rawBody, opts = {}) {
       return;
     }
 
+    // ── Template echo guard ───────────────────────────────────────────────────
+    // MSG91 echoes our outbound templates back through this webhook with
+    // customerNumber = our own integrated number. Drop silently.
+    const ownNumberLastTen = normalizePhone(config.msg91IntegratedNumber).slice(-10);
+    const senderLastTen    = waPhone.slice(-10);
+    if (ownNumberLastTen && senderLastTen === ownNumberLastTen) {
+      console.log(`⏭  Template echo from own number ${waPhone} — dropped`);
+      return;
+    }
+
     // Resolve leads for this phone (done BEFORE conversation lookup so the
     // merge helper can match by lead ref too, not just waPhone — this is what
     // catches the case where a manual template send created a conversation
@@ -619,50 +631,82 @@ async function processMSG91Payload(rawBody, opts = {}) {
     let lead            = matchingLeads
       .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))[0] || null;
 
-    // ── Auto-create a Lead for a brand-new (unmatched) WhatsApp sender ────────
-    // Previously a first-time inbound message from an unknown number just sat
-    // in WhatsAppConversation with no Lead attached at all — it never showed
-    // up anywhere in the CRM's lead pipeline, and no one was ever notified.
-    // Fire-and-forget (doesn't block the webhook response); any failure here
-    // must never break normal message delivery.
+    // ── Smart lead creation — cold inbound only ──────────────────────────────
+    // Only create a lead when this is a genuine cold contact (they messaged us
+    // first). Skip when they are replying to a template/blast we sent them.
+    // Detection: check WhatsAppSendLog (blast/nurture) AND WhatsAppMessage
+    // outbound (sendTemplate/sendMessage/startConversation).
     if (!lead) {
       try {
-        // Use the real contact name if it looks like a genuine person's name;
-        // otherwise fall back to "Sir/Madam" so the lead card in the CRM
-        // displays a polite salutation instead of a raw phone number or a
-        // garbled system token like "SJSJASSS".
-        const autoLeadName = isRealName(contactName)
-          ? contactName.trim()
-          : `Sir/Madam (${waPhone})`;
+        const lastTen = waPhone.slice(-10);
 
-        lead = await Lead.create({
-          name:    autoLeadName,
-          mobile:  waPhone,
-          source:  "WhatsApp",
-          status:  "New",
-          date:    new Date(),
-          remark:  "Auto-created from inbound WhatsApp message",
-          initialRemark: "Auto-created from inbound WhatsApp message",
+        // Check 1: blast / nurture / autotemplate sends
+        const priorSendLog = await WhatsAppSendLog.findOne({
           company: config.company,
-        });
-        console.log(`[WhatsApp] 🆕 Auto-created lead "${lead.name}" (${waPhone}) for company ${config.company}`);
-        // BUG FIX: this previously only called notifyAllAdminsCampaignLead
-        // (each admin's PERSONAL Telegram chat) and never notifyCampaignLead
-        // (the company's shared Telegram GROUP) — the only one of the three
-        // lead-source webhooks missing this call (website/meta both call
-        // both). That's why the company group never heard about new
-        // WhatsApp leads even with telegramEnabled + telegramChatId (group)
-        // configured correctly.
-        notifyCampaignLead(lead, config.company).catch((e) =>
-          console.error("[Telegram] notifyCampaignLead (WhatsApp lead) failed:", e.message)
-        );
-        notifyAllAdminsCampaignLead(lead, config.company).catch((e) =>
-          console.error("[Telegram] notifyAllAdminsCampaignLead (WhatsApp lead) failed:", e.message)
-        );
+          phone:   { $in: [waPhone, lastTen, `+${waPhone}`] },
+          status:  "sent",
+        }).lean();
+
+        // Check 2: manual sendTemplate / sendMessage / startConversation
+        let priorOutboundMsg = null;
+        if (!priorSendLog) {
+          const conv = await WhatsAppConversation.findOne({
+            waPhoneHash: hmac(waPhone),
+            company:     config.company,
+          }).select("_id").lean();
+          if (conv) {
+            priorOutboundMsg = await WhatsAppMessage.findOne({
+              conversation: conv._id,
+              direction:    "outbound",
+            }).select("_id messageType").lean();
+          }
+        }
+
+        const weContactedFirst = !!(priorSendLog || priorOutboundMsg);
+
+        if (weContactedFirst) {
+          // Reply to our template — not a new enquiry, skip lead creation
+          console.log(`[WhatsApp] 📨 ${waPhone} replied to our outbound — not creating lead`);
+        } else {
+          // Genuine cold inbound — create lead
+          const autoLeadName = isRealName(contactName)
+            ? contactName.trim()
+            : `Sir/Madam (${waPhone})`;
+
+          lead = await Lead.create({
+            name:          autoLeadName,
+            mobile:        waPhone,
+            source:        "WhatsApp",
+            status:        "New",
+            date:          new Date(),
+            remark:        "Auto-created from inbound WhatsApp message",
+            initialRemark: "Auto-created from inbound WhatsApp message",
+            company:       config.company,
+          });
+          console.log(`[WhatsApp] 🆕 New lead "${lead.name}" (${waPhone}) — genuine cold inbound`);
+
+          // Dedicated WA Telegram notification
+          notifyWhatsAppNewLead({
+            companyId: config.company,
+            lead,
+            waPhone,
+            msgBody: msgBody || msgText || "",
+          }).catch((e) => console.error("[Telegram-WA] notifyWhatsAppNewLead failed:", e.message));
+
+          // Bot notification for new cold lead
+          if (config.botWebhookUrl) {
+            axios.post(config.botWebhookUrl, {
+              event: "new_lead", leadId: lead._id.toString(), leadName: lead.name,
+              waPhone, contactName: resolvedContactName, companyId: config.company.toString(),
+              message: { body: msgBody || msgText || "", type: contentType, timestamp: timestamp || new Date() },
+            }, {
+              headers: { "Content-Type": "application/json", ...(config.botSecret ? { "X-Bot-Secret": config.botSecret } : {}) },
+              timeout: 10000,
+            }).catch((e) => console.error("[Bot] new_lead forward failed:", e.message));
+          }
+        }
       } catch (e) {
-        // e.g. a race with another inbound message from the same number
-        // creating the lead first — non-fatal, just proceed without one.
-        console.error("[WhatsApp] auto-create lead failed:", e.message);
+        console.error("[WhatsApp] smart lead creation error:", e.message);
       }
     }
     const leadOwnerId   = lead?.user?.toString() || null;
@@ -790,17 +834,49 @@ async function processMSG91Payload(rawBody, opts = {}) {
       const optOutText = String(
         extractInteractiveTitle(item) || msgText || msgBody || ""
       ).trim().toLowerCase();
-      const isStopRequest = optOutText === "stop promotion" || optOutText === "stop";
-      if (isStopRequest && matchingLeads.length) {
-        const ids = matchingLeads.map((l) => l._id);
-        await Lead.updateMany(
-          { _id: { $in: ids } },
-          { $set: { followUpReminderOptOut: true } }
-        );
-        console.log(`🛑 Stop Promotion → opted ${ids.length} lead(s) out of follow-up reminders (phone ${waPhone})`);
+      const STOP_PHRASES = new Set(["stop", "stop promotion", "unsubscribe", "opt out", "optout"]);
+      const isStopRequest = STOP_PHRASES.has(optOutText);
+      if (isStopRequest) {
+        console.log(`🛑 STOP received from ${waPhone}`);
+        if (matchingLeads.length) {
+          const ids = matchingLeads.map((l) => l._id);
+          await Lead.updateMany(
+            { _id: { $in: ids } },
+            { $set: { whatsappOptOut: true, whatsappOptOutAt: new Date(), followUpReminderOptOut: true } }
+          );
+          console.log(`✅ whatsappOptOut set on ${ids.length} lead(s) for ${waPhone}`);
+          // Notify admins via dedicated WA Telegram channel
+          notifyWhatsAppOptOut({
+            companyId:   config.company,
+            contactName: resolvedContactName,
+            waPhone,
+          }).catch((e) => console.error("[Telegram-WA] notifyWhatsAppOptOut failed:", e.message));
+        }
+        // Send acknowledgement reply if session is still open
+        try {
+          const freshConv = await WhatsAppConversation.findById(conversation._id).lean();
+          const sessionOpen = freshConv?.sessionExpiresAt && freshConv.sessionExpiresAt > new Date();
+          if (sessionOpen && config.msg91AuthKey && config.msg91IntegratedNumber) {
+            const { normalizePhone: _np } = require("../utils/normalizePhone");
+            const senderNum = _np(config.msg91IntegratedNumber);
+            const ackText = "You have been unsubscribed and will no longer receive promotional messages from us. If you change your mind, please contact us directly. Thank you.";
+            await axios.post(
+              "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
+              { integrated_number: senderNum, recipient_number: waPhone, content_type: "text", text: ackText },
+              { headers: { authkey: config.msg91AuthKey, "Content-Type": "application/json", accept: "application/json" }, timeout: 8000 }
+            );
+            await WhatsAppMessage.create({
+              conversation: conversation._id, direction: "outbound", body: ackText,
+              messageType: "text", waMessageId: `optout_ack_${Date.now()}_${waPhone}`,
+              sentBy: null, status: "sent", waTimestamp: new Date(),
+            });
+          }
+        } catch (ackErr) {
+          console.error(`[optOut] ack failed for ${waPhone}:`, ackErr.message);
+        }
       }
     } catch (e) {
-      console.error("[optOut] Stop Promotion handling error:", e.message);
+      console.error("[optOut] STOP handling error:", e.message);
     }
 
     // ── Auto-tag lead.service from an interactive list/button reply ──────────
@@ -831,6 +907,53 @@ async function processMSG91Payload(rawBody, opts = {}) {
       }
     } catch (e) {
       console.error("[autoTagService] interactive reply handling error:", e.message);
+    }
+
+    // ── Auto-reply / bot-reply detection ─────────────────────────────────────
+    // Detects automated replies from recipient bots (e.g. "Thank you for
+    // contacting us...") that fire back immediately after we send a template.
+    // Both conditions must be true to skip: (A) we sent to this number
+    // recently (<10 min) AND (B) message matches auto-reply patterns.
+    try {
+      const AUTO_REPLY_PATTERNS = [
+        /thank you for contacting/i,
+        /thanks for (?:contacting|choosing|reaching out)/i,
+        /we will (?:contact|get back to|reach) you/i,
+        /we will contact you (?:soon|shortly|asap)/i,
+        /our team will (?:contact|reach|get back)/i,
+        /leave (?:your )?(?:message|query)/i,
+        /out of (?:office|reach)/i,
+        /currently (?:unavailable|busy|away)/i,
+        /auto.?reply/i,
+        /this is an automated/i,
+        /please (?:leave|drop) (?:a )?(?:message|query)/i,
+        /we (?:received|got) your (?:message|query|request)/i,
+        /namaste|regards[\s\S]{0,80}wa\.me\//i,
+      ];
+      const bodyForCheck = String(msgBody || msgText || "").trim();
+      const looksLikeAutoReply = bodyForCheck.length > 0 &&
+        AUTO_REPLY_PATTERNS.some((p) => p.test(bodyForCheck));
+      if (looksLikeAutoReply) {
+        const tenMinsAgo = new Date(Date.now() - 10 * 60 * 1000);
+        const lastTenAR  = waPhone.slice(-10);
+        const recentLog  = await WhatsAppSendLog.findOne({
+          company: config.company, phone: { $in: [waPhone, lastTenAR, `+${waPhone}`] },
+          status: "sent", createdAt: { $gte: tenMinsAgo },
+        }).lean();
+        let recentOut = null;
+        if (!recentLog && conversation) {
+          recentOut = await WhatsAppMessage.findOne({
+            conversation: conversation._id, direction: "outbound",
+            waTimestamp: { $gte: tenMinsAgo },
+          }).select("_id").lean();
+        }
+        if (recentLog || recentOut) {
+          console.log(`⏭  Auto-reply from ${waPhone} — skipped: "${bodyForCheck.substring(0, 80)}"`);
+          return;
+        }
+      }
+    } catch (arErr) {
+      console.error("[autoReply] detection error:", arErr.message);
     }
 
     // ── Save message ──────────────────────────────────────────────────────────
@@ -978,6 +1101,39 @@ async function processMSG91Payload(rawBody, opts = {}) {
       conversationId: conversation._id.toString(),
       leadId:      (lead?._id || conversation.lead)?.toString() || null,
     }).catch((e) => console.error("[FCM] sendWhatsAppInboundNotification threw:", e.message));
+
+    // ── Telegram: WA reply notification (existing leads only) ─────────────────
+    notifyWhatsAppInbound({
+      companyId:   config.company,
+      contactName: resolvedContactName,
+      waPhone,
+      msgBody,
+      lead,
+    }).catch((e) => console.error("[Telegram-WA] notifyWhatsAppInbound threw:", e.message));
+
+    // ── Bot forward — every inbound message ───────────────────────────────────
+    try {
+      const botUrl  = config.botWebhookUrl;
+      const botMode = config.botMode || "off";
+      if (botUrl && botMode !== "off") {
+        const agentAssigned = !!(conversation.assignedAgent);
+        const shouldForward = botMode === "always" || (botMode === "unattended" && !agentAssigned);
+        if (shouldForward) {
+          axios.post(botUrl, {
+            event: "inbound_message", waPhone, contactName: resolvedContactName,
+            leadId: (lead?._id || conversation.lead)?.toString() || null,
+            leadName: lead?.name || null, companyId: config.company.toString(),
+            conversationId: conversation._id.toString(), agentAssigned,
+            message: { body: msgBody, type: messageType, timestamp: timestamp || new Date() },
+          }, {
+            headers: { "Content-Type": "application/json", ...(config.botSecret ? { "X-Bot-Secret": config.botSecret } : {}) },
+            timeout: 10000,
+          }).catch((e) => console.error(`[Bot] inbound_message forward failed:`, e.message));
+        }
+      }
+    } catch (botErr) {
+      console.error("[Bot] forward error:", botErr.message);
+    }
 
     console.log(`✅ Inbound saved & pushed: ${waPhone} → "${msgBody.substring(0, 80)}" [${messageType}]`);
 
