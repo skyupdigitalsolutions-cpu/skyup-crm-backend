@@ -11,6 +11,7 @@ const { acquireWaDedupLock } = require("../middlewares/rateLimiter"); // ✅ Red
 const { hmac } = require("../utils/fieldCrypto");
 const { processMSG91Payload, looksLikeMsg91Payload } = require("./msg91WebhookController");
 const { getLeadDisplayName, isRealName } = require("../utils/getLeadDisplayName");
+const { notifyWhatsAppInbound, notifyWhatsAppOptOut } = require("../services/telegramService");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /wa-webhook  — Meta's one-time verification handshake
@@ -198,6 +199,35 @@ async function handleInboundMessage(msg, value, config) {
     body        = `[${msg.type} message]`;
   }
 
+  // ── STOP / opt-out detection (Meta WA path) ─────────────────────────────
+  try {
+    const stopText = String(body || "").trim().toLowerCase();
+    const META_STOP_PHRASES = new Set(["stop", "stop promotion", "unsubscribe", "opt out", "optout"]);
+    if (META_STOP_PHRASES.has(stopText)) {
+      const lead = await findLeadByPhone(waPhone, config.company);
+      if (lead) {
+        await Lead.findByIdAndUpdate(lead._id, { whatsappOptOut: true, whatsappOptOutAt: new Date(), followUpReminderOptOut: true });
+        console.log(`🛑 Meta WA STOP from ${waPhone} — lead ${lead._id} opted out`);
+        notifyWhatsAppOptOut({ companyId: config.company, contactName: resolvedContactName, waPhone })
+          .catch((e) => console.error("[Telegram-WA] notifyWhatsAppOptOut threw:", e.message));
+      }
+      // Send acknowledgement if session open
+      try {
+        const sessionOpen = conversation.sessionExpiresAt && conversation.sessionExpiresAt > new Date();
+        if (sessionOpen && config.provider !== "msg91" && config.accessToken && config.phoneNumberId) {
+          const ackText = "You have been unsubscribed and will no longer receive promotional messages from us. If you change your mind, please contact us directly. Thank you.";
+          const apiUrl = `https://graph.facebook.com/${config.graphApiVersion || "v19.0"}/${config.phoneNumberId}/messages`;
+          await require("axios").post(apiUrl,
+            { messaging_product: "whatsapp", recipient_type: "individual", to: waPhone, type: "text", text: { preview_url: false, body: ackText } },
+            { headers: { Authorization: `Bearer ${config.accessToken}`, "Content-Type": "application/json" } }
+          );
+          await WhatsAppMessage.create({ conversation: conversation._id, direction: "outbound", body: ackText,
+            messageType: "text", waMessageId: `optout_ack_${Date.now()}_${waPhone}`, sentBy: null, status: "sent", waTimestamp: new Date() });
+        }
+      } catch (ackErr) { console.error(`[optOut] Meta WA ack failed for ${waPhone}:`, ackErr.message); }
+    }
+  } catch (stopErr) { console.error("[optOut] Meta WA STOP error:", stopErr.message); }
+
   // ── Save the message ──────────────────────────────────────────────────────
   const savedMsg = await WhatsAppMessage.create({
     conversation: conversation._id,
@@ -269,6 +299,15 @@ async function handleInboundMessage(msg, value, config) {
     // company-room emit (controllers/msg91WebhookController.js).
     io.to(`wa_company_${config.company.toString()}`).emit("wa_message", payload);
   }
+
+  // Telegram: WA reply notification (existing leads replying back)
+  notifyWhatsAppInbound({
+    companyId:   config.company,
+    contactName: resolvedContactName,
+    waPhone,
+    msgBody:     body,
+    lead,
+  }).catch((e) => console.error("[Telegram-WA] Meta WA notifyWhatsAppInbound threw:", e.message));
 
   console.log(`📩 WA inbound: ${waPhone} → "${body.substring(0, 60)}"`);
 }
