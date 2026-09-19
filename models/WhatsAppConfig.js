@@ -96,6 +96,18 @@ const whatsAppConfigSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+
+    // ── WhatsApp-specific Telegram Notifications ─────────────────────────────
+    // Completely separate from the campaign-lead Telegram on Company model.
+    waTelegramBotToken: { type: String, default: "", trim: true },
+    waTelegramChatId:   { type: String, default: "", trim: true },
+    waTelegramEnabled:  { type: Boolean, default: false },
+
+    // ── External Bot Integration ──────────────────────────────────────────────
+    // botMode: "off" | "always" | "unattended"
+    botWebhookUrl: { type: String, default: "", trim: true },
+    botSecret:     { type: String, default: "", trim: true },
+    botMode:       { type: String, enum: ["off", "always", "unattended"], default: "off" },
   },
   { timestamps: true }
 );
@@ -108,7 +120,7 @@ const whatsAppConfigSchema = new mongoose.Schema(
 // hide it you need the deterministic-HMAC approach (encrypt for display + an
 // integratedNumberHash for lookups) — left out here on purpose.
 whatsAppConfigSchema.plugin(encryptedFieldsPlugin, {
-  fields: ["msg91AuthKey", "accessToken", "verifyToken", "phoneNumber"],
+  fields: ["msg91AuthKey", "accessToken", "verifyToken", "phoneNumber", "botSecret", "waTelegramBotToken"],
 });
 
 module.exports = mongoose.model("WhatsAppConfig", whatsAppConfigSchema);
