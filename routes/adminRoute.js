@@ -44,6 +44,9 @@ const {
   getTelegramConfig,
   saveTelegramConfig,
   testTelegramConfig,
+  getWATelegramConfig,
+  saveWATelegramConfig,
+  testWATelegramConfig,
   getAdminsTelegramConfig,
   saveAdminTelegramConfig,
   testAdminTelegramConfig,
@@ -166,6 +169,11 @@ router.delete("/company/msg91-email-config", protectAdmin, requireCompanySuperAd
 router.get("/company/telegram",       protectAdmin, getTelegramConfig);
 router.put("/company/telegram",       protectAdmin, requireCompanySuperAdmin, saveTelegramConfig);
 router.post("/company/telegram/test", protectAdmin, testTelegramConfig);
+
+// ── WhatsApp-specific Telegram config ──────────────────────────────────────────
+router.get("/company/telegram/whatsapp",       protectAdmin, getWATelegramConfig);
+router.put("/company/telegram/whatsapp",       protectAdmin, requireCompanySuperAdmin, saveWATelegramConfig);
+router.post("/company/telegram/whatsapp/test", protectAdmin, requireCompanySuperAdmin, testWATelegramConfig);
 
 // ── Per-admin Telegram config (super-admin manages each admin's personal chat) ─
 router.get("/company/telegram/admins",                    protectAdmin, requireCompanySuperAdmin, getAdminsTelegramConfig);
