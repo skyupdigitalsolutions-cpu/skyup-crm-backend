@@ -1148,6 +1148,49 @@ const deleteMsg91EmailConfig = async (req, res, next) => {
 };
 
 // ── Admin Telegram config ─────────────────────────────────────────────────────
+// ── WhatsApp-specific Telegram config endpoints ────────────────────────────────
+const getWATelegramConfig = async (req, res, next) => {
+  try {
+    const companyId = req.admin?.company;
+    const WaConfig = require('../models/WhatsAppConfig');
+    const config = await WaConfig.findOne({ company: companyId }).lean();
+    res.json({
+      waTelegramEnabled: config?.waTelegramEnabled || false,
+      waTelegramChatId:  config?.waTelegramChatId  || '',
+      hasToken:          !!(config?.waTelegramBotToken),
+    });
+  } catch (err) { next(err); }
+};
+
+const saveWATelegramConfig = async (req, res, next) => {
+  try {
+    const companyId = req.admin?.company;
+    const { waTelegramBotToken, waTelegramChatId, waTelegramEnabled } = req.body;
+    const WaConfig = require('../models/WhatsAppConfig');
+    const update = {};
+    if (waTelegramChatId  !== undefined) update.waTelegramChatId  = (waTelegramChatId || '').trim();
+    if (waTelegramEnabled !== undefined) update.waTelegramEnabled = !!waTelegramEnabled;
+    if (waTelegramBotToken?.trim())      update.waTelegramBotToken = waTelegramBotToken.trim();
+    await WaConfig.findOneAndUpdate({ company: companyId }, update, { upsert: true });
+    res.json({ message: 'WhatsApp Telegram settings saved.' });
+  } catch (err) { next(err); }
+};
+
+const testWATelegramConfig = async (req, res, next) => {
+  try {
+    const companyId = req.admin?.company;
+    const WaConfig = require('../models/WhatsAppConfig');
+    const config = await WaConfig.findOne({ company: companyId });
+    if (!config?.waTelegramBotToken) return res.status(400).json({ message: 'Bot token not configured.' });
+    if (!config?.waTelegramChatId)   return res.status(400).json({ message: 'Chat ID not configured.' });
+    const Company = require('../models/Company');
+    const company = await Company.findById(companyId).select('name').lean();
+    const { sendTestNotification } = require('../services/telegramService');
+    await sendTestNotification(config.waTelegramBotToken, config.waTelegramChatId, company?.name || '');
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
 const getAdminsTelegramConfig = async (req, res, next) => {
   try {
     const companyId = req.admin.company._id;
@@ -1510,6 +1553,9 @@ module.exports = {
   getTelegramConfig,
   saveTelegramConfig,
   testTelegramConfig,
+  getWATelegramConfig,
+  saveWATelegramConfig,
+  testWATelegramConfig,
   getAdminsTelegramConfig,
   saveAdminTelegramConfig,
   testAdminTelegramConfig,
