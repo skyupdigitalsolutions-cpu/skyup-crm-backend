@@ -12,6 +12,7 @@ const WhatsAppTemplate = require("../models/WhatsAppTemplate");
 const { extractBodyText, substitute } = require("../utils/templateContentResolver");
 const { fetchLiveTemplateBody, syncTemplatesForCompany } = require("../services/msg91TemplateService");
 const { getLeadDisplayName, isRealName } = require("../utils/getLeadDisplayName");
+const { notifyWhatsAppLeadCreated } = require("../services/telegramService");
 
 // ── Resolve a template's cached body text ONCE per batch, so every recipient
 // in a bulk/CSV/employee blast just does a cheap string substitution instead
@@ -662,6 +663,9 @@ const saveConfig = async (req, res, next) => {
       businessAccountId,
       graphApiVersion,
       phoneNumber,
+      botWebhookUrl,
+      botSecret,
+      botMode,
     } = req.body;
     const { companyId } = callerCtx(req);
 
@@ -682,6 +686,9 @@ const saveConfig = async (req, res, next) => {
       phoneNumber: phoneNumber || "",
       isActive: true,
       company: companyId,
+      ...(botWebhookUrl !== undefined && { botWebhookUrl: (botWebhookUrl || "").trim() }),
+      ...(botMode       !== undefined && { botMode: botMode || "off" }),
+      ...(botSecret?.trim()           && { botSecret: botSecret.trim() }),
     };
     if (provider === "msg91") {
       updateData.msg91AuthKey = msg91AuthKey || "";
@@ -736,6 +743,9 @@ const getConfig = async (req, res, next) => {
         businessAccountId: config.businessAccountId,
         graphApiVersion: config.graphApiVersion,
       }),
+      botWebhookUrl: config.botWebhookUrl || "",
+      botMode:       config.botMode       || "off",
+      botConfigured: !!(config.botWebhookUrl && config.botMode && config.botMode !== "off"),
     });
   } catch (err) {
     next(err);
@@ -2391,6 +2401,103 @@ const getTemplateBody = async (req, res, next) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /whatsapp/conversations/:id/create-lead
+// Agent promotes an unknown inbox contact to a CRM lead.
+// ─────────────────────────────────────────────────────────────────────────────
+const createLeadFromConversation = async (req, res, next) => {
+  try {
+    const { id: conversationId } = req.params;
+    const { companyId, userId }  = callerCtx(req);
+    const conversation = await WhatsAppConversation.findOne({ _id: conversationId, company: companyId });
+    if (!conversation) return res.status(404).json({ success: false, message: "Conversation not found" });
+    if (conversation.lead) {
+      const existing = await Lead.findById(conversation.lead).lean();
+      if (existing) return res.json({ success: true, lead: existing, created: false, message: "Already linked to a lead" });
+    }
+    const waPhone  = conversation.waPhone;
+    const lastTen  = waPhone.slice(-10);
+    const existing = await Lead.findOne({ company: companyId, $or: [{ mobile: waPhone }, { mobile: lastTen }, { mobile: `+${waPhone}` }] }).lean();
+    if (existing) {
+      await WhatsAppConversation.findByIdAndUpdate(conversationId, { lead: existing._id });
+      return res.json({ success: true, lead: existing, created: false, message: "Linked to existing lead" });
+    }
+    const resolvedName = req.body.name?.trim() ||
+      (isRealName(conversation.contactName) ? conversation.contactName.trim() : null) ||
+      "Sir/Madam";
+    const remark = req.body.remark?.trim() || "Promoted from WhatsApp inbox by agent";
+    const newLead = await Lead.create({
+      name: resolvedName, mobile: waPhone, source: "WhatsApp", status: req.body.status?.trim() || "New",
+      date: new Date(), remark, initialRemark: remark, user: userId || undefined, company: companyId,
+    });
+    await WhatsAppConversation.findByIdAndUpdate(conversationId, { lead: newLead._id });
+    console.log(`[WhatsApp] ✅ Agent promoted ${waPhone} → Lead "${newLead.name}"`);
+    const agentName = req.admin?.name || req.user?.name || "Admin";
+    notifyWhatsAppLeadCreated({ companyId, leadName: newLead.name, waPhone, agentName })
+      .catch((e) => console.error("[Telegram-WA] notifyWhatsAppLeadCreated threw:", e.message));
+    return res.status(201).json({ success: true, lead: newLead, created: true });
+  } catch (err) { console.error("createLeadFromConversation error:", err.message); next(err); }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /whatsapp/bot-reply — bot sends reply back through the CRM
+// Auth: X-Bot-Secret header must match WhatsAppConfig.botSecret
+// ─────────────────────────────────────────────────────────────────────────────
+const botReply = async (req, res, next) => {
+  try {
+    const { conversationId, text, companyId } = req.body;
+    if (!conversationId || !text?.trim() || !companyId)
+      return res.status(400).json({ error: "conversationId, text and companyId are required" });
+    const incomingSecret = req.headers["x-bot-secret"] || "";
+    const config = await WhatsAppConfig.findOne({ company: companyId, isActive: true });
+    if (!config) return res.status(404).json({ error: "WhatsApp not configured" });
+    if (!config.botWebhookUrl) return res.status(403).json({ error: "Bot integration not enabled" });
+    if (config.botSecret && incomingSecret !== config.botSecret) return res.status(403).json({ error: "Invalid X-Bot-Secret" });
+    const conversation = await WhatsAppConversation.findOne({ _id: conversationId, company: companyId });
+    if (!conversation) return res.status(404).json({ error: "Conversation not found" });
+    const now = new Date();
+    if (!conversation.sessionExpiresAt || conversation.sessionExpiresAt <= now)
+      return res.status(400).json({ error: "24-hour session expired", code: "SESSION_EXPIRED" });
+    const provider       = config.provider || "msg91";
+    const recipientPhone = safeWaPhone(conversation.waPhone);
+    let waMessageId;
+    try {
+      if (provider === "msg91") {
+        const senderNumber = normalizePhone(config.msg91IntegratedNumber);
+        const r = await axios.post(
+          "https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/",
+          { integrated_number: senderNumber, recipient_number: recipientPhone, content_type: "text", text: text.trim() },
+          { headers: { authkey: config.msg91AuthKey, "Content-Type": "application/json", accept: "application/json" } }
+        );
+        waMessageId = r.data?.data?.message_uuid || r.data?.requestId || `bot_${Date.now()}`;
+      } else {
+        const apiUrl = `https://graph.facebook.com/${config.graphApiVersion || "v21.0"}/${config.phoneNumberId}/messages`;
+        const r = await axios.post(apiUrl,
+          { messaging_product: "whatsapp", recipient_type: "individual", to: recipientPhone, type: "text", text: { preview_url: false, body: text.trim() } },
+          { headers: { Authorization: `Bearer ${config.accessToken}`, "Content-Type": "application/json" } }
+        );
+        waMessageId = r.data?.messages?.[0]?.id || `bot_${Date.now()}`;
+      }
+    } catch (apiErr) {
+      const { status, message } = describeWaApiError(apiErr, "botReply");
+      return res.status(502).json({ error: message, providerStatus: status });
+    }
+    const savedMsg = await WhatsAppMessage.create({
+      conversation: conversationId, direction: "outbound", body: text.trim(),
+      messageType: "text", waMessageId, sentBy: null, status: "sent", waTimestamp: new Date(),
+    });
+    await WhatsAppConversation.findByIdAndUpdate(conversationId, { lastMessage: text.trim(), lastMessageAt: new Date(), status: "open" });
+    const io = global._io;
+    if (io) {
+      const payload = { type: "wa_new_message", conversationId: conversationId.toString(),
+        message: { _id: savedMsg._id.toString(), direction: "outbound", body: text.trim(), messageType: "text", waTimestamp: new Date(), status: "sent", sentBy: { name: "Bot" } },
+        waPhone: conversation.waPhone, companyId: companyId.toString() };
+      io.to(`wa_company_${companyId}`).emit("wa_message", payload);
+    }
+    return res.json({ success: true, message: savedMsg });
+  } catch (err) { console.error("botReply error:", err.message); next(err); }
+};
+
 module.exports = {
   getConversations,
   getMessages,
@@ -2417,4 +2524,6 @@ module.exports = {
   listWhatsAppTemplates,
   syncWhatsAppTemplates,
   listLeadSources,
+  createLeadFromConversation,
+  botReply,
 };
