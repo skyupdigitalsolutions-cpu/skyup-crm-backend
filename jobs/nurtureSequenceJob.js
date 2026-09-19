@@ -253,6 +253,7 @@ function resolveNextVariation(rule, lead) {
 function ruleMatchesStatus(rule, lead) {
   if (HARD_SKIP_STATUSES.has(lead.status)) return false;
   if (isManualOrImported(lead)) return false;
+  if (lead.whatsappOptOut === true) return false; // lead sent STOP — skip all nurture
   // Skip standard nurture for leads in objection-handling sequence
   // (objection job runs separately — don't double-send)
   if (lead.objectionTag && rule.trigger?.isObjectionRule !== true) {
