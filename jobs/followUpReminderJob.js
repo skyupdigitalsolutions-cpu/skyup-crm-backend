@@ -119,6 +119,7 @@ async function runFollowUpReminderCheck(slot) {
       mergedInto: null,
       // Leads who tapped "Stop Promotion" are permanently excluded
       followUpReminderOptOut: { $ne: true },
+      whatsappOptOut:         { $ne: true },
       scheduledCalls: {
         $elemMatch: { type: "follow-up", done: false, scheduledAt: { $lte: todayEnd } },
       },
