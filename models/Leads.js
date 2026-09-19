@@ -492,6 +492,11 @@ const leadSchema = mongoose.Schema(
     // excluded from the follow-up reminder job (other automations still fire).
     followUpReminderOptOut:       { type: Boolean, default: false },
 
+    // Set true when a lead replies "STOP" to any inbound WhatsApp message.
+    // Opted-out leads are permanently excluded from ALL WhatsApp automations.
+    whatsappOptOut:               { type: Boolean, default: false },
+    whatsappOptOutAt:             { type: Date,    default: null  },
+
     // ── "No follow-up date set" alert tracking (push notification to EMPLOYEE) ─
     // leadAlertsJob's runNoFollowUpDateCheck() nudges the assigned employee when
     // a lead has gone 24h+ since creation with NO scheduledCalls entry at all
