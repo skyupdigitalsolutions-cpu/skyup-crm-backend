@@ -21,10 +21,11 @@
 //   telegramEnabled     — master on/off switch
 // ─────────────────────────────────────────────────────────────────────────────
 
-const https    = require('https');
-const Company  = require('../models/Company');
-const User     = require('../models/Users');
-const Lead     = require('../models/Leads');
+const https           = require('https');
+const Company         = require('../models/Company');
+const WhatsAppConfig  = require('../models/WhatsAppConfig');
+const User            = require('../models/Users');
+const Lead            = require('../models/Leads');
 
 // ── Log a Telegram send to the lead's telegramNotifications history ──────────
 // Lets the lead's chronological journey show exactly when a Telegram alert
@@ -70,7 +71,7 @@ const CAMPAIGN_SOURCES = new Set([
   'Meta',          // Facebook + Instagram Lead Ads (metaWebhookController)
   'Google Ads',    // Google Lead Form Extension (googleAdsHelper)
   'Website',       // Landing page / website tracking (websiteWebhookController)
-  'WhatsApp',      // First-time inbound WhatsApp message with no matching lead (msg91WebhookController)
+  // WhatsApp has its own dedicated notifications via notifyWhatsApp* functions
 ]);
 
 // ── Platform label for notification message ───────────────────────────────────
@@ -497,6 +498,89 @@ async function notifyAllAdminsCampaignLead(lead, companyId) {
   }
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WhatsApp-specific Telegram notifications
+// All use waTelegramBotToken + waTelegramChatId from WhatsAppConfig
+// Completely separate from campaign-lead Telegram on Company model
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function _sendWATelegram(companyId, text) {
+  if (!(await telegramEntitled(companyId))) return null;
+  const waConfig = await WhatsAppConfig.findOne({ company: companyId })
+    .select('waTelegramBotToken waTelegramChatId waTelegramEnabled').lean();
+  if (!waConfig?.waTelegramEnabled)  return null;
+  if (!waConfig?.waTelegramBotToken) return null;
+  if (!waConfig?.waTelegramChatId)   return null;
+  await sendTelegramMessage(waConfig.waTelegramBotToken, waConfig.waTelegramChatId, text);
+  return true;
+}
+
+function buildWhatsAppNewLeadMessage(companyName, lead, waPhone, msgBody) {
+  const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  const preview = msgBody && msgBody.length > 100 ? msgBody.substring(0, 100) + '…' : (msgBody || '(no text)');
+  return `📲 <b>New WhatsApp Lead</b>\n\n👤 <b>Name:</b> ${escapeHtml(lead.name || 'Unknown')}\n📞 <b>Number:</b> <code>+${escapeHtml(waPhone)}</code>\n💬 <b>First message:</b> ${escapeHtml(preview)}\n📋 <b>Source:</b> WhatsApp (cold inbound)\n🕐 <b>Time:</b> ${now}\n\n<i>🏢 ${escapeHtml(companyName)}</i>`;
+}
+
+async function notifyWhatsAppNewLead({ companyId, lead, waPhone, msgBody }) {
+  if (!companyId || !waPhone || !lead) return;
+  try {
+    const company = await Company.findById(companyId).select('name').lean();
+    const text = buildWhatsAppNewLeadMessage(company?.name || '', lead, waPhone, msgBody);
+    await _sendWATelegram(companyId, text);
+    console.log(`[Telegram-WA] ✅ New WA lead: ${lead.name} (${waPhone})`);
+  } catch (err) { console.error('[Telegram-WA] notifyWhatsAppNewLead error:', err.message); }
+}
+
+function buildWhatsAppReplyMessage(companyName, contactName, waPhone, msgBody, leadName) {
+  const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  const preview = msgBody && msgBody.length > 100 ? msgBody.substring(0, 100) + '…' : (msgBody || '(media/no text)');
+  const displayName = leadName || contactName || `+${waPhone}`;
+  return `💬 <b>WhatsApp Reply</b>\n\n👤 <b>From:</b> ${escapeHtml(displayName)}\n📞 <b>Number:</b> <code>+${escapeHtml(waPhone)}</code>\n💬 <b>Message:</b> ${escapeHtml(preview)}\n🕐 <b>Time:</b> ${now}\n\n<i>🏢 ${escapeHtml(companyName)}</i>`;
+}
+
+async function notifyWhatsAppInbound({ companyId, contactName, waPhone, msgBody, lead }) {
+  if (!companyId || !waPhone) return;
+  try {
+    const hasLead = !!(lead?._id || lead);
+    if (!hasLead) return; // unknown number — agent handles from inbox
+    const company = await Company.findById(companyId).select('name').lean();
+    const text = buildWhatsAppReplyMessage(company?.name || '', contactName, waPhone, msgBody, lead?.name);
+    await _sendWATelegram(companyId, text);
+    console.log(`[Telegram-WA] ✅ WA reply notified: ${waPhone}`);
+  } catch (err) { console.error('[Telegram-WA] notifyWhatsAppInbound error:', err.message); }
+}
+
+function buildWhatsAppStopMessage(companyName, contactName, waPhone) {
+  const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  return `🛑 <b>WhatsApp Opt-Out</b>\n\n👤 <b>Contact:</b> ${escapeHtml(contactName || 'Unknown')}\n📞 <b>Number:</b> <code>+${escapeHtml(waPhone)}</code>\n📋 <b>Status:</b> Unsubscribed — all automated WhatsApp messages stopped\n🕐 <b>Time:</b> ${now}\n\n<i>🏢 ${escapeHtml(companyName)}</i>`;
+}
+
+async function notifyWhatsAppOptOut({ companyId, contactName, waPhone }) {
+  if (!companyId || !waPhone) return;
+  try {
+    const company = await Company.findById(companyId).select('name').lean();
+    const text = buildWhatsAppStopMessage(company?.name || '', contactName, waPhone);
+    await _sendWATelegram(companyId, text);
+    console.log(`[Telegram-WA] ✅ WA opt-out notified: ${waPhone}`);
+  } catch (err) { console.error('[Telegram-WA] notifyWhatsAppOptOut error:', err.message); }
+}
+
+function buildLeadPromotedMessage(companyName, leadName, waPhone, agentName) {
+  const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  return `✅ <b>WhatsApp Lead Created</b>\n\n👤 <b>Lead Name:</b> ${escapeHtml(leadName || 'Unknown')}\n📞 <b>Number:</b> <code>+${escapeHtml(waPhone)}</code>\n👷 <b>Created By:</b> ${escapeHtml(agentName || 'Admin')}\n📋 <b>Source:</b> WhatsApp Inbox (manual)\n🕐 <b>Time:</b> ${now}\n\n<i>🏢 ${escapeHtml(companyName)}</i>`;
+}
+
+async function notifyWhatsAppLeadCreated({ companyId, leadName, waPhone, agentName }) {
+  if (!companyId || !waPhone) return;
+  try {
+    const company = await Company.findById(companyId).select('name').lean();
+    const text = buildLeadPromotedMessage(company?.name || '', leadName, waPhone, agentName);
+    await _sendWATelegram(companyId, text);
+    console.log(`[Telegram-WA] ✅ WA lead-created notified: ${leadName} (${waPhone})`);
+  } catch (err) { console.error('[Telegram-WA] notifyWhatsAppLeadCreated error:', err.message); }
+}
+
 module.exports = {
   notifyCampaignLead,
   notifyEmployeeLead,
@@ -506,4 +590,9 @@ module.exports = {
   sendTestNotification,
   isCampaignLead,
   CAMPAIGN_SOURCES,
+  // WhatsApp-specific (separate WA Telegram channel)
+  notifyWhatsAppNewLead,
+  notifyWhatsAppInbound,
+  notifyWhatsAppOptOut,
+  notifyWhatsAppLeadCreated,
 };
