@@ -865,6 +865,12 @@ async function autoSendTemplates(lead, companyId) {
     return [{ channel: "all", status: "skipped", detail: `Source "${lead.source}" is excluded from automation` }];
   }
 
+  // Honour STOP opt-out
+  if (lead.whatsappOptOut === true) {
+    console.log(`[autoTemplate] ⏭ Skipped — lead ${lead._id} opted out (whatsappOptOut=true)`);
+    return [{ channel: "all", status: "skipped", detail: "Lead has opted out of WhatsApp messages (sent STOP)" }];
+  }
+
   console.log(`[autoTemplate] ▶ New lead: "${lead.name}" company=${companyId}`);
 
   try {
@@ -935,6 +941,11 @@ async function sendInterestedBlast(lead, companyId) {
   if (!companyId || !lead) {
     console.warn("[interestedBlast] ❌ Skipped — missing lead or companyId");
     return [{ channel: "all", status: "skipped", detail: "Missing lead or companyId" }];
+  }
+
+  if (lead.whatsappOptOut === true) {
+    console.log(`[interestedBlast] ⏭ Skipped — lead ${lead._id} opted out (whatsappOptOut=true)`);
+    return [{ channel: "all", status: "skipped", detail: "Lead has opted out of WhatsApp messages (sent STOP)" }];
   }
 
   console.log(`[interestedBlast] ▶ Lead "${lead.name}" marked Interested — company=${companyId}`);
