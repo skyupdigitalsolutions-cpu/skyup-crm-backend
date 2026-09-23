@@ -1151,7 +1151,8 @@ const deleteMsg91EmailConfig = async (req, res, next) => {
 // ── WhatsApp-specific Telegram config endpoints ────────────────────────────────
 const getWATelegramConfig = async (req, res, next) => {
   try {
-    const companyId = req.admin?.company;
+    // FIX: use ._id — req.admin.company is a populated object, not just an ObjectId.
+    const companyId = req.admin?.company?._id || req.admin?.company;
     const WaConfig = require('../models/WhatsAppConfig');
     const config = await WaConfig.findOne({ company: companyId }).lean();
     res.json({
@@ -1164,7 +1165,14 @@ const getWATelegramConfig = async (req, res, next) => {
 
 const saveWATelegramConfig = async (req, res, next) => {
   try {
-    const companyId = req.admin?.company;
+    // FIX: req.admin.company is a populated object (from adminAuthMiddleware's
+    // .populate("company")). Using req.admin?.company directly passes the full
+    // Company document to the MongoDB query instead of an ObjectId, causing
+    // findOneAndUpdate to never match the existing WhatsAppConfig document
+    // (it upserts a new one with company=object) and findOne in the test
+    // endpoint to find a different (or no) document — producing a 500 error.
+    // Fix: use ._id consistently, matching every other function in this file.
+    const companyId = req.admin?.company?._id || req.admin?.company;
     const { waTelegramBotToken, waTelegramChatId, waTelegramEnabled } = req.body;
     const WaConfig = require('../models/WhatsAppConfig');
     const update = {};
@@ -1178,7 +1186,8 @@ const saveWATelegramConfig = async (req, res, next) => {
 
 const testWATelegramConfig = async (req, res, next) => {
   try {
-    const companyId = req.admin?.company;
+    // FIX: same bug as saveWATelegramConfig — must use ._id to get ObjectId.
+    const companyId = req.admin?.company?._id || req.admin?.company;
     const WaConfig = require('../models/WhatsAppConfig');
     const config = await WaConfig.findOne({ company: companyId });
     if (!config?.waTelegramBotToken) return res.status(400).json({ message: 'Bot token not configured.' });
