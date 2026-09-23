@@ -249,30 +249,40 @@ const getCallLogs = async (req, res) => {
     // list here (filtered to a call-log "user" matching their own admin ID,
     // which normal call logs never have) instead of an error — worse,
     // because it looks like "no calls" rather than a clear problem.
-    const isAdmin = !!(req.admin || req.callerCompany);
+    // FIX BUG 1: req.admin is only set for admin/super_admin tokens by protectAny.
+    // req.callerCompany is set for ALL authenticated callers (admin AND employee),
+    // so using it as the isAdmin signal incorrectly treats every employee request
+    // as an admin request, leaking all company-wide call data to regular employees.
+    const isAdmin = !!req.admin;
     const company = req.callerCompany || req.user?.company;
-
-    const filter = isAdmin
-      ? { company, ...(req.query.userId ? { user: req.query.userId } : {}) }
-      : { user: (req.user.userId || req.user._id) };
 
     if (isAdmin && !company) {
       return res.status(400).json({ message: 'Company not resolved for admin token' });
     }
 
+    const filter = isAdmin
+      ? { company, ...(req.query.userId ? { user: req.query.userId } : {}) }
+      : { user: (req.user.userId || req.user._id) };
+
     if (req.query.date) {
-      const dayStart = new Date(req.query.date);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(dayStart);
-      dayEnd.setDate(dayEnd.getDate() + 1);
-      filter.timestamp = { $gte: dayStart, $lt: dayEnd };
+      // FIX BUG 2: Use device timezone offset to compute correct UTC boundaries.
+      // tzOffset = device's UTC offset in minutes (positive = ahead of UTC, e.g. IST = 330).
+      // Without this, calls made between 00:00-05:30 IST appear in the previous UTC day's
+      // bucket and are missing from the selected day on Indian devices.
+      const tzOffset = parseInt(req.query.tzOffset || '0', 10) || 0;
+      const [year, month, day] = req.query.date.split('-').map(Number);
+      // Local midnight expressed in UTC:
+      const dayStartUTC = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      dayStartUTC.setUTCMinutes(dayStartUTC.getUTCMinutes() - tzOffset);
+      const dayEndUTC = new Date(dayStartUTC.getTime() + 24 * 60 * 60 * 1000);
+      filter.timestamp = { $gte: dayStartUTC, $lt: dayEndUTC };
     }
 
     let logsQuery = MobileCallLog.find(filter)
       .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
       .populate('matchedLead', 'name mobile status');
-    // Only populate the caller's name/email when showing merged company-wide
-    // results (admin) — an agent already knows every log here is their own.
+    // Only populate user name/email for admin (company-wide view).
+    // Employees already know every log here is their own.
     if (isAdmin) logsQuery = logsQuery.populate('user', 'name email');
 
     const [logs, total] = await Promise.all([
@@ -293,19 +303,28 @@ const getCallLogs = async (req, res) => {
 //     one specific agent. Optional ?date=YYYY-MM-DD to query a past day.
 const getTodayCallLogs = async (req, res) => {
   try {
-    // Determine date window
+    // FIX: use tzOffset (device UTC offset in minutes) for correct local-day boundaries.
+    // Without this, calls near midnight on IST devices appear on the wrong day.
     const dateParam = req.query.date;
+    const tzOffset  = parseInt(req.query.tzOffset || '0', 10) || 0;
     let dayStart, dayEnd;
     if (dateParam) {
-      dayStart = new Date(dateParam); dayStart.setHours(0, 0, 0, 0);
-      dayEnd   = new Date(dateParam); dayEnd.setHours(23, 59, 59, 999);
+      const [year, month, day] = dateParam.split('-').map(Number);
+      dayStart = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      dayStart.setUTCMinutes(dayStart.getUTCMinutes() - tzOffset);
+      dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000 - 1);
     } else {
-      const now = new Date();
-      dayStart  = new Date(now); dayStart.setHours(0, 0, 0, 0);
-      dayEnd    = new Date(now); dayEnd.setHours(23, 59, 59, 999);
+      // No date supplied — use the current local day in the device's timezone.
+      // Compute "now" shifted by tzOffset so we get the device's current date.
+      const nowUTC = Date.now();
+      const localMidnightMs = Math.floor((nowUTC + tzOffset * 60000) / 86400000) * 86400000 - tzOffset * 60000;
+      dayStart = new Date(localMidnightMs);
+      dayEnd   = new Date(localMidnightMs + 24 * 60 * 60 * 1000 - 1);
     }
 
-    const isAdmin = !!(req.admin || req.callerCompany);
+    // FIX: req.admin is only set for admin/super_admin tokens.
+    // req.callerCompany is set for both admin AND employee — cannot use it as isAdmin signal.
+    const isAdmin = !!req.admin;
     const company = req.callerCompany || req.user?.company;
 
     let filter;
@@ -316,7 +335,7 @@ const getTodayCallLogs = async (req, res) => {
       // Optional drill-down: ?userId=<agentId>
       if (req.query.userId) filter.user = req.query.userId;
     } else {
-      // Regular agent: only their own logs
+      // Regular employee: only their own logs
       filter = { user: (req.user.userId || req.user._id), timestamp: { $gte: dayStart, $lte: dayEnd } };
     }
 
