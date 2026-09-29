@@ -402,9 +402,11 @@ const getMonitoringSummary = async (req, res) => {
 };
 
 // ── GET /api/call-logs/monitoring/history ─────────────────────────────────────
-// Extra params: callType (incoming|outgoing|missed|rejected|connected|not_picked),
+// Extra params: callType (incoming|outgoing|missed|rejected|connected|not_picked|
+//                         outgoing_connected|missed_any),
+//               phone (exact normalised number — drill-down from Clients),
 //               search (phone digits or contact name), hasRecording=true,
-//               page, limit (max 500)
+//               sort (recent|duration), page, limit (max 500)
 const getMonitoringHistory = async (req, res) => {
   try {
     const scope = await resolveScope(req, res);
@@ -427,6 +429,11 @@ const getMonitoringHistory = async (req, res) => {
     } else if (ct === "not_picked") {
       filter.callType = "outgoing";
       filter.duration = 0;
+    } else if (ct === "outgoing_connected") {
+      filter.callType = "outgoing";
+      filter.duration = { $gt: 0 };
+    } else if (ct === "missed_any") {
+      filter.callType = { $in: ["missed", "rejected"] };
     } else if (CALL_TYPES.includes(ct)) {
       filter.callType = ct;
     }
@@ -443,12 +450,19 @@ const getMonitoringHistory = async (req, res) => {
         or.push({ phoneNumber:     { $regex: escapeRegex(digits) } });
         or.push({ normalizedPhone: { $regex: escapeRegex(digits) } });
       }
-      filter.$or = or;
+      filter.$and = [{ $or: or }];
     }
+
+    const phone = String(req.query.phone || "").trim().slice(0, 30);
+    if (phone) {
+      (filter.$and = filter.$and || []).push({ $or: [{ normalizedPhone: phone }, { phoneNumber: phone }] });
+    }
+
+    const sort = req.query.sort === "duration" ? { duration: -1, timestamp: -1 } : { timestamp: -1 };
 
     const [logs, total] = await Promise.all([
       MobileCallLog.find(filter)
-        .sort({ timestamp: -1 })
+        .sort(sort)
         .skip((page - 1) * limit)
         .limit(limit)
         .select("-recordings.transcript")
@@ -584,4 +598,91 @@ const getNeverAttended = async (req, res) => {
   }
 };
 
-module.exports = { getMonitoringSummary, getMonitoringHistory, getNeverAttended };
+// ── GET /api/call-logs/monitoring/clients ─────────────────────────────────────
+// One row per distinct phone number (the "Unique clients" figure), with call
+// counts and talk time. Params: search, sort (calls|duration|recent|missed),
+// page, limit (max 200).
+const getMonitoringClients = async (req, res) => {
+  try {
+    const scope = await resolveScope(req, res);
+    if (!scope) return;
+    const range = resolveRange(req.query);
+
+    const page  = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 25));
+
+    const match = {
+      company:   scope.company,
+      user:      { $in: scope.userIds },
+      timestamp: { $gte: range.start, $lt: range.end },
+    };
+    const search = String(req.query.search || "").trim().slice(0, 50);
+    if (search) {
+      const digits = search.replace(/\D/g, "");
+      const or = [{ name: { $regex: escapeRegex(search), $options: "i" } }];
+      if (digits.length >= 3) {
+        or.push({ phoneNumber:     { $regex: escapeRegex(digits) } });
+        or.push({ normalizedPhone: { $regex: escapeRegex(digits) } });
+      }
+      match.$or = or;
+    }
+
+    const SORTS = {
+      calls:    { calls: -1, lastCallAt: -1 },
+      duration: { duration: -1, calls: -1 },
+      recent:   { lastCallAt: -1 },
+      missed:   { missed: -1, lastCallAt: -1 },
+    };
+    const sort = SORTS[req.query.sort] || SORTS.calls;
+
+    const [facet] = await MobileCallLog.aggregate([
+      { $match: match },
+      { $sort: { timestamp: -1 } },
+      { $group: {
+        _id:          phoneKeyExpr,
+        phoneNumber:  { $first: "$phoneNumber" },
+        name:         { $max: "$name" },
+        matchedLead:  { $max: "$matchedLead" },
+        calls:        { $sum: 1 },
+        incoming:     countIf(typeIs("incoming")),
+        outgoing:     countIf(typeIs("outgoing")),
+        missed:       countIf({ $in: ["$callType", ["missed", "rejected"]] }),
+        notPickedUp:  countIf({ $and: [typeIs("outgoing"), { $eq: ["$duration", 0] }] }),
+        connected:    countIf(isConnectedExpr),
+        duration:     { $sum: "$duration" },
+        firstCallAt:  { $min: "$timestamp" },
+        lastCallAt:   { $max: "$timestamp" },
+        users:        { $addToSet: "$user" },
+      } },
+      { $facet: {
+        rows:  [{ $sort: sort }, { $skip: (page - 1) * limit }, { $limit: limit }],
+        total: [{ $count: "n" }],
+      } },
+    ]).allowDiskUse(true);
+
+    const rows  = facet.rows;
+    const total = (facet.total[0] && facet.total[0].n) || 0;
+
+    const leadIds = [...new Set(rows.map((r) => r.matchedLead).filter(Boolean).map(String))];
+    const leads = leadIds.length
+      ? await Lead.find({ _id: { $in: leadIds }, company: scope.company }).select("name status").lean()
+      : [];
+    const leadMap  = new Map(leads.map((l) => [String(l._id), l]));
+    const userName = new Map(scope.users.map((u) => [String(u._id), u.name]));
+
+    res.json({
+      rows: rows.map(({ matchedLead, users, _id, ...r }) => ({
+        ...r,
+        phoneKey:  _id,
+        lead:      matchedLead ? leadMap.get(String(matchedLead)) || null : null,
+        employees: users.map((id) => userName.get(String(id))).filter(Boolean),
+      })),
+      total, page, totalPages: Math.ceil(total / limit),
+    });
+  } catch (error) {
+    console.error("[callMonitoring] clients error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = { getMonitoringSummary, getMonitoringHistory, getNeverAttended, getMonitoringClients };
