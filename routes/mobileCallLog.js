@@ -12,6 +12,9 @@ const {
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
   summarizeUnmatchedCall,
 } = require('../controllers/mobileCallLogController');
+const {
+  getMonitoringSummary, getMonitoringHistory, getNeverAttended,
+} = require('../controllers/callMonitoringController');
 const { makeCompanyUploadMiddleware } = require('../services/cloudinaryService');
 
 // Per-company recording upload — routes the file to the company's own Cloudinary
@@ -33,5 +36,10 @@ router.post('/summarize-unmatched', protectAny, summarizeUnmatchedCall); // AI s
 router.get('/recordings',   protectAny, getCompanyRecordings);
 router.get('/all',          protectAny, getCompanyAllLogs);
 router.get('/lead/:leadId', protectAny, getCallLogsForLead);
+
+// ── Admin Call Monitoring dashboard (admin / super_admin only — enforced in controller)
+router.get('/monitoring/summary',        protectAny, getMonitoringSummary);
+router.get('/monitoring/history',        protectAny, getMonitoringHistory);
+router.get('/monitoring/never-attended', protectAny, getNeverAttended);
 
 module.exports = router;
