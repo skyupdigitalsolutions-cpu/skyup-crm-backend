@@ -13,7 +13,7 @@ const {
   summarizeUnmatchedCall,
 } = require('../controllers/mobileCallLogController');
 const {
-  getMonitoringSummary, getMonitoringHistory, getNeverAttended,
+  getMonitoringSummary, getMonitoringHistory, getNeverAttended, getMonitoringClients,
 } = require('../controllers/callMonitoringController');
 const { makeCompanyUploadMiddleware } = require('../services/cloudinaryService');
 
@@ -41,5 +41,6 @@ router.get('/lead/:leadId', protectAny, getCallLogsForLead);
 router.get('/monitoring/summary',        protectAny, getMonitoringSummary);
 router.get('/monitoring/history',        protectAny, getMonitoringHistory);
 router.get('/monitoring/never-attended', protectAny, getNeverAttended);
+router.get('/monitoring/clients',        protectAny, getMonitoringClients);
 
 module.exports = router;
