@@ -12,7 +12,7 @@
 const CustomReport = require("../models/CustomReport");
 const Company      = require("../models/Company");
 const Lead         = require("../models/Leads");
-const { callGroq } = require("../utils/leadActionSummary");
+const { callGrok: callGroq } = require("../utils/leadActionSummary");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const FIELD_TYPES = ["revenue", "cost", "profit", "other"];
