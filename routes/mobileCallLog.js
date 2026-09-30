@@ -3,6 +3,7 @@
 //         Mobile app uses this instead of GET / (which returns full history).
 
 const express = require('express');
+const { withCache } = require('../middlewares/redisCache');
 const router  = express.Router();
 const { protect, protectAny } = require('../middlewares/authMiddleware');
 const { protectAdmin }        = require('../middlewares/adminAuthMiddleware');
@@ -10,11 +11,8 @@ const {
   syncCallLogs, getCallLogs, getTodayCallLogs, matchPhone,
   uploadRecording, upload, getCompanyRecordings,
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
-  summarizeUnmatchedCall,
+  summarizeUnmatchedCall, getUncalledLeads,
 } = require('../controllers/mobileCallLogController');
-const {
-  getMonitoringSummary, getMonitoringHistory, getNeverAttended, getMonitoringClients,
-} = require('../controllers/callMonitoringController');
 const { makeCompanyUploadMiddleware } = require('../services/cloudinaryService');
 
 // Per-company recording upload — routes the file to the company's own Cloudinary
@@ -27,8 +25,8 @@ const recordingUpload = makeCompanyUploadMiddleware({
 });
 
 router.get('/match',        protectAny, matchPhone);
-router.get('/today',        protectAny, getTodayCallLogs);   // protectAny: agents see own, admins see all company
-router.get('/',             protectAny, getCallLogs);        // supports ?date=YYYY-MM-DD
+router.get('/today',        protectAny, withCache, getTodayCallLogs);   // protectAny: agents see own, admins see all company
+router.get('/',             protectAny, withCache, getCallLogs);        // supports ?date=YYYY-MM-DD
 router.post('/sync',        protectAny, syncCallLogs);
 router.post('/recording',   protectAny, recordingUpload, uploadRecording);
 router.post('/remark',      protectAny, saveRemark);
@@ -37,10 +35,8 @@ router.get('/recordings',   protectAny, getCompanyRecordings);
 router.get('/all',          protectAny, getCompanyAllLogs);
 router.get('/lead/:leadId', protectAny, getCallLogsForLead);
 
-// ── Admin Call Monitoring dashboard (admin / super_admin only — enforced in controller)
-router.get('/monitoring/summary',        protectAny, getMonitoringSummary);
-router.get('/monitoring/history',        protectAny, getMonitoringHistory);
-router.get('/monitoring/never-attended', protectAny, getNeverAttended);
-router.get('/monitoring/clients',        protectAny, getMonitoringClients);
+// Leads assigned to this user that have NOT been called on/before the selected day.
+// Carry-forward: appears every day until the lead is actually called.
+router.get('/uncalled', protectAny, getUncalledLeads);
 
 module.exports = router;
