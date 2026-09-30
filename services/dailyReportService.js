@@ -621,7 +621,7 @@ function buildSummaryBlock(totals, date) {
  * Splits a long report into multiple ≤4000-char Telegram messages.
  * Returns an array of HTML strings.
  */
-function formatTelegramMessages(report, companyName, nurtureStats, waStats, outcomeStats, statusSnap) {
+function formatTelegramMessages(report, companyName, nurtureStats, waStats, outcomeStats, statusSnap, followUpList = null) {
   const header =
     `📊 <b>SKYUP CRM — DAILY SALES REPORT</b>\n` +
     `📅 ${formatDate(report.reportDate)}\n` +
@@ -706,6 +706,19 @@ function formatTelegramMessages(report, companyName, nurtureStats, waStats, outc
     if ((current + snapBlock).length > MAX_MSG_LEN) {
       messages.push(current); current = snapBlock;
     } else { current += snapBlock; }
+  }
+
+  // ── Follow-up list block ──────────────────────────────────────────────────
+  if (followUpList) {
+    const fuListBlock = buildFollowUpListBlock(followUpList);
+    if (fuListBlock) {
+      if ((current + fuListBlock).length > MAX_MSG_LEN) {
+        messages.push(current);
+        current = fuListBlock;
+      } else {
+        current += fuListBlock;
+      }
+    }
   }
 
   // WhatsApp stats — appended after outcome/status
@@ -977,6 +990,116 @@ ${emoji} ${stageName}: ${stageTotal}
   return block;
 }
 
+
+// ── Follow-up list for the report day ────────────────────────────────────────
+// Returns the ACTUAL LIST of leads with follow-ups on the report day —
+// not just counts, but names, times, employee, and status.
+// Split into three groups: completed today, due today (pending), overdue.
+async function getFollowUpList(companyId, dayStart, dayEnd) {
+  try {
+    const cid = new mongoose.Types.ObjectId(String(companyId));
+
+    const leads = await Lead.find({
+      company:    cid,
+      mergedInto: null,
+      isClosed:   { $ne: true },
+      // Has at least one scheduledCalls entry relevant to today or overdue
+      $or: [
+        // Due today (pending or completed today)
+        { scheduledCalls: { $elemMatch: { scheduledAt: { $gte: dayStart, $lte: dayEnd } } } },
+        // Overdue (past, not done)
+        { scheduledCalls: { $elemMatch: { done: false, scheduledAt: { $lt: dayStart } } } },
+      ],
+    })
+      .select('_id name mobile status scheduledCalls user')
+      .populate('user', 'name')
+      .lean();
+
+    const completed = [];
+    const dueToday  = [];
+    const overdue   = [];
+
+    for (const lead of leads) {
+      const employeeName = lead.user?.name || 'Unassigned';
+      for (const sc of (lead.scheduledCalls || [])) {
+        const at = new Date(sc.scheduledAt);
+        const isToday   = at >= dayStart && at <= dayEnd;
+        const isPast    = at < dayStart;
+        const isDone    = !!sc.done;
+        const timeStr   = at.toLocaleTimeString('en-IN', {
+          timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true,
+        });
+        const entry = {
+          leadName:     lead.name || 'Unknown Lead',
+          mobile:       lead.mobile || '',
+          status:       lead.status || '',
+          employee:     employeeName,
+          time:         timeStr,
+          scheduledAt:  at,
+          note:         sc.note || '',
+          type:         sc.type || 'follow-up',
+        };
+        if (isDone && isToday)    { completed.push(entry); continue; }
+        if (!isDone && isToday)   { dueToday.push(entry);  continue; }
+        if (!isDone && isPast)    { overdue.push(entry);   continue; }
+      }
+    }
+
+    // Sort each group by scheduledAt
+    const byTime = (a, b) => a.scheduledAt - b.scheduledAt;
+    completed.sort(byTime);
+    dueToday.sort(byTime);
+    overdue.sort(byTime);
+
+    return { completed, dueToday, overdue };
+  } catch (err) {
+    console.warn('[DailyReport] getFollowUpList error:', err.message);
+    return { completed: [], dueToday: [], overdue: [] };
+  }
+}
+
+// ── Build follow-up list block ────────────────────────────────────────────────
+function buildFollowUpListBlock(followUpList) {
+  const { completed, dueToday, overdue } = followUpList;
+  const total = completed.length + dueToday.length + overdue.length;
+  if (total === 0) return '';
+
+  // Cap list length to avoid huge messages (show top N per group)
+  const MAX_PER_GROUP = 15;
+
+  function formatEntry(entry, idx) {
+    const note = entry.note ? ` — ${escapeHtml(entry.note)}` : '';
+    const emp  = entry.employee !== 'Unassigned' ? ` 👤 ${escapeHtml(entry.employee)}` : '';
+    return `${idx + 1}. <b>${escapeHtml(entry.leadName)}</b> · ${entry.time}${emp}${note}\n`;
+  }
+
+  let block = `\n📋 <b>FOLLOW-UP LIST</b>\n`;
+
+  if (overdue.length > 0) {
+    block += `\n🔴 <b>Overdue (${overdue.length})</b>\n`;
+    overdue.slice(0, MAX_PER_GROUP).forEach((e, i) => { block += formatEntry(e, i); });
+    if (overdue.length > MAX_PER_GROUP)
+      block += `   <i>…and ${overdue.length - MAX_PER_GROUP} more</i>\n`;
+  }
+
+  if (dueToday.length > 0) {
+    block += `\n🟡 <b>Due Today — Pending (${dueToday.length})</b>\n`;
+    dueToday.slice(0, MAX_PER_GROUP).forEach((e, i) => { block += formatEntry(e, i); });
+    if (dueToday.length > MAX_PER_GROUP)
+      block += `   <i>…and ${dueToday.length - MAX_PER_GROUP} more</i>\n`;
+  }
+
+  if (completed.length > 0) {
+    block += `\n✅ <b>Completed Today (${completed.length})</b>\n`;
+    completed.slice(0, MAX_PER_GROUP).forEach((e, i) => { block += formatEntry(e, i); });
+    if (completed.length > MAX_PER_GROUP)
+      block += `   <i>…and ${completed.length - MAX_PER_GROUP} more</i>\n`;
+  }
+
+  block += `\n────────────────────\n`;
+  return block;
+}
+
 async function generateAndSend(config, companyName, reportDate, triggeredBy = 'scheduler') {
   const tz          = config.timezone || 'Asia/Kolkata';
   const localDate   = reportDate || getTodayInTimezone(tz);
@@ -1027,11 +1150,13 @@ async function generateAndSend(config, companyName, reportDate, triggeredBy = 's
     // and crashing the report job every day since the bug was introduced.
     const { dayStart, dayEnd } = getCompanyDayBounds(config.timezone || 'Asia/Kolkata', localDate);
 
-    const report       = await buildReport(companyId, config, localDate);
+    const report        = await buildReport(companyId, config, localDate);
     const nurtureStats  = await getNurtureStats(companyId, localDate);
     const outcomeStats  = await getOutcomeStats(companyId, dayStart, dayEnd);
     const statusSnap    = await getStatusSnapshot(companyId);
     const waStats       = await getWhatsAppStats(companyId, dayStart, dayEnd);
+    // NEW: actual follow-up list (lead names + times + employee + status)
+    const followUpList  = await getFollowUpList(companyId, dayStart, dayEnd);
 
     // ── Empty report check ────────────────────────────────────────────────
     if (!report.hasActivity && !config.sendEmptyReport) {
@@ -1044,7 +1169,7 @@ async function generateAndSend(config, companyName, reportDate, triggeredBy = 's
     }
 
     // ── Format messages ───────────────────────────────────────────────────
-    const messages = formatTelegramMessages(report, companyName, nurtureStats, waStats, outcomeStats, statusSnap);
+    const messages = formatTelegramMessages(report, companyName, nurtureStats, waStats, outcomeStats, statusSnap, followUpList);
 
     // ── Decrypt token ─────────────────────────────────────────────────────
     const decryptedToken = config.getDecryptedToken();
@@ -1080,4 +1205,6 @@ module.exports = {
   getCompanyDayBounds,
   getTodayInTimezone,
   sendTelegramMessage,
+  getFollowUpList,
+  buildFollowUpListBlock,
 };
