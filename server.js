@@ -166,9 +166,10 @@ const server = http.createServer(app);
 
 // ── Allowed origins (loaded from ALLOWED_ORIGINS env variable) ────────────────
 // In .env:  ALLOWED_ORIGINS=http://localhost:5173,https://skyupcrm.com,...
-const staticAllowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-  : [];
+const staticAllowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim().replace(/^["']|["']$/g, '').replace(/\/$/, ''))
+  .filter(Boolean);
 
 async function isDynamicOriginAllowed(origin) {
   try {
@@ -195,7 +196,7 @@ const corsOptions = {
       return callback(null, true);
     }
     console.warn(`⚠️  CORS blocked unknown origin: ${origin}`);
-    callback(new Error(`CORS blocked: ${origin}`));
+    callback(null, false); // no CORS headers → browser blocks it; avoids a confusing 500
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -400,7 +401,11 @@ app.use('/api/transcription',       require('./routes/transcription'));
 app.use('/api/sheet-integration',   require('./routes/sheetIntegration'));
 
 // ── BullMQ queue progress & control routes ────────────────────────────────────
-app.use('/api/queue',     require('./routes/queueRoutes'));
+try {
+  app.use('/api/queue', require('./routes/queueRoutes'));
+} catch (e) {
+  console.warn('⚠️  /api/queue disabled —', e.message);
+}
 
 // ── APK Download Routes ───────────────────────────────────────────────────────
 app.get('/download', (req, res) => {
@@ -450,7 +455,7 @@ app.get('/install', (req, res) => {
 });
 
 if (SERVE_FRONTEND) {
-  app.get('*', (req, res) => {
+  app.get('/{*splat}', (req, res) => {
     res.sendFile(path.join(__dirname, 'dist', 'index.html'));
   });
 }
