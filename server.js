@@ -98,6 +98,7 @@ const { startNurtureSequenceJob }     = require('./jobs/nurtureSequenceJob');
 const { startMetaAutoSyncJob }        = require('./jobs/metaAutoSyncJob'); // NEW — auto-syncs new Meta ad sets & forms
 const { startTemplateSyncJob }        = require('./jobs/templateSyncJob'); // NEW — auto-syncs WhatsApp templates from MSG91
 const { startDailyReportJob }         = require('./jobs/dailyReportJob');
+const { startFollowUpPingJob }        = require('./jobs/followUpDailyPingJob');
 const { startLeadAIAnalysisJob }      = require('./jobs/leadAIAnalysisJob');
 const { startFestivalCampaignJob }    = require('./jobs/festivalCampaignJob'); // NEW — fires scheduled festival template blasts on their due date
 
@@ -106,8 +107,6 @@ const smsCampaignRoute         = require('./routes/smsCampaign');
 const smsCampaignEmployeeRoute = require('./routes/smsCampaignEmployee');
 const smsHistoryRoute  = require('./routes/smsHistory');
 
-// ── Saanvi Voicebot Proxy ─────────────────────────────────────────────────────
-const saanviProxyRoute    = require('./routes/saanviProxy');
 const dailyReportRoute    = require('./routes/dailyReportRoute');
 
 // ── WhatsApp Routes (MSG91 + Meta) ────────────────────────────────────────────
@@ -392,7 +391,6 @@ app.use('/api/subscription',        subscriptionRoute);
 // NEW
 app.use('/api/addons',              addonRoutes);
 app.use('/api/benefits',            benefitRoutes);
-app.use('/api/saanvi',              saanviProxyRoute);
 app.use('/api/whatsapp',            whatsappRoutes);
 app.use('/api/reports',             require('./routes/reportRoutes'));
 app.use('/api/nurture',             require('./routes/nurtureRoute'));
@@ -400,6 +398,9 @@ app.use('/api/call-logs',           require('./routes/mobileCallLog'));
 app.use('/api/transcription',       require('./routes/transcription'));
 // Employee Excel / Google Sheet integration (independent of Daily Report/Telegram)
 app.use('/api/sheet-integration',   require('./routes/sheetIntegration'));
+
+// ── BullMQ queue progress & control routes ────────────────────────────────────
+app.use('/api/queue',     require('./routes/queueRoutes'));
 
 // ── APK Download Routes ───────────────────────────────────────────────────────
 app.get('/download', (req, res) => {
@@ -534,6 +535,7 @@ connectDB().then(() => {
     startMetaAutoSyncJob();
     startTemplateSyncJob();      // hourly — keeps WhatsApp template cache fresh from MSG91
     startDailyReportJob();         // Sends daily Telegram performance report at each company's configured time
+    startFollowUpPingJob();        // 9 AM: follow-up list · 4 PM: called vs not-called
     startLeadAIAnalysisJob();     // AI Lead Outcome Intelligence — processes pending analyses every 2 min
     startFestivalCampaignJob();   // Festival Campaigns — checks every 15 min (IST) for scheduled festive blasts due today
     // MSG91 inbound: webhook-only mode — no polling needed
@@ -557,6 +559,15 @@ if (process.env.RENDER_EXTERNAL_URL) {
 // ── Global error handler ────────────────────────────────────────────────────
 // Must be after all routes. Returns safe responses, never stack traces.
 app.use(errorHandler);
+
+// ── Start BullMQ workers ──────────────────────────────────────────────────────
+// Workers resume any pending jobs from before a server restart automatically.
+try {
+  const { initQueues } = require('./queues');
+  initQueues();
+} catch (e) {
+  console.error('BullMQ init error:', e.message);
+}
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 const { redisClient } = require('./middlewares/rateLimiter');
