@@ -4,7 +4,17 @@ const router  = express.Router();
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 const { createOrder, verifyPayment, getInvoices, getSubscription } = require("../controllers/razorpayController");
 const { createAddonOrder, verifyAddonPayment } = require("../controllers/addonPaymentController");
-const { createCartOrder, verifyCartPayment }   = require("../controllers/cartController");
+const cartController = require("../controllers/cartController");
+
+// Guard: if the cart checkout controller is missing/incomplete on this server,
+// keep booting and return 501 for cart routes instead of crashing the whole API.
+const cartHandler = (name) =>
+  typeof cartController[name] === "function"
+    ? cartController[name]
+    : (console.warn(`⚠️  [razorpay] cartController.${name} missing — /cart route returns 501`),
+       (req, res) => res.status(501).json({ message: "Cart checkout is not available right now." }));
+const createCartOrder   = cartHandler("createCartOrder");
+const verifyCartPayment = cartHandler("verifyCartPayment");
 
 router.use(protectAdmin);
 
