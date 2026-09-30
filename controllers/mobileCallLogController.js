@@ -859,5 +859,5 @@ module.exports = {
   upload, syncCallLogs, getCallLogs, getTodayCallLogs,
   matchPhone, uploadRecording, getCompanyRecordings,
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
-  summarizeUnmatchedCall,
+  summarizeUnmatchedCall, getUncalledLeads,
 };
