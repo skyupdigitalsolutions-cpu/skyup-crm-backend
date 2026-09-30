@@ -107,7 +107,8 @@ async function getGoogleAdsDashboard({ company, from, to, campaign, salesperson,
   // Fall back to manually-entered values when API is unavailable.
   const liveDataByCampaign = new Map(); // campaignName -> { cost, impressions, clicks, ctr, avgCpc }
   try {
-    const { getGoogleAdsReport } = require("./googleAdsApiService");
+    const { buildReport } = require("./googleAdsApiService");
+    const getGoogleAdsReport = (cfg, from, to) => buildReport(cfg, { from, to });
     // Use the first config that has OAuth credentials
     const oauthCfg = configs.find((c) => c.refreshToken || c.accessToken);
     if (oauthCfg) {
