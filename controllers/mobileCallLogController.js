@@ -280,7 +280,13 @@ const getCallLogs = async (req, res) => {
 
     let logsQuery = MobileCallLog.find(filter)
       .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
-      .populate('matchedLead', 'name mobile status');
+      // FIX: extend matchedLead populate to include remark + scheduledCalls
+      // so DayCallLogsScreen can show:
+      //   • Lead status badge (status)
+      //   • Remark status — done vs pending (remark from the MobileCallLog itself,
+      //     but status from the lead)
+      //   • Next follow-up date badge (scheduledCalls — filtered to pending entries)
+      .populate('matchedLead', 'name mobile status scheduledCalls');
     // Only populate user name/email for admin (company-wide view).
     // Employees already know every log here is their own.
     if (isAdmin) logsQuery = logsQuery.populate('user', 'name email');
@@ -720,6 +726,131 @@ const summarizeUnmatchedCall = async (req, res) => {
     await log.save();
     res.json({ message: 'Summary generated', summary, log });
   } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+
+// ── GET /api/call-logs/uncalled ───────────────────────────────────────────────
+// Returns leads assigned to this user that were NEVER called on the selected
+// date AND have never been called at all since then (carry-forward rule):
+//
+//   "Not called on day X" means:
+//     • Lead was assigned to this user on or BEFORE day X (createdAt <= dayEnd)
+//     • Lead has NO callHistory entry with calledAt on day X
+//
+//   "Carry-forward" rule:
+//     • If a lead was assigned on day X and not called on day X, it should
+//       appear on day X+1, X+2, etc. until it IS called.
+//     • Implementation: we query leads with callHistory completely empty OR
+//       whose most recent callHistory.calledAt is BEFORE dayStart.
+//       This means "never been called yet" OR "not called since before this day."
+//       The frontend then shows these on the selected day regardless of when
+//       the lead was created — so an uncalled lead from 3 days ago still shows
+//       on today's "Not Called" section.
+//
+//   "Disappear" rule:
+//     • Once any callHistory entry exists with calledAt >= dayStart, the lead
+//       is considered called and drops off the "Not Called" list for that day.
+//     • Closed leads (isClosed: true) and merged leads are excluded.
+//
+//  Query params:
+//    date=YYYY-MM-DD  — the day to check (defaults to today)
+//    tzOffset=330     — device UTC offset in minutes (IST = 330)
+//    limit=200
+//    page=1
+const getUncalledLeads = async (req, res) => {
+  try {
+    const page  = parseInt(req.query.page  || 1);
+    const limit = parseInt(req.query.limit || 200);
+
+    // FIX: use req.admin only (not req.callerCompany) — same fix as getCallLogs
+    const isAdmin = !!req.admin;
+    const company = req.callerCompany || req.user?.company;
+
+    if (!company) return res.status(400).json({ message: 'Company not resolved' });
+
+    // Compute day boundaries in device timezone (same logic as getCallLogs)
+    const tzOffset = parseInt(req.query.tzOffset || '0', 10) || 0;
+    let dayStart, dayEnd;
+
+    if (req.query.date) {
+      const [year, month, day] = req.query.date.split('-').map(Number);
+      dayStart = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      dayStart.setUTCMinutes(dayStart.getUTCMinutes() - tzOffset);
+      dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000 - 1);
+    } else {
+      const nowUTC = Date.now();
+      const localMidnightMs = Math.floor((nowUTC + tzOffset * 60000) / 86400000) * 86400000 - tzOffset * 60000;
+      dayStart = new Date(localMidnightMs);
+      dayEnd   = new Date(localMidnightMs + 24 * 60 * 60 * 1000 - 1);
+    }
+
+    // ── Base filter ────────────────────────────────────────────────────────────
+    // For an employee: their assigned leads only.
+    // For admin: all company leads (admin oversight view).
+    const baseFilter = {
+      company,
+      isClosed:   { $ne: true },
+      mergedInto: null,
+      // Lead must have been created/assigned on or before end of selected day
+      // (a lead created tomorrow cannot be "uncalled today")
+      createdAt: { $lte: dayEnd },
+    };
+
+    if (!isAdmin) {
+      baseFilter.user = req.user.userId || req.user._id;
+    }
+
+    // ── "Not called" filter ────────────────────────────────────────────────────
+    // A lead is "not called on/before dayEnd" when:
+    //   1. callHistory is completely empty  →  never called at all
+    //   2. Every callHistory entry's calledAt is BEFORE dayStart
+    //      → was called before, but not on or after this day (= carry-forward
+    //        from a previous day where the call happened but nothing recent)
+    //
+    // We use $or to combine these:
+    //   $or: [
+    //     { callHistory: { $size: 0 } },                      — never called
+    //     { callHistory: { $not: { $elemMatch: { calledAt: { $gte: dayStart } } } } }
+    //                                                          — no call on/after dayStart
+    //   ]
+    // The second condition absorbs the first (empty array matches $not $elemMatch),
+    // so we just need the second condition:
+    const uncalledFilter = {
+      ...baseFilter,
+      $nor: [
+        { 'callHistory.calledAt': { $gte: dayStart } }
+      ],
+    };
+
+    const [leads, total] = await Promise.all([
+      Lead.find(uncalledFilter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .select('_id name mobile primaryPhone status remark initialRemark temperature Quality campaign source createdAt callHistory scheduledCalls date user')
+        .populate('user', 'name email')
+        .lean(),
+      Lead.countDocuments(uncalledFilter),
+    ]);
+
+    // Annotate each lead with useful computed fields
+    const annotated = leads.map(lead => ({
+      ...lead,
+      callHistoryCount: (lead.callHistory || []).length,
+      hasScheduledCalls: (lead.scheduledCalls || []).some(sc => !sc.done),
+      pendingScheduledCalls: (lead.scheduledCalls || [])
+        .filter(sc => sc && !sc.done && sc.scheduledAt)
+        .map(sc => ({ scheduledAt: sc.scheduledAt, type: sc.type, note: sc.note }))
+        .sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt)),
+      // Days since created (so the agent knows how long this lead has been waiting)
+      daysSinceAssigned: Math.floor((dayEnd - new Date(lead.createdAt)) / (24 * 60 * 60 * 1000)),
+    }));
+
+    res.json({ leads: annotated, total, page, pages: Math.ceil(total / limit) });
+  } catch (error) {
+    console.error('[getUncalledLeads]', error.message);
     res.status(500).json({ message: error.message });
   }
 };
