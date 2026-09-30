@@ -2,7 +2,7 @@
 const GoogleAdsConfig    = require("../models/GoogleAdsConfig");
 const Lead               = require("../models/Leads");
 const { normalizePhone } = require("../utils/normalizePhone");
-const { autoSendTemplates } = require("./leadController");
+const { autoSendTemplates } = require("../services/autoTemplateService");
 const {
   parseGoogleLeadData,
   getNextAssignedUserGoogle,
