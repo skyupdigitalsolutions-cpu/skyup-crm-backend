@@ -75,6 +75,12 @@ async function getLeadInsights({
   page = 1, limit = 25, leadScope = {},
 } = {}) {
   const now = new Date();
+  // Company won / lost statuses (Customize CRM) in addition to the generic patterns.
+  const _cust = await require("./customizationService").getCustomization(company);
+  const _won  = new Set(require("./customizationService").statusKeysByCategory(_cust, "won"));
+  const _lost = new Set(require("./customizationService").statusKeysByCategory(_cust, "lost"));
+  const isConverted  = (s) => _won.has(String(s || "").trim()) || CONVERTED_RE.test(String(s || "").trim());
+  const isClosedLost = (s, closed) => _lost.has(String(s || "").trim()) || CLOSED_LOST_RE.test(String(s || "").trim()) || !!closed;
 
   // FIX: this used to be hardcoded to a single IST day (getISTDayBounds(date))
   // with no way to widen it — every lead not touched on that exact day was

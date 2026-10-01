@@ -73,9 +73,9 @@ const getAllConfigs = async (req, res, next) => {
 
         const [cfgLeads, cfgConv, legacyLeads, legacyConv] = await Promise.all([
           Lead.countDocuments(byConfigQuery),
-          Lead.countDocuments({ ...byConfigQuery, status: "Converted" }),
+          Lead.countDocuments({ ...byConfigQuery, status: { $in: require("../services/customizationService").statusKeysByCategory(require("../services/customizationService").peekCustomization(companyId), "won") } }),
           Lead.countDocuments(legacyQuery),
-          Lead.countDocuments({ ...legacyQuery, status: "Converted" }),
+          Lead.countDocuments({ ...legacyQuery, status: { $in: require("../services/customizationService").statusKeysByCategory(require("../services/customizationService").peekCustomization(companyId), "won") } }),
         ]);
 
         return {

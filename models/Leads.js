@@ -41,10 +41,13 @@ const meetingRemarkSchema = new mongoose.Schema(
   {
     userId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     userName:     { type: String, default: '' },
+    // Values come from the company's customization (lists.meetingTypes);
+    // validated in meetingRemarkController. Enum removed so companies can
+    // define their own meeting types.
     meetingType:  {
       type:    String,
-      enum:    ['In-Person', 'Video Call', 'Phone Call', 'Site Visit', 'Demo'],
       default: 'In-Person',
+      trim:    true,
     },
     outcome:      { type: String, default: '' },
     remark:       { type: String, default: '' },
@@ -225,6 +228,9 @@ const leadSchema = mongoose.Schema(
     // exactly, because their slug becomes part of the approved template name.
     industry: { type: String, default: "", trim: true, index: true },
     service:  { type: String, default: "", trim: true, index: true },
+    // Multi-select services (Customize CRM → Lead Fields → Service → multiple).
+    // `service` above always mirrors services[0] for nurture templates / old clients.
+    services: { type: [String], default: [] },
 
     // The lead's own business name — used for the {{2}} body variable in every
     // nurture template ("is {{2}} getting enough new patients?"). Distinct from
@@ -233,6 +239,14 @@ const leadSchema = mongoose.Schema(
     // still succeeds — Meta rejects a template send with a missing variable.
     businessName: { type: String, default: "", trim: true },
 
+    // ── Company-defined custom fields (Customize CRM → Custom Fields) ─────────
+    // Keys/types come from CompanyCustomization.customFields; values are
+    // validated by utils/customizationResolver.sanitizeCustomFieldValues()
+    // before they are written, so only known keys of the right type land here.
+    customFields: { type: Map, of: mongoose.Schema.Types.Mixed, default: () => ({}) },
+
+    // Stored value = the status KEY from the company's customization (labels
+    // can be renamed freely without touching existing leads).
     status:    { type: String, required: true, trim: true },
     date:      { type: Date, required: true },
     remark:    { type: String, required: true, trim: true },
@@ -241,10 +255,13 @@ const leadSchema = mongoose.Schema(
     // latest call/meeting remark — this is written once at creation and never
     // changed, so the app can always show the lead's initial campaign remark.
     initialRemark: { type: String, default: "" },
+    // Lead quality — values come from the company's customization
+    // (default Hot / Warm / Cold). The old enum was removed so companies can
+    // define their own qualities; controllers validate against the company list.
     temperature: {
       type: String,
-      enum: ["Hot", "Warm", "Cold", null],
       default: null,
+      trim: true,
     },
 
     // ── Qualification scoring (Meta Ad Set leads) ─────────────────────────────

@@ -677,7 +677,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
             name:          autoLeadName,
             mobile:        waPhone,
             source:        "WhatsApp",
-            status:        "New",
+            status:        require("../services/customizationService").defaultStatusKey(await require("../services/customizationService").getCustomization(config.company)),
             date:          new Date(),
             remark:        "Auto-created from inbound WhatsApp message",
             initialRemark: "Auto-created from inbound WhatsApp message",

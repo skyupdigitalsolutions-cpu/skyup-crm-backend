@@ -54,10 +54,10 @@ function sha256Lower(value) {
 // before hashing, and defaults to assuming Indian numbers here since that's
 // this agency's client base — adjust the default country code if a client
 // operates outside India.
-function normalizePhoneForHash(raw) {
+function normalizePhoneForHash(raw, countryCode = "91") {
   if (!raw) return null;
   let digits = String(raw).replace(/\D/g, "");
-  if (digits.length === 10) digits = `91${digits}`; // bare 10-digit Indian mobile
+  if (digits.length === 10) digits = `${countryCode || "91"}${digits}`; // bare 10-digit local mobile → company country code
   return digits;
 }
 
@@ -70,7 +70,17 @@ function normalizePhoneForHash(raw) {
  * @param {string} status - the NEW status just set on this lead
  */
 async function sendMetaConversionEvent(lead, status) {
-  const eventName = STATUS_TO_META_EVENT[status];
+  // Per-company mapping: each status in Customize CRM → Statuses can carry a
+  // Meta event (default matrix = STATUS_TO_META_EVENT above).
+  let eventName = STATUS_TO_META_EVENT[status];
+  let countryCode = "91";
+  try {
+    const custSvc = require("./customizationService");
+    const cust = await custSvc.getCustomization(lead?.company?._id || lead?.company);
+    const st = custSvc.findStatus(cust, status);
+    if (st) eventName = st.metaEvent || null;
+    countryCode = cust.general?.defaultCountryCode || "91";
+  } catch (_) { /* fall back to the default matrix */ }
   if (!eventName) {
     return { sent: false, reason: `Status "${status}" is not mapped to a Meta event (by design)` };
   }
@@ -88,7 +98,7 @@ async function sendMetaConversionEvent(lead, status) {
   }
 
   const hashedEmail = sha256Lower(lead.email);
-  const hashedPhone = sha256Lower(normalizePhoneForHash(lead.mobile));
+  const hashedPhone = sha256Lower(normalizePhoneForHash(lead.mobile, countryCode));
 
   if (!hashedEmail && !hashedPhone) {
     return { sent: false, reason: "Lead has neither email nor phone — nothing to match on" };

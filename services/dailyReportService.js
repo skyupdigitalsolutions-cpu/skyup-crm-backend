@@ -135,6 +135,14 @@ function getTodayInTimezone(timezone = 'Asia/Kolkata') {
 async function aggregateLeadStats(companyId, dayStart, dayEnd) {
   const cid = new mongoose.Types.ObjectId(companyId);
   const now  = new Date();
+  // Status buckets come from the company's customization (categories), so
+  // renamed / custom statuses are counted in the right column.
+  const _svc  = require('./customizationService');
+  const _cust = await _svc.getCustomization(companyId);
+  const WON   = _svc.statusKeysByCategory(_cust, 'won');
+  const LOST  = _svc.statusKeysByCategory(_cust, 'lost');
+  const INT   = [..._svc.statusKeysByCategory(_cust, 'interested'), 'Interest'];
+  const OPEN  = _svc.statusKeysByCategory(_cust, 'open');
 
   const pipeline = [
     // ── 1. Match only this company's leads created today ─────────────────────
@@ -153,10 +161,10 @@ async function aggregateLeadStats(companyId, dayStart, dayEnd) {
         hot:         { $sum: { $cond: [{ $eq: ['$temperature', 'Hot'] },  1, 0] } },
         warm:        { $sum: { $cond: [{ $eq: ['$temperature', 'Warm'] }, 1, 0] } },
         cold:        { $sum: { $cond: [{ $eq: ['$temperature', 'Cold'] }, 1, 0] } },
-        converted:   { $sum: { $cond: [{ $eq: ['$status', 'Converted'] },        1, 0] } },
-        notInterested:{ $sum: { $cond: [{ $eq: ['$status', 'Not Interested'] },  1, 0] } },
-        interested:  { $sum: { $cond: [{ $eq: ['$status', 'Interest'] },         1, 0] } },
-        inProgress:  { $sum: { $cond: [{ $eq: ['$status', 'In Progress'] },      1, 0] } },
+        converted:   { $sum: { $cond: [{ $in: ['$status', WON] },  1, 0] } },
+        notInterested:{ $sum: { $cond: [{ $in: ['$status', LOST] }, 1, 0] } },
+        interested:  { $sum: { $cond: [{ $in: ['$status', INT] },  1, 0] } },
+        inProgress:  { $sum: { $cond: [{ $in: ['$status', OPEN] }, 1, 0] } },
         closed:      { $sum: { $cond: ['$isClosed',                              1, 0] } },
       },
     },
@@ -623,7 +631,7 @@ function buildSummaryBlock(totals, date) {
  */
 function formatTelegramMessages(report, companyName, nurtureStats, waStats, outcomeStats, statusSnap, followUpList = null) {
   const header =
-    `📊 <b>SKYUP CRM — DAILY SALES REPORT</b>\n` +
+    `📊 <b>${escapeHtml(report.__title || `${companyName || 'CRM'} — DAILY SALES REPORT`)}</b>\n` +
     `📅 ${formatDate(report.reportDate)}\n` +
     `🏢 ${escapeHtml(companyName)}\n`;
 
@@ -675,9 +683,9 @@ function formatTelegramMessages(report, companyName, nurtureStats, waStats, outc
       'Invalid':        '🚫',
       'Client Meeting': '🤝',
     };
-    for (const { outcome, count } of outcomeStats) {
+    for (const { outcome, count, label } of outcomeStats) {
       const emoji = outcomeEmoji[outcome] || '•';
-      outBlock += `${emoji} ${escapeHtml(outcome)}: ${count}\n`;
+      outBlock += `${emoji} ${escapeHtml(label || outcome)}: ${count}\n`;
     }
     outBlock += `\n────────────────────\n`;
     if ((current + outBlock).length > MAX_MSG_LEN) {
@@ -696,9 +704,10 @@ function formatTelegramMessages(report, companyName, nurtureStats, waStats, outc
       'Not Interested': '❌',
     };
     let snapTotal = 0;
-    for (const { status, count } of statusSnap) {
-      const emoji = statusEmoji[status] || '•';
-      snapBlock += `${emoji} ${escapeHtml(status)}: ${count}\n`;
+    const catEmoji = { new: '🆕', open: '⏳', interested: '🌟', verification: '🔍', won: '💰', lost: '❌' };
+    for (const { status, count, label, category } of statusSnap) {
+      const emoji = statusEmoji[status] || catEmoji[category] || '•';
+      snapBlock += `${emoji} ${escapeHtml(label || status)}: ${count}\n`;
       snapTotal += count;
     }
     snapBlock += `• Total Open: ${snapTotal}\n`;
@@ -1167,6 +1176,22 @@ async function generateAndSend(config, companyName, reportDate, triggeredBy = 's
       console.log(`[DailyReport] No activity for ${companyId} ${localDate} — skipping (sendEmptyReport=false)`);
       return { sent: false, skipped: true };
     }
+
+    // ── Company customization: report title + renamed status/outcome labels ──
+    try {
+      const _svc  = require('./customizationService');
+      const _cust = await _svc.getCustomization(companyId);
+      const _name = await _svc.companyDisplayName(companyId);
+      report.__title = _svc.fillTemplate(_cust.messaging.dailyReportTitle, { company: _name });
+      for (const row of statusSnap || []) {
+        const st = _svc.findStatus(_cust, row.status);
+        if (st) { row.label = st.label; row.category = st.category; }
+      }
+      for (const row of outcomeStats || []) {
+        const oc = _svc.findOutcome(_cust, row.outcome);
+        if (oc) row.label = oc.label;
+      }
+    } catch (_) { /* fall back to raw keys */ }
 
     // ── Format messages ───────────────────────────────────────────────────
     const messages = formatTelegramMessages(report, companyName, nurtureStats, waStats, outcomeStats, statusSnap, followUpList);

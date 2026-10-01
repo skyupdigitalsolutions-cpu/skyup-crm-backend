@@ -150,6 +150,10 @@ function categorise(text, status) {
  * @param {boolean} [opts.withAI=true]
  */
 async function getNonConversionReport({ company, from, to, withAI = true, leadScope = {} }) {
+  // Company "won" statuses (Customize CRM) — everything else counts as non-converted.
+  const _won = new Set(require("./customizationService").statusKeysByCategory(await require("./customizationService").getCustomization(company), "won"));
+  const isNonConverted = (status = "", isClosed = false) =>
+    !_won.has(String(status).trim()) && !/^(converted|won|customer|closed won|closed-won|complete[d]?)$/i.test(String(status).trim());
   const toDate   = to   ? endOfDay(new Date(to))   : endOfDay(new Date());
   const fromDate = from ? startOfDay(new Date(from)) : startOfDay(new Date(Date.now() - 30 * 86400000));
 

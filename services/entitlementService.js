@@ -395,11 +395,6 @@ async function getCompanyEntitlements(companyId) {
     // leadNurtureSequence above) rather than a plan-level entitlement, until
     // it's broadly available. See routes/linkedinConfig.js.
     linkedInAds:         false,
-    // Employee Excel / Google Sheet integration — AVAILABILITY flag. Turned ON
-    // per-company by the Developer panel (devOverrides.featureToggles). This is
-    // Layer 1 of the two-tier gate; Layer 2 is company.employeeSheetIntegration
-    // .enabled, combined below into ent.googleSheetIntegrationEnabled.
-    googleSheetIntegration: false,
 
     // Recording / retention meta
     recordingEnabled:  planLimits.recordingEnabled,
@@ -527,19 +522,25 @@ async function getCompanyEntitlements(companyId) {
     }
   }
 
-  // ── Effective employee-facing Google Sheet flag ───────────────────────────
-  // Layer 1 (availability): ent.googleSheetIntegration — set from the Developer
-  //   panel featureToggles above (default false).
-  // Layer 2 (enablement):   company.employeeSheetIntegration.enabled — the
-  //   Company Admin toggle. Only when BOTH are true does the employee see the
-  //   "Excel / Google Sheet" panel option. This single derived key is what the
-  //   frontend sidebar/route gates on, so it never appears when the developer
-  //   hasn't made it available OR the admin hasn't enabled it.
-  ent.googleSheetIntegrationEnabled = !!(
-    ent.googleSheetIntegration &&
-    company.employeeSheetIntegration &&
-    company.employeeSheetIntegration.enabled
-  );
+  // ── 5b. Company customization — module on/off switches ───────────────────
+  // The plan/addon/developer layers above decide what a company MAY use; the
+  // company's own Customize CRM → Modules screen decides what it DOES use.
+  //   plan-gated module → available AND switched on by the company
+  //   nav-only module   → (developer toggle, default on) AND switched on
+  // Fails open: if customization can't be loaded, plan entitlements stand.
+  try {
+    const { getCustomization, applyModulesToEntitlements } = require("./customizationService");
+    const cust = await getCustomization(idStr);
+    const devToggles = overrides.featureToggles instanceof Map
+      ? Object.fromEntries(overrides.featureToggles)
+      : (overrides.featureToggles || {});
+    applyModulesToEntitlements(ent, cust, devToggles);
+  } catch (err) {
+    console.error("[entitlements] customization merge failed:", err.message);
+  }
+
+  ent.plan = company.plan || null;
+
 
   // Re-derive readOnly after all overrides (devOverride cannot change subscriptionStatus directly)
   ent.readOnly = !["active", "trial"].includes(ent.subscriptionStatus);

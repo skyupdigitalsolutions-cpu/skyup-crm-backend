@@ -63,7 +63,43 @@ const transcribeMobileCall = async (req, res, next) => {
     if (!ent.callTranscription) {
       return res.status(403).json({
         message: 'Call transcription is not included in your plan. Upgrade to enable it.',
-        code: 'TRANSCRIPTION_NOT_AVAILABLE',
+        code: 'TRANSCRIPTION_NOT_AVAILABLE', feature: 'callTranscription',
+      });
+    }
+
+    // ── Already transcribed → never transcribe (or bill) the audio again ──────
+    // A re-run only adds the AI summary when it's missing (e.g. the company
+    // upgraded to AI Summary after the call was transcribed).
+    if (recording.transcribeStatus === 'done' && recording.transcript) {
+      if (recording.summary) {
+        return res.json({
+          message: 'Already transcribed', transcript: recording.transcript, summary: recording.summary,
+          summaryGenerated: true, durationSec: recording.durationSec || 0, minutesBilled: 0, recordingId,
+        });
+      }
+      if (!ent.aiSummary) {
+        return res.status(403).json({
+          message: 'AI call summary is not included in your plan. Upgrade to enable it.',
+          code: 'FEATURE_NOT_ENABLED', feature: 'aiSummary',
+        });
+      }
+      if (remaining.summaries <= 0) {
+        return res.status(429).json({
+          message: 'Monthly AI summary limit reached. Upgrade your plan or buy an AI summary add-on.',
+          code: 'SUMMARY_LIMIT_REACHED', feature: 'aiSummary',
+          limit: remaining.limits?.summaries, used: remaining.used?.summaries ?? 0, unit: 'minutes',
+        });
+      }
+      const summaryOnly = await summarizeCallTranscript(recording.transcript, log.name || 'the customer');
+      if (summaryOnly) {
+        recording.summary = summaryOnly;
+        await log.save({ validateBeforeSave: false });
+        await consumeUsage(caller.company, 'summariesUsed', recording.billedMinutes || 1).catch(() => {});
+      }
+      return res.json({
+        message: summaryOnly ? 'Summary generated' : 'Summary could not be generated',
+        transcript: recording.transcript, summary: summaryOnly || null, summaryGenerated: !!summaryOnly,
+        durationSec: recording.durationSec || 0, minutesBilled: 0, recordingId,
       });
     }
 
@@ -74,7 +110,7 @@ const transcribeMobileCall = async (req, res, next) => {
     if (remaining.transcriptions <= 0) {
       return res.status(429).json({
         message: 'Monthly call transcription limit reached. Upgrade your plan or buy a transcription add-on.',
-        code: 'TRANSCRIPTION_LIMIT_REACHED',
+        code: 'TRANSCRIPTION_LIMIT_REACHED', feature: 'callTranscription',
         limit: remaining.limits?.transcriptions ?? ent.transcriptionsLimit,
         used:  remaining.used?.transcriptions ?? 0,
         unit:  'minutes',
@@ -124,6 +160,8 @@ const transcribeMobileCall = async (req, res, next) => {
       transcript,
       summary,
       summaryGenerated: !!summary,
+      // Why there's no summary (so the UI can offer the right next step).
+      summarySkippedReason: summary ? null : (!ent.aiSummary ? 'not_in_plan' : (remaining.summaries <= 0 ? 'limit_reached' : 'failed')),
       durationSec: measuredSec,
       minutesBilled: alreadyBilled ? 0 : billedMinutes,
       recordingId,
@@ -206,7 +244,7 @@ const getLeadCombinedSummary = async (req, res, next) => {
     if (remaining.summaries <= 0) {
       return res.status(429).json({
         message: 'Monthly AI summary limit reached. Upgrade your plan or buy an AI summary add-on.',
-        code: 'SUMMARY_LIMIT_REACHED',
+        code: 'SUMMARY_LIMIT_REACHED', feature: 'aiSummary',
         limit: remaining.limits?.summaries,
         used:  remaining.used?.summaries ?? 0,
       });

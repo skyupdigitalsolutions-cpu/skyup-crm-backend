@@ -436,6 +436,12 @@ const deleteCompanyUser = async (req, res) => {
     const user = existsAtAll;
     await User.findByIdAndDelete(req.params.id);
 
+    // Team Lead removed → their members report to the admin directly again.
+    if (user.isTeamLead) {
+      await User.updateMany({ company: req.admin.company._id, teamLead: user._id }, { $set: { teamLead: null } });
+    }
+    try { require("../utils/teamScope").invalidateTeam(req.admin.company._id); } catch { /* best effort */ }
+
     // FIX (stale name in Communications/Inbox after deletion): deleting the
     // User document doesn't retroactively touch any WhatsAppConversation
     // still pointing at them via assignedAgent — Mongo populate correctly

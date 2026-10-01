@@ -40,6 +40,18 @@ const userSchema = mongoose.Schema(
       default: null,
     },
 
+    // ── Team Lead hierarchy ─────────────────────────────────────────────────
+    // A Team Lead is a normal employee account (role stays "user", so login,
+    // mobile app, attendance etc. work unchanged) with isTeamLead=true.
+    // Employees point at their Team Lead via `teamLead`. Empty = reports
+    // directly to the admin. A Team Lead never has a teamLead of their own.
+    isTeamLead: { type: Boolean, default: false },
+    teamLead: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
     // ── Device / app info captured on login & clock-in ────────────────────────
     appName:     { type: String, default: null },
     appVersion:  { type: String, default: null },
@@ -150,6 +162,7 @@ userSchema.methods.matchPassword = async function (enteredPassword) {
 // ── Performance indexes ───────────────────────────────────────────────────────
 userSchema.index({ email: 1 }, { unique: true });
 userSchema.index({ company: 1 });
+userSchema.index({ company: 1, teamLead: 1 });
 
 // ── Encrypt device IPs at rest ───────────────────────────────────────────────
 // ipAddress is written on login/clock-in via User.findByIdAndUpdate(_, { $set })

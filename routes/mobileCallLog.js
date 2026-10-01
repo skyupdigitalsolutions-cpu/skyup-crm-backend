@@ -14,6 +14,7 @@ const {
   uploadRecording, upload, getCompanyRecordings,
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
   summarizeUnmatchedCall, getUncalledLeads,
+  getMyCallHistory,
 } = require('../controllers/mobileCallLogController');
 const { makeCompanyUploadMiddleware } = require('../services/cloudinaryService');
 
@@ -28,6 +29,7 @@ const recordingUpload = makeCompanyUploadMiddleware({
 
 // ── Reads (cached per company + user, 30s TTL via /call-logs rule) ────────────
 router.get('/match',        protectAny, matchPhone);
+router.get('/my-history',   protectAny, getMyCallHistory);  // employee web: full call log + talk time
 router.get('/today',        protectAny, withCache, getTodayCallLogs);   // protectAny: agents see own, admins see all company
 router.get('/',             protectAny, withCache, getCallLogs);        // supports ?date=YYYY-MM-DD
 router.get('/recordings',   protectAny, getCompanyRecordings);

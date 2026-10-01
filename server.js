@@ -452,9 +452,13 @@ app.use('/api/reports',             require('./routes/reportRoutes'));
 app.use('/api/nurture',             require('./routes/nurtureRoute'));
 app.use('/api/call-logs',           require('./routes/mobileCallLog'));
 app.use('/api/transcription',       require('./routes/transcription'));
-// Employee Excel / Google Sheet integration (independent of Daily Report/Telegram)
-app.use('/api/sheet-integration',   require('./routes/sheetIntegration'));
 // Per-company CRM customization (statuses, outcomes, modules, workflows, …)
+// Team Lead hierarchy (admin team setup + Team Lead "My Team" APIs)
+try {
+  app.use('/api/team', require('./routes/teamRoute'));
+} catch (e) {
+  console.error('⚠️  /api/team not mounted:', e.message);
+}
 try {
   app.use('/api/customization', require('./routes/customizationRoute'));
 } catch (e) {
@@ -462,10 +466,13 @@ try {
 }
 
 // ── BullMQ queue progress & control routes ────────────────────────────────────
-try {
-  app.use('/api/queue', require('./routes/queueRoutes'));
-} catch (e) {
-  console.warn('⚠️  /api/queue disabled —', e.message);
+// Optional module — only mounted when routes/queueRoutes.js is present.
+if (require('fs').existsSync(path.join(__dirname, 'routes', 'queueRoutes.js'))) {
+  try {
+    app.use('/api/queue', require('./routes/queueRoutes'));
+  } catch (e) {
+    console.warn('⚠️  /api/queue disabled —', e.message);
+  }
 }
 
 // ── APK Download Routes ───────────────────────────────────────────────────────
@@ -628,11 +635,18 @@ app.use(errorHandler);
 
 // ── Start BullMQ workers ──────────────────────────────────────────────────────
 // Workers resume any pending jobs from before a server restart automatically.
-try {
-  const { initQueues } = require('./queues');
-  initQueues();
-} catch (e) {
-  console.error('BullMQ init error:', e.message);
+// Optional module — only started when ./queues (file or folder) is present.
+{
+  const fs_ = require('fs');
+  const hasQueues = fs_.existsSync(path.join(__dirname, 'queues.js')) || fs_.existsSync(path.join(__dirname, 'queues'));
+  if (hasQueues) {
+    try {
+      const { initQueues } = require('./queues');
+      initQueues();
+    } catch (e) {
+      console.error('BullMQ init error:', e.message);
+    }
+  }
 }
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────

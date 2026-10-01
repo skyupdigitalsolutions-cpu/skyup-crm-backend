@@ -89,6 +89,9 @@ async function aggregateLeads({ company, fromD, toD, campaign, salesperson, stat
 
 // ── Public entry ─────────────────────────────────────────────────────────────
 async function getGoogleAdsDashboard({ company, from, to, campaign, salesperson, status, withAI = false }) {
+  // Company "won" statuses (Customize CRM) in addition to the generic patterns.
+  const _won = new Set(require("./customizationService").statusKeysByCategory(await require("./customizationService").getCustomization(company), "won"));
+  const isWon = (s) => _won.has(String(s || "").trim()) || WON_RE.test(String(s || "").trim());
   const { fromD, toD, prevFrom, prevTo } = ranges(from, to);
   const conn = Lead.db;
 

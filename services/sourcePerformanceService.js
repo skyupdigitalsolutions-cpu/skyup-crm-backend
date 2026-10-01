@@ -132,6 +132,9 @@ function detectIssues({ active, leads, converted, cost, hasCost, isWebsite }) {
 async function getSourcePerformanceReport({
   company, from, to, source, configModel, nameField, withCost = false, cacheKind, withAI = true,
 }) {
+  // Company "won" statuses (Customize CRM) in addition to the generic patterns.
+  const _won = new Set(require("./customizationService").statusKeysByCategory(await require("./customizationService").getCustomization(company), "won"));
+  const isConverted = (s) => _won.has(String(s || "").trim()) || CONVERTED_RE.test(String(s || "").trim());
   const { fromD, toD } = dateRange(from, to);
   const conn = Lead.db;
 

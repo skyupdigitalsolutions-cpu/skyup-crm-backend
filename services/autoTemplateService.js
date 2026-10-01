@@ -804,7 +804,9 @@ async function sendAutoSms({ companyId, lead, smsSettings }) {
 
   console.log(`[autoTemplate] 📤 SMS → ${phone} VAR1="${leadName}"`);
 
-  const logMessage = `Hi ${leadName}, thank you for contacting SKYUP Digital Solutions LLP!`;
+  // Company-specific greeting text (Customize CRM → Messaging) — previously
+  // hardcoded to Skyup's copy for every tenant.
+  const logMessage = await require("./customizationService").renderSmsGreeting(companyId, leadName);
 
   try {
     const { data } = await axios.post(

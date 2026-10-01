@@ -35,6 +35,7 @@
 const Lead    = require("../models/Leads");
 const Company = require("../models/Company");
 const { sendAutoWhatsApp, sendAutoEmail } = require("./autoTemplateService");
+const custSvc = require("./customizationService");
 
 const IST_TIMEZONE = "Asia/Kolkata";
 
@@ -88,7 +89,23 @@ async function sendOutcomeAutomation(lead, companyId, outcome) {
       return { skipped: "missing lead / companyId / outcome" };
     }
 
-    const key = OUTCOME_KEY[outcome.trim().toLowerCase()];
+    // ── Resolve the outcome against the company's customization ─────────────
+    // Each outcome either carries its own WhatsApp/Email automation (set in
+    // Customize CRM → Call Outcomes) or points at a built-in
+    // Company.outcomeAutomation entry via automationKey. Outcomes whose
+    // behaviour is handled by another flow (Interested blast, meeting
+    // reminders, Invalid) never send here — avoids double messages.
+    const cust = await custSvc.getCustomization(companyId);
+    const outcomeObj = custSvc.findOutcome(cust, outcome);
+    if (outcomeObj && ["interested", "clientMeeting", "invalid"].includes(outcomeObj.behavior)) {
+      return { skipped: `outcome "${outcome}" is handled by its own flow` };
+    }
+    const customAuto = outcomeObj && outcomeObj.automation &&
+      (outcomeObj.automation.whatsapp?.enabled || outcomeObj.automation.email?.enabled)
+      ? outcomeObj.automation : null;
+    const key = (outcomeObj && outcomeObj.automationKey) ||
+      (customAuto ? `custom_${String(outcomeObj.key).toLowerCase().replace(/[^a-z0-9]+/g, "_")}` : null) ||
+      (!outcomeObj ? OUTCOME_KEY[outcome.trim().toLowerCase()] : null);
     if (!key) {
       // Interested / Client Meeting / Invalid / unknown — not handled here.
       return { skipped: `outcome "${outcome}" is not handled by outcomeAutomation` };
@@ -104,7 +121,8 @@ async function sendOutcomeAutomation(lead, companyId, outcome) {
     //                    routed through OUTCOME_KEY, so it is unaffected)
     // The new-lead welcome template (crm_followup_leads) is separately blocked
     // for these sources inside autoTemplateService.autoSendTemplates().
-    const OUTCOMES_ALLOWED_FOR_MANUAL = new Set(["answered"]);
+    // Per-outcome "allowForManualLeads" (Customize CRM). Default: only Answered.
+    const allowedForManual = outcomeObj ? !!outcomeObj.allowForManualLeads : key === "answered";
     const BLOCKED_SOURCES = new Set(["manual", "csv import", "excel import", "other"]);
     const isManualOrImportedLead = (l) =>
       !!l && (
@@ -122,7 +140,7 @@ async function sendOutcomeAutomation(lead, companyId, outcome) {
       } catch (_) { /* if the lookup fails, fall through */ }
     }
 
-    if (isManualOrImported && !OUTCOMES_ALLOWED_FOR_MANUAL.has(key)) {
+    if (isManualOrImported && !allowedForManual) {
       return { skipped: `lead ${lead._id} source="${lead.source}" — manual/imported leads only receive the "Answered" outcome automation` };
     }
 
@@ -133,11 +151,13 @@ async function sendOutcomeAutomation(lead, companyId, outcome) {
     // for company docs that predate this field, and .toObject() then gives us
     // plain values (with defaults applied) to read and pass downstream — so the
     // automation works out of the box with no DB migration or "Save" step.
-    const companyDoc = await Company.findById(companyId).select("outcomeAutomation name");
-    if (!companyDoc) return { skipped: "company not found" };
-    const company = companyDoc.toObject();
-
-    const cfg = company.outcomeAutomation && company.outcomeAutomation[key];
+    let cfg = customAuto;
+    if (!cfg) {
+      const companyDoc = await Company.findById(companyId).select("outcomeAutomation name");
+      if (!companyDoc) return { skipped: "company not found" };
+      const company = companyDoc.toObject();
+      cfg = company.outcomeAutomation && company.outcomeAutomation[key];
+    }
     if (!cfg) return { skipped: `no outcomeAutomation config for "${key}"` };
 
     const waOn = !!cfg.whatsapp?.enabled;

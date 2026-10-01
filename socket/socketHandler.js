@@ -50,7 +50,7 @@ async function pushPendingFollowUps(socket, adminId, company, role) {
     // Always scope to this admin's assigned leads only
     const query = {
       isClosed:      { $ne: true },
-      status:        { $ne: 'Converted' },
+      status:        { $nin: require('../services/customizationService').statusKeysByCategory(require('../services/customizationService').peekCustomization(company), 'won') },
       company,
       assignedAdmin: adminId,
       scheduledCalls: { $elemMatch: { done: false, scheduledAt: { $lte: todayEnd } } },

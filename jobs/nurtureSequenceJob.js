@@ -696,10 +696,12 @@ async function runNurtureSequenceCheck() {
     const rules = await NurtureRule.find({ company: companyId, enabled: true }).lean();
     if (!rules.length) continue; // entitlement on, but no rules built yet for this company
 
+    // "Lost" statuses come from the company's customization (default: Not Interested).
+    const _cust = await require("../services/customizationService").getCustomization(companyId);
     const leads = await Lead.find({
       company:    companyId,
       isClosed:   { $ne: true },
-      status:     { $nin: ["Not Interested"] },
+      status:     { $nin: require("../services/customizationService").statusKeysByCategory(_cust, "lost") },
       mergedInto: null,
     })
       .select("name mobile company status temperature source date callHistory importedViaCsv addedManually nurtureSent nurtureGreetingLastSent user industry service businessName campaign adSetName")
@@ -754,6 +756,13 @@ async function triggerNurtureForLead(leadId, newStatus) {
 
   const companyIdStr = String(lead.company?._id || lead.company || "");
   if (!companyIdStr) return;
+
+  // Company-defined "lost" statuses never receive nurture messages.
+  {
+    const _svc = require("../services/customizationService");
+    const _cust = await _svc.getCustomization(companyIdStr);
+    if (_svc.statusCategory(_cust, newStatus) === "lost") return;
+  }
 
   // Multi-tenant entitlement check — same flag the cron gate and the
   // /api/nurture/* routes already enforce.

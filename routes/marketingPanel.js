@@ -16,6 +16,17 @@ const { authLimiter, ipFloodLimiter } = require("../middlewares/rateLimiter");
 // Marketing users ONLY — accepts marketingAccess:true admins + super_admin.
 // Returns same JWT shape as main login so mktApi interceptor works identically.
 // SECURITY FIX: ipFloodLimiter (300/15min per IP) + authLimiter (10/15min per account)
+// ── Company status buckets (Customize CRM → Statuses) ─────────────────────────
+// Sync read of the company's customization (refreshed in the background) so
+// these promise-chain handlers count renamed / custom statuses correctly.
+const _cs = require("../services/customizationService");
+const STATUS_IN = (companyId, cat) => _cs.statusKeysByCategory(_cs.peekCustomization(companyId), cat);
+const HOT_KEYS  = (companyId) => {
+  const c = _cs.peekCustomization(companyId);
+  const hot = (c.temperatures || []).find((t) => t.key === "Hot") || (c.temperatures || [])[0];
+  return hot ? [hot.key] : ["Hot"];
+};
+
 router.post("/login", ipFloodLimiter, authLimiter, async function (req, res) {
   try {
     const email    = (req.body.email    || "").toLowerCase().trim();
@@ -130,7 +141,7 @@ router.get("/meta-ad-level", protectMarketing, function (req, res) {
             { $group: {
               _id:       { campaign: "$campaign", adSetName: { $ifNull: ["$adSetName", ""] } },
               total:     { $sum: 1 },
-              converted: { $sum: { $cond: [{ $eq: ["$status","Converted"] },1,0] } },
+              converted: { $sum: { $cond: [{ $in: ["$status", STATUS_IN(companyId, "won")] },1,0] } },
               qualified: { $sum: { $cond: [{ $in: ["$temperature",["Hot"]] },1,0] } },
             }},
           ]);
@@ -210,18 +221,18 @@ router.get("/leads-intelligence", protectMarketing, function (req, res) {
         { "$group": {
           "_id": { campaign: "$campaign", adSet: "$adSetName", source: "$source" },
           total:      { "$sum": 1 },
-          converted:  { "$sum": { "$cond": [{ "$eq": ["$status","Converted"] }, 1, 0] } },
-          inProgress: { "$sum": { "$cond": [{ "$eq": ["$status","In Progress"] }, 1, 0] } },
-          newLeads:   { "$sum": { "$cond": [{ "$eq": ["$status","New"] }, 1, 0] } },
-          notInt:     { "$sum": { "$cond": [{ "$eq": ["$status","Not Interested"] }, 1, 0] } },
-          verif:      { "$sum": { "$cond": [{ "$eq": ["$status","Verification"] }, 1, 0] } },
+          converted:  { "$sum": { "$cond": [{ $in: ["$status", STATUS_IN(companyId, "won")] }, 1, 0] } },
+          inProgress: { "$sum": { "$cond": [{ $in: ["$status", STATUS_IN(companyId, "open")] }, 1, 0] } },
+          newLeads:   { "$sum": { "$cond": [{ $in: ["$status", STATUS_IN(companyId, "new")] }, 1, 0] } },
+          notInt:     { "$sum": { "$cond": [{ $in: ["$status", STATUS_IN(companyId, "lost")] }, 1, 0] } },
+          verif:      { "$sum": { "$cond": [{ $in: ["$status", STATUS_IN(companyId, "verification")] }, 1, 0] } },
           firstLead:  { "$min": "$date" },
           lastLead:   { "$max": "$date" },
         }},
         { "$sort": { total: -1 } },
       ]),
       // 2. Converted leads with full detail
-      Lead.find(Object.assign({}, filter, { status: "Converted" }))
+      Lead.find(Object.assign({}, filter, { status: { $in: STATUS_IN(companyId, "won") } }))
         .select("name mobile email campaign adSetName source status date remark callHistory user language followUpDate")
         .populate("user", "name")
         .sort({ date: -1 }).limit(200).lean(),
@@ -362,7 +373,7 @@ router.get("/meta-campaign/:id", protectMarketing, function (req, res) {
 
         const [totalLeads, convertedLeads, qualifiedLeads] = await Promise.all([
           Lead.countDocuments(crmFilter),
-          Lead.countDocuments(Object.assign({}, crmFilter, { status: "Converted" })),
+          Lead.countDocuments(Object.assign({}, crmFilter, { status: { $in: STATUS_IN(companyId, "won") } })),
           Lead.countDocuments(Object.assign({}, crmFilter, { $or: [{ temperature: "Hot" }, { leadCategory: "Hot" }] })),
         ]);
 
@@ -471,7 +482,7 @@ router.get("/google-campaign/:id", protectMarketing, function (req, res) {
         };
         const [totalLeads, convertedLeads, qualifiedLeads] = await Promise.all([
           Lead.countDocuments(crmFilter),
-          Lead.countDocuments(Object.assign({}, crmFilter, { status: "Converted" })),
+          Lead.countDocuments(Object.assign({}, crmFilter, { status: { $in: STATUS_IN(companyId, "won") } })),
           Lead.countDocuments(Object.assign({}, crmFilter, { $or: [{ temperature: "Hot" }, { leadCategory: "Hot" }] })),
         ]);
 
@@ -519,7 +530,7 @@ router.get("/google-campaigns", protectMarketing, function (req, res) {
           };
           const [leads, converted, qualified] = await Promise.all([
             Lead.countDocuments(crmFilter),
-            Lead.countDocuments(Object.assign({}, crmFilter, { status: "Converted" })),
+            Lead.countDocuments(Object.assign({}, crmFilter, { status: { $in: STATUS_IN(companyId, "won") } })),
             Lead.countDocuments(Object.assign({}, crmFilter, { $or: [{ temperature: "Hot" }, { leadCategory: "Hot" }] })),
           ]);
           const avgDeal = Number(cfg.avgDealValue) || 0;
@@ -576,10 +587,10 @@ router.get("/reports/summary", protectMarketing, function (req, res) {
         { $group: {
           _id: null,
           total:      { $sum: 1 },
-          converted:  { $sum: { $cond: [{ $eq: ["$status", "Converted"] }, 1, 0] } },
-          inProgress: { $sum: { $cond: [{ $eq: ["$status", "In Progress"] }, 1, 0] } },
-          newLeads:   { $sum: { $cond: [{ $eq: ["$status", "New"] }, 1, 0] } },
-          notInt:     { $sum: { $cond: [{ $eq: ["$status", "Not Interested"] }, 1, 0] } },
+          converted:  { $sum: { $cond: [{ $in: ["$status", STATUS_IN(companyId, "won")] }, 1, 0] } },
+          inProgress: { $sum: { $cond: [{ $in: ["$status", STATUS_IN(companyId, "open")] }, 1, 0] } },
+          newLeads:   { $sum: { $cond: [{ $in: ["$status", STATUS_IN(companyId, "new")] }, 1, 0] } },
+          notInt:     { $sum: { $cond: [{ $in: ["$status", STATUS_IN(companyId, "lost")] }, 1, 0] } },
           hotLeads:   { $sum: { $cond: [{ $in: ["$temperature", ["Hot"]] }, 1, 0] } },
         }},
       ]),
@@ -589,7 +600,7 @@ router.get("/reports/summary", protectMarketing, function (req, res) {
         { $group: {
           _id: "$source",
           total:     { $sum: 1 },
-          converted: { $sum: { $cond: [{ $eq: ["$status", "Converted"] }, 1, 0] } },
+          converted: { $sum: { $cond: [{ $in: ["$status", STATUS_IN(companyId, "won")] }, 1, 0] } },
         }},
         { $sort: { total: -1 } },
       ]),
@@ -599,7 +610,7 @@ router.get("/reports/summary", protectMarketing, function (req, res) {
         { $group: {
           _id: "$campaign",
           total:     { $sum: 1 },
-          converted: { $sum: { $cond: [{ $eq: ["$status", "Converted"] }, 1, 0] } },
+          converted: { $sum: { $cond: [{ $in: ["$status", STATUS_IN(companyId, "won")] }, 1, 0] } },
         }},
         { $sort: { total: -1 } },
         { $limit: 20 },
@@ -610,7 +621,7 @@ router.get("/reports/summary", protectMarketing, function (req, res) {
         { $group: {
           _id: "$user",
           total:     { $sum: 1 },
-          converted: { $sum: { $cond: [{ $eq: ["$status", "Converted"] }, 1, 0] } },
+          converted: { $sum: { $cond: [{ $in: ["$status", STATUS_IN(companyId, "won")] }, 1, 0] } },
         }},
         { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "userInfo" } },
         { $project: {

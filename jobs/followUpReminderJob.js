@@ -29,6 +29,7 @@ const cron    = require("node-cron");
 const Lead    = require("../models/Leads");
 const Company = require("../models/Company");
 const { sendAutoWhatsApp, sendAutoEmail } = require("../services/autoTemplateService");
+const custSvc = require("../services/customizationService");
 
 const IST_TIMEZONE = "Asia/Kolkata";
 
@@ -106,16 +107,44 @@ async function fireFollowUpReminder(lead, company) {
 // Returns { matched, sent, details } — details is a per-lead breakdown of
 // WhatsApp/Email results, useful for the temporary dev test route and for
 // eyeballing exactly why a channel was sent/skipped/failed.
-async function runFollowUpReminderCheck(slot) {
-  const now      = new Date();
-  const todayKey = istDayKey(now);
-  const todayEnd = istTodayEnd(now);
+//
+// opts.companyId — limit to one company. Without it, every company with the
+// reminder enabled is processed (used by the dev test route). Timing per
+// company (morning/evening time, interval days, on/off) comes from
+// Customize CRM → Alerts → "Follow-up reminders to the lead".
+async function runFollowUpReminderCheck(slot, opts = {}) {
+  let companyIds;
+  if (opts.companyId) {
+    companyIds = [String(opts.companyId)];
+  } else {
+    const companies = await Company.find({ isActive: { $ne: false } }).select("_id").lean();
+    companyIds = companies.map((c) => String(c._id));
+  }
+  const total = { matched: 0, sent: 0, details: [] };
+  for (const companyId of companyIds) {
+    const cust = await custSvc.getCustomization(companyId);
+    const cfg = cust.alerts?.leadFollowUpReminder;
+    if (!cfg || !cfg.enabled) continue;
+    const r = await runFollowUpReminderForCompany(companyId, cust, slot);
+    total.matched += r.matched || 0;
+    total.sent += r.sent || 0;
+    total.details.push(...(r.details || []));
+  }
+  return total;
+}
+
+async function runFollowUpReminderForCompany(companyId, cust, slot) {
+  const clock    = custSvc.companyClock(cust);
+  const todayKey = clock.dayKey;
+  const todayEnd = new Date(custSvc.companyDateAt(cust, 1, 0, 0).getTime() - 1);
+  const intervalDays = cust.alerts?.leadFollowUpReminder?.intervalDays || REMINDER_INTERVAL_DAYS;
 
   let leads;
   try {
     leads = await Lead.find({
+      company:    companyId,
       isClosed:   { $ne: true },
-      status:     { $ne: "Converted" },
+      status:     { $nin: custSvc.closedStatusKeys(cust) },
       mergedInto: null,
       // Leads who tapped "Stop Promotion" are permanently excluded
       followUpReminderOptOut: { $ne: true },
@@ -131,116 +160,125 @@ async function runFollowUpReminderCheck(slot) {
       .select("name mobile email company scheduledCalls followUpReminderLastSentDate followUpReminderLastSentSlot followUpReminderCycleStart")
       .lean();
   } catch (err) {
-    console.error(`[followUpReminder:${slot}] query error:`, err.message);
+    console.error(`[followUpReminder:${slot}] query error (${companyId}):`, err.message);
     return { matched: 0, sent: 0, details: [], error: err.message };
   }
 
-  if (!leads.length) {
-    console.log(`[followUpReminder:${slot}] 0 lead(s) due.`);
-    return { matched: 0, sent: 0, details: [] };
-  }
+  if (!leads.length) return { matched: 0, sent: 0, details: [] };
 
-  // Group by company so we fetch each company's settings once
-  const byCompany = new Map();
-  for (const lead of leads) {
-    const cId = String(lead.company);
-    if (!byCompany.has(cId)) byCompany.set(cId, []);
-    byCompany.get(cId).push(lead);
+  let company;
+  try {
+    // NOT using .lean(): Mongoose skips schema defaults on lean results.
+    // Hydrating the doc + .toObject() applies the schema defaults even for
+    // company docs that predate this field, so the reminder works with no
+    // DB migration. (Templates are editable in Customize CRM → Automations.)
+    const companyDoc = await Company.findById(companyId).select("followUpReminder name");
+    company = companyDoc ? companyDoc.toObject() : null;
+  } catch (err) {
+    console.error(`[followUpReminder:${slot}] company lookup error (${companyId}):`, err.message);
+    return { matched: leads.length, sent: 0, details: [] };
+  }
+  if (!company) return { matched: leads.length, sent: 0, details: [] };
+
+  const details = [];
+  // If BOTH channels are off for this company, skip cheaply
+  const waOn = !!company.followUpReminder?.whatsapp?.enabled;
+  const emOn = !!company.followUpReminder?.email?.enabled;
+  if (!waOn && !emOn) {
+    details.push({
+      leadId: String(leads[0]?._id || ""),
+      company: company.name,
+      results: [{ channel: "all", status: "skipped", detail: "followUpReminder disabled for this company (both channels off)" }],
+    });
+    return { matched: leads.length, sent: 0, details };
   }
 
   let sent = 0;
-  const details = [];
-  for (const [companyId, companyLeads] of byCompany) {
-    let company;
+  for (const lead of leads) {
+    // ── N-day cadence gate ──────────────────────────────────────────────────
+    // Fire only when a new cycle is due. On the cycle-start day BOTH slots
+    // fire; the lead is then skipped until intervalDays have elapsed.
+    //   • never reminded            → eligible, start a cycle
+    //   • same day as cycle start   → eligible (this is the day's 2nd slot)
+    //   • >= interval days elapsed  → eligible, start a NEW cycle
+    //   • 1..interval-1 days        → skip (inside the quiet window)
+    const cycleStart   = lead.followUpReminderCycleStart || null;
+    const daysElapsed  = dayDiffKeys(cycleStart, todayKey); // Infinity if never
+    const startNewCycle = !cycleStart || daysElapsed >= intervalDays;
+    const sameCycleDay  = daysElapsed === 0;
+    if (!startNewCycle && !sameCycleDay) {
+      continue; // inside the quiet window — no reminder today
+    }
+
+    const results = await fireFollowUpReminder(lead, company);
+    console.log(
+      `[followUpReminder:${slot}] lead ${lead._id} ("${lead.name}"):`,
+      JSON.stringify(results)
+    );
+    details.push({ leadId: String(lead._id), leadName: lead.name, company: company.name, results });
     try {
-      // NOT using .lean(): Mongoose skips schema defaults on lean results, and
-      // there's no admin UI that saves `followUpReminder` to the DB. Hydrating
-      // the doc + .toObject() applies the schema defaults even for company docs
-      // that predate this field, so the reminder works with no DB migration.
-      const companyDoc = await Company.findById(companyId).select("followUpReminder name");
-      company = companyDoc ? companyDoc.toObject() : null;
+      const update = { followUpReminderLastSentDate: todayKey, followUpReminderLastSentSlot: slot };
+      // Only stamp a new cycle start when a fresh cycle actually begins, so
+      // the evening slot on the same day doesn't reset the clock.
+      if (startNewCycle) update.followUpReminderCycleStart = todayKey;
+      await Lead.updateOne({ _id: lead._id }, { $set: update });
     } catch (err) {
-      console.error(`[followUpReminder:${slot}] company lookup error (${companyId}):`, err.message);
-      continue;
+      console.error(`[followUpReminder:${slot}] mark-sent error for lead ${lead._id}:`, err.message);
     }
-    if (!company) continue;
-
-    // If BOTH channels are off for this company, skip cheaply
-    const waOn = !!company.followUpReminder?.whatsapp?.enabled;
-    const emOn = !!company.followUpReminder?.email?.enabled;
-    if (!waOn && !emOn) {
-      details.push({
-        leadId: String(companyLeads[0]?._id || ""),
-        company: company.name,
-        results: [{ channel: "all", status: "skipped", detail: "followUpReminder disabled for this company (both channels off)" }],
-      });
-      continue;
-    }
-
-    for (const lead of companyLeads) {
-      // ── 3-day cadence gate ────────────────────────────────────────────────
-      // Fire only when a new cycle is due. On the cycle-start day BOTH slots
-      // (9:30 AM + 8:30 PM) fire; the lead is then skipped until
-      // REMINDER_INTERVAL_DAYS have elapsed.
-      //   • never reminded            → eligible, start a cycle
-      //   • same day as cycle start   → eligible (this is the day's 2nd slot)
-      //   • >= interval days elapsed  → eligible, start a NEW cycle
-      //   • 1..interval-1 days        → skip (inside the quiet window)
-      const cycleStart   = lead.followUpReminderCycleStart || null;
-      const daysElapsed  = dayDiffKeys(cycleStart, todayKey); // Infinity if never
-      const startNewCycle = !cycleStart || daysElapsed >= REMINDER_INTERVAL_DAYS;
-      const sameCycleDay  = daysElapsed === 0;
-      if (!startNewCycle && !sameCycleDay) {
-        continue; // inside the quiet window — no reminder today
-      }
-
-      const results = await fireFollowUpReminder(lead, company);
-      console.log(
-        `[followUpReminder:${slot}] lead ${lead._id} ("${lead.name}"):`,
-        JSON.stringify(results)
-      );
-      details.push({ leadId: String(lead._id), leadName: lead.name, company: company.name, results });
-      try {
-        const update = { followUpReminderLastSentDate: todayKey, followUpReminderLastSentSlot: slot };
-        // Only stamp a new cycle start when a fresh cycle actually begins, so
-        // the evening slot on the same day doesn't reset the 3-day clock.
-        if (startNewCycle) update.followUpReminderCycleStart = todayKey;
-        await Lead.updateOne({ _id: lead._id }, { $set: update });
-      } catch (err) {
-        console.error(`[followUpReminder:${slot}] mark-sent error for lead ${lead._id}:`, err.message);
-      }
-      sent++;
-    }
+    sent++;
   }
 
-  if (sent) console.log(`[followUpReminder:${slot}] Sent ${sent} reminder(s).`);
+  if (sent) console.log(`[followUpReminder:${slot}] (${company.name}) Sent ${sent} reminder(s).`);
   return { matched: leads.length, sent, details };
 }
 
-function startFollowUpReminderJob() {
-  // 9:30 AM IST
-  cron.schedule(
-    "30 9 * * *",
-    () => {
-      runFollowUpReminderCheck("morning").catch((e) =>
-        console.error("[followUpReminder:morning] job error:", e.message)
-      );
-    },
-    { timezone: IST_TIMEZONE }
-  );
-
-  // 8:30 PM IST
-  cron.schedule(
-    "30 20 * * *",
-    () => {
-      runFollowUpReminderCheck("evening").catch((e) =>
-        console.error("[followUpReminder:evening] job error:", e.message)
-      );
-    },
-    { timezone: IST_TIMEZONE }
-  );
-
-  console.log(`✅ Follow-up reminder job started (WhatsApp + Email to lead, every ${REMINDER_INTERVAL_DAYS} day(s) at 9:30 AM & 8:30 PM IST).`);
+// Once-per-company-per-slot-per-day guard (Redis when available).
+const _slotRan = new Map();
+async function claimSlot(companyId, dayKey, slot) {
+  const k = `fur:${companyId}:${dayKey}:${slot}`;
+  if (_slotRan.get(k)) return false;
+  try {
+    const { redisClient } = require("../middlewares/rateLimiter");
+    if (redisClient && redisClient.isReady) {
+      const ok = await redisClient.set(`job:${k}`, "1", { NX: true, EX: 2 * 24 * 3600 });
+      if (ok !== "OK") { _slotRan.set(k, true); return false; }
+    }
+  } catch (_) { /* in-process guard only */ }
+  _slotRan.set(k, true);
+  if (_slotRan.size > 20000) _slotRan.clear();
+  return true;
 }
 
-module.exports = { startFollowUpReminderJob, runFollowUpReminderCheck };
+// Every 15 minutes: for each company, fire the morning / evening slot once the
+// company's configured time has passed (company timezone).
+async function followUpReminderTick() {
+  try {
+    const companies = await Company.find({ isActive: { $ne: false } }).select("_id").lean();
+    const custMap = await custSvc.getCustomizationMany(companies.map((c) => c._id));
+    for (const c of companies) {
+      const id = String(c._id);
+      const cust = custMap.get(id);
+      const cfg = cust?.alerts?.leadFollowUpReminder;
+      if (!cfg || !cfg.enabled) continue;
+      const clock = custSvc.companyClock(cust);
+      const slots = [["morning", cfg.morningTime]];
+      if (cfg.eveningEnabled) slots.push(["evening", cfg.eveningTime]);
+      for (const [slot, time] of slots) {
+        if (clock.minutesOfDay < custSvc.hhmmToMinutes(time, slot === "morning" ? 570 : 1230)) continue;
+        if (!(await claimSlot(id, clock.dayKey, slot))) continue;
+        await runFollowUpReminderForCompany(id, cust, slot).catch((e) =>
+          console.error(`[followUpReminder:${slot}] job error (${id}):`, e.message)
+        );
+      }
+    }
+  } catch (err) {
+    console.error("[followUpReminder] tick error:", err.message);
+  }
+}
+
+function startFollowUpReminderJob() {
+  cron.schedule("*/15 * * * *", () => { followUpReminderTick(); });
+  console.log("✅ Follow-up reminder job started (WhatsApp + Email to lead — per-company times & cadence, checked every 15 min).");
+}
+
+module.exports = { startFollowUpReminderJob, runFollowUpReminderCheck, followUpReminderTick };

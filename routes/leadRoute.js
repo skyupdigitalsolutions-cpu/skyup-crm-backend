@@ -158,12 +158,14 @@ router.patch("/admin/:id/assign-roundrobin", protectAdmin, validateObjectId("id"
     if (!users.length)
       return res.status(400).json({ message: "No users in company" });
 
+    const custSvc = require("../services/customizationService");
+    const closedStatuses = custSvc.closedStatusKeys(await custSvc.getCustomization(companyId));
     const counts = await Promise.all(
       users.map((u) =>
         Lead.countDocuments({
           company: companyId,
           user: u._id,
-          status: { $nin: ["Not Interested", "Converted"] },
+          status: { $nin: closedStatuses },
         }).then((c) => ({ userId: u._id, count: c })),
       ),
     );

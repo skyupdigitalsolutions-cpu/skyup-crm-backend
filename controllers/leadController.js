@@ -48,31 +48,168 @@ const { getCompanyEntitlements } = require("../services/entitlementService");
 const { notifyCampaignLead, notifyEmployeeLead, notifyEmployeeFollowUp, notifyAllAdminsCampaignLead } = require("../services/telegramService");
 const { INDUSTRIES, SERVICES } = require("../utils/templateNameResolver");
 
-// Same canonical-list validation used in metaConfigController.js — the
-// locked <select> dropdowns in the UI (UserLeadsPage.jsx etc.) can only ever
-// submit a valid value, but this endpoint itself is the actual API surface;
-// a direct call (script, mobile client, Postman) could otherwise set any
-// string here. An unrecognised industry/service doesn't fail loudly — it
-// still passes canResolve() (both fields non-empty) and silently resolves a
-// template name that will never exist in MSG91, so the lead gets zero
-// nurture messages forever with nothing but a server log line.
-const VALID_NURTURE_INDUSTRIES = new Set(INDUSTRIES);
-const VALID_NURTURE_SERVICES   = new Set(SERVICES);
+// ── Per-company customization (statuses, outcomes, workflows, permissions …) ──
+// Every status / outcome / temperature / flow rule below is read from the
+// company's customization instead of being hardcoded. With no customization
+// saved, the defaults reproduce the previous hardcoded behaviour exactly.
+const custSvc = require("../services/customizationService");
+const teamScope = require("../utils/teamScope");
+const getCust = (companyId) => custSvc.getCustomization(companyId);
 
-// ── Helper: pick next user (round-robin, excluding previousAgents) ─────────────────
-async function getNextUser(companyId, excludeIds = []) {
-  const users = await User.find({ company: companyId }).select("_id").lean();
+// Industry/service validation: the company's own lists PLUS the canonical
+// nurture lists (templateNameResolver) so existing nurture templates keep
+// resolving. An unrecognised value is silently dropped (same as before).
+function validNurtureSet(cust, listName, canonical) {
+  return new Set([...(canonical || []), ...((cust?.lists?.[listName]) || [])].map((v) => String(v).trim()));
+}
+
+// Industry + services from a request body → normalised update fields.
+//   industry: one of the company's industries, or (leadFields.industry.allowOther)
+//             any typed value ("Other: X" is accepted and stored as "X"). "" clears.
+//   services: body.services (array or comma string) or body.service (string).
+//             Unknown values dropped unless leadFields.service.allowOther.
+//             Single-select companies keep only the first. [] / "" clears.
+//   Lead.service always mirrors services[0] (nurture templates, old clients).
+function readIndustryServices(cust, body = {}) {
+  const out = {};
+  const lf = cust?.leadFields || {};
+  const clean = (v, max = 80) => String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, max);
+  if (body.industry !== undefined && body.industry !== null) {
+    let v = clean(body.industry).replace(/^other\s*[:-]\s*/i, "");
+    if (/^other$/i.test(v)) v = "";
+    const valid = [...validNurtureSet(cust, "industries", INDUSTRIES)];
+    const hit = valid.find((x) => x.toLowerCase() === v.toLowerCase());
+    if (!v) out.industry = "";
+    else if (hit) out.industry = hit;
+    else if (lf.industry?.allowOther !== false) out.industry = v;
+  }
+  let raw;
+  if (body.services !== undefined && body.services !== null) raw = body.services;
+  else if (body.service !== undefined && body.service !== null) raw = body.service;
+  if (raw !== undefined) {
+    let arr = Array.isArray(raw) ? raw : String(raw).split(/\s*[,|]\s*/);
+    const valid = [...validNurtureSet(cust, "services", SERVICES)];
+    const seen = new Set();
+    arr = arr.map((x) => clean(x)).filter(Boolean)
+      .map((v) => valid.find((x) => x.toLowerCase() === v.toLowerCase()) || (lf.service?.allowOther ? v : null))
+      .filter((v) => {
+        if (!v || seen.has(v.toLowerCase())) return false;
+        seen.add(v.toLowerCase());
+        return true;
+      })
+      .slice(0, 25);
+    if (lf.service?.multiple === false) arr = arr.slice(0, 1);
+    out.services = arr;
+    out.service = arr[0] || "";
+  }
+  return out;
+}
+
+// True when the request comes from an employee session (not admin/super_admin).
+function isEmployeeReq(req) {
+  if (req.admin || req.superAdmin) return false;
+  const role = String(req.user?.role || "user");
+  return role === "user" || role === "employee";
+}
+
+// Enforce a company permission for employees. Admin callers are not affected
+// (admin-side permissions are checked separately with adminDenied()).
+// Returns true when the request was rejected (caller should `return`).
+function employeeDenied(req, res, cust, permissionName, what) {
+  if (!isEmployeeReq(req)) return false;
+  if (custSvc.permission(cust, "employee", permissionName)) return false;
+  res.status(403).json({
+    message: `Your company has disabled ${what} for employees.`,
+    code: "PERMISSION_DISABLED",
+    permission: permissionName,
+  });
+  return true;
+}
+
+function adminDenied(req, res, cust, permissionName, what) {
+  const role = req.superAdmin ? "super_admin" : (req.admin?.role || "");
+  if (!req.admin && !req.superAdmin) return false;
+  if (role === "super_admin" || role === "superadmin") return false; // owner can always
+  if (custSvc.permission(cust, "admin", permissionName)) return false;
+  res.status(403).json({
+    message: `Your company has disabled ${what} for admins.`,
+    code: "PERMISSION_DISABLED",
+    permission: permissionName,
+  });
+  return true;
+}
+
+// Map any status input (key / renamed label / alias) to the stored key.
+// Unknown → `fallback` (default: the company's default status).
+function resolveStatusKey(cust, value, fallback) {
+  const s = custSvc.findStatus(cust, value);
+  if (s) return s.key;
+  return fallback !== undefined ? fallback : custSvc.defaultStatusKey(cust);
+}
+
+// Map a temperature input to the stored key, or null when not a known quality.
+function resolveTemperatureKey(cust, value) {
+  const t = custSvc.findTemperature(cust, value);
+  return t ? t.key : null;
+}
+
+// Validate custom field values from a request body. Accepts either
+// body.customFields = { key: value } or flat body keys matching field keys.
+function readCustomFields(cust, body, role, partial) {
+  const fields = cust?.customFields || [];
+  if (!fields.length || !body) return { values: {}, errors: [] };
+  const src = { ...(body.customFields && typeof body.customFields === "object" ? body.customFields : {}) };
+  for (const f of fields) {
+    if (src[f.key] === undefined && body[f.key] !== undefined) src[f.key] = body[f.key];
+    if (src[f.key] === undefined && body[f.label] !== undefined) src[f.key] = body[f.label]; // CSV header by label
+  }
+  return custSvc.sanitizeCustomFieldValues(cust, src, { role, partial });
+}
+
+// Required built-in fields (Customize CRM → Lead Fields).
+function missingRequiredLeadFields(cust, data) {
+  const lf = cust?.leadFields || {};
+  const missing = [];
+  for (const k of ["email", "source", "campaign", "industry", "service", "businessName", "language", "secondaryPhone"]) {
+    if (lf[k]?.visible !== false && lf[k]?.required && !String(data?.[k] ?? "").trim()) missing.push(lf[k].label || k);
+  }
+  return missing;
+}
+
+// ── Helper: pick next user for a lead ─────────────────────────────────────────
+//   purpose "assign" → company's assignment strategy (least_loaded | round_robin | manual)
+//   purpose "verify" → always least-loaded (picking a verifier, never manual)
+// previousAgents / excludeIds are skipped when anyone else is available.
+async function getNextUser(companyId, excludeIds = [], { purpose = "verify", cust: custIn } = {}) {
+  const cust = custIn || await getCust(companyId);
+  const strategy = purpose === "assign" ? (cust.workflows?.assignment?.strategy || "least_loaded") : "least_loaded";
+  if (strategy === "manual") return null;
+
+  const users = await User.find({ company: companyId }).select("_id").sort({ _id: 1 }).lean();
   if (!users.length) return null;
   const pool = users.filter(
-    (u) => !excludeIds.some((e) => e.toString() === u._id.toString()),
+    (u) => !excludeIds.some((e) => e && e.toString() === u._id.toString()),
   );
   const candidates = pool.length > 0 ? pool : users;
+
+  if (strategy === "round_robin") {
+    // Atomic counter on the company so concurrent creates don't collide.
+    const updated = await Company.findByIdAndUpdate(
+      companyId,
+      { $inc: { roundRobinIndex: 1 } },
+      { new: true, projection: { roundRobinIndex: 1 } },
+    ).lean();
+    const idx = Math.max(0, ((updated?.roundRobinIndex || 1) - 1)) % candidates.length;
+    return candidates[idx]._id;
+  }
+
+  const closed = custSvc.closedStatusKeys(cust);
   const counts = await Promise.all(
     candidates.map((u) =>
       Lead.countDocuments({
         company: companyId,
         user: u._id,
-        status: { $nin: ["Not Interested", "Converted"] },
+        status: { $nin: closed },
       }).then((c) => ({ userId: u._id, count: c })),
     ),
   );
@@ -80,29 +217,11 @@ async function getNextUser(companyId, excludeIds = []) {
   return counts[0].userId;
 }
 
-// ── Helper: build scheduled calls (+3d follow-up, +7d & +30d verification) ────
-function buildScheduledCalls() {
-  const now = Date.now();
-  return [
-    {
-      type: "follow-up",
-      scheduledAt: new Date(now + 3 * 24 * 60 * 60 * 1000),
-      done: false,
-      note: "Auto follow-up after Not Interested",
-    },
-    {
-      type: "verification",
-      scheduledAt: new Date(now + 7 * 24 * 60 * 60 * 1000),
-      done: false,
-      note: "7-day verification call",
-    },
-    {
-      type: "verification",
-      scheduledAt: new Date(now + 30 * 24 * 60 * 60 * 1000),
-      done: false,
-      note: "1-month verification call",
-    },
-  ];
+// ── Helper: build the scheduled calls a workflow adds (company-configurable;
+// default = +3d follow-up, +7d & +30d verification) ───────────────────────────
+function buildScheduledCalls(cust, flow = "notInterested") {
+  const cfg = cust?.workflows?.[flow]?.followUps;
+  return custSvc.buildScheduledFollowUps(cfg || custSvc.buildDefaults().workflows[flow].followUps);
 }
 
 // ── Phone uniqueness check: returns existing lead if number already taken ──────
@@ -279,8 +398,27 @@ const createLead = async (req, res) => {
       });
     }
 
+    const cust = await getCust(companyId);
+    if (employeeDenied(req, res, cust, "canAddLeads", "adding leads")) return;
+    const missing = missingRequiredLeadFields(cust, req.body);
+    if (missing.length) return res.status(400).json({ message: `Required: ${missing.join(", ")}` });
+    const cf = readCustomFields(cust, req.body, isEmployeeReq(req) ? "employee" : "admin", false);
+    if (cf.errors.length) return res.status(400).json({ message: cf.errors.join(" "), errors: cf.errors });
+
+    const lc = cust.workflows.leadCreation;
+    // Strip anything the client must not set directly on create.
+    const {
+      company: _c, customFields: _cf, isClosed: _ic, mergedInto: _mi, callHistory: _ch,
+      scheduledCalls: _sc, activityTimeline: _at, previousAgents: _pa, ...body
+    } = req.body || {};
     const lead = await Lead.create({
-      ...req.body,
+      ...body,
+      status:  resolveStatusKey(cust, body.status),
+      source:  body.source || lc.defaultSource || "Manual",
+      remark:  body.remark || lc.defaultRemark || "Manually added",
+      date:    body.date || new Date(),
+      temperature: body.temperature !== undefined ? resolveTemperatureKey(cust, body.temperature) : null,
+      customFields: cf.values,
       mobile:        primaryMobile,
       primaryPhone:  primaryMobile,
       secondaryPhone: normSecondary ? secondaryMobile : null,
@@ -303,9 +441,17 @@ const adminCreateLead = async (req, res) => {
     const companyId = getCompanyId(req);
     if (!companyId)
       return res.status(400).json({ message: "companyId is required." });
+    const cust = await getCust(companyId);
+    const missing = missingRequiredLeadFields(cust, req.body);
+    if (missing.length) return res.status(400).json({ message: `Required: ${missing.join(", ")}` });
+    const cf = readCustomFields(cust, req.body, "admin", false);
+    if (cf.errors.length) return res.status(400).json({ message: cf.errors.join(" "), errors: cf.errors });
+    const lc = cust.workflows.leadCreation;
+    const manualAssignment = cust.workflows.assignment.strategy === "manual";
+
     let assignedUser = req.body.user || null;
-    if (!assignedUser) {
-      assignedUser = await getNextUser(companyId);
+    if (!assignedUser && !manualAssignment) {
+      assignedUser = await getNextUser(companyId, [], { purpose: "assign", cust });
       if (!assignedUser)
         return res.status(400).json({
           message: "No users found in this company to assign the lead.",
@@ -354,22 +500,28 @@ const adminCreateLead = async (req, res) => {
       primaryPhone: primaryMobile,
       secondaryPhone: normSecondary ? secondaryMobile : null,
       email: req.body.email || "",
-      source: req.body.source || "Web Form",
+      source: req.body.source || lc.defaultSource || "Web Form",
       campaign: req.body.campaign || null,
-      status: req.body.status || "New",
+      status: resolveStatusKey(cust, req.body.status),
       date: req.body.date || new Date(),
-      remark: req.body.remark || "Manually added",
+      remark: req.body.remark || lc.defaultRemark || "Manually added",
       temperature:
-        req.body.temperature ||
-        computeQuality(
-          {
-            name: req.body.name || "",
-            mobile: primaryMobile,
-            email: req.body.email || "",
-            _extraAnswers: [],
-          },
-          0,
-        ),
+        resolveTemperatureKey(cust, req.body.temperature) ||
+        (lc.autoTemperature
+          ? computeQuality(
+              {
+                name: req.body.name || "",
+                mobile: primaryMobile,
+                email: req.body.email || "",
+                _extraAnswers: [],
+              },
+              0,
+            )
+          : null),
+      ...readIndustryServices(cust, req.body),
+      ...(req.body.businessName ? { businessName: String(req.body.businessName).trim() } : {}),
+      ...(req.body.language ? { language: String(req.body.language).trim() } : {}),
+      customFields: cf.values,
       user: assignedUser,
       company: companyId,
       assignedAdmin: req.admin?._id || req.superAdmin?._id || null,
@@ -461,14 +613,22 @@ const adminCreateLeadsBulk = async (req, res) => {
     const fallbackUser = await User.findOne({ company: companyId })
       .select("_id")
       .lean();
+    const cust = await getCust(companyId);
+    const lc = cust.workflows.leadCreation;
+    const manualAssignment = cust.workflows.assignment.strategy === "manual";
     const results = [],
       errors = [];
     for (let i = 0; i < items.length; i++) {
       const row = items[i];
      try {
-        const assignedUser = row.user || (fallbackUser ? fallbackUser._id : null);
-        if (!assignedUser) {
+        const assignedUser = row.user || (manualAssignment ? null : (fallbackUser ? fallbackUser._id : null));
+        if (!assignedUser && !manualAssignment) {
           errors.push({ index: i, message: "No user found." });
+          continue;
+        }
+        const cf = readCustomFields(cust, row, "admin", false);
+        if (cf.errors.length) {
+          errors.push({ index: i, row: row.name || i, message: cf.errors.join(" ") });
           continue;
         }
 
@@ -503,11 +663,13 @@ const adminCreateLeadsBulk = async (req, res) => {
           mobile:        primaryMobile,
           primaryPhone:  primaryMobile,
           secondaryPhone: normSecondary ? secondaryMobile : null,
-          source:        row.source   || "Web Form",
+          source:        row.source   || lc.defaultSource || "Web Form",
           campaign:      row.campaign || null,
-          status:        row.status   || "New",
+          status:        resolveStatusKey(cust, row.status),
           date:          row.date     || new Date(),
-          remark:        row.remark   || "Manually added",
+          remark:        row.remark   || lc.defaultRemark || "Manually added",
+          ...(row.temperature ? { temperature: resolveTemperatureKey(cust, row.temperature) } : {}),
+          customFields:  cf.values,
           user:          assignedUser,
           company:       companyId,
           assignedAdmin: req.admin?._id || req.superAdmin?._id || null,
@@ -544,8 +706,12 @@ const adminImportCSV = async (req, res) => {
     const rows = req.body.leads;
     if (!Array.isArray(rows) || rows.length === 0)
       return res.status(400).json({ message: "No leads provided in CSV." });
+    const cust = await getCust(companyId);
+    if (adminDenied(req, res, cust, "canImportLeads", "lead import")) return;
+    const lc = cust.workflows.leadCreation;
+    const importStrategy = cust.workflows.assignment.importStrategy || "round_robin";
     const users = await User.find({ company: companyId }).select("_id").lean();
-    if (!users.length)
+    if (!users.length && importStrategy !== "unassigned")
       return res
         .status(400)
         .json({ message: "No users found in this company." });
@@ -555,7 +721,15 @@ const adminImportCSV = async (req, res) => {
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       try {
-        const assignedUser = users[i % users.length]._id;
+        const assignedUser =
+          importStrategy === "unassigned" ? null
+          : importStrategy === "least_loaded" ? await getNextUser(companyId, [], { purpose: "verify", cust })
+          : users[i % users.length]._id;
+        const cf = readCustomFields(cust, row, "admin", false);
+        if (cf.errors.length) {
+          errors.push({ index: i, row: row.name || i, message: cf.errors.join(" ") });
+          continue;
+        }
         const mobile =
           row["Primary Number"] ||
           row.mobile ||
@@ -642,14 +816,15 @@ const adminImportCSV = async (req, res) => {
           secondaryPhone: normSecondary ? secondaryPhone : null,
           normalizedSecondaryPhone: normSecondary || null,
           email: row.email || "",
-          source: row.source || "Excel Import",
+          source: row.source || lc.defaultImportSource || "Excel Import",
           campaign: row.campaign || null,
           importedViaCsv: true,
-          status: row.status || "New",
+          status: resolveStatusKey(cust, row.status),
           date: row.date ? new Date(row.date) : new Date(),
-          remark: row.remark || row.notes || "Imported via Excel",
+          remark: row.remark || row.notes || lc.defaultImportRemark || "Imported via Excel",
+          customFields: cf.values,
           temperature:
-            row.temperature ||
+            resolveTemperatureKey(cust, row.temperature) ||
             computeQuality(
               {
                 name: row.name || "",
@@ -696,12 +871,20 @@ const userImportCSV = async (req, res) => {
     if (!Array.isArray(rows) || rows.length === 0)
       return res.status(400).json({ message: "No leads provided in CSV." });
     const companyId = getCompanyId(req);
+    const cust = await getCust(companyId);
+    if (employeeDenied(req, res, cust, "canImportLeads", "lead import")) return;
+    const lc = cust.workflows.leadCreation;
     const results = [],
       errors = [];
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       try {
+        const cf = readCustomFields(cust, row, "employee", false);
+        if (cf.errors.length) {
+          errors.push({ index: i, row: row.name || i, message: cf.errors.join(" ") });
+          continue;
+        }
         const mobile =
           row["Primary Number"] ||
           row.mobile ||
@@ -785,14 +968,15 @@ const userImportCSV = async (req, res) => {
           secondaryPhone: normSecondary ? secondaryPhone : null,
           normalizedSecondaryPhone: normSecondary || null,
           email: row.email || "",
-          source: row.source || "Excel Import",
+          source: row.source || lc.defaultImportSource || "Excel Import",
           campaign: row.campaign || null,
           importedViaCsv: true,
-          status: row.status || "New",
+          status: resolveStatusKey(cust, row.status),
           date: row.date ? new Date(row.date) : new Date(),
-          remark: row.remark || row.notes || "Imported via Excel",
+          remark: row.remark || row.notes || lc.defaultImportRemark || "Imported via Excel",
+          customFields: cf.values,
           temperature:
-            row.temperature ||
+            resolveTemperatureKey(cust, row.temperature) ||
             computeQuality(
               {
                 name: row.name || "",
@@ -830,18 +1014,14 @@ const userImportCSV = async (req, res) => {
   }
 };
 
-const deleteLead = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
-    if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    await Lead.findByIdAndDelete(id);
-    return res
-      .status(200)
-      .json({ message: "Deleted the Lead Successfully!.." });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+const deleteLead = (req, res) => {
+  // Lead deletion has been removed for every role. Leads are never deleted —
+  // close them (wrong entry / invalid) or merge duplicates instead, so the
+  // full history stays in reports and audits.
+  return res.status(403).json({
+    code: "LEAD_DELETE_DISABLED",
+    message: "Leads can't be deleted. Close the lead (wrong entry / invalid) or merge it with the duplicate instead.",
+  });
 };
 
 const updateLead = async (req, res) => {
@@ -855,8 +1035,28 @@ const updateLead = async (req, res) => {
     const {
       company, user, normalizedPhone, normalizedSecondaryPhone,
       leadgenId, previousAgents, reassignCount, additionalNumbers,
-      mergedFrom, ...safeBody
+      mergedFrom, customFields: _rawCustom, ...safeBody
     } = req.body;
+
+    const cust = await getCust(companyId);
+    if (employeeDenied(req, res, cust, "canEditLeadDetails", "editing lead details")) return;
+    const touchesPhone = safeBody.mobile !== undefined || safeBody.primaryPhone !== undefined || safeBody.secondaryPhone !== undefined;
+    if (touchesPhone && employeeDenied(req, res, cust, "canEditPhoneNumbers", "editing phone numbers")) return;
+    if (safeBody.status !== undefined) safeBody.status = resolveStatusKey(cust, safeBody.status, lead.status);
+    if (safeBody.temperature !== undefined) {
+      if (employeeDenied(req, res, cust, "canChangeTemperature", "changing lead quality")) return;
+      safeBody.temperature = resolveTemperatureKey(cust, safeBody.temperature);
+    }
+    const cfIn = readCustomFields(cust, req.body, isEmployeeReq(req) ? "employee" : "admin", true);
+    if (cfIn.errors.length) return res.status(400).json({ message: cfIn.errors.join(" "), errors: cfIn.errors });
+    for (const [k, v] of Object.entries(cfIn.values)) safeBody[`customFields.${k}`] = v;
+    // Never let a flat custom-field key land as a top-level lead path.
+    for (const f of cust.customFields || []) { delete safeBody[f.key]; delete safeBody[f.label]; }
+    if (safeBody.industry !== undefined || safeBody.service !== undefined || safeBody.services !== undefined) {
+      const isv = readIndustryServices(cust, safeBody);
+      delete safeBody.industry; delete safeBody.service; delete safeBody.services;
+      Object.assign(safeBody, isv);
+    }
 
     // If caller is changing primary phone, validate uniqueness
     const newPrimary = safeBody.mobile || safeBody.primaryPhone;
@@ -920,10 +1120,25 @@ const adminUpdateLead = async (req, res) => {
     const {
       company, leadgenId, reassignReason,
       normalizedPhone, normalizedSecondaryPhone,
-      additionalNumbers, mergedFrom,
+      additionalNumbers, mergedFrom, customFields: _rawCustom,
       ...safeBody
     } = req.body;
     const incomingUser = req.body.user;
+
+    const cust = await getCust(companyId || lead.company);
+    if (incomingUser && String(incomingUser) !== previousUserId &&
+        adminDenied(req, res, cust, "canReassignLeads", "reassigning leads")) return;
+    if (safeBody.status !== undefined) safeBody.status = resolveStatusKey(cust, safeBody.status, lead.status);
+    if (safeBody.temperature !== undefined) safeBody.temperature = resolveTemperatureKey(cust, safeBody.temperature);
+    const cfIn = readCustomFields(cust, req.body, "admin", true);
+    if (cfIn.errors.length) return res.status(400).json({ message: cfIn.errors.join(" "), errors: cfIn.errors });
+    for (const [k, v] of Object.entries(cfIn.values)) safeBody[`customFields.${k}`] = v;
+    for (const f of cust.customFields || []) { delete safeBody[f.key]; delete safeBody[f.label]; }
+    if (safeBody.industry !== undefined || safeBody.service !== undefined || safeBody.services !== undefined) {
+      const isv = readIndustryServices(cust, safeBody);
+      delete safeBody.industry; delete safeBody.service; delete safeBody.services;
+      Object.assign(safeBody, isv);
+    }
 
     // Validate primary phone change
     const newPrimary = safeBody.mobile || safeBody.primaryPhone;
@@ -1068,26 +1283,14 @@ const adminUpdateLead = async (req, res) => {
   }
 };
 
-const adminDeleteLead = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const companyId = req.admin
-      ? req.admin.company._id || req.admin.company
-      : null;
-    const scope = await getAdminLeadScope(req, companyId);
-    const query = mergeLeadScope(
-      companyId ? { _id: id, company: companyId } : { _id: id },
-      scope
-    );
-    const lead = await Lead.findOne(query);
-    if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
-    await Lead.findByIdAndDelete(id);
-    return res
-      .status(200)
-      .json({ message: "Deleted the Lead Successfully!.." });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+const adminDeleteLead = (req, res) => {
+  // Lead deletion has been removed for every role. Leads are never deleted —
+  // close them (wrong entry / invalid) or merge duplicates instead, so the
+  // full history stays in reports and audits.
+  return res.status(403).json({
+    code: "LEAD_DELETE_DISABLED",
+    message: "Leads can't be deleted. Close the lead (wrong entry / invalid) or merge it with the duplicate instead.",
+  });
 };
 
 // ── Projection for mobile list — only the fields formatLead() needs ──────────
@@ -1104,6 +1307,7 @@ const adminDeleteLead = async (req, res) => {
 // because it WAS in this list; `service` never was.
 const MOBILE_LIST_PROJECTION = {
   name:              1,
+  customFields:      1,
   mobile:            1,
   primaryPhone:      1,
   secondaryPhone:    1,
@@ -1112,6 +1316,7 @@ const MOBILE_LIST_PROJECTION = {
   campaign:          1,
   industry:          1,
   service:           1,
+  services:          1,
   status:            1,
   remark:            1,
   initialRemark:     1,
@@ -1147,7 +1352,11 @@ const MOBILE_LIST_PROJECTION = {
 // are intentionally excluded — the detail modal fetches them individually via
 // GET /lead/:id when the user opens a specific lead.
 const ADMIN_LIST_PROJECTION = {
+  industry:          1,
+  service:           1,
+  services:          1,
   name:              1,
+  customFields:      1,
   mobile:            1,
   primaryPhone:      1,
   secondaryPhone:    1,
@@ -1272,9 +1481,23 @@ const patchLead = async (req, res) => {
     const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
-    const { status, remark, outcome, followUpDate, temperature, Quality, industry, service } =
-      req.body;
+    const { remark, followUpDate, temperature, Quality, industry, service } = req.body;
+    let { status, outcome } = req.body;
     const update = {};
+
+    const companyIdStr = String(lead.company?._id || lead.company || "");
+    const cust = await getCust(companyIdStr);
+    const lu = cust.workflows.leadUpdate;
+
+    // ── Canonicalise status / outcome against the company's customization ───
+    // Clients may send a key, a renamed label or an alias — always store the key.
+    if (status !== undefined && status !== null && status !== "") {
+      status = resolveStatusKey(cust, status, lead.status);
+    } else if (status === "" || status === null) {
+      status = undefined;
+    }
+    const outcomeObj = (typeof outcome === "string" && outcome.trim()) ? custSvc.findOutcome(cust, outcome) : null;
+    if (outcomeObj) outcome = outcomeObj.key;
 
     if (status !== undefined) update.status = status;
     if (remark !== undefined) update.remark = remark;
@@ -1286,7 +1509,6 @@ const patchLead = async (req, res) => {
     // key on ents (spread from planLimits.features at build time). The broken
     // path always returned undefined → false → silently dropped industry/service
     // on every save even when the toggle was ON.
-    const companyIdStr = String(lead.company?._id || lead.company || "");
     const ents = await getCompanyEntitlements(companyIdStr).catch(() => null);
     // Nurture is fully multi-tenant now (jobs/nurtureSequenceJob.js gates on
     // this exact same entitlement flag via getNurtureEnabledCompanyIds()), so
@@ -1295,21 +1517,41 @@ const patchLead = async (req, res) => {
     // import and is always null — `=== NURTURE_COMPANY_ID` never matches,
     // leaving the entitlement flag as the single source of truth.
     const nurtureEnabled = !!ents?.leadNurtureSequence || companyIdStr === NURTURE_COMPANY_ID;
-    if (nurtureEnabled) {
-      if (industry !== undefined && industry !== "" && VALID_NURTURE_INDUSTRIES.has(String(industry).trim())) {
-        update.industry = String(industry).trim();
-      }
-      if (service !== undefined && service !== "" && VALID_NURTURE_SERVICES.has(String(service).trim())) {
-        update.service = String(service).trim();
-      }
-    }
+    // Industry / service are also plain lead fields when the company shows
+    // them (Customize CRM → Lead Fields) — not only for nurture companies.
+    const showIndustry = nurtureEnabled || cust.leadFields?.industry?.visible !== false;
+    const showService  = nurtureEnabled || cust.leadFields?.service?.visible !== false;
+    const isv = readIndustryServices(cust, { industry, service, services: req.body.services });
+    if (showIndustry && isv.industry !== undefined) update.industry = isv.industry;
+    if (showService && isv.services !== undefined) { update.services = isv.services; update.service = isv.service; }
 
     const temp = temperature || Quality;
-    if (temp && ["Hot", "Warm", "Cold"].includes(temp))
-      update.temperature = temp;
+    if (temp) {
+      const tKey = resolveTemperatureKey(cust, temp);
+      if (tKey && tKey !== lead.temperature) {
+        if (employeeDenied(req, res, cust, "canChangeTemperature", "changing lead quality")) return;
+      }
+      if (tKey) update.temperature = tKey;
+    }
+
+    // ── Company custom fields ─────────────────────────────────────────────────
+    const cfIn = readCustomFields(cust, req.body, isEmployeeReq(req) ? "employee" : "admin", true);
+    if (cfIn.errors.length) return res.status(400).json({ message: cfIn.errors.join(" "), errors: cfIn.errors });
 
     const pushOps = {};
     const setOps = {};
+    for (const [k, v] of Object.entries(cfIn.values)) setOps[`customFields.${k}`] = v;
+
+    // ── Optional server-side auto-advance of status from the outcome ─────────
+    // (Customize CRM → Workflows → "Move status from outcome"). Never downgrades.
+    if (lu.autoAdvanceStatusFromOutcome && outcomeObj?.autoStatus && (status === undefined || status === lead.status)) {
+      const target = custSvc.findStatus(cust, outcomeObj.autoStatus);
+      const current = custSvc.findStatus(cust, lead.status);
+      if (target && (!current || (target.order || 0) > (current.order || 0)) && !["won", "lost"].includes(current?.category)) {
+        status = target.key;
+        update.status = status;
+      }
+    }
 
     // ── Call history — only push when this is a genuine call interaction.
     // A bare remark-only edit (no outcome, no calledNumber) should NOT create
@@ -1324,12 +1566,16 @@ const patchLead = async (req, res) => {
       (outcome && typeof outcome === "string" && outcome.trim().length > 0) ||
       req.body.calledNumber
     );
-    if (remark && remark.trim() && isGenuineCall) {
+    const hasRemark = !!(remark && String(remark).trim());
+    if (isGenuineCall && lu.remarkRequired && !hasRemark) {
+      return res.status(400).json({ message: "A remark is required when logging a call." });
+    }
+    if (isGenuineCall && (hasRemark || !lu.remarkRequired)) {
       const histEntry = {
         userId: req.user._id,
         userName: req.user.name || "",
-        remark: remark.trim(),
-        outcome: outcome || "Call Back",
+        remark: hasRemark ? String(remark).trim() : "",
+        outcome: outcome || lu.defaultOutcomeWhenMissing || "Call Back",
         calledAt: new Date(),
       };
       if (req.body.calledNumber) histEntry.calledNumber = req.body.calledNumber;
@@ -1337,37 +1583,49 @@ const patchLead = async (req, res) => {
       pushOps.callHistory = histEntry;
     }
 
-    const pendingCalls = lead.scheduledCalls
-      .map((sc, idx) => ({ sc, idx }))
-      .filter(({ sc }) => !sc.done)
-      .sort((a, b) => new Date(a.sc.scheduledAt) - new Date(b.sc.scheduledAt));
+    if (lu.completeOldestPendingOnUpdate !== false) {
+      const pendingCalls = lead.scheduledCalls
+        .map((sc, idx) => ({ sc, idx }))
+        .filter(({ sc }) => !sc.done)
+        .sort((a, b) => new Date(a.sc.scheduledAt) - new Date(b.sc.scheduledAt));
 
-    if (pendingCalls.length > 0) {
-      const { idx } = pendingCalls[0];
-      setOps[`scheduledCalls.${idx}.done`] = true;
-      setOps[`scheduledCalls.${idx}.doneAt`] = new Date();
+      if (pendingCalls.length > 0) {
+        const { idx } = pendingCalls[0];
+        setOps[`scheduledCalls.${idx}.done`] = true;
+        setOps[`scheduledCalls.${idx}.doneAt`] = new Date();
+      }
     }
 
-    if (status !== undefined && status !== "Not Interested") {
-      const shouldSchedule = !!(followUpDate || outcome === "Call Back");
+    // ── Follow-up scheduling — driven by the outcome's follow-up rule ────────
+    //   none     → never     optional → only if a date is picked
+    //   required → a date must be picked    auto → picked date, else N days later
+    // Leads moving to a "lost" status never get a new follow-up here (the
+    // Not-Interested flow schedules its own).
+    const statusCat = custSvc.statusCategory(cust, status !== undefined ? status : lead.status);
+    const rule = outcomeObj ? outcomeObj.followUp : (outcome === "Call Back" ? "auto" : "optional");
+    if ((status !== undefined || outcomeObj) && statusCat !== "lost" && rule !== "none") {
+      if (rule === "required" && !followUpDate) {
+        return res.status(400).json({ message: `Pick a follow-up date for "${outcomeObj?.label || outcome}".` });
+      }
+      const shouldSchedule = !!(followUpDate || rule === "auto");
 
       if (shouldSchedule) {
+        if (followUpDate && employeeDenied(req, res, cust, "canScheduleFollowUps", "scheduling follow-ups")) return;
         let scheduledAt;
         if (followUpDate) {
           const provided = new Date(followUpDate);
-          const todayStart = new Date();
-          todayStart.setHours(0, 0, 0, 0);
-          if (provided < todayStart) {
+          if (Number.isNaN(provided.getTime())) {
+            return res.status(400).json({ message: "Invalid follow-up date." });
+          }
+          if (lu.preventPastFollowUp && provided < custSvc.companyDayStart(cust)) {
             return res
               .status(400)
               .json({ message: "Follow-up date cannot be in the past." });
           }
           scheduledAt = provided;
         } else {
-          const tomorrow = new Date();
-          tomorrow.setDate(tomorrow.getDate() + 1);
-          tomorrow.setHours(9, 0, 0, 0);
-          scheduledAt = tomorrow;
+          const days = outcomeObj ? outcomeObj.autoFollowUpDays : lu.defaultFollowUpDays;
+          scheduledAt = custSvc.companyDateAt(cust, days, lu.defaultFollowUpHour);
         }
 
         pushOps.scheduledCalls = {
@@ -1375,7 +1633,7 @@ const patchLead = async (req, res) => {
           scheduledAt,
           done: false,
           doneAt: null,
-          note: `Follow-up after status "${status}" — outcome: ${outcome || "Call Back"}`,
+          note: `Follow-up after status "${status !== undefined ? status : lead.status}" — outcome: ${outcome || lu.defaultOutcomeWhenMissing || "Call Back"}`,
         };
       }
     }
@@ -1414,8 +1672,9 @@ const patchLead = async (req, res) => {
     // Uses company's interestedBlast settings. Sends only ONCE per lead
     // (guarded by interestedBlastSentAt — claimed atomically below).
     const isInterestedNow =
-      (typeof outcome === "string" && outcome.trim().toLowerCase() === "interested") ||
-      (typeof status === "string" && status.trim().toLowerCase() === "interested");
+      (outcomeObj ? outcomeObj.behavior === "interested"
+                  : (typeof outcome === "string" && outcome.trim().toLowerCase() === "interested")) ||
+      (status !== undefined && custSvc.statusCategory(cust, status) === "interested");
 
     if (isInterestedNow && updatedLead) {
       const blastCompanyId =
@@ -1530,19 +1789,22 @@ const patchLeadTemperature = async (req, res) => {
       lastCalledByBot,
     } = req.body;
 
-    if (!["Hot", "Warm", "Cold"].includes(temperature))
-      return res
-        .status(400)
-        .json({ message: "temperature must be Hot, Warm, or Cold" });
-
     const companyId = req.admin?.company?._id || req.admin?.company;
     if (!companyId)
       return res.status(400).json({ message: "Company not found in token." });
+    const tempCust = await getCust(companyId);
+    const tempKey = resolveTemperatureKey(tempCust, temperature);
+    if (!tempKey) {
+      const allowed = tempCust.temperatures.filter((t) => t.active).map((t) => t.label).join(", ");
+      return res
+        .status(400)
+        .json({ message: `temperature must be one of: ${allowed}` });
+    }
     const scope = await getAdminLeadScope(req, companyId);
     const lead = await Lead.findOne(mergeLeadScope({ _id: id, company: companyId }, scope));
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
-    const update = { temperature };
+    const update = { temperature: tempKey };
     if (voiceBotSummary !== undefined) update.voiceBotSummary = voiceBotSummary;
     if (voiceBotScore !== undefined) update.voiceBotScore = voiceBotScore;
     if (voiceBotReason !== undefined) update.voiceBotReason = voiceBotReason;
@@ -1576,15 +1838,21 @@ const markNotInterested = async (req, res) => {
     const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
+    const cust = await getCust(lead.company);
+    if (employeeDenied(req, res, cust, "canMarkNotInterested", "marking leads Not Interested")) return;
+    const wf = cust.workflows.notInterested;
+    const niOutcome = (cust.outcomes.find((o) => o.behavior === "notInterested") || { key: "Not Interested" }).key;
+
     const historyEntry = {
       userId: req.user._id,
       userName: req.user.name || "",
       remark: remark.trim(),
-      outcome: "Not Interested",
+      outcome: niOutcome,
       calledAt: new Date(),
     };
 
-    const stage = lead.niStage || null;
+    // Workflow switched off → simply mark the lead lost, keep it with the agent.
+    const stage = (wf.enabled && wf.verification) ? (lead.niStage || null) : "__direct__";
 
     // Common pieces of the update applied in every branch.
     const updatePayload = {
@@ -1600,14 +1868,32 @@ const markNotInterested = async (req, res) => {
     let message     = "";
     let scheduledForResponse = [];
 
-    if (!stage) {
+    if (stage === "__direct__") {
+      // ── Verification disabled for this company ─────────────────────────────
+      updatePayload.$set.status = wf.finalStatus;
+      if (wf.enabled) {
+        const newScheduledCalls = buildScheduledCalls(cust, "notInterested");
+        scheduledForResponse = newScheduledCalls;
+        if (newScheduledCalls.length) updatePayload.$push.scheduledCalls = { $each: newScheduledCalls };
+      }
+      outcome = "marked_directly";
+      message = scheduledForResponse.length
+        ? `Lead marked ${wf.finalStatus}. ${scheduledForResponse.length} follow-up call(s) scheduled.`
+        : `Lead marked ${wf.finalStatus}.`;
+    } else if (!stage) {
       // ── STAGE 1: first Not Interested ────────────────────────────────────
       // Reassign to another agent for VERIFICATION. Remember the original
       // employee so a second NI can be sent back to them. Schedule the 3 calls.
       const excludeIds = [...(lead.previousAgents || []), req.user._id];
-      nextUserId = await getNextUser(req.user.company, excludeIds);
+      // Workflow "verifier: team_lead" → the employee's own Team Lead verifies
+      // (falls back to round robin when they have no Team Lead).
+      if (wf.verifier === "team_lead" && custSvc.permission(cust, "teamLead", "canVerifyNotInterested")) {
+        const tlId = await teamScope.getTeamLeadOf(req.user._id);
+        if (tlId && String(tlId) !== String(req.user._id)) nextUserId = tlId;
+      }
+      if (!nextUserId) nextUserId = await getNextUser(req.user.company, excludeIds, { purpose: "verify", cust });
 
-      const newScheduledCalls = buildScheduledCalls();
+      const newScheduledCalls = buildScheduledCalls(cust, "notInterested");
       scheduledForResponse = newScheduledCalls;
 
       updatePayload.$set.niOriginalAgent = req.user._id;
@@ -1617,17 +1903,17 @@ const markNotInterested = async (req, res) => {
       if (nextUserId) {
         updatePayload.$set.user    = nextUserId;
         updatePayload.$set.niStage = "verification";
-        updatePayload.$set.status  = "Verification";
+        updatePayload.$set.status  = wf.verificationStatus;
       } else {
         // No other agent available — keep with current employee, no verification.
         updatePayload.$set.niStage = null;
-        updatePayload.$set.status  = "Not Interested";
+        updatePayload.$set.status  = wf.finalStatus;
       }
 
       outcome = nextUserId ? "sent_for_verification" : "no_verifier_available";
       message = nextUserId
-        ? `Lead sent for verification to ${"another agent"} with 3 scheduled calls.`
-        : "No other agent available; lead kept with you. 3 follow-up calls scheduled.";
+        ? `Lead sent for verification to ${"another agent"} with ${newScheduledCalls.length} scheduled calls.`
+        : `No other agent available; lead kept with you. ${newScheduledCalls.length} follow-up calls scheduled.`;
     } else if (stage === "verification") {
       // ── STAGE 2: verifier ALSO marks Not Interested ──────────────────────
       // Send the lead BACK to the original employee, keep it active with the
@@ -1640,7 +1926,7 @@ const markNotInterested = async (req, res) => {
       updatePayload.$set.niStage = "returned";
       // Keep the lead actionable for the original employee with its remaining
       // follow-ups; flag it Not Interested so it's visibly confirmed.
-      updatePayload.$set.status  = "Not Interested";
+      updatePayload.$set.status  = wf.finalStatus;
 
       outcome = "returned_to_original";
       message = backTo
@@ -1651,7 +1937,7 @@ const markNotInterested = async (req, res) => {
     } else {
       // ── STAGE 3+: already returned once — avoid ping-pong ────────────────
       // Reset to New so it stays with the current owner; keep follow-ups intact.
-      updatePayload.$set.status = "New";
+      updatePayload.$set.status = wf.resetStatus;
       outcome = "kept_no_reassign";
       message = "Lead marked Not Interested again. Kept with current employee; existing follow-ups retained.";
     }
@@ -1665,7 +1951,7 @@ const markNotInterested = async (req, res) => {
 
     // Build a human message that includes the resolved agent name where relevant.
     if (outcome === "sent_for_verification") {
-      message = `Lead sent for verification to ${updatedLead.user?.name || "another agent"} with 3 scheduled calls.`;
+      message = `Lead sent for verification to ${updatedLead.user?.name || "another agent"} with ${scheduledForResponse.length} scheduled calls.`;
     } else if (outcome === "returned_to_original") {
       message = `Verification confirmed Not Interested. Lead returned to ${updatedLead.user?.name || "the original employee"} with remaining follow-ups.`;
     }
@@ -1719,39 +2005,28 @@ const markColdReassign = async (req, res) => {
     const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
+    const cust = await getCust(lead.company);
+    if (employeeDenied(req, res, cust, "canMarkCold", "the cold-lead flow")) return;
+    const wf = cust.workflows.cold;
+    // The quality that triggers this flow (default "Cold"); falls back to the
+    // first quality flagged triggersColdFlow, then "Cold".
+    const coldTemp = (cust.temperatures.find((t) => t.triggersColdFlow) || { key: "Cold" }).key;
+
     const historyEntry = {
       userId: req.user._id,
       userName: req.user.name || "",
       remark: remark.trim(),
-      outcome: "Cold",
+      outcome: coldTemp,
       calledAt: new Date(),
     };
 
-    const buildColdScheduledCalls = () => ([
-      {
-        type: "follow-up",
-        scheduledAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
-        done: false,
-        note: "Auto follow-up after Cold reassignment",
-      },
-      {
-        type: "verification",
-        scheduledAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        done: false,
-        note: "7-day verification call",
-      },
-      {
-        type: "verification",
-        scheduledAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-        done: false,
-        note: "1-month verification call",
-      },
-    ]);
+    const buildColdScheduledCalls = () => buildScheduledCalls(cust, "cold");
 
-    const stage = lead.coldStage || null;
+    // Workflow off / verification off → just set the quality, no reassignment.
+    const stage = (wf.enabled && wf.verification) ? (lead.coldStage || null) : "__direct__";
 
     const updatePayload = {
-      $set: { temperature: "Cold", remark: remark.trim() },
+      $set: { temperature: coldTemp, remark: remark.trim() },
       $push: {
         callHistory: historyEntry,
         previousAgents: req.user._id,
@@ -1762,10 +2037,17 @@ const markColdReassign = async (req, res) => {
     let outcome     = "";
     let scheduledForResponse = [];
 
-    if (!stage) {
+    if (stage === "__direct__") {
+      if (wf.enabled) {
+        const newScheduledCalls = buildColdScheduledCalls();
+        scheduledForResponse = newScheduledCalls;
+        if (newScheduledCalls.length) updatePayload.$push.scheduledCalls = { $each: newScheduledCalls };
+      }
+      outcome = "marked_directly";
+    } else if (!stage) {
       // ── STAGE 1: first Cold mark — send to another agent for VERIFICATION ──
       const excludeIds = [...(lead.previousAgents || []), req.user._id];
-      nextUserId = await getNextUser(req.user.company, excludeIds);
+      nextUserId = await getNextUser(req.user.company, excludeIds, { purpose: "verify", cust });
 
       const newScheduledCalls = buildColdScheduledCalls();
       scheduledForResponse = newScheduledCalls;
@@ -1777,7 +2059,7 @@ const markColdReassign = async (req, res) => {
       if (nextUserId) {
         updatePayload.$set.user      = nextUserId;
         updatePayload.$set.coldStage = "verification";
-        updatePayload.$set.status    = "Verification";
+        updatePayload.$set.status    = wf.verificationStatus;
       } else {
         updatePayload.$set.coldStage = null;
         // No verifier available — keep with current agent, status unchanged.
@@ -1790,13 +2072,13 @@ const markColdReassign = async (req, res) => {
       if (backTo) updatePayload.$set.user = backTo;
       updatePayload.$set.coldStage = "returned";
       // Keep it active for the original employee with remaining follow-ups.
-      updatePayload.$set.status    = "New";
+      updatePayload.$set.status    = wf.returnStatus;
 
       outcome = "returned_to_original";
       nextUserId = backTo;
     } else {
       // ── STAGE 3+: already returned — keep with current owner, no reassign ─
-      updatePayload.$set.status = "New";
+      updatePayload.$set.status = wf.returnStatus;
       outcome = "kept_no_reassign";
     }
 
@@ -1808,10 +2090,14 @@ const markColdReassign = async (req, res) => {
       .populate("coldOriginalAgent", "name email");
 
     let message;
-    if (outcome === "sent_for_verification") {
-      message = `Cold lead sent for verification to ${updatedLead.user?.name || "another agent"} with 3 scheduled calls.`;
+    if (outcome === "marked_directly") {
+      message = scheduledForResponse.length
+        ? `Lead marked ${coldTemp}. ${scheduledForResponse.length} follow-up call(s) scheduled.`
+        : `Lead marked ${coldTemp}.`;
+    } else if (outcome === "sent_for_verification") {
+      message = `Cold lead sent for verification to ${updatedLead.user?.name || "another agent"} with ${scheduledForResponse.length} scheduled calls.`;
     } else if (outcome === "no_verifier_available") {
-      message = "No other agent available; lead kept with you. 3 follow-up calls scheduled.";
+      message = `No other agent available; lead kept with you. ${scheduledForResponse.length} follow-up calls scheduled.`;
     } else if (outcome === "returned_to_original") {
       message = `Verification confirmed Cold. Lead returned to ${updatedLead.user?.name || "the original employee"} with remaining follow-ups.`;
     } else {
@@ -1881,6 +2167,14 @@ const markInvalid = async (req, res) => {
     if (lead.isClosed)
       return res.status(400).json({ message: "Lead is already closed." });
 
+    const cust = await getCust(companyId || lead.company);
+    if (employeeDenied(req, res, cust, "canMarkInvalid", "marking leads Invalid")) return;
+    const wf = cust.workflows.invalid;
+    const invalidOutcome = (cust.outcomes.find((o) => o.behavior === "invalid") || { key: "Invalid" }).key;
+    if (!wf.enabled) {
+      return res.status(400).json({ message: "The Invalid lead workflow is turned off for your company." });
+    }
+
     const _io = global._io;
     const UserModel = require("../models/Users");
 
@@ -1903,7 +2197,7 @@ const markInvalid = async (req, res) => {
       userId:   req.user._id,
       userName: req.user.name || "",
       remark:   remark.trim(),
-      outcome:  reject ? "Invalid Rejected" : "Invalid",
+      outcome:  reject ? `${invalidOutcome} Rejected` : invalidOutcome,
       calledAt: new Date(),
     };
 
@@ -1914,7 +2208,7 @@ const markInvalid = async (req, res) => {
         $set: {
           remark:       remark.trim(),
           invalidStage: null,
-          status:       "New",
+          status:       wf.resetStatus,
         },
         $push: { callHistory: historyEntry },
       };
@@ -1979,7 +2273,7 @@ const markInvalid = async (req, res) => {
             closedAt:     new Date(),
             closedBy:     req.user._id,
             invalidStage: null,
-            status:       "Not Interested",
+            status:       wf.closedStatus,
             user:         null,   // remove from every employee panel
           },
           $push: { callHistory: historyEntry },
@@ -2013,8 +2307,11 @@ const markInvalid = async (req, res) => {
     }
 
     // ── STAGE 1: first Invalid → send to another agent for verification ────────
+    // (verification switched off for the company → close immediately)
     const excludeIds = [...(lead.previousAgents || []), req.user._id];
-    const nextUserId = await getNextUser(req.user.company, excludeIds);
+    const nextUserId = wf.verification
+      ? await getNextUser(req.user.company, excludeIds, { purpose: "verify", cust })
+      : null;
 
     const updatePayload = {
       $set: {
@@ -2031,15 +2328,15 @@ const markInvalid = async (req, res) => {
     if (nextUserId) {
       updatePayload.$set.user         = nextUserId;
       updatePayload.$set.invalidStage = "verification";
-      updatePayload.$set.status       = "Verification";
+      updatePayload.$set.status       = wf.verificationStatus;
     } else {
       // No other agent available — close immediately with the single mark.
       updatePayload.$set.invalidStage = null;
       updatePayload.$set.isClosed     = true;
-      updatePayload.$set.closeReason  = remark.trim() || "Invalid";
+      updatePayload.$set.closeReason  = remark.trim() || invalidOutcome;
       updatePayload.$set.closedAt     = new Date();
       updatePayload.$set.closedBy     = req.user._id;
-      updatePayload.$set.status       = "Not Interested";
+      updatePayload.$set.status       = wf.closedStatus;
       updatePayload.$set.user         = null;
     }
 
@@ -2100,6 +2397,8 @@ const closeLeadWrongEntry = async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
     const companyId = getCompanyId(req);
+    const cust = await getCust(companyId);
+    if (employeeDenied(req, res, cust, "canCloseLeads", "closing leads")) return;
     const scope = await getAdminLeadScope(req, companyId);
     const lead = await Lead.findOne(mergeLeadScope({ _id: id, company: companyId }, scope));
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
@@ -2130,13 +2429,19 @@ const closeLeadWrongEntry = async (req, res) => {
 const closeLeadByUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { phone, remark } = req.body;
-    if (!phone || !phone.trim())
+    const { remark } = req.body;
+    const phone = String(req.body.phone || "");
+    const companyId = getCompanyId(req);
+    const cust = await getCust(companyId);
+    if (employeeDenied(req, res, cust, "canCloseLeads", "closing leads")) return;
+    const closeCfg = cust.workflows.closeByEmployee;
+    if (!closeCfg.enabled)
+      return res.status(400).json({ message: "Closing leads is turned off for your company." });
+    if (closeCfg.requirePhone && !phone.trim())
       return res.status(400).json({ message: "Phone number is required to close a lead." });
     if (!remark || !remark.trim())
       return res.status(400).json({ message: "Remark is required to close a lead." });
 
-    const companyId = getCompanyId(req);
     const lead = await Lead.findOne({ _id: id, company: companyId, user: req.user._id });
     if (!lead) return res.status(404).json({ message: "Lead not found or not assigned to you." });
     if (lead.isClosed) return res.status(400).json({ message: "Lead is already closed." });
@@ -2149,7 +2454,7 @@ const closeLeadByUser = async (req, res) => {
           closeReason:    remark.trim(),
           closedAt:       new Date(),
           closedBy:       req.user._id,
-          status:         "Not Interested",
+          status:         closeCfg.closedStatus,
         },
         $push: {
           callHistory: {
@@ -2366,6 +2671,8 @@ const logPhoneReveal = async (req, res) => {
     const companyId =
       req.user?.company || req.admin?.company?._id || req.admin?.company;
 
+    const revealCust = await getCust(companyId);
+    if (employeeDenied(req, res, revealCust, "canRevealContact", "revealing contact details")) return;
     const scope = await getAdminLeadScope(req, companyId);
     const lead = await Lead.findOne(mergeLeadScope({ _id: id, company: companyId }, scope));
     if (!lead) return res.status(404).json({ message: "Lead Not Found" });
@@ -2396,6 +2703,8 @@ const logEmailReveal = async (req, res) => {
     const companyId =
       req.user?.company || req.admin?.company?._id || req.admin?.company;
 
+    const revealCust = await getCust(companyId);
+    if (employeeDenied(req, res, revealCust, "canRevealContact", "revealing contact details")) return;
     const scope = await getAdminLeadScope(req, companyId);
     const lead = await Lead.findOne(mergeLeadScope({ _id: id, company: companyId }, scope));
     if (!lead) return res.status(404).json({ message: "Lead Not Found" });
@@ -2502,9 +2811,12 @@ const getPendingNotifications = async (req, res) => {
 
     const isSuperAdmin = role === "super_admin" || role === "superadmin";
 
+    const notifCust    = await getCust(company);
+    const na           = notifCust.alerts.noAction;
     const now          = Date.now();
-    const oneHourAgo   = new Date(now - 60  * 60 * 1000);
-    const twoHoursAgo  = new Date(now - 120 * 60 * 1000);
+    const oneHourAgo   = new Date(now - na.firstAlertHours  * 60 * 60 * 1000);
+    const twoHoursAgo  = new Date(now - na.secondAlertHours * 60 * 60 * 1000);
+    const fmtH = (h) => (h % 1 === 0 ? `${h} hour${h === 1 ? "" : "s"}` : `${Math.round(h * 60)} minutes`);
     const todayStart   = new Date(); todayStart.setHours(0, 0, 0, 0);
     const todayEnd     = new Date(); todayEnd.setHours(23, 59, 59, 999);
 
@@ -2517,14 +2829,14 @@ const getPendingNotifications = async (req, res) => {
       ...scope,
       user:        { $ne: null },
       isClosed:    { $ne: true },
-      status:      { $nin: ["Not Interested", "Converted"] },
+      status:      { $nin: custSvc.closedStatusKeys(notifCust) },
       callHistory: { $size: 0 },
     };
 
-    const noAction2h = await Lead.find({ ...noActionBase, createdAt: { $lte: twoHoursAgo } })
+    const noAction2h = !na.enabled ? [] : await Lead.find({ ...noActionBase, createdAt: { $lte: twoHoursAgo } })
       .select("_id name user").populate("user", "name").lean();
     const twoHourIds = new Set(noAction2h.map(l => String(l._id)));
-    const noAction1h = (await Lead.find({ ...noActionBase, createdAt: { $lte: oneHourAgo } })
+    const noAction1h = !na.enabled ? [] : (await Lead.find({ ...noActionBase, createdAt: { $lte: oneHourAgo } })
       .select("_id name user").populate("user", "name").lean())
       .filter(l => !twoHourIds.has(String(l._id))); // 1h list excludes those already 2h+
 
@@ -2553,8 +2865,8 @@ const getPendingNotifications = async (req, res) => {
       id: "noa-2h", type: "no_action",
       title: `${noAction2h.length} Lead${noAction2h.length > 1 ? "s" : ""} — No Action`,
       body: noAction2h.length === 1
-        ? `"${noAction2h[0].name}" has had no activity for 2 hours.`
-        : `${noAction2h.length} leads have had no activity for 2 hours.`,
+        ? `"${noAction2h[0].name}" has had no activity for ${fmtH(na.secondAlertHours)}.`
+        : `${noAction2h.length} leads have had no activity for ${fmtH(na.secondAlertHours)}.`,
       leads: mkLeads(noAction2h), threshold: "2h",
       timestamp: new Date().toISOString(), urgent: true,
     });
@@ -2562,8 +2874,8 @@ const getPendingNotifications = async (req, res) => {
       id: "noa-1h", type: "no_action",
       title: `${noAction1h.length} Lead${noAction1h.length > 1 ? "s" : ""} — No Action`,
       body: noAction1h.length === 1
-        ? `"${noAction1h[0].name}" has had no activity for 1 hour.`
-        : `${noAction1h.length} leads have had no activity for 1 hour.`,
+        ? `"${noAction1h[0].name}" has had no activity for ${fmtH(na.firstAlertHours)}.`
+        : `${noAction1h.length} leads have had no activity for ${fmtH(na.firstAlertHours)}.`,
       leads: mkLeads(noAction1h), threshold: "1h",
       timestamp: new Date().toISOString(), urgent: false,
     });
@@ -2597,6 +2909,7 @@ const addSecondaryPhone = async (req, res, next) => {
       return res.status(400).json({ message: "secondaryPhone is required" });
     }
     const companyId = getCompanyId(req);
+    if (employeeDenied(req, res, await getCust(companyId), "canEditPhoneNumbers", "editing phone numbers")) return;
     const scope = await getAdminLeadScope(req, companyId);
     const lead = await Lead.findOne(mergeLeadScope({
       _id: id,
@@ -2672,6 +2985,7 @@ const removeSecondaryPhone = async (req, res, next) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
+    if (employeeDenied(req, res, await getCust(companyId), "canEditPhoneNumbers", "editing phone numbers")) return;
     const scope = await getAdminLeadScope(req, companyId);
     const lead = await Lead.findOne(mergeLeadScope({
       _id: id,
@@ -2714,6 +3028,7 @@ const swapPhones = async (req, res, next) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
+    if (employeeDenied(req, res, await getCust(companyId), "canEditPhoneNumbers", "editing phone numbers")) return;
     const scope = await getAdminLeadScope(req, companyId);
     const lead = await Lead.findOne(mergeLeadScope({
       _id: id,
@@ -2783,6 +3098,7 @@ const mergeLead = async (req, res, next) => {
     }
 
     const companyId = getCompanyId(req);
+    if (employeeDenied(req, res, await getCust(companyId), "canMergeLeads", "merging leads")) return;
     const actorId   = req.user?._id || req.admin?._id || req.superAdmin?._id || null;
     const actorRole = req.admin ? "admin" : (req.superAdmin ? "superadmin" : "user");
 

@@ -288,7 +288,9 @@ const sendSingleSms = async (req, res, next) => {
 
     // Log the actual template message text for records
     const resolvedName = isRealName(name) ? name : "Sir/Madam";
-    const logMessage = `Hi ${resolvedName}, thank you for contacting SKYUP Digital Solutions LLP! Our Services:SEO Services, Social Media & GBP Management, Google & Meta Ads, Website Design & Development, AI Automation & Machine Learning, Chatbot & WhatsApp Automation. One of our team members will connect with you shortly. Phone: +91 88678 67775 Website: SKYUP Digital Solutions LLP`;
+    // Company-specific greeting text (Customize CRM → Messaging) — previously
+    // hardcoded to Skyup's full service list + phone number for every tenant.
+    const logMessage = await require("../services/customizationService").renderSmsGreeting(companyId, resolvedName);
 
     await saveLog({
       to:             mobile,

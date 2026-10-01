@@ -166,8 +166,8 @@ async function _sendClientMeetingWhatsApp({ lead, companyId, meetingDate, meetin
       return { success: false, message: 'MSG91 WhatsApp credentials are not configured.' };
     }
 
-    const company     = await Company.findById(companyId).select('name').lean();
-    const companyName = company?.name || 'SkyUp Digital Solutions';
+    const company     = await Company.findById(companyId).select('name brandName').lean();
+    const companyName = company?.brandName || company?.name || 'our team';
 
     const clientName = lead.name || 'there';
     const dateStr    = meetingDate ? fmtDate(meetingDate) : fmtDate(new Date());
@@ -269,8 +269,8 @@ async function _sendClientMeetingEmail({ lead, companyId, meetingDate, meetingTi
       return { success: false, message: 'Lead has no email address.' };
     }
 
-    const company     = await Company.findById(companyId).select('name').lean();
-    const companyName = company?.name || 'SkyUp Digital Solutions';
+    const company     = await Company.findById(companyId).select('name brandName').lean();
+    const companyName = company?.brandName || company?.name || 'our team';
 
     const clientName = lead.name || 'there';
     const dateStr    = meetingDate ? fmtDate(meetingDate) : fmtDate(new Date());
@@ -331,10 +331,24 @@ const addMeetingRemark = (req, res) => {
 
       const proposalSentBool = proposalSent === true || proposalSent === 'true';
 
+      // Meeting types come from the company's customization (lists.meetingTypes).
+      const _svc  = require('../services/customizationService');
+      const _cust = await _svc.getCustomization(companyId);
+      if (!req.admin && !req.superAdmin && !_svc.permission(_cust, 'employee', 'canLogClientMeetings')) {
+        return res.status(403).json({ message: 'Your company has disabled client meeting logging for employees.', code: 'PERMISSION_DISABLED' });
+      }
+      const _types = _cust.lists.meetingTypes || [];
+      let _meetingType = String(meetingType || _types[0] || 'In-Person').trim();
+      const _match = _types.find((t) => t.toLowerCase() === _meetingType.toLowerCase());
+      if (_types.length && !_match) {
+        return res.status(400).json({ message: `Unknown meeting type "${_meetingType}". Allowed: ${_types.join(', ')}` });
+      }
+      if (_match) _meetingType = _match;
+
       const entry = {
         userId:       getUserId(req),
         userName:     getUserName(req),
-        meetingType:  meetingType || 'In-Person',
+        meetingType:  _meetingType,
         outcome:      outcome.trim(),
         remark:       remark.trim(),
         metAt:        new Date(),

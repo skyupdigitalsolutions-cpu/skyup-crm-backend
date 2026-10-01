@@ -105,6 +105,7 @@ const MODULE_CATALOG = [
   // People
   { key: "attendance",           group: "People",        label: "Attendance" },
   { key: "payroll",              group: "People",        label: "Payroll" },
+  { key: "teamLeads",            group: "People",        label: "Team Leads (My Team)",      navOnly: true },
   // Communication
   { key: "communications",       group: "Communication", label: "Communications",            navOnly: true },
   { key: "whatsappBlast",        group: "Communication", label: "WhatsApp Blast" },
@@ -125,7 +126,6 @@ const MODULE_CATALOG = [
   { key: "googleAds",            group: "Integrations",  label: "Google Ads" },
   { key: "linkedInAds",          group: "Integrations",  label: "LinkedIn Ads" },
   { key: "websiteTracking",      group: "Integrations",  label: "Website Forms" },
-  { key: "googleSheetIntegration", group: "Integrations", label: "Excel / Google Sheet" },
   { key: "metaConversionSync",   group: "Integrations",  label: "Meta Conversion Sync" },
   { key: "apiAccess",            group: "Integrations",  label: "API Access" },
   { key: "webhookAccess",        group: "Integrations",  label: "Webhooks" },
@@ -221,7 +221,8 @@ const DEFAULT_LISTS = {
   services: [
     "SEO", "Paid Ads", "Website Design & Development", "AI Automation",
     "CRM", "Video Editing", "Graphic Design", "Social Media Marketing",
-    "AI Voice Agent",
+    "AI Voice Agent", "Custom Software", "WhatsApp Automation & Chatbots", "ERP Systems",
+    "Mobile Applications", "Branding",
   ],
   languages: ["English", "Hindi", "Kannada", "Tamil", "Telugu", "Malayalam", "Marathi", "Bengali", "Gujarati"],
 };
@@ -233,8 +234,10 @@ const DEFAULT_LEAD_FIELDS = {
   source:         { visible: true,  required: false, label: "Source" },
   campaign:       { visible: true,  required: false, label: "Campaign" },
   temperature:    { visible: true,  required: false, label: "Lead Quality" },
-  industry:       { visible: true,  required: false, label: "Industry" },
-  service:        { visible: true,  required: false, label: "Service" },
+  // allowOther → pickers show "Other" with a free-text box (value stored as typed).
+  industry:       { visible: true,  required: false, label: "Industry", allowOther: true },
+  // multiple → a lead can carry several services (Lead.services[]; Lead.service = first one).
+  service:        { visible: true,  required: false, label: "Service", multiple: true, allowOther: false },
   businessName:   { visible: true,  required: false, label: "Business Name" },
   language:       { visible: true,  required: false, label: "Language" },
   remark:         { visible: true,  required: true,  label: "Remark" },
@@ -275,6 +278,10 @@ const DEFAULT_WORKFLOWS = {
     verificationStatus: "Verification",
     finalStatus: "Not Interested",
     resetStatus: "New",
+    // Who verifies: "round_robin" (another employee, as before) or
+    // "team_lead" (the employee's Team Lead; falls back to round robin when
+    // the employee has no Team Lead).
+    verifier: "round_robin",
     followUps: [
       { type: "follow-up",    days: 3,  note: "Auto follow-up after Not Interested" },
       { type: "verification", days: 7,  note: "7-day verification call" },
@@ -316,7 +323,6 @@ const DEFAULT_PERMISSIONS = {
     canImportLeads: true,
     canEditLeadDetails: true,
     canEditPhoneNumbers: true,
-    canDeleteLeads: true,
     canCloseLeads: true,
     canMarkInvalid: true,
     canMarkNotInterested: true,
@@ -328,8 +334,28 @@ const DEFAULT_PERMISSIONS = {
     canExportLeads: true,
     canLogClientMeetings: true,
   },
+  // Team Lead = an employee flagged isTeamLead. Everything an employee can do
+  // (above) PLUS these, limited to their own team.
+  teamLead: {
+    canViewTeamLeads: true,       // see team members' leads
+    canEditTeamLeads: true,       // update / log calls on team members' leads
+    canCallTeamLeads: true,       // call team members' leads (number revealed for the call)
+    canReassignLeads: true,       // move leads between own team members
+    canRevealTeamContact: false,  // see unmasked phone / email of team leads
+    canViewTeamCalls: true,       // team call logs & recordings
+    canViewTeamAttendance: true,  // team attendance today / history
+    canVerifyNotInterested: true, // act as NI verifier when workflow says so
+  },
+  // Call recordings: who may DOWNLOAD the audio file (everyone can still play
+  // it inside the CRM). Off by default = the old "no download" behaviour.
+  recordings: {
+    superAdminCanDownload: false,
+    adminCanDownload: false,
+    teamLeadCanDownload: false,
+    employeeCanDownload: false,
+  },
+  // Lead deletion has been removed for every role — close or merge instead.
   admin: {
-    canDeleteLeads: true,
     canImportLeads: true,
     canExportLeads: true,
     canReassignLeads: true,
@@ -344,6 +370,8 @@ const DEFAULT_ALERTS = {
     secondAlertHours: 2,
     escalationHours: 3,
     escalationEnabled: true,
+    // Second alert also goes to the employee's Team Lead (if they have one).
+    notifyTeamLead: true,
   },
   noFollowUpDate: {
     enabled: true,

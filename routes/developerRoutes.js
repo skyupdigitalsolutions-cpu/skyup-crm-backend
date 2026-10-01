@@ -80,6 +80,19 @@ router.post("/companies/:id/grant-benefit", grantBenefit);
 router.get("/companies/:id/payments",       getCompanyPayments);
 router.put("/companies/:id/cloudinary",     setCompanyCloudinary);
 
+// ── Per-company CRM customization (developer can edit ANY company) ────────────
+{
+  const cust = require("../controllers/customizationController");
+  const withCompany = (fn) => (req, res) => { req.params.companyId = req.params.id; return fn(req, res); };
+  router.get("/companies/:id/customization",                               withCompany(cust.getMine));
+  router.get("/companies/:id/customization/history",                       withCompany(cust.getHistory));
+  router.get("/companies/:id/customization/automations",                   withCompany(cust.getAutomations));
+  router.put("/companies/:id/customization/automations/follow-up-reminder", withCompany(cust.saveFollowUpReminder));
+  router.put("/companies/:id/customization/automations/outcome/:key",      withCompany(cust.saveOutcomeAutomation));
+  router.put("/companies/:id/customization/:section",                      withCompany(cust.saveSection));
+  router.post("/companies/:id/customization/:section/reset",               withCompany(cust.resetSection));
+}
+
 // ── Subscriptions ─────────────────────────────────────────────────────────────
 router.get("/subscriptions",            getSubscriptions);
 router.put("/subscriptions/:companyId", updateSubscription);

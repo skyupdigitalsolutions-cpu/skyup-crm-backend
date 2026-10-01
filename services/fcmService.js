@@ -364,8 +364,13 @@ async function sendNoActionAlert(recipient, leads, threshold = 'daily') {
     const messaging = getMessaging();
     const count     = leads.length;
 
-    const thresholdLabel = threshold === '1h' ? '1 hour' : threshold === '2h' ? '2 hours' : '24 hours';
-    const urgency        = threshold === '2h' ? '🚨' : threshold === '1h' ? '⚠️' : '⚠️';
+    // threshold is "<n>h" or "<n>m" — company-configurable (Customize CRM → Alerts).
+    const _m = /^(\d+(?:\.\d+)?)(h|m)$/.exec(String(threshold || ''));
+    const _mins = _m ? (_m[2] === 'h' ? Number(_m[1]) * 60 : Number(_m[1])) : 24 * 60;
+    const thresholdLabel = _mins % 60 === 0
+      ? `${_mins / 60} hour${_mins === 60 ? '' : 's'}`
+      : `${_mins} minutes`;
+    const urgency        = _mins >= 120 ? '🚨' : '⚠️';
     const title = `${urgency} ${count} Lead${count > 1 ? 's' : ''} — No Action in ${thresholdLabel}`;
     const body  = count === 1
       ? `"${leads[0].name}" was assigned ${thresholdLabel} ago with no call or remark yet.`
@@ -374,9 +379,12 @@ async function sendNoActionAlert(recipient, leads, threshold = 'daily') {
     // ── Socket ────────────────────────────────────────────────────────────────
     const _io = global._io;
     if (_io && recipient._id) {
+      // Team Leads are employee accounts → their socket room is agent:<id>.
       const room = recipient.role === 'super_admin'
         ? `superadmin:${recipient._id}`
-        : `admin:${recipient._id}`;
+        : (recipient.role === 'user' || recipient.role === 'employee')
+          ? `agent:${recipient._id}`
+          : `admin:${recipient._id}`;
       _io.to(room).emit('no_action_alert', {
         count,
         threshold,
@@ -511,7 +519,7 @@ async function sendFollowUpAlert(recipient, leads, type = 'due') {
 // ─────────────────────────────────────────────────────────────────────────────
 async function sendEscalationAlert(superAdmin, adminBreakdown, totalCount) {
   try {
-    const title = `🚨 ${totalCount} Lead${totalCount > 1 ? 's' : ''} — No Action (3h Escalation)`;
+    const title = `🚨 ${totalCount} Lead${totalCount > 1 ? 's' : ''} — No Action (Escalation)`;
     const body  = adminBreakdown
       .map(a => `${a.adminName}: ${a.count} lead${a.count > 1 ? 's' : ''} unactioned`)
       .join(' | ');

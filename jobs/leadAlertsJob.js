@@ -46,6 +46,36 @@ const Lead  = require('../models/Leads');
 const Admin = require('../models/Admin');
 const User  = require('../models/Users');
 const { sendNoActionAlert, sendFollowUpAlert, sendEscalationAlert, sendNoFollowUpAlert, sendScheduledCallReminder } = require('../services/fcmService');
+const Company = require('../models/Company');
+const custSvc = require('../services/customizationService');
+
+// ── Per-company customization ────────────────────────────────────────────────
+// Every threshold / time below comes from the company's Customize CRM →
+// Alerts settings (defaults = the old hardcoded values: 1h / 2h / 3h,
+// 24h no-follow-up, 9:30 digest, 15-min call reminder).
+async function activeCompaniesWithConfig() {
+  const companies = await Company.find({ isActive: { $ne: false } }).select('_id').lean();
+  const map = await custSvc.getCustomizationMany(companies.map(c => c._id));
+  return companies.map(c => ({ companyId: c._id, cust: map.get(String(c._id)) }));
+}
+
+// Once-per-company-per-day guard for time-of-day jobs (works across restarts
+// via Redis when available; in-process map otherwise).
+const _ranToday = new Map();
+async function claimDaily(tag, companyId, dayKey) {
+  const k = `${tag}:${companyId}:${dayKey}`;
+  if (_ranToday.get(k)) return false;
+  try {
+    const { redisClient } = require('../middlewares/rateLimiter');
+    if (redisClient && redisClient.isReady) {
+      const ok = await redisClient.set(`job:${k}`, '1', { NX: true, EX: 2 * 24 * 3600 });
+      if (ok !== 'OK') { _ranToday.set(k, true); return false; }
+    }
+  } catch (_) { /* fall back to in-process guard */ }
+  _ranToday.set(k, true);
+  if (_ranToday.size > 20000) _ranToday.clear();
+  return true;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -86,6 +116,32 @@ async function notifyAdminNoAction(leads, threshold) {
     if (!admin || !admin._id) continue;
     if (admin.role === 'super_admin') continue;
     await sendNoActionAlert(admin, adminLeads, threshold);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  notifyTeamLeadsNoAction — second-tier alert also goes to the Team Lead of
+//  each lead's employee (Customize CRM → Alerts → "notify Team Lead").
+// ─────────────────────────────────────────────────────────────────────────────
+async function notifyTeamLeadsNoAction(companyId, leads, threshold) {
+  const userIds = [...new Set(leads.map((l) => String(l.user?._id || l.user || '')).filter(Boolean))];
+  if (!userIds.length) return;
+  const members = await User.find({ _id: { $in: userIds }, company: companyId, teamLead: { $ne: null } })
+    .select('_id teamLead').lean();
+  if (!members.length) return;
+  const tlOf = new Map(members.map((m) => [String(m._id), String(m.teamLead)]));
+  const byTl = new Map();
+  for (const l of leads) {
+    const tl = tlOf.get(String(l.user?._id || l.user || ''));
+    if (!tl) continue;
+    if (!byTl.has(tl)) byTl.set(tl, []);
+    byTl.get(tl).push(l);
+  }
+  if (!byTl.size) return;
+  const tls = await User.find({ _id: { $in: [...byTl.keys()] }, company: companyId, isTeamLead: true })
+    .select('_id name email fcmToken role').lean();
+  for (const tl of tls) {
+    await sendNoActionAlert({ ...tl, role: 'user' }, byTl.get(String(tl._id)) || [], threshold);
   }
 }
 
@@ -140,6 +196,25 @@ async function notifySuperAdminEscalation(leads) {
 //  Also runs the 3h super_admin escalation check in the same tick.
 // ─────────────────────────────────────────────────────────────────────────────
 async function runNewLeadNoActionCheck() {
+  try {
+    // Only leads assigned to regular admins (unchanged rule)
+    const adminIds = await Admin.find({ role: 'admin' })
+      .select('_id')
+      .lean()
+      .then(docs => docs.map(d => d._id));
+
+    const companies = await activeCompaniesWithConfig();
+    for (const { companyId, cust } of companies) {
+      const na = cust?.alerts?.noAction;
+      if (!na || !na.enabled) continue;
+      await runNoActionForCompany(companyId, cust, na, adminIds);
+    }
+  } catch (err) {
+    console.error('[LeadAlertsJob] runNewLeadNoActionCheck error:', err.message);
+  }
+}
+
+async function runNoActionForCompany(companyId, cust, na, adminIds) {
   const now = Date.now();
 
   // NOTE: only UPPER bounds are used now. The lower bounds (…Plus) previously
@@ -148,29 +223,25 @@ async function runNewLeadNoActionCheck() {
   // never alerted. The `noActionAlert{1,2}hSentAt` / SuperAdmin guards already
   // prevent duplicate alerts, so we can safely match ANY still-unactioned lead
   // older than each threshold and let the guard dedup.
-  const oneHourAgo      = new Date(now - 60  * 60 * 1000);
-  const twoHoursAgo     = new Date(now - 120 * 60 * 1000);
-  const threeHoursAgo   = new Date(now - 180 * 60 * 1000);
-
-  // Only fetch leads assigned to regular admins
-  const adminIds = await Admin.find({ role: 'admin' })
-    .select('_id')
-    .lean()
-    .then(docs => docs.map(d => d._id));
+  const firstAgo      = new Date(now - na.firstAlertHours  * 60 * 60 * 1000);
+  const secondAgo     = new Date(now - na.secondAlertHours * 60 * 60 * 1000);
+  const escalationAgo = new Date(now - na.escalationHours  * 60 * 60 * 1000);
+  const label = (h) => (h % 1 === 0 ? `${h}h` : `${Math.round(h * 60)}m`);
 
   const baseQuery = {
+    company:       companyId,
     user:          { $ne: null },
     isClosed:      { $ne: true },
-    status:        { $nin: ['Not Interested', 'Converted'] },
+    status:        { $nin: custSvc.closedStatusKeys(cust) },
     callHistory:   { $size: 0 },
     assignedAdmin: { $in: adminIds },
   };
 
   try {
-    // ── 1-hour window — notify admin ─────────────────────────────────────────
+    // ── First threshold — notify admin ───────────────────────────────────────
     const leads1h = await Lead.find({
       ...baseQuery,
-      createdAt:             { $lte: oneHourAgo },
+      createdAt:             { $lte: firstAgo },
       noActionAlert1hSentAt: null,
     })
       .select('_id name mobile company assignedAdmin user status createdAt')
@@ -179,18 +250,18 @@ async function runNewLeadNoActionCheck() {
       .lean();
 
     if (leads1h.length > 0) {
-      console.log(`[LeadAlertsJob] 1h no-action: ${leads1h.length} lead(s) — notifying admin(s)`);
-      await notifyAdminNoAction(leads1h, '1h');
+      console.log(`[LeadAlertsJob] ${label(na.firstAlertHours)} no-action (${companyId}): ${leads1h.length} lead(s) — notifying admin(s)`);
+      await notifyAdminNoAction(leads1h, label(na.firstAlertHours));
       await Lead.updateMany(
         { _id: { $in: leads1h.map(l => l._id) } },
         { $set: { noActionAlert1hSentAt: new Date() } }
       );
     }
 
-    // ── 2-hour window — notify admin ─────────────────────────────────────────
+    // ── Second threshold — notify admin ──────────────────────────────────────
     const leads2h = await Lead.find({
       ...baseQuery,
-      createdAt:             { $lte: twoHoursAgo },
+      createdAt:             { $lte: secondAgo },
       noActionAlert2hSentAt: null,
     })
       .select('_id name mobile company assignedAdmin user status createdAt')
@@ -199,24 +270,29 @@ async function runNewLeadNoActionCheck() {
       .lean();
 
     if (leads2h.length > 0) {
-      console.log(`[LeadAlertsJob] 2h no-action: ${leads2h.length} lead(s) — notifying admin(s)`);
-      await notifyAdminNoAction(leads2h, '2h');
+      console.log(`[LeadAlertsJob] ${label(na.secondAlertHours)} no-action (${companyId}): ${leads2h.length} lead(s) — notifying admin(s)`);
+      await notifyAdminNoAction(leads2h, label(na.secondAlertHours));
+      if (na.notifyTeamLead !== false) {
+        await notifyTeamLeadsNoAction(companyId, leads2h, label(na.secondAlertHours))
+          .catch((e) => console.error('[LeadAlertsJob] team-lead alert error:', e.message));
+      }
       await Lead.updateMany(
         { _id: { $in: leads2h.map(l => l._id) } },
         { $set: { noActionAlert2hSentAt: new Date() } }
       );
     }
 
-    // ── 3-hour escalation window — notify super_admin ─────────────────────────
+    // ── Escalation — notify super_admin ──────────────────────────────────────
     // Conditions:
-    //   • Lead is 180–195 min old (3h window)
+    //   • Lead is older than the escalation threshold
     //   • callHistory is still empty (admin took NO action)
-    //   • noActionAlert2hSentAt is NOT null (admin was already warned at 2h)
+    //   • noActionAlert2hSentAt is NOT null (admin was already warned)
     //   • noActionAlertSuperAdminSentAt is null (super_admin not yet notified)
+    if (na.escalationEnabled === false) return;
     const leads3h = await Lead.find({
       ...baseQuery,                           // callHistory: {$size:0} still applies
-      createdAt:                    { $lte: threeHoursAgo },
-      noActionAlert2hSentAt:        { $ne: null },   // admin was warned at 2h
+      createdAt:                    { $lte: escalationAgo },
+      noActionAlert2hSentAt:        { $ne: null },   // admin was warned
       noActionAlertSuperAdminSentAt: null,            // super_admin not yet escalated
     })
       .select('_id name mobile company assignedAdmin user status createdAt noActionAlert2hSentAt')
@@ -225,7 +301,7 @@ async function runNewLeadNoActionCheck() {
       .lean();
 
     if (leads3h.length > 0) {
-      console.log(`[LeadAlertsJob] 3h escalation: ${leads3h.length} lead(s) — notifying super_admin(s)`);
+      console.log(`[LeadAlertsJob] ${label(na.escalationHours)} escalation (${companyId}): ${leads3h.length} lead(s) — notifying super_admin(s)`);
       await notifySuperAdminEscalation(leads3h);
       await Lead.updateMany(
         { _id: { $in: leads3h.map(l => l._id) } },
@@ -234,7 +310,7 @@ async function runNewLeadNoActionCheck() {
     }
 
   } catch (err) {
-    console.error('[LeadAlertsJob] runNewLeadNoActionCheck error:', err.message);
+    console.error(`[LeadAlertsJob] no-action check error (${companyId}):`, err.message);
   }
 }
 
@@ -243,17 +319,41 @@ async function runNewLeadNoActionCheck() {
 //  Each admin receives alerts only for their own assigned leads.
 //  super_admin is excluded from follow-up alerts.
 // ─────────────────────────────────────────────────────────────────────────────
-async function runFollowUpAlerts() {
+// Called every 15 minutes. Fires each company's digest once per day at (or
+// just after) its configured time — Customize CRM → Alerts → Follow-up digest.
+// Pass { force: true, companyId } to run immediately (tests / manual trigger).
+async function runFollowUpAlerts(opts = {}) {
   try {
-    const now        = new Date();
-    const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
-    const todayEnd   = new Date(now); todayEnd.setHours(23, 59, 59, 999);
+    const companies = opts.companyId
+      ? [{ companyId: opts.companyId, cust: await custSvc.getCustomization(opts.companyId) }]
+      : await activeCompaniesWithConfig();
+    for (const { companyId, cust } of companies) {
+      const cfg = cust?.alerts?.followUpDigest;
+      if (!cfg || !cfg.enabled) continue;
+      const clock = custSvc.companyClock(cust);
+      const due = clock.minutesOfDay >= custSvc.hhmmToMinutes(cfg.time, 570);
+      if (!opts.force) {
+        if (!due) continue;
+        if (!(await claimDaily('fudigest', companyId, clock.dayKey))) continue;
+      }
+      await runFollowUpAlertsForCompany(companyId, cust);
+    }
+  } catch (err) {
+    console.error('[LeadAlertsJob] runFollowUpAlerts error:', err.message);
+  }
+}
+
+async function runFollowUpAlertsForCompany(companyId, cust) {
+  try {
+    const todayStart = custSvc.companyDayStart(cust);
+    const todayEnd   = new Date(custSvc.companyDateAt(cust, 1, 0, 0).getTime() - 1);
 
     // Query all leads with a pending follow-up due today or overdue
     // No longer filtering by assignedAdmin — also picks up employee-assigned leads
     const leads = await Lead.find({
+      company:        companyId,
       isClosed:       { $ne: true },
-      status:         { $ne: 'Converted' },
+      status:         { $nin: custSvc.statusKeysByCategory(cust, 'won') },
       mergedInto:     null,
       scheduledCalls: { $elemMatch: { done: false, scheduledAt: { $lte: todayEnd } } },
     })
@@ -316,7 +416,7 @@ async function runFollowUpAlerts() {
       }
     }
   } catch (err) {
-    console.error('[LeadAlertsJob] runFollowUpAlerts error:', err.message);
+    console.error(`[LeadAlertsJob] follow-up alerts error (${companyId}):`, err.message);
   }
 }
 
@@ -367,29 +467,41 @@ async function sendFollowUpAlertToEmployee(user, leads, type) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function runNoFollowUpDateCheck() {
   try {
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const companies = await activeCompaniesWithConfig();
+    for (const { companyId, cust } of companies) {
+      const cfg = cust?.alerts?.noFollowUpDate;
+      if (!cfg || !cfg.enabled) continue;
+      await runNoFollowUpDateForCompany(companyId, cust, cfg);
+    }
+  } catch (err) {
+    console.error('[LeadAlertsJob] runNoFollowUpDateCheck error:', err.message);
+  }
+}
+
+async function runNoFollowUpDateForCompany(companyId, cust, cfg) {
+  try {
+    const afterAgo  = new Date(Date.now() - cfg.afterHours * 60 * 60 * 1000);
+    const repeatAgo = new Date(Date.now() - cfg.repeatEveryHours * 60 * 60 * 1000);
 
     const leads = await Lead.find({
+      company:    companyId,
       user:       { $ne: null },
       mergedInto: null,
       isClosed:   { $ne: true },
-      status:     { $nin: ['Not Interested', 'Converted'] },
-      date:       { $lte: twentyFourHoursAgo },
+      status:     { $nin: custSvc.closedStatusKeys(cust) },
+      date:       { $lte: afterAgo },
       // Never had ANY scheduledCalls entry at all — "no follow-up date ever set"
       'scheduledCalls.0': { $exists: false },
-      // Re-fire every 24h: never alerted, or last alert was 24h+ ago
+      // Re-fire every N hours: never alerted, or last alert was N hours+ ago
       $or: [
         { noFollowUpAlertLastSentAt: null },
-        { noFollowUpAlertLastSentAt: { $lte: twentyFourHoursAgo } },
+        { noFollowUpAlertLastSentAt: { $lte: repeatAgo } },
       ],
     })
       .select('_id name mobile company user status date')
       .lean();
 
-    if (!leads.length) {
-      console.log('[LeadAlertsJob] No-follow-up-date check: 0 lead(s) due.');
-      return;
-    }
+    if (!leads.length) return;
 
     // Group by assigned employee so each gets ONE notification, not one per lead
     const byUser = new Map();
@@ -399,7 +511,7 @@ async function runNoFollowUpDateCheck() {
       byUser.get(uid).push(lead);
     }
 
-    console.log(`[LeadAlertsJob] No-follow-up-date: ${leads.length} lead(s) across ${byUser.size} employee(s).`);
+    console.log(`[LeadAlertsJob] No-follow-up-date (${companyId}): ${leads.length} lead(s) across ${byUser.size} employee(s).`);
 
     // FIX: this used to do `await User.findById(userId)` INSIDE the loop —
     // one DB round trip per employee with an overdue lead, every time this
@@ -422,7 +534,7 @@ async function runNoFollowUpDateCheck() {
       );
     }
   } catch (err) {
-    console.error('[LeadAlertsJob] runNoFollowUpDateCheck error:', err.message);
+    console.error(`[LeadAlertsJob] no-follow-up-date error (${companyId}):`, err.message);
   }
 }
 
@@ -442,8 +554,29 @@ async function runNoFollowUpDateCheck() {
 // morning summary that may already be hours stale or many hours early.
 async function runScheduledCallReminders() {
   try {
+    const companies = await activeCompaniesWithConfig();
+    // Group companies by their configured lead time so we run one query per
+    // distinct window instead of one per company.
+    const byWindow = new Map();
+    for (const { companyId, cust } of companies) {
+      const cfg = cust?.alerts?.callReminder;
+      if (!cfg || !cfg.enabled) continue;
+      const mins = cfg.minutesBefore || 15;
+      if (!byWindow.has(mins)) byWindow.set(mins, []);
+      byWindow.get(mins).push(companyId);
+    }
+    for (const [mins, companyIds] of byWindow) {
+      await runScheduledCallRemindersWindow(mins, companyIds);
+    }
+  } catch (err) {
+    console.error('[LeadAlertsJob] runScheduledCallReminders error:', err.message);
+  }
+}
+
+async function runScheduledCallRemindersWindow(minutesBefore, companyIds) {
+  try {
     const now     = new Date();
-    const in15Min = new Date(now.getTime() + 15 * 60 * 1000);
+    const in15Min = new Date(now.getTime() + minutesBefore * 60 * 1000);
 
     // $elemMatch is required here, not separate top-level dot-path
     // conditions — without it, Mongo can match each condition against a
@@ -452,6 +585,7 @@ async function runScheduledCallReminders() {
     // the time window), rather than requiring ONE SINGLE entry to satisfy
     // all three simultaneously.
     const leads = await Lead.find({
+      company:    { $in: companyIds },
       mergedInto: null,
       isClosed:   { $ne: true },
       user:       { $ne: null },
@@ -527,12 +661,12 @@ function startLeadAlertsJob() {
     runNoFollowUpDateCheck();
   });
 
-  // Follow-up due alerts — once a day at 9:30 AM IST
+  // Follow-up due alerts — once a day per company at its configured time
+  // (default 9:30 AM in the company timezone). Checked every 15 minutes.
   // Sends to BOTH admins AND employees so everyone knows their follow-ups for the day.
-  cron.schedule('30 9 * * *', () => {
-    console.log('[LeadAlertsJob] Running follow-up due alerts (9:30 AM)...');
+  cron.schedule('*/15 * * * *', () => {
     runFollowUpAlerts();
-  }, { timezone: 'Asia/Kolkata' });
+  });
 
   // Precise scheduled call-back reminder — every 5 minutes, catches anything
   // landing in the next 15-minute window. Separate from the daily digest
@@ -542,10 +676,10 @@ function startLeadAlertsJob() {
   });
 
   console.log('[LeadAlertsJob] ✅ Lead alert jobs started');
-  console.log('  → No-action (admin 1h + 2h, super_admin 3h escalation): every 15 min');
-  console.log('  → Missing follow-up date (employee, 24h+, re-fires 24h): every 15 min');
-  console.log('  → Follow-up due (admin + employee):                      daily at 9:30 AM IST');
-  console.log('  → Scheduled call-back reminder (precise, 15-min lead-time): every 5 min');
+  console.log('  → No-action (admin 2 tiers + super_admin escalation, per-company hours): every 15 min');
+  console.log('  → Missing follow-up date (employee, per-company hours):               every 15 min');
+  console.log('  → Follow-up due digest (admin + employee, per-company time):          checked every 15 min');
+  console.log('  → Scheduled call-back reminder (per-company lead time):               every 5 min');
 }
 
 module.exports = {

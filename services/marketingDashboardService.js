@@ -48,6 +48,17 @@ function buildFilter(company, query) {
 
 // ── Main dashboard aggregation ────────────────────────────────────────────────
 async function getMarketingDashboard({ company, query, leadScope = {} }) {
+  // Status buckets from the company's customization (renamed/custom statuses).
+  const _svc  = require("./customizationService");
+  const _cust = await _svc.getCustomization(company);
+  const WON   = _svc.statusKeysByCategory(_cust, "won");
+  const LOST  = _svc.statusKeysByCategory(_cust, "lost");
+  const OPEN  = _svc.statusKeysByCategory(_cust, "open");
+  const NEW   = _svc.statusKeysByCategory(_cust, "new");
+  const VERIF = _svc.statusKeysByCategory(_cust, "verification");
+  const sumOf = (counts, keys) => keys.reduce((a, k) => a + (counts[k] || 0), 0);
+  const labelOf = (cat, fallback) => (_cust.statuses.find((x) => x.category === cat && x.active) || { label: fallback }).label;
+  if (query && query.status) query = { ...query, status: (_svc.findStatus(_cust, query.status) || { key: query.status }).key };
   const filter = buildFilter(company, query);
   // Per-admin isolation (no-op for super_admin / marketing_user / employees).
   const scopedFilter = mergeLeadScope(filter, leadScope);
@@ -65,11 +76,11 @@ async function getMarketingDashboard({ company, query, leadScope = {} }) {
     counts[statusAgg[i]["_id"] || "Unknown"] = statusAgg[i].count;
   }
   const total      = Object.values(counts).reduce(function (s, v) { return s + v; }, 0);
-  const converted  = counts["Converted"]     || 0;
-  const inProgress = counts["In Progress"]   || 0;
-  const notInt     = counts["Not Interested"] || 0;
-  const newLeads   = counts["New"]           || 0;
-  const verif      = counts["Verification"]  || 0;
+  const converted  = sumOf(counts, WON);
+  const inProgress = sumOf(counts, OPEN);
+  const notInt     = sumOf(counts, LOST);
+  const newLeads   = sumOf(counts, NEW);
+  const verif      = sumOf(counts, VERIF);
 
   // ── 2. Previous period for trend arrows ───────────────────────────────────
   let prevTotal = 0, prevConverted = 0;
@@ -84,7 +95,7 @@ async function getMarketingDashboard({ company, query, leadScope = {} }) {
     prevFilter.date = { "$gte": new Date(fromD.getTime() - diff), "$lte": fromD };
     const prevAgg = await Lead.aggregate([
       { "$match": mergeLeadScope(prevFilter, leadScope) },
-      { "$group": { "_id": null, count: { "$sum": 1 }, conv: { "$sum": { "$cond": [{ "$eq": ["$status", "Converted"] }, 1, 0] } } } },
+      { "$group": { "_id": null, count: { "$sum": 1 }, conv: { "$sum": { "$cond": [{ "$in": ["$status", WON] }, 1, 0] } } } },
     ]);
     if (prevAgg.length) { prevTotal = prevAgg[0].count; prevConverted = prevAgg[0].conv; }
   }
@@ -100,9 +111,9 @@ async function getMarketingDashboard({ company, query, leadScope = {} }) {
     { "$group": {
       "_id": { "$dateToString": { "format": "%Y-%m-%d", "date": "$date" } },
       total:     { "$sum": 1 },
-      converted: { "$sum": { "$cond": [{ "$eq": ["$status", "Converted"] }, 1, 0] } },
-      inProgress: { "$sum": { "$cond": [{ "$eq": ["$status", "In Progress"] }, 1, 0] } },
-      newL:       { "$sum": { "$cond": [{ "$eq": ["$status", "New"] }, 1, 0] } },
+      converted: { "$sum": { "$cond": [{ "$in": ["$status", WON] }, 1, 0] } },
+      inProgress: { "$sum": { "$cond": [{ "$in": ["$status", OPEN] }, 1, 0] } },
+      newL:       { "$sum": { "$cond": [{ "$in": ["$status", NEW] }, 1, 0] } },
     }},
     { "$sort": { "_id": 1 } },
   ]);
@@ -113,10 +124,10 @@ async function getMarketingDashboard({ company, query, leadScope = {} }) {
     { "$group": {
       "_id": { campaign: "$campaign", source: "$source" },
       total:     { "$sum": 1 },
-      converted: { "$sum": { "$cond": [{ "$eq": ["$status", "Converted"] }, 1, 0] } },
-      inProgress: { "$sum": { "$cond": [{ "$eq": ["$status", "In Progress"] }, 1, 0] } },
-      newL:       { "$sum": { "$cond": [{ "$eq": ["$status", "New"] }, 1, 0] } },
-      notInt:     { "$sum": { "$cond": [{ "$eq": ["$status", "Not Interested"] }, 1, 0] } },
+      converted: { "$sum": { "$cond": [{ "$in": ["$status", WON] }, 1, 0] } },
+      inProgress: { "$sum": { "$cond": [{ "$in": ["$status", OPEN] }, 1, 0] } },
+      newL:       { "$sum": { "$cond": [{ "$in": ["$status", NEW] }, 1, 0] } },
+      notInt:     { "$sum": { "$cond": [{ "$in": ["$status", LOST] }, 1, 0] } },
     }},
     { "$sort": { total: -1 } },
     { "$limit": 20 },
@@ -128,7 +139,7 @@ async function getMarketingDashboard({ company, query, leadScope = {} }) {
     { "$group": {
       "_id": "$source",
       count:     { "$sum": 1 },
-      converted: { "$sum": { "$cond": [{ "$eq": ["$status", "Converted"] }, 1, 0] } },
+      converted: { "$sum": { "$cond": [{ "$in": ["$status", WON] }, 1, 0] } },
     }},
     { "$sort": { count: -1 } },
   ]);
@@ -139,9 +150,9 @@ async function getMarketingDashboard({ company, query, leadScope = {} }) {
     { "$group": {
       "_id": { userId: "$user._id", name: "$user.name" },
       total:     { "$sum": 1 },
-      converted: { "$sum": { "$cond": [{ "$eq": ["$status", "Converted"] }, 1, 0] } },
-      inProgress: { "$sum": { "$cond": [{ "$eq": ["$status", "In Progress"] }, 1, 0] } },
-      notInt:    { "$sum": { "$cond": [{ "$eq": ["$status", "Not Interested"] }, 1, 0] } },
+      converted: { "$sum": { "$cond": [{ "$in": ["$status", WON] }, 1, 0] } },
+      inProgress: { "$sum": { "$cond": [{ "$in": ["$status", OPEN] }, 1, 0] } },
+      notInt:    { "$sum": { "$cond": [{ "$in": ["$status", LOST] }, 1, 0] } },
     }},
     { "$sort": { converted: -1 } },
     { "$limit": 20 },
@@ -156,7 +167,7 @@ async function getMarketingDashboard({ company, query, leadScope = {} }) {
 
   const todayFollowups    = await Lead.countDocuments(mergeLeadScope(Object.assign({}, baseFollow, { followUpDate: { "$gte": todayStart, "$lte": todayEnd } }), leadScope));
   const upcomingFollowups = await Lead.countDocuments(mergeLeadScope(Object.assign({}, baseFollow, { followUpDate: { "$gt": todayEnd } }), leadScope));
-  const missedFollowups   = await Lead.countDocuments(mergeLeadScope(Object.assign({}, baseFollow, { followUpDate: { "$lt": todayStart }, status: { "$nin": ["Converted", "Not Interested"] } }), leadScope));
+  const missedFollowups   = await Lead.countDocuments(mergeLeadScope(Object.assign({}, baseFollow, { followUpDate: { "$lt": todayStart }, status: { "$nin": [...WON, ...LOST] } }), leadScope));
 
   // ── 8. Distinct campaigns + sources for filter dropdowns ─────────────────
   const distinctCampaigns = await Lead.distinct("campaign", mergeLeadScope({ company: company, campaign: { "$nin": [null, ""] } }, leadScope));
@@ -170,7 +181,7 @@ async function getMarketingDashboard({ company, query, leadScope = {} }) {
     for (let i = 0; i < gAds.length; i++) {
       const g = gAds[i];
       const leadCount = await Lead.countDocuments(mergeLeadScope({ company: company, campaign: g.campaignName, mergedInto: null }, leadScope));
-      const convCount = await Lead.countDocuments(mergeLeadScope({ company: company, campaign: g.campaignName, status: "Converted", mergedInto: null }, leadScope));
+      const convCount = await Lead.countDocuments(mergeLeadScope({ company: company, campaign: g.campaignName, status: { "$in": WON }, mergedInto: null }, leadScope));
       adPerformance.push({
         name:        g.campaignName,
         source:      "Google Ads",
@@ -213,11 +224,11 @@ async function getMarketingDashboard({ company, query, leadScope = {} }) {
     },
     funnel: [
       { stage: "Total Leads",   count: funnelNew + funnelInProg + funnelConv + funnelNotInt + funnelVerif, color: "#6366F1" },
-      { stage: "New",           count: funnelNew,    color: "#3B82F6" },
-      { stage: "In Progress",   count: funnelInProg, color: "#F59E0B" },
-      { stage: "Verification",  count: funnelVerif,  color: "#8B5CF6" },
-      { stage: "Converted",     count: funnelConv,   color: "#10B981" },
-      { stage: "Not Interested",count: funnelNotInt, color: "#EF4444" },
+      { stage: labelOf("new", "New"),                   count: funnelNew,    color: "#3B82F6" },
+      { stage: labelOf("open", "In Progress"),          count: funnelInProg, color: "#F59E0B" },
+      { stage: labelOf("verification", "Verification"), count: funnelVerif,  color: "#8B5CF6" },
+      { stage: labelOf("won", "Converted"),             count: funnelConv,   color: "#10B981" },
+      { stage: labelOf("lost", "Not Interested"),       count: funnelNotInt, color: "#EF4444" },
     ],
     followups: {
       today:    todayFollowups,

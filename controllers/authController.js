@@ -121,6 +121,8 @@ const login = async (req, res) => {
         createdBy: user.createdBy,    // include createdBy for chat widget
         role:      user.role,
         contactAccountEmail: user.contactAccountEmail || null, // Google acct for contacts auto-save
+        isTeamLead: !!user.isTeamLead,                         // Team Lead → "My Team" pages
+        teamLead:   user.teamLead || null,
         token:     generateToken(user._id, user.role || "employee"),
       });
     } else {
@@ -283,6 +285,8 @@ const loginUnified = async (req, res) => {
         role: user.role || "employee",
         companyId: user.company._id,
         createdBy: user.createdBy,
+        isTeamLead: !!user.isTeamLead,
+        teamLead:   user.teamLead || null,
         token: generateToken(user._id, user.role || "employee", tokenExpiry),
         companyKey: await _getCompanyKey(user.company._id),
       });

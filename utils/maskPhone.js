@@ -68,6 +68,12 @@ function maskEmail(email) {
 function maskLeadPII(lead, role, callerId) {
   if (!lead) return lead;
 
+  // Custom fields are a Mongoose Map — after .toObject() they'd serialise to
+  // {} in res.json(), so flatten to a plain object for every response.
+  if (lead.customFields instanceof Map) {
+    lead = { ...lead, customFields: Object.fromEntries(lead.customFields) };
+  }
+
   const isSuperAdmin = role === 'super_admin' || role === 'superadmin';
   if (isSuperAdmin) return lead;
 

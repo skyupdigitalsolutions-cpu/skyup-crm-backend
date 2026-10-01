@@ -581,7 +581,9 @@ const saveRemark = async (req, res) => {
 
           // ── Auto-blast when mobile app marks the call outcome "Interested" ──
           // Same once-only guard as patchLead: atomically claim before sending.
-          if (typeof outcome === 'string' && outcome.trim().toLowerCase() === 'interested') {
+          const _cust = await require('../services/customizationService').getCustomization(lead.company);
+          const _oc = typeof outcome === 'string' ? require('../services/customizationService').findOutcome(_cust, outcome) : null;
+          if (_oc ? _oc.behavior === 'interested' : (typeof outcome === 'string' && outcome.trim().toLowerCase() === 'interested')) {
             const blastCompanyId = lead.company?._id || lead.company || updated.company;
             if (blastCompanyId) {
               Lead.findOneAndUpdate(
@@ -855,7 +857,103 @@ const getUncalledLeads = async (req, res) => {
   }
 };
 
+// ── GET /api/call-logs/my-history ─────────────────────────────────────────────
+// Complete call log + talk time for ONE employee (the caller; admins may pass
+// ?userId=). Query: from, to (ISO), type (incoming|outgoing|missed|rejected),
+// search (name / number), leadsOnly=1, page, limit.
+// Returns { summary, byDay[], logs[], total, page, pages }.
+const getMyCallHistory = async (req, res) => {
+  try {
+    const mongoose = require('mongoose');
+    const isAdmin = !!req.admin;
+    const company = req.callerCompany || req.user?.company;
+    const selfId  = req.user?.userId || req.user?._id;
+    const userId  = isAdmin && req.query.userId ? req.query.userId : selfId;
+    if (!userId || !mongoose.isValidObjectId(String(userId))) {
+      return res.status(400).json({ message: 'Employee not resolved.' });
+    }
+    const uid = new mongoose.Types.ObjectId(String(userId));
+
+    const to   = req.query.to   ? new Date(req.query.to)   : new Date();
+    const from = req.query.from ? new Date(req.query.from) : new Date(to.getTime() - 6 * 86400000);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      return res.status(400).json({ message: 'Invalid date range.' });
+    }
+    const base = { user: uid, timestamp: { $gte: from, $lte: to } };
+    if (isAdmin && company) base.company = company;
+
+    const listFilter = { ...base };
+    const type = String(req.query.type || '');
+    if (['incoming', 'outgoing', 'missed', 'rejected'].includes(type)) listFilter.callType = type;
+    if (req.query.leadsOnly === '1') listFilter.matchedLead = { $ne: null };
+    const q = String(req.query.search || '').trim().slice(0, 40);
+    if (q) {
+      const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const digits = q.replace(/\D/g, '');
+      listFilter.$or = [{ name: new RegExp(esc, 'i') }];
+      if (digits.length >= 3) listFilter.$or.push({ phoneNumber: new RegExp(digits) }, { normalizedPhone: new RegExp(digits) });
+    }
+
+    const page  = Math.max(1, parseInt(req.query.page  || '1', 10));
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit || '50', 10)));
+    const tzMin = parseInt(req.query.tzOffset || '330', 10) || 0;
+    const tz = `${tzMin >= 0 ? '+' : '-'}${String(Math.floor(Math.abs(tzMin) / 60)).padStart(2, '0')}${String(Math.abs(tzMin) % 60).padStart(2, '0')}`;
+
+    const [sumAgg, byDay, logs, total] = await Promise.all([
+      MobileCallLog.aggregate([
+        { $match: base },
+        { $group: {
+          _id: null,
+          total:     { $sum: 1 },
+          incoming:  { $sum: { $cond: [{ $eq: ['$callType', 'incoming'] }, 1, 0] } },
+          outgoing:  { $sum: { $cond: [{ $eq: ['$callType', 'outgoing'] }, 1, 0] } },
+          missed:    { $sum: { $cond: [{ $eq: ['$callType', 'missed'] }, 1, 0] } },
+          rejected:  { $sum: { $cond: [{ $eq: ['$callType', 'rejected'] }, 1, 0] } },
+          connected: { $sum: { $cond: [{ $gt: ['$duration', 0] }, 1, 0] } },
+          talkSecs:  { $sum: { $ifNull: ['$duration', 0] } },
+          inSecs:    { $sum: { $cond: [{ $eq: ['$callType', 'incoming'] }, { $ifNull: ['$duration', 0] }, 0] } },
+          outSecs:   { $sum: { $cond: [{ $eq: ['$callType', 'outgoing'] }, { $ifNull: ['$duration', 0] }, 0] } },
+          longest:   { $max: { $ifNull: ['$duration', 0] } },
+          leads:     { $sum: { $cond: [{ $ifNull: ['$matchedLead', false] }, 1, 0] } },
+          numbers:   { $addToSet: { $ifNull: ['$normalizedPhone', '$phoneNumber'] } },
+          recorded:  { $sum: { $cond: [{ $gt: [{ $size: { $ifNull: ['$recordings', []] } }, 0] }, 1, 0] } },
+        } },
+        { $project: { _id: 0, uniqueNumbers: { $size: '$numbers' }, total: 1, incoming: 1, outgoing: 1, missed: 1, rejected: 1, connected: 1, talkSecs: 1, inSecs: 1, outSecs: 1, longest: 1, leads: 1, recorded: 1 } },
+      ]),
+      MobileCallLog.aggregate([
+        { $match: base },
+        { $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp', timezone: tz } },
+          calls: { $sum: 1 },
+          talkSecs: { $sum: { $ifNull: ['$duration', 0] } },
+          missed: { $sum: { $cond: [{ $eq: ['$callType', 'missed'] }, 1, 0] } },
+        } },
+        { $sort: { _id: -1 } },
+      ]),
+      MobileCallLog.find(listFilter)
+        .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
+        .select('phoneNumber name callType duration timestamp matchedLead remark recordings.url recordings.durationSec recordings.transcribeStatus')
+        .populate('matchedLead', 'name status')
+        .lean(),
+      MobileCallLog.countDocuments(listFilter),
+    ]);
+
+    const summary = sumAgg[0] || { total: 0, incoming: 0, outgoing: 0, missed: 0, rejected: 0, connected: 0, talkSecs: 0, inSecs: 0, outSecs: 0, longest: 0, leads: 0, recorded: 0, uniqueNumbers: 0 };
+    summary.avgSecs = summary.connected ? Math.round(summary.talkSecs / summary.connected) : 0;
+
+    res.json({
+      range: { from, to },
+      summary,
+      byDay: byDay.map((d) => ({ date: d._id, calls: d.calls, talkSecs: d.talkSecs, missed: d.missed })),
+      logs, total, page, pages: Math.ceil(total / limit),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
+  getMyCallHistory,
   upload, syncCallLogs, getCallLogs, getTodayCallLogs,
   matchPhone, uploadRecording, getCompanyRecordings,
   getCompanyAllLogs, getCallLogsForLead, saveRemark,

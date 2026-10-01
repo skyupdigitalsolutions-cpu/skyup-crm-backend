@@ -49,8 +49,25 @@ function getISTDayBounds(dateInput) {
  * @param {string}          [options.campaign]    - filter by campaign name
  * @param {string}          [options.status]      - filter by lead status
  */
+// Company status buckets (Customize CRM → Statuses). Defaults reproduce the
+// old literals: won=Converted, lost=Not Interested, open=In Progress, new=New.
+async function statusBuckets(company) {
+  const svc  = require('./customizationService');
+  const cust = await svc.getCustomization(company);
+  return {
+    cust,
+    svc,
+    WON:  svc.statusKeysByCategory(cust, 'won'),
+    LOST: svc.statusKeysByCategory(cust, 'lost'),
+    OPEN: svc.statusKeysByCategory(cust, 'open'),
+    NEW:  svc.statusKeysByCategory(cust, 'new'),
+  };
+}
+
 async function getDailyReport({ company, date, userId, campaign, status, excludeClosed = false, leadScope = {} } = {}) {
   if (!company) throw new Error('company is required');
+  const { cust, svc, WON, LOST, OPEN, NEW } = await statusBuckets(company);
+  if (status) status = (svc.findStatus(cust, status) || { key: status }).key;
 
   const { dayStart, dayEnd } = getISTDayBounds(date);
 
@@ -112,7 +129,7 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
       { $group: {
         _id:       null,
         total:     { $sum: 1 },
-        converted: { $sum: { $cond: [{ $eq: ['$status', 'Converted'] }, 1, 0] } },
+        converted: { $sum: { $cond: [{ $in: ['$status', WON] }, 1, 0] } },
       }},
     ]),
 
@@ -155,8 +172,8 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
           ...followUpMatch,
           isClosed:   { $ne: true },
           mergedInto: null,
-          status:     { $nin: ['Not Interested', 'Converted'] },
-          date:       { $lte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+          status:     { $nin: [...LOST, ...WON] },
+          date:       { $lte: new Date(Date.now() - (cust.alerts?.noFollowUpDate?.afterHours || 24) * 60 * 60 * 1000) },
           'scheduledCalls.0': { $exists: false },
         }, leadScope) },
       {
@@ -181,11 +198,13 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
 
   // ── Aggregate counts ──────────────────────────────────────────────────────
   const total         = todayLeads.length;
-  const converted     = todayLeads.filter(l => l.status === 'Converted').length;
-  const inProgress    = todayLeads.filter(l => l.status === 'In Progress').length;
-  const notInterested = todayLeads.filter(l => l.status === 'Not Interested').length;
-  const newLeads      = todayLeads.filter(l => l.status === 'New').length;
-  const contacted     = todayLeads.filter(l => l.status !== 'New').length;
+  const inSet = (arr) => { const st = new Set(arr); return (l) => st.has(l.status); };
+  const isWon = inSet(WON), isOpen = inSet(OPEN), isLost = inSet(LOST), isNew = inSet(NEW);
+  const converted     = todayLeads.filter(isWon).length;
+  const inProgress    = todayLeads.filter(isOpen).length;
+  const notInterested = todayLeads.filter(isLost).length;
+  const newLeads      = todayLeads.filter(isNew).length;
+  const contacted     = todayLeads.filter(l => !isNew(l)).length;
   const unassigned    = todayLeads.filter(l => !l.user).length;
   // Virtual status counts
   const merged        = todayLeads.filter(l => !!l.mergedInto).length;
@@ -227,8 +246,8 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
     }
     const entry = employeeMap.get(uid);
     entry.leads++;
-    if (lead.status === 'Converted')   entry.converted++;
-    if (lead.status === 'In Progress') entry.inProgress++;
+    if (isWon(lead))  entry.converted++;
+    if (isOpen(lead)) entry.inProgress++;
   }
 
   // Attach call counts per employee
@@ -316,7 +335,7 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
     employees,
     followUps,
     missingFollowUps,
-    conversions: todayLeads.filter(l => l.status === 'Converted'),
+    conversions: todayLeads.filter(isWon),
   };
 }
 
@@ -332,6 +351,7 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
  */
 async function getEmployeeReport({ company, fromDate, toDate, userId, leadScope = {} } = {}) {
   if (!company) throw new Error('company is required');
+  const { WON, LOST, OPEN, NEW } = await statusBuckets(company);
 
   const { dayStart: from } = getISTDayBounds(fromDate);
   const { dayEnd:   to   } = getISTDayBounds(toDate || fromDate);
@@ -348,10 +368,10 @@ async function getEmployeeReport({ company, fromDate, toDate, userId, leadScope 
       $group: {
         _id:         '$user',
         total:       { $sum: 1 },
-        converted:   { $sum: { $cond: [{ $eq: ['$status', 'Converted'] },    1, 0] } },
-        inProgress:  { $sum: { $cond: [{ $eq: ['$status', 'In Progress'] },  1, 0] } },
-        notInt:      { $sum: { $cond: [{ $eq: ['$status', 'Not Interested'] }, 1, 0] } },
-        newLeads:    { $sum: { $cond: [{ $eq: ['$status', 'New'] },          1, 0] } },
+        converted:   { $sum: { $cond: [{ $in: ['$status', WON] },  1, 0] } },
+        inProgress:  { $sum: { $cond: [{ $in: ['$status', OPEN] }, 1, 0] } },
+        notInt:      { $sum: { $cond: [{ $in: ['$status', LOST] }, 1, 0] } },
+        newLeads:    { $sum: { $cond: [{ $in: ['$status', NEW] },  1, 0] } },
       },
     },
     {
@@ -389,6 +409,7 @@ async function getEmployeeReport({ company, fromDate, toDate, userId, leadScope 
  */
 async function getCampaignReport({ company, fromDate, toDate, leadScope = {} } = {}) {
   if (!company) throw new Error('company is required');
+  const { WON } = await statusBuckets(company);
 
   const match = { company: new mongoose.Types.ObjectId(company) };
   if (fromDate || toDate) {
@@ -403,7 +424,7 @@ async function getCampaignReport({ company, fromDate, toDate, leadScope = {} } =
       $group: {
         _id:       { $ifNull: ['$campaign', 'Direct / None'] },
         total:     { $sum: 1 },
-        converted: { $sum: { $cond: [{ $eq: ['$status', 'Converted'] }, 1, 0] } },
+        converted: { $sum: { $cond: [{ $in: ['$status', WON] }, 1, 0] } },
         sources:   { $addToSet: '$source' },
       },
     },
@@ -471,10 +492,16 @@ async function getDailyOutcomesReport({
   // Outcome classification — the actual accuracy fix. A call only reaches any
   // of these outcomes because the phone was picked up and a conversation (or
   // at least a clear "no"/"later") happened.
-  const ANSWERED_OUTCOMES = new Set([
-    'Answered', 'Interested', 'Not Interested', 'Client Meeting', 'Call Back Later',
-  ]);
-  const NOT_ANSWERED_OUTCOMES = new Set(['Not Answered', 'Busy', 'Switch Off']);
+  // Classification now comes from each outcome's group in Customize CRM →
+  // Call Outcomes (answered / not answered / other), incl. renamed labels.
+  const { cust: _oc, svc: _ocSvc } = await statusBuckets(company);
+  const ANSWERED_OUTCOMES = new Set();
+  const NOT_ANSWERED_OUTCOMES = new Set();
+  for (const o of _oc.outcomes || []) {
+    const bucket = o.group === 'answered' ? ANSWERED_OUTCOMES : o.group === 'notAnswered' ? NOT_ANSWERED_OUTCOMES : null;
+    if (bucket) { bucket.add(o.key); bucket.add(o.label); }
+  }
+  if (status) status = (_ocSvc.findStatus(_oc, status) || { key: status }).key;
   // 'Invalid' (wrong/junk number) is neither — it's excluded from the answer
   // rate entirely since it was never a real dial attempt at this lead.
 

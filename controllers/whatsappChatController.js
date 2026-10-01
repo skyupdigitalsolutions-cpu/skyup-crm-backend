@@ -2427,7 +2427,7 @@ const createLeadFromConversation = async (req, res, next) => {
       "Sir/Madam";
     const remark = req.body.remark?.trim() || "Promoted from WhatsApp inbox by agent";
     const newLead = await Lead.create({
-      name: resolvedName, mobile: waPhone, source: "WhatsApp", status: req.body.status?.trim() || "New",
+      name: resolvedName, mobile: waPhone, source: "WhatsApp", status: (() => { const _c = require("../services/customizationService").peekCustomization(companyId); return (req.body.status && (require("../services/customizationService").findStatus(_c, req.body.status.trim()) || {}).key) || require("../services/customizationService").defaultStatusKey(_c); })(),
       date: new Date(), remark, initialRemark: remark, user: userId || undefined, company: companyId,
     });
     await WhatsAppConversation.findByIdAndUpdate(conversationId, { lead: newLead._id });

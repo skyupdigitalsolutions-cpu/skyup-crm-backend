@@ -78,7 +78,7 @@ const getMine = async (req, res) => {
     const isEmployee = role === "user" || role === "employee";
     // Employees don't need admin-only knobs; everything else is non-secret config.
     const payload = isEmployee
-      ? { ...cust, permissions: { employee: cust.permissions.employee }, customFields: cust.customFields.filter((f) => f.employeeVisible) }
+      ? { ...cust, permissions: { employee: cust.permissions.employee, teamLead: cust.permissions.teamLead, recordings: cust.permissions.recordings }, customFields: cust.customFields.filter((f) => f.employeeVisible) }
       : cust;
     return res.json({
       success: true,

@@ -26,7 +26,7 @@ const getConfigs = async (req, res, next) => {
       configs.map(async (cfg) => {
         const [leads, converted] = await Promise.all([
           Lead.countDocuments({ company: companyId, campaign: cfg.campaignName }),
-          Lead.countDocuments({ company: companyId, campaign: cfg.campaignName, status: "Converted" }),
+          Lead.countDocuments({ company: companyId, campaign: cfg.campaignName, status: { $in: require("../services/customizationService").statusKeysByCategory(require("../services/customizationService").peekCustomization(companyId), "won") } }),
         ]);
         return { ...cfg, leads, converted };
       })
