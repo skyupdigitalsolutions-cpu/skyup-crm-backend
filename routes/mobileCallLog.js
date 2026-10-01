@@ -16,6 +16,9 @@ const {
   summarizeUnmatchedCall, getUncalledLeads,
   getMyCallHistory,
 } = require('../controllers/mobileCallLogController');
+const {
+  getMonitoringSummary, getMonitoringHistory, getNeverAttended, getMonitoringClients,
+} = require('../controllers/callMonitoringController');
 const { makeCompanyUploadMiddleware } = require('../services/cloudinaryService');
 
 // Per-company recording upload — routes the file to the company's own Cloudinary
@@ -35,6 +38,13 @@ router.get('/',             protectAny, withCache, getCallLogs);        // suppo
 router.get('/recordings',   protectAny, getCompanyRecordings);
 router.get('/all',          protectAny, getCompanyAllLogs);
 router.get('/lead/:leadId', protectAny, getCallLogsForLead);
+
+// ── Admin Call Monitoring report (admin / super_admin only — the controller
+//    returns 403 for employees). Cached 30s per company+user+query.
+router.get('/monitoring/summary',        protectAny, withCache, getMonitoringSummary);
+router.get('/monitoring/history',        protectAny, withCache, getMonitoringHistory);
+router.get('/monitoring/never-attended', protectAny, withCache, getNeverAttended);
+router.get('/monitoring/clients',        protectAny, withCache, getMonitoringClients);
 
 // Leads assigned to this user that have NOT been called on/before the selected day.
 // Carry-forward: appears every day until the lead is actually called.
