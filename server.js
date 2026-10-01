@@ -200,7 +200,7 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-company-id"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-company-id", "x-webhook-key"],
   optionsSuccessStatus: 200,
 };
 
@@ -283,8 +283,30 @@ app.use(
   websiteWebhookRoute
 );
 
+// ── Public Google-Ads / custom-site lead webhook — open CORS ─────────────────
+// Website forms (e.g. skyupdigitalsolutions.com) POST here from the browser and
+// send the campaign key in the `x-webhook-key` header. That custom header makes
+// the browser send a preflight, which the global allowlisted CORS rejected
+// ("x-webhook-key is not allowed by Access-Control-Allow-Headers"). Answer the
+// preflight here, BEFORE the global CORS. The key check in the controller is
+// the real security gate — CORS here is intentionally open (same as
+// /website-webhook above). The POST itself continues to the route at line
+// `app.use('/', googleWebhookRoute)` further down.
+app.use('/google-webhook', (req, res, next) => {
+  const origin = req.headers.origin || '';
+  res.header('Access-Control-Allow-Origin',  origin || '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, x-webhook-key');
+  res.header('Access-Control-Max-Age',       '86400');
+  res.header('Vary', 'Origin');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  // Skip the global allowlisted CORS for this public endpoint.
+  req._publicCors = true;
+  next();
+});
+
 // ── CORS must be first ────────────────────────────────────────────────────────
-app.use(cors(corsOptions));
+app.use((req, res, next) => (req._publicCors ? next() : cors(corsOptions)(req, res, next)));
 app.options(/(.*)/, cors(corsOptions));
 
 // ── Body parsers ──────────────────────────────────────────────────────────────
@@ -399,6 +421,8 @@ app.use('/api/call-logs',           require('./routes/mobileCallLog'));
 app.use('/api/transcription',       require('./routes/transcription'));
 // Employee Excel / Google Sheet integration (independent of Daily Report/Telegram)
 app.use('/api/sheet-integration',   require('./routes/sheetIntegration'));
+// Per-company CRM customization (statuses, outcomes, modules, workflows, …)
+app.use('/api/customization',       require('./routes/customizationRoute'));
 
 // ── BullMQ queue progress & control routes ────────────────────────────────────
 try {
