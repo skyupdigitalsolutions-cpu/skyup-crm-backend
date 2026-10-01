@@ -98,6 +98,7 @@ const generalLimiter = rateLimit({
       p === "/api/lead/my-leads"       ||
       p.startsWith("/meta")            ||
       p.startsWith("/website-webhook") ||
+      p.startsWith("/google-webhook")  ||
       p.startsWith("/msg91-webhook")      // MSG91 sends from fixed IPs — must not be rate-limited
     );
   },
