@@ -164,54 +164,98 @@ app.use(helmet({
 
 const server = http.createServer(app);
 
-// ── Allowed origins (loaded from ALLOWED_ORIGINS env variable) ────────────────
-// In .env:  ALLOWED_ORIGINS=http://localhost:5173,https://skyupcrm.com,...
-const staticAllowedOrigins = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(o => o.trim().replace(/^["']|["']$/g, '').replace(/\/$/, ''))
-  .filter(Boolean);
+// ═════════════════════════════════════════════════════════════════════════════
+// CORS — single source of truth
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. Built-in first-party origins (always allowed, even if ALLOWED_ORIGINS is
+//    missing/misspelt on the server — a bad .env must never lock out the CRM).
+// 2. Extra origins from ALLOWED_ORIGINS (comma separated, trailing "/" ok).
+// 3. Any sub-domain of the first-party domains (e.g. app.skyupcrm.com).
+// 4. Customer landing pages registered as active WebsiteConfig (DB, cached).
+// Public lead webhooks (/google-webhook, /website-webhook) are OPEN to any
+// origin further below — their secret key is the security gate.
+// ═════════════════════════════════════════════════════════════════════════════
+const normOrigin = (o) => String(o || '').trim().replace(/^["']|["']$/g, '').replace(/\/+$/, '').toLowerCase();
 
+const FIRST_PARTY_DOMAINS = ['skyupcrm.com', 'skyupdigitalsolutions.com'];
+const BUILTIN_ORIGINS = [
+  'https://skyupcrm.com', 'https://www.skyupcrm.com',
+  'https://skyupdigitalsolutions.com', 'https://www.skyupdigitalsolutions.com',
+  'http://localhost:5173', 'http://localhost:5174', 'http://localhost:3000',
+  'http://127.0.0.1:5173',
+];
+const staticAllowedOrigins = [...new Set([
+  ...BUILTIN_ORIGINS,
+  ...(process.env.ALLOWED_ORIGINS || '').split(',').map(normOrigin).filter(Boolean),
+].map(normOrigin))];
+
+function isFirstPartyOrigin(origin) {
+  try {
+    const { protocol, hostname } = new URL(origin);
+    if (protocol !== 'https:' && protocol !== 'http:') return false;
+    return FIRST_PARTY_DOMAINS.some((d) => hostname === d || hostname.endsWith('.' + d));
+  } catch { return false; }
+}
+
+// DB lookup for registered customer websites — cached so a preflight never
+// waits on Mongo, and never throws.
+const _originCache = new Map(); // origin → { ok, exp }
+const ORIGIN_CACHE_MS = 5 * 60 * 1000;
 async function isDynamicOriginAllowed(origin) {
+  const hit = _originCache.get(origin);
+  if (hit && hit.exp > Date.now()) return hit.ok;
+  let ok = false;
   try {
     const WebsiteConfig = require('./models/WebsiteConfig');
-    const hostname = origin.replace(/^https?:\/\//, "").replace(/\/$/, "");
-    const config = await WebsiteConfig.findOne({
-      pageUrl:  { $regex: escapeRegex(hostname), $options: "i" }, // A.8.28 literal match
+    const hostname = origin.replace(/^https?:\/\//, '').replace(/\/$/, '').replace(/^www\./, '');
+    const lookup = WebsiteConfig.exists({
+      pageUrl:  { $regex: escapeRegex(hostname), $options: 'i' }, // A.8.28 literal match
       isActive: true,
     });
-    return !!config;
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 3000));
+    ok = !!(await Promise.race([lookup, timeout]));
   } catch (e) {
-    console.error("CORS DB check error:", e.message);
-    return false;
+    console.error('CORS DB check error:', e.message);
+    ok = false;
   }
+  _originCache.set(origin, { ok, exp: Date.now() + (ok ? ORIGIN_CACHE_MS : 60 * 1000) });
+  return ok;
+}
+
+async function isOriginAllowed(rawOrigin) {
+  if (!rawOrigin) return true;                       // server-to-server, curl, mobile app
+  const origin = normOrigin(rawOrigin);
+  if (staticAllowedOrigins.includes(origin)) return true;
+  if (isFirstPartyOrigin(origin)) return true;
+  return isDynamicOriginAllowed(origin);
 }
 
 const corsOptions = {
-  origin: async (origin, callback) => {
-    if (!origin) return callback(null, true);
-    if (staticAllowedOrigins.includes(origin)) return callback(null, true);
-    const allowed = await isDynamicOriginAllowed(origin);
-    if (allowed) {
-      console.log(`✅ CORS allowed for registered website: ${origin}`);
-      return callback(null, true);
-    }
-    console.warn(`⚠️  CORS blocked unknown origin: ${origin}`);
-    callback(null, false); // no CORS headers → browser blocks it; avoids a confusing 500
+  origin: (origin, callback) => {
+    isOriginAllowed(origin)
+      .then((ok) => {
+        if (!ok) console.warn(`⚠️  CORS blocked unknown origin: ${origin}`);
+        callback(null, ok); // false → no CORS headers (browser blocks), no 500
+      })
+      .catch(() => callback(null, false));
   },
   credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-company-id", "x-webhook-key"],
-  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  // allowedHeaders intentionally omitted → the cors package echoes whatever
+  // headers the browser asks for in the preflight (Authorization,
+  // x-company-id, x-webhook-key, …). Adding a new custom header can never
+  // break CORS again.
+  exposedHeaders: ['Content-Disposition', 'RateLimit-Remaining', 'RateLimit-Reset'],
+  maxAge: 86400,               // browsers cache the preflight for 24h
+  optionsSuccessStatus: 204,
 };
 
 const io = new Server(server, {
   cors: {
-    origin: async (origin, callback) => {
-      if (!origin) return callback(null, true);
-      if (staticAllowedOrigins.includes(origin)) return callback(null, true);
-      const allowed = await isDynamicOriginAllowed(origin);
-      if (allowed) return callback(null, true);
-      callback(new Error(`CORS blocked: ${origin}`));
+    origin: (origin, callback) => {
+      isOriginAllowed(origin)
+        .then((ok) => (ok ? callback(null, true) : callback(new Error(`CORS blocked: ${origin}`))))
+        .catch(() => callback(new Error(`CORS blocked: ${origin}`)));
     },
     credentials: true,
   },
@@ -268,20 +312,20 @@ const io = new Server(server, {
 // blocked by the browser. Body is parsed inline because the global JSON parser
 // is registered further down. Secret verification inside the controller is the
 // real security gate — CORS here is intentionally open.
-app.use(
-  '/website-webhook',
-  (req, res, next) => {
-    const origin = req.headers.origin || '';
-    res.header('Access-Control-Allow-Origin',  origin || '*');
-    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
-    res.header('Vary', 'Origin');
-    if (req.method === 'OPTIONS') return res.sendStatus(200);
-    next();
-  },
-  express.json(),
-  websiteWebhookRoute
-);
+function openCors(req, res, next) {
+  const origin = req.headers.origin;
+  res.header('Access-Control-Allow-Origin',  origin || '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers',
+    req.headers['access-control-request-headers'] || 'Content-Type, x-webhook-key');
+  res.header('Access-Control-Max-Age', '86400');
+  res.header('Vary', 'Origin, Access-Control-Request-Headers');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  req._publicCors = true; // skip the allowlisted CORS below
+  next();
+}
+
+app.use('/website-webhook', openCors, express.json(), websiteWebhookRoute);
 
 // ── Public Google-Ads / custom-site lead webhook — open CORS ─────────────────
 // Website forms (e.g. skyupdigitalsolutions.com) POST here from the browser and
@@ -292,22 +336,11 @@ app.use(
 // the real security gate — CORS here is intentionally open (same as
 // /website-webhook above). The POST itself continues to the route at line
 // `app.use('/', googleWebhookRoute)` further down.
-app.use('/google-webhook', (req, res, next) => {
-  const origin = req.headers.origin || '';
-  res.header('Access-Control-Allow-Origin',  origin || '*');
-  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, x-webhook-key');
-  res.header('Access-Control-Max-Age',       '86400');
-  res.header('Vary', 'Origin');
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-  // Skip the global allowlisted CORS for this public endpoint.
-  req._publicCors = true;
-  next();
-});
+app.use('/google-webhook', openCors);
 
 // ── CORS must be first ────────────────────────────────────────────────────────
 app.use((req, res, next) => (req._publicCors ? next() : cors(corsOptions)(req, res, next)));
-app.options(/(.*)/, cors(corsOptions));
+app.options(/(.*)/, (req, res, next) => (req._publicCors ? next() : cors(corsOptions)(req, res, next)));
 
 // ── Body parsers ──────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -422,7 +455,11 @@ app.use('/api/transcription',       require('./routes/transcription'));
 // Employee Excel / Google Sheet integration (independent of Daily Report/Telegram)
 app.use('/api/sheet-integration',   require('./routes/sheetIntegration'));
 // Per-company CRM customization (statuses, outcomes, modules, workflows, …)
-app.use('/api/customization',       require('./routes/customizationRoute'));
+try {
+  app.use('/api/customization', require('./routes/customizationRoute'));
+} catch (e) {
+  console.error('⚠️  /api/customization not mounted:', e.message);
+}
 
 // ── BullMQ queue progress & control routes ────────────────────────────────────
 try {
@@ -544,7 +581,7 @@ connectDB().then(() => {
     console.log(`📦 Addon API:         /api/addons`);
     console.log(`🎁 Benefit API:       /api/benefits`);
     console.log(`🌐 Frontend served:   ${SERVE_FRONTEND ? 'YES (from dist/)' : 'NO (separate Render service)'}`);
-    console.log(`🔒 CORS origins:      ${staticAllowedOrigins.length} origin(s) loaded from ALLOWED_ORIGINS env`);
+    console.log(`🔒 CORS origins:      ${staticAllowedOrigins.length} static + *.skyupcrm.com / *.skyupdigitalsolutions.com + registered websites`);
     startSubscriptionExpiryJob();
     startTrialExpiryJob();   // NEW — emails customers when their 7-day trial lapses
     startIdleJob();
