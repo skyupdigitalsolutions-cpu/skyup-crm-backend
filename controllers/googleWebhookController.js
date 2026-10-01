@@ -21,9 +21,9 @@ const { sendNewLeadNotification } = require("../services/fcmService");
  *  2. If no key in request → try matching by campaignId or formId from the body
  *  3. If still no match → log full body and return (don't drop silently)
  */
-const receiveGoogleWebhook = async (req, res) => {
+async function processGoogleLead(req) {
   // Always respond 200 quickly so Google doesn't retry
-  res.sendStatus(200);
+  // (HTTP response is sent by receiveGoogleWebhook below)
 
   try {
     const body = req.body;
@@ -87,12 +87,12 @@ const receiveGoogleWebhook = async (req, res) => {
         } else {
           console.error("❌ Cannot identify campaign. No key, no campaignId/formId match, and multiple active configs exist.");
           console.error("   Full body logged above. Configure google_key in Google Ads webhook URL to fix this.");
-          return;
+          return { ok: false, status: 400, message: "Campaign key missing or not recognised." };
         }
       }
     }
 
-    if (!config) return;
+    if (!config) return { ok: false, status: 404, message: "Campaign not found or inactive. Check the webhook key." };
 
     console.log(`✅ Config matched — campaign: "${config.campaignName}" | company: ${config.company}`);
 
@@ -121,7 +121,7 @@ const receiveGoogleWebhook = async (req, res) => {
           `⏭ Duplicate — leadId "${googleLeadId}" already exists for company ${config.company}`,
           `| matched lead: ${duplicate._id} | phone: ${duplicate.mobile}`
         );
-        return;
+        return { ok: true, duplicate: true, message: "Thank you! We already have your details — our team will contact you shortly." };
       }
     }
 
@@ -157,12 +157,32 @@ const receiveGoogleWebhook = async (req, res) => {
       console.warn("   For Google Ads: check column names match full_name / phone_number / email.");
       console.warn("   For custom sources: send { name, phone, email } in the request body.");
       console.warn("   Received body keys:", Object.keys(body).join(", "));
-      return;
+      return { ok: false, status: 400, message: "Please enter your name and phone number." };
     }
 
     // ── Save lead ────────────────────────────────────────────────────────────
     const assignedUserId = await getNextAssignedUserGoogle(config);
     const leadPayload    = mapGoogleLeadToSchema(parsedFields, config, googleLeadId, assignedUserId);
+
+    // Lead.remark is REQUIRED — an empty defaultRemark on the campaign made
+    // Lead.create fail silently. Always fall back to a sensible remark.
+    if (!String(leadPayload.remark || "").trim()) leadPayload.remark = "Lead from Google Ads";
+    if (!String(leadPayload.status || "").trim()) leadPayload.status = "New";
+
+    // Website / custom forms send flat extra fields (company, solution,
+    // requirement, budget, timeline …). Keep them on the lead's remark so the
+    // sales team sees the full enquiry instead of losing it.
+    if (!userColumnData.length) {
+      const SKIP = new Set([
+        "name", "full_name", "fullName", "phone", "mobile", "phone_number", "email",
+        "google_key", "googleKey", "key", "_id", "lead_id", "leadId", "google_lead_id",
+        "campaign_id", "campaignId", "form_id", "formId",
+      ]);
+      const extras = Object.entries(body || {})
+        .filter(([k, v]) => !SKIP.has(k) && v !== null && v !== undefined && String(v).trim() !== "" && typeof v !== "object")
+        .map(([k, v]) => `${k}: ${String(v).trim().slice(0, 500)}`);
+      if (extras.length) leadPayload.remark = `${leadPayload.remark}\n${extras.join("\n")}`.slice(0, 4000);
+    }
 
     // Optional: auto-detect preferred language from the lead form columns.
     try {
@@ -217,7 +237,7 @@ const receiveGoogleWebhook = async (req, res) => {
           `| matched lead: ${matchedLead?._id || 'not found'}`,
           `| matched name: ${matchedLead?.name || 'unknown'}`
         );
-        return;
+        return { ok: true, duplicate: true, message: "Thank you! We already have your details — our team will contact you shortly." };
       }
       throw createErr;
     }
@@ -263,10 +283,36 @@ const receiveGoogleWebhook = async (req, res) => {
       );
     }
 
+    return { ok: true, leadId: String(newLead._id), message: "Thank you! Our team will contact you shortly." };
   } catch (err) {
     console.error("❌ GOOGLE WEBHOOK PROCESSING ERROR:", err.message);
     console.error(err.stack);
+    return { ok: false, status: 500, message: "Could not save your details. Please try again." };
   }
+}
+
+/**
+ * Two kinds of callers:
+ *  • Google Ads servers (no Origin header) → reply 200 immediately so Google
+ *    never retries, then process in the background (original behaviour).
+ *  • Browser forms on our / customer websites (Origin header present) → wait
+ *    for the result and reply JSON { success, message } so the form can show
+ *    a real success / error message instead of "Something went wrong".
+ */
+const receiveGoogleWebhook = async (req, res) => {
+  const fromBrowser = !!req.headers.origin;
+  if (!fromBrowser) {
+    res.sendStatus(200);
+    processGoogleLead(req).catch((e) => console.error("❌ GOOGLE WEBHOOK:", e.message));
+    return;
+  }
+  const r = await processGoogleLead(req);
+  return res.status(r.ok ? 200 : (r.status || 400)).json({
+    success: !!r.ok,
+    message: r.message,
+    ...(r.leadId ? { leadId: r.leadId } : {}),
+    ...(r.duplicate ? { duplicate: true } : {}),
+  });
 };
 
 module.exports = { receiveGoogleWebhook };
