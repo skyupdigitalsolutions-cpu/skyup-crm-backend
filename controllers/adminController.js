@@ -232,10 +232,67 @@ const updateAdmin = async (req, res) => {
   }
 };
 
+// Admin (same company) that an employee can belong to.
+async function resolveCompanyAdmin(companyId, adminId) {
+  if (!adminId || !require("mongoose").isValidObjectId(adminId)) return null;
+  return Admin.findOne({ _id: adminId, company: companyId, role: { $in: ["admin", "super_admin", "superadmin"] } })
+    .select("_id name email role")
+    .lean();
+}
+
+// PUT /api/admin/user/:id   { assignedTo: <adminId> }   — super_admin only
+// Moves an employee (and therefore their leads' visibility) to another admin.
+const reassignCompanyUser = async (req, res) => {
+  try {
+    if (req.admin.role !== "super_admin") {
+      return res.status(403).json({ message: "Only the super admin can reassign employees." });
+    }
+    const companyId = req.admin.company._id;
+    const { assignedTo } = req.body || {};
+    if (!assignedTo) return res.status(400).json({ message: "Please select an admin." });
+
+    const [user, owner] = await Promise.all([
+      User.findOne({ _id: req.params.id, company: companyId }).select("_id name email createdBy"),
+      resolveCompanyAdmin(companyId, assignedTo),
+    ]);
+    if (!user)  return res.status(404).json({ message: "Employee not found in your company." });
+    if (!owner) return res.status(400).json({ message: "Selected admin was not found in your company." });
+
+    const previous = user.createdBy ? String(user.createdBy) : null;
+    if (previous !== String(owner._id)) {
+      await User.updateOne({ _id: user._id }, { $set: { createdBy: owner._id } });
+      logAuditEvent({
+        action: "update", resourceType: "User", req,
+        actorId: req.admin?._id, actorModel: "Admin", actorEmail: req.admin?.email,
+        actorRole: req.admin?.role, company: companyId,
+        resourceId: user._id, statusCode: 200,
+        metadata: { targetEmail: user.email, changeType: "reassign_admin", previousValue: previous, newValue: String(owner._id) },
+      });
+      try { require("../utils/teamScope").invalidateTeam(companyId); } catch { /* best effort */ }
+    }
+
+    res.status(200).json({
+      message: `${user.name} is now assigned to ${owner.name}.`,
+      user: { _id: user._id, name: user.name, email: user.email, createdBy: owner._id,
+              assignedTo: { _id: owner._id, name: owner.name, email: owner.email, role: owner.role } },
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const createCompanyUser = async (req, res) => {
   try {
-    const { name, email, password, contactAccountEmail, languages } = req.body;
+    const { name, email, password, contactAccountEmail, languages, assignedTo } = req.body;
     const companyId = req.admin.company._id;
+
+    // Super admin can create an employee directly under another admin.
+    let ownerId = req.admin._id;
+    if (assignedTo && req.admin.role === "super_admin" && String(assignedTo) !== String(req.admin._id)) {
+      const owner = await resolveCompanyAdmin(companyId, assignedTo);
+      if (!owner) return res.status(400).json({ message: "Selected admin was not found in your company." });
+      ownerId = owner._id;
+    }
 
     const company = await Company.findById(companyId);
     if (!company) return res.status(404).json({ message: "Company not found" });
@@ -257,7 +314,7 @@ const createCompanyUser = async (req, res) => {
       name, email, password,
       company: companyId,
       role: "user",
-      createdBy: req.admin._id,
+      createdBy: ownerId,
       // Optional: Google account email leads are auto-saved into on the
       // employee's phone. Stored normalized (trim/lowercase via the schema).
       contactAccountEmail: contactAccountEmail
@@ -305,10 +362,22 @@ const getCompanyUsers = async (req, res) => {
 
     // SECURITY FIX: plainPassword is deprecated — always excluded now.
     const userSelectFields = "-password -plainPassword";
-    const [users, totalCompanyUsers] = await Promise.all([
-      User.find(ownFilter).select(userSelectFields),
+    const [rawUsers, totalCompanyUsers] = await Promise.all([
+      User.find(ownFilter).select(userSelectFields).populate("createdBy", "name email role").lean(),
       User.countDocuments(filter),
     ]);
+
+    // `assignedTo` = the admin this employee belongs to (stored as createdBy,
+    // which drives per-admin lead/user visibility). createdBy is kept as the
+    // plain id so existing consumers comparing ids keep working.
+    const users = rawUsers.map((u) => {
+      const owner = u.createdBy && typeof u.createdBy === "object" ? u.createdBy : null;
+      return {
+        ...u,
+        createdBy: owner ? owner._id : u.createdBy,
+        assignedTo: owner ? { _id: owner._id, name: owner.name, email: owner.email, role: owner.role } : null,
+      };
+    });
 
     res.status(200).json({ users, totalCompanyUsers });
   } catch (error) {
@@ -1543,6 +1612,7 @@ module.exports = {
   updateLeadLanguage,
   updateUserLanguages,
   createCompanyUser,
+  reassignCompanyUser,
   deleteCompanyUser,
   resetAdminPassword,
   resetUserPassword,

@@ -16,6 +16,7 @@ const {
   updateLeadLanguage,
   updateUserLanguages,
   createCompanyUser,
+  reassignCompanyUser,
   deleteCompanyUser,
   resetAdminPassword,
   resetUserPassword,
@@ -225,6 +226,8 @@ router.post(
   createCompanyUser
 );
 router.delete("/user/:id", protectAdmin, validateObjectId("id"), deleteCompanyUser);
+// Super admin moves an employee to another admin (Users → Reassign).
+router.put("/user/:id", protectAdmin, validateObjectId("id"), requireCompanySuperAdmin, reassignCompanyUser);
 
 // SECURITY FIX replacement feature — see controllers/adminController.js.
 // Reset (not view) a password: generates a brand-new one, returned once.
