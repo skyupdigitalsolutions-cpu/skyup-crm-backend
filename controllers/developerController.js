@@ -4,6 +4,7 @@
 // All existing functions are UNCHANGED.
 
 const path          = require("path");
+const { readPagination, sendList, sendObject, applyPage } = require("../utils/paginate");
 const { logAuditEvent } = require("../utils/auditLogger");
 const fs            = require("fs");
 const multer        = require("multer");
@@ -46,7 +47,7 @@ const logoStorage = new CloudinaryStorage({
     const id     = req.params.id || Date.now();
     const prefix = file.fieldname === "headerLogo" ? "company_header_logo" : "company_logo";
     return {
-      folder:          "skyup-crm/logos",
+      folder:          await require("../services/cloudinaryService").companyFolder(req.params.id || null, "logos"),
       resource_type:   "image",
       public_id:       `${prefix}_${id}_${Date.now()}`,
       allowed_formats: ["jpg", "jpeg", "png", "svg", "webp"],
@@ -401,8 +402,20 @@ const deleteCompany = async (req, res) => {
 // ── List companies ────────────────────────────────────────────────────────────
 const getCompanies = async (req, res) => {
   try {
-    const companies = await Company.find().select("-brevoApiKey -encryptionKeyHash -customerOpenAiKey -customerGeminiKey");
-    res.json(companies);
+    // Opt-in pagination + ?search= (name/email). Secrets are never listed.
+    const filter = {};
+    if (req.query.search && String(req.query.search).trim()) {
+      const rx = new RegExp(String(req.query.search).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      filter.$or = [{ name: rx }, { email: rx }];
+    }
+    const pg = readPagination(req, { defaultLimit: 50, maxLimit: 500 });
+    const [companies, total] = await Promise.all([
+      applyPage(Company.find(filter).sort({ createdAt: -1 }), pg)
+        .select("-brevoApiKey -encryptionKeyHash -customerOpenAiKey -customerGeminiKey -msg91EmailApiKey -razorpayTokenId -encryptedCompanyKey -recoveryKeyHash -telegramBotToken -cloudinaryConfig.apiKey -cloudinaryConfig.apiSecret")
+        .lean(),
+      pg.enabled ? Company.countDocuments(filter) : null,
+    ]);
+    return sendList(res, companies, pg, total);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -424,10 +437,14 @@ const toggleCompanyStatus = async (req, res) => {
 // ── Subscriptions list (developer panel) ─────────────────────────────────────
 const getSubscriptions = async (req, res) => {
   try {
-    const subs = await Company.find().select(
-      "name plan subscriptionStatus subscriptionExpiry maxAdmins maxUsers maxLeads maxWebsites isActive"
-    );
-    res.json(subs);
+    const pg = readPagination(req, { defaultLimit: 50, maxLimit: 500 });
+    const [subs, total] = await Promise.all([
+      applyPage(Company.find().sort({ createdAt: -1 }), pg).select(
+        "name plan subscriptionStatus subscriptionExpiry maxAdmins maxUsers maxLeads maxWebsites isActive"
+      ).lean(),
+      pg.enabled ? Company.countDocuments() : null,
+    ]);
+    return sendList(res, subs, pg, total);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -492,9 +509,16 @@ const getCompanyDetails = async (req, res, next) => {
       company.cloudinaryConfig = { ...company.cloudinaryConfig, apiSecret: "********" };
     }
 
+    let cloudinaryFolderPath = null;
+    try {
+      const cs = require("../services/cloudinaryService");
+      cloudinaryFolderPath = `${cs.ROOT_FOLDER}/${await cs.companyFolderBase(company._id)}`;
+    } catch { /* optional */ }
+
     res.json({
       success: true,
       company,
+      cloudinaryFolderPath,
       entitlements,
       addons,
       benefits,
@@ -954,7 +978,8 @@ const getCompanyPayments = async (req, res, next) => {
 const setCompanyCloudinary = async (req, res, next) => {
   try {
     const companyId = req.params.id;
-    const { enabled, cloudName, apiKey, apiSecret } = req.body;
+    const { enabled, cloudName, apiKey, apiSecret, folder } = req.body;
+    const cloudSvc = require("../services/cloudinaryService");
 
     const company = await Company.findById(companyId).select("name cloudinaryConfig");
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
@@ -975,16 +1000,22 @@ const setCompanyCloudinary = async (req, res, next) => {
       apiSecret: (apiSecret && apiSecret !== "********")
         ? apiSecret.trim()
         : (company.cloudinaryConfig?.apiSecret || ""),
+      // Optional custom folder — works with own AND shared Cloudinary.
+      folder: folder !== undefined ? cloudSvc.cleanFolderName(folder) : (company.cloudinaryConfig?.folder || ""),
     };
     await company.save();
+    cloudSvc.invalidateCompanyFolder(company._id);
+    const folderBase = await cloudSvc.companyFolderBase(company._id);
 
     // Never echo the secret back.
     res.json({
       success: true,
-      message: wantEnabled
-        ? `"${company.name}" will now store media in its own Cloudinary.`
-        : `"${company.name}" reverted to the platform's global Cloudinary.`,
+      message: (wantEnabled
+        ? `"${company.name}" will now store media in its own Cloudinary`
+        : `"${company.name}" uses the shared platform Cloudinary`) + ` — folder: ${cloudSvc.ROOT_FOLDER}/${folderBase}/`,
+      folderPath: `${cloudSvc.ROOT_FOLDER}/${folderBase}`,
       cloudinaryConfig: {
+        folder:    company.cloudinaryConfig.folder,
         enabled:   company.cloudinaryConfig.enabled,
         cloudName: company.cloudinaryConfig.cloudName,
         apiKey:    company.cloudinaryConfig.apiKey,

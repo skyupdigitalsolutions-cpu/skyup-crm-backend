@@ -25,7 +25,7 @@ const multer               = require("multer");
 const Lead                 = require("../models/Leads");
 const WhatsAppConversation = require("../models/WhatsAppConversation");
 const WhatsAppMessage      = require("../models/WhatsAppMessage");
-const { getCloudinaryForCompany } = require("../services/cloudinaryService");
+const { getCloudinaryForCompany, companyFolder } = require("../services/cloudinaryService");
 
 // ── Multer memory storage (we upload to Cloudinary manually for vision) ────────
 const memStorage = multer.memoryStorage();
@@ -47,13 +47,14 @@ function getCompanyId(req) {
 
 // ── Upload buffer to Cloudinary and get a public URL ──────────────────────────
 async function uploadScreenshotToCloudinary(buffer, mimetype, companyId) {
-  const { config: cloudConfig } = await getCloudinaryForCompany(companyId);
-  const cloudinary = require("cloudinary").v2;
+  // Isolated per-company instance (no global config race) + company folder.
+  const { instance } = await getCloudinaryForCompany(companyId);
+  const folder = await companyFolder(companyId, "wa-screenshots");
 
   return new Promise((resolve, reject) => {
-    const uploadStream = cloudinary.uploader.upload_stream(
+    const uploadStream = instance.uploader.upload_stream(
       {
-        folder:          "skyup-crm/wa-screenshots",
+        folder,
         resource_type:   "image",
         allowed_formats: ["jpg", "jpeg", "png", "webp"],
       },
@@ -63,8 +64,6 @@ async function uploadScreenshotToCloudinary(buffer, mimetype, companyId) {
       }
     );
 
-    // Pass explicit config so it doesn't use global singleton
-    cloudinary.config(cloudConfig);
     uploadStream.end(buffer);
   });
 }

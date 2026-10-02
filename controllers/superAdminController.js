@@ -4,6 +4,7 @@
 // All existing functions are UNCHANGED.
 
 const bcrypt       = require("bcryptjs");
+const { readPagination, sendList, sendObject, applyPage } = require("../utils/paginate");
 const SuperAdmin   = require("../models/SuperAdmin");
 const Company      = require("../models/Company");
 const Admin        = require("../models/Admin");
@@ -259,8 +260,12 @@ const createCompany = async (req, res) => {
 
 const getCompanies = async (req, res) => {
   try {
-    const companies = await Company.find().select("-brevoApiKey -encryptionKeyHash");
-    res.json(companies);
+    const pg = readPagination(req, { defaultLimit: 50, maxLimit: 500 });
+    const [companies, total] = await Promise.all([
+      applyPage(Company.find().sort({ createdAt: -1 }), pg).select("-brevoApiKey -encryptionKeyHash -customerOpenAiKey -customerGeminiKey -msg91EmailApiKey -razorpayTokenId -encryptedCompanyKey -recoveryKeyHash -telegramBotToken -cloudinaryConfig.apiKey -cloudinaryConfig.apiSecret").lean(),
+      pg.enabled ? Company.countDocuments() : null,
+    ]);
+    return sendList(res, companies, pg, total);
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
@@ -354,8 +359,31 @@ const getAdminDetails = async (req, res) => {
     const users   = await User.find({ company: companyId, createdBy: adminId }).select("-password").lean();
     const userIds = users.map(u => u._id.toString());
     const leadsQuery = { company: companyId, $or: [{ assignedAdmin: adminId }, ...(userIds.length > 0 ? [{ user: { $in: userIds } }] : [])] };
-    const leads  = await Lead.find(leadsQuery).select("name mobile email status source campaign temperature phoneRevealCount assignedAdmin user date remark").lean();
-    const leadsWithRevealsByAdmin = await Lead.find({ company: companyId, "phoneRevealLog.0": { $exists: true } }).select("name mobile phoneRevealLog phoneRevealCount").lean();
+    // PERF: breakdowns come from one aggregate; the lead LIST is paginated when
+    // the caller sends ?page=&limit= (otherwise unchanged: full list).
+    const { meta } = require("../utils/paginate");
+    const pg = readPagination(req, { defaultLimit: 100, maxLimit: 500 });
+    const mongoose = require("mongoose");
+    const oid = (v) => (mongoose.isValidObjectId(v) ? new mongoose.Types.ObjectId(String(v)) : v);
+    const aggMatch = { company: oid(companyId), $or: [{ assignedAdmin: oid(adminId) }, ...(userIds.length > 0 ? [{ user: { $in: userIds.map(oid) } }] : [])] };
+    const revealerIds = [...userIds, String(adminId)].flatMap((v) => [v, oid(v)]); // stored as id or string
+    const [leads, aggRows, leadsWithRevealsByAdmin] = await Promise.all([
+      (pg.enabled
+        ? Lead.find(leadsQuery).sort({ createdAt: -1 }).skip(pg.skip).limit(pg.limit)
+        : Lead.find(leadsQuery)
+      ).select("name mobile email status source campaign temperature phoneRevealCount assignedAdmin user date remark").lean(),
+      Lead.aggregate([
+        { $match: aggMatch },
+        { $facet: {
+          total:  [{ $count: "n" }],
+          status: [{ $group: { _id: "$status", n: { $sum: 1 } } }],
+          temp:   [{ $group: { _id: { $ifNull: ["$temperature", "Unknown"] }, n: { $sum: 1 } } }],
+        } },
+      ]),
+      // Only leads revealed by THIS admin or their employees (was: every lead
+      // in the company that had any reveal at all).
+      Lead.find({ company: companyId, "phoneRevealLog.userId": { $in: revealerIds } }).select("name mobile phoneRevealLog phoneRevealCount").lean(),
+    ]);
     let totalRevealsByAdmin = 0;
     const revealedLeads = [];
     leadsWithRevealsByAdmin.forEach(lead => {
@@ -365,9 +393,15 @@ const getAdminDetails = async (req, res) => {
         revealedLeads.push({ leadId: lead._id, name: lead.name, mobile: lead.mobile, revealCount: adminReveals.length, revealedBy: adminReveals.map(e => ({ userName: e.userName, revealedAt: e.revealedAt })) });
       }
     });
-    const statusBreakdown = leads.reduce((acc, l) => { acc[l.status] = (acc[l.status] || 0) + 1; return acc; }, {});
-    const tempBreakdown   = leads.reduce((acc, l) => { const t = l.temperature || "Unknown"; acc[t] = (acc[t] || 0) + 1; return acc; }, {});
-    res.status(200).json({ admin, users, leads, stats: { totalUsers: users.length, totalLeads: leads.length, statusBreakdown, tempBreakdown, phoneReveals: { totalRevealsByAdmin, leadsRevealed: revealedLeads.length, details: revealedLeads } } });
+    const f = aggRows[0] || {};
+    const totalLeads = f.total?.[0]?.n || 0;
+    const statusBreakdown = Object.fromEntries((f.status || []).map((r) => [r._id, r.n]));
+    const tempBreakdown   = Object.fromEntries((f.temp || []).map((r) => [r._id || "Unknown", r.n]));
+    res.status(200).json({
+      admin, users, leads,
+      ...(pg.enabled ? { pagination: meta(pg, totalLeads) } : {}),
+      stats: { totalUsers: users.length, totalLeads, statusBreakdown, tempBreakdown, phoneReveals: { totalRevealsByAdmin, leadsRevealed: revealedLeads.length, details: revealedLeads } },
+    });
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
 

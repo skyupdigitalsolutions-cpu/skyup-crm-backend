@@ -120,5 +120,8 @@ customReportSchema.pre("validate", function () {
   };
 });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+customReportSchema.index({ company: 1, periodEnd: -1, createdAt: -1 });
+
 module.exports = mongoose.model("CustomReport", customReportSchema);
 module.exports.FIELD_TYPES = FIELD_TYPES;

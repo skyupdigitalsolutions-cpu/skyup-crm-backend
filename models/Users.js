@@ -179,6 +179,10 @@ userSchema.plugin(encryptedFieldsPlugin, { fields: ["ipAddress", "lastIpAddress"
 // cached copy used by the auth middleware (see utils/authCache.js).
 try { require("../utils/authCache").attachInvalidation(userSchema, "user"); } catch (_) {}
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+userSchema.index({ company: 1, createdBy: 1 }); // per-admin employee lists
+userSchema.index({ company: 1, role: 1 }); // round robin / agents
+
 const User = mongoose.model("User", userSchema);
 
 module.exports = User;

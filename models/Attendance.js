@@ -85,4 +85,8 @@ const attendanceSchema = new mongoose.Schema({
 attendanceSchema.index({ user: 1, date: 1 }, { unique: true });
 attendanceSchema.index({ company: 1, date: 1 });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+attendanceSchema.index({ company: 1, date: 1, status: 1 }); // idle job + daily board
+attendanceSchema.index({ company: 1, user: 1, date: -1 }); // attendance report / export
+
 module.exports = mongoose.model("Attendance", attendanceSchema);

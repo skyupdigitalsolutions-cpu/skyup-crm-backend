@@ -617,6 +617,9 @@ const companySchema = mongoose.Schema(
       cloudName: { type: String,  default: "", trim: true },
       apiKey:    { type: String,  default: "", trim: true },
       apiSecret: { type: String,  default: "", trim: true },
+      // Folder for this company's media inside whichever Cloudinary account is
+      // used (own or the shared platform one). Blank = "<company-name>-<id>".
+      folder:    { type: String,  default: "", trim: true },
     },
   },
   { timestamps: true }
@@ -636,6 +639,11 @@ companySchema.plugin(encryptedFieldsPlugin, {
 // Auth cache invalidation — any write to this collection refreshes the
 // cached copy used by the auth middleware (see utils/authCache.js).
 try { require("../utils/authCache").attachInvalidation(companySchema, "company"); } catch (_) {}
+
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+companySchema.index({ createdAt: -1 }); // developer company list
+companySchema.index({ subscriptionStatus: 1, subscriptionExpiry: 1 }); // expiry jobs
+companySchema.index({ isActive: 1, createdAt: 1 }); // default tenant lookups
 
 const Company = mongoose.model("Company", companySchema);
 

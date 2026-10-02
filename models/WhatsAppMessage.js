@@ -124,4 +124,7 @@ const whatsAppMessageSchema = new mongoose.Schema(
 // Index for fast conversation history retrieval
 whatsAppMessageSchema.index({ conversation: 1, waTimestamp: 1 });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+whatsAppMessageSchema.index({ conversation: 1, waTimestamp: -1, _id: -1 }); // newest-first chat page + 'load older'
+
 module.exports = mongoose.model("WhatsAppMessage", whatsAppMessageSchema);

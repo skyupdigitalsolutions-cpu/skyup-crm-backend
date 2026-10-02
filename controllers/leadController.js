@@ -20,6 +20,7 @@ function getCallerId(req) {
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
 const mongoose = require("mongoose");
+const { readPagination, sendList, applyPage } = require("../utils/paginate");
 const Company = require("../models/Company");
 const { normalizePhone } = require("../utils/normalizePhone");
 const { computeQuality } = require("../utils/qualityHelper");
@@ -248,19 +249,25 @@ async function findLeadByPhone(
 // ── GET all leads (user sees own + unassigned) ────────────────────────────────
 const getLeads = async (req, res) => {
   try {
-    const leads = await Lead.find({
+    const filter = {
       company: getCompanyId(req),
       $or: [{ user: req.user._id }, { user: null }],
       mergedInto: null,
-    })
-      .select(MOBILE_LIST_PROJECTION)
-      .populate("user", "name email")
-      .lean();
+    };
+    // Opt-in pagination (?page=&limit=) — see utils/paginate.js
+    const pg = readPagination(req, { defaultLimit: 100, maxLimit: 500 });
+    const [leads, total] = await Promise.all([
+      applyPage(Lead.find(filter).sort({ createdAt: -1 }), pg)
+        .select(MOBILE_LIST_PROJECTION)
+        .populate("user", "name email")
+        .lean(),
+      pg.enabled ? Lead.countDocuments(filter) : null,
+    ]);
     // SECURITY: mask PII — employees see full numbers for their own leads
     const callerRole = req.user?.role || "user";
     const callerId = getCallerId(req);
     const masked = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, callerRole, callerId));
-    res.status(200).json(masked);
+    return sendList(res, masked, pg, total);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -311,15 +318,19 @@ const getLeadsByCampaign = async (req, res) => {
       }
       const scope = await getAdminLeadScope(req, companyId);
       const q = mergeLeadScope({ company: companyId, $or: or }, scope);
-      const rawLeads = await Lead.find(q)
-        .select(ADMIN_LIST_PROJECTION)
-        .populate("user", "name email")
-        .lean();
+      const pgA = readPagination(req, { defaultLimit: 100, maxLimit: 500 });
+      const [rawLeads, totalA] = await Promise.all([
+        applyPage(Lead.find(q).sort({ createdAt: -1 }), pgA)
+          .select(ADMIN_LIST_PROJECTION)
+          .populate("user", "name email")
+          .lean(),
+        pgA.enabled ? Lead.countDocuments(q) : null,
+      ]);
       // SECURITY: mask PII based on caller role
       const callerRole = getCallerRole(req);
       const callerId = getCallerId(req);
       const leads = rawLeads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, callerRole, callerId));
-      return res.status(200).json(leads);
+      return sendList(res, leads, pgA, totalA);
     }
 
     if (!campaign)
@@ -335,14 +346,20 @@ const getLeadsByCampaign = async (req, res) => {
     }
 
     const scope = await getAdminLeadScope(req, companyId);
-    const leads = await Lead.find(mergeLeadScope(filter, scope))
-      .populate("user", "name email")
-      .populate("previousAgents", "name email");
+    const fq = mergeLeadScope(filter, scope);
+    const pgB = readPagination(req, { defaultLimit: 100, maxLimit: 500 });
+    const [leads, totalB] = await Promise.all([
+      applyPage(Lead.find(fq).sort({ createdAt: -1 }), pgB)
+        .populate("user", "name email")
+        .populate("previousAgents", "name email")
+        .lean(),
+      pgB.enabled ? Lead.countDocuments(fq) : null,
+    ]);
     // SECURITY: mask PII based on caller role
     const adminRole = req.admin?.role || req.superAdmin?.role || "admin";
     const callerId = getCallerId(req);
     const masked = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, adminRole, callerId));
-    res.status(200).json(masked);
+    return sendList(res, masked, pgB, totalB);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -2697,7 +2714,8 @@ const adminGetAllLeads = async (req, res) => {
     const page  = Math.max(1, parseInt(req.query.page  || "1",   10));
     // FIX: removed hardcoded 500 cap — allow fetching all leads across pages.
     // Frontend now fetches multiple pages if total > limit.
-    const limit = Math.max(1, parseInt(req.query.limit || "500", 10));
+    // Capped at 1000 per page so one request can never pull an unbounded payload.
+    const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || "500", 10) || 500));
     const skip  = (page - 1) * limit;
 
     // Per-admin isolation: admins see only their own leads; super_admin sees all.

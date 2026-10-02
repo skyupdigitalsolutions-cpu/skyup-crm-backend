@@ -257,7 +257,7 @@ const corsOptions = {
   // headers the browser asks for in the preflight (Authorization,
   // x-company-id, x-webhook-key, …). Adding a new custom header can never
   // break CORS again.
-  exposedHeaders: ['Content-Disposition', 'RateLimit-Remaining', 'RateLimit-Reset'],
+  exposedHeaders: ['Content-Disposition', 'RateLimit-Remaining', 'RateLimit-Reset', 'X-Total-Count', 'X-Page', 'X-Limit', 'X-Total-Pages', 'X-Has-More'],
   maxAge: 86400,               // browsers cache the preflight for 24h
   optionsSuccessStatus: 204,
 };

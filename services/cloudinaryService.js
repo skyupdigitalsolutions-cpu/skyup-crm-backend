@@ -51,6 +51,64 @@ async function resolveCompanyConfig(companyId) {
   return { config: globalConfig(), scope: 'global' };
 }
 
+// ── Per-company folders ──────────────────────────────────────────────────────
+// Every upload goes to   <ROOT>/<company folder>/<type>
+//   ROOT            = CLOUDINARY_ROOT_FOLDER env (default "skyup-crm")
+//   company folder  = Developer → Company → Storage → "Folder name", or
+//                     "<company-name>-<last 6 of id>" when left blank
+//   type            = recordings | meeting-recordings | meeting-docs | logos |
+//                     whatsapp-inbound | whatsapp-screenshots | wa-screenshots
+// So several companies can safely share ONE Cloudinary account and each one's
+// media stays in its own folder in the Media Library.
+const ROOT_FOLDER = String(process.env.CLOUDINARY_ROOT_FOLDER || 'skyup-crm').replace(/^\/+|\/+$/g, '') || 'skyup-crm';
+const FOLDER_TTL_MS = 5 * 60 * 1000;
+const _folderCache = new Map(); // companyId → { base, exp }
+
+function slugify(v) {
+  return String(v || '')
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+
+/** Clean a developer-typed folder name ("Acme Corp/Calls" → "acme-corp/calls"). */
+function cleanFolderName(v) {
+  return String(v || '')
+    .split('/').map(slugify).filter(Boolean).join('/')
+    .slice(0, 80);
+}
+
+async function companyFolderBase(companyId) {
+  const id = companyId ? String(companyId._id || companyId) : '';
+  if (!id) return '_shared';
+  const hit = _folderCache.get(id);
+  if (hit && hit.exp > Date.now()) return hit.base;
+  let base = '';
+  try {
+    const c = await Company.findById(id).select('name cloudinaryConfig.folder').lean();
+    base = cleanFolderName(c?.cloudinaryConfig?.folder) || `${slugify(c?.name) || 'company'}-${id.slice(-6)}`;
+  } catch (e) {
+    base = `company-${id.slice(-6)}`;
+  }
+  _folderCache.set(id, { base, exp: Date.now() + FOLDER_TTL_MS });
+  return base;
+}
+
+/** Full Cloudinary folder for a company + media type. */
+async function companyFolder(companyId, type) {
+  return `${ROOT_FOLDER}/${await companyFolderBase(companyId)}/${type}`;
+}
+
+function invalidateCompanyFolder(companyId) {
+  if (companyId) _folderCache.delete(String(companyId._id || companyId));
+}
+
+/** Company id from any authenticated request (employee / admin / developer). */
+function companyIdFromReq(req) {
+  const v = req?.user?.company || req?.user?.companyId || req?.admin?.company?._id
+    || req?.admin?.company || req?.callerCompany || req?.params?.companyId || null;
+  return v ? String(v._id || v) : null;
+}
+
 // Return a configured Cloudinary instance for direct uploader calls.
 // Usage:
 //   const { instance } = await getCloudinaryForCompany(companyId);
@@ -82,6 +140,8 @@ function makeCompanyUploadMiddleware({ field, folderBase = 'skyup-crm/recordings
         req.user?.company || req.admin?.company?._id || req.admin?.company || req.callerCompany || null;
 
       const { config, scope } = await resolveCompanyConfig(companyId);
+      // 'skyup-crm/recordings' → 'recordings'
+      const folderType = String(folderBase).split('/').filter(Boolean).pop() || 'media';
 
       // Build an ISOLATED Cloudinary instance configured with this company's
       // creds. cloudinary.v2 exposes a Cloudinary class for creating instances
@@ -121,7 +181,7 @@ function makeCompanyUploadMiddleware({ field, folderBase = 'skyup-crm/recordings
           const ext = extMatch ? extMatch[0] : "";
           const safeBase = (original.replace(/\.[^./\\]+$/, "").replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 60) || "file");
           return {
-            folder:           `${folderBase}/${companyId || 'unknown'}`,
+            folder:           await companyFolder(companyId, folderType),
             resource_type:    'auto',
             public_id:        `${safeBase}_${req2.user?._id || 'u'}_${Date.now()}${ext}`,
             use_filename:     true,
@@ -149,6 +209,12 @@ function makeCompanyUploadMiddleware({ field, folderBase = 'skyup-crm/recordings
 }
 
 module.exports = {
+  companyFolder,
+  companyFolderBase,
+  cleanFolderName,
+  invalidateCompanyFolder,
+  companyIdFromReq,
+  ROOT_FOLDER,
   getCloudinaryForCompany,
   resolveCompanyConfig,
   makeCompanyUploadMiddleware,

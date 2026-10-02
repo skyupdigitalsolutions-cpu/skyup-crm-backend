@@ -137,4 +137,8 @@ whatsAppConversationSchema.pre("updateMany",       computeWaPhoneHashOnUpdate);
 // plaintext first.
 whatsAppConversationSchema.plugin(encryptedFieldsPlugin, { fields: ["waPhone"] });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+whatsAppConversationSchema.index({ company: 1, assignedAgent: 1, lastMessageAt: -1 }); // agent inbox
+whatsAppConversationSchema.index({ company: 1, lead: 1 }); // conversation for a lead
+
 module.exports = mongoose.model("WhatsAppConversation", whatsAppConversationSchema);

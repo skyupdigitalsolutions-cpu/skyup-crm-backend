@@ -839,5 +839,14 @@ leadSchema.pre('insertMany', function (next, docs) {
   next();
 });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+leadSchema.index({ company: 1, metaConfigId: 1 }); // Meta page / ad-set lead lists
+leadSchema.index({ company: 1, adSetName: 1 }); // ad-set rescoring + drill-down
+leadSchema.index({ company: 1, campaign: 1, adSetName: 1, createdAt: -1 }); // campaign drill-down
+leadSchema.index({ company: 1, assignedAdmin: 1 }); // per-admin lead scope
+leadSchema.index({ company: 1, user: 1, updatedAt: -1 }); // Team Lead lead list
+leadSchema.index({ company: 1, 'scheduledCalls.done': 1, 'scheduledCalls.scheduledAt': 1 }); // follow-up alerts
+leadSchema.index({ company: 1, 'phoneRevealLog.userId': 1 }); // reveal audits per admin
+
 const Lead = mongoose.model("Lead", leadSchema);
 module.exports = Lead;

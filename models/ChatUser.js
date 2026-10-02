@@ -17,4 +17,7 @@ const chatUserSchema = new mongoose.Schema({
 
 chatUserSchema.index({ company: 1, role: 1 });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+chatUserSchema.index({ lastSeen: -1 }); // chat user list
+
 module.exports = mongoose.model('ChatUser', chatUserSchema);

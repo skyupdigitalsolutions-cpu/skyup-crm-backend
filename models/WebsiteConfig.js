@@ -83,4 +83,7 @@ websiteConfigSchema.pre("updateOne",        computeHashOnUpdate);
 // Encrypt the scalar secret at rest (auto-decrypts on read for the admin UI).
 websiteConfigSchema.plugin(encryptedFieldsPlugin, { fields: ["webhookSecret"] });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+websiteConfigSchema.index({ company: 1, isActive: 1 });
+
 module.exports = mongoose.model("WebsiteConfig", websiteConfigSchema);

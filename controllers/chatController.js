@@ -1,5 +1,6 @@
 const ChatUser = require('../models/ChatUser');
 const Message  = require('../models/Message');
+const { readPagination, sendList, applyPage } = require('../utils/paginate');
 
 // POST /api/chat/users — create or fetch chat user
 const createOrFetchChatUser = async (req, res) => {
@@ -22,8 +23,12 @@ const createOrFetchChatUser = async (req, res) => {
 // GET /api/chat/users — get all chat users
 const getAllChatUsers = async (req, res) => {
   try {
-    const users = await ChatUser.find().sort({ lastSeen: -1 });
-    res.json(users);
+    const pg = readPagination(req, { defaultLimit: 50, maxLimit: 200 });
+    const [users, total] = await Promise.all([
+      applyPage(ChatUser.find().sort({ lastSeen: -1 }), pg).lean(),
+      pg.enabled ? ChatUser.countDocuments() : null,
+    ]);
+    return sendList(res, users, pg, total);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -33,13 +38,24 @@ const getAllChatUsers = async (req, res) => {
 const getChatHistory = async (req, res) => {
   const { username } = req.params;
   try {
-    const messages = await Message.find({
+    const filter = {
       $or: [
         { from: username, to: 'admin' },
         { from: 'admin',  to: username }
       ]
-    }).sort({ timestamp: 1 });
-    res.json(messages);
+    };
+    // Paginated mode returns the NEWEST page first-in-time order:
+    // page 1 = latest `limit` messages (still sorted oldest → newest).
+    const pg = readPagination(req, { defaultLimit: 100, maxLimit: 300 });
+    if (!pg.enabled) {
+      const messages = await Message.find(filter).sort({ timestamp: 1 }).lean();
+      return res.json(messages);
+    }
+    const [desc, total] = await Promise.all([
+      Message.find(filter).sort({ timestamp: -1, _id: -1 }).skip(pg.skip).limit(pg.limit).lean(),
+      Message.countDocuments(filter),
+    ]);
+    return sendList(res, desc.reverse(), pg, total);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -73,5 +73,9 @@ const paymentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+paymentSchema.index({ company: 1, createdAt: -1 }); // invoices
+paymentSchema.index({ company: 1, status: 1, createdAt: -1 }); // last paid / totals
+
 const Payment = mongoose.model("Payment", paymentSchema);
 module.exports = Payment;

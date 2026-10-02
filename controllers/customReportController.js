@@ -10,6 +10,7 @@
 //   GET    /custom-reports/:id/trends        period-over-period trend vs prior reports
 //   POST   /custom-reports/:id/analyze       generate AI suggestions + improvement notes
 const CustomReport = require("../models/CustomReport");
+const { readPagination, sendList, applyPage } = require("../utils/paginate");
 const Company      = require("../models/Company");
 const Lead         = require("../models/Leads");
 const { callGrok: callGroq } = require("../utils/leadActionSummary");
@@ -71,10 +72,12 @@ const listCustomReports = async (req, res) => {
     const { company } = req.query;
     const q = {};
     if (company) q.company = company;
-    const reports = await CustomReport.find(q)
-      .sort({ periodEnd: -1, createdAt: -1 })
-      .lean();
-    res.json(reports);
+    const pg = readPagination(req, { defaultLimit: 50, maxLimit: 200 });
+    const [reports, total] = await Promise.all([
+      applyPage(CustomReport.find(q).sort({ periodEnd: -1, createdAt: -1 }), pg).lean(),
+      pg.enabled ? CustomReport.countDocuments(q) : null,
+    ]);
+    return sendList(res, reports, pg, total);
   } catch (e) {
     res.status(500).json({ message: e.message });
   }

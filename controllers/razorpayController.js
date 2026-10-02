@@ -1,4 +1,5 @@
 const Razorpay   = require("razorpay");
+const { readPagination, sendList, sendObject, applyPage } = require("../utils/paginate");
 const crypto     = require("crypto");
 const Company    = require("../models/Company");
 const Payment    = require("../models/Payment");
@@ -272,9 +273,11 @@ const getInvoices = async (req, res) => {
   try {
     const companyId = req.admin.company._id;
 
-    const payments = await Payment.find({ company: companyId })
-      .sort({ createdAt: -1 })
-      .lean();
+    const pg = readPagination(req, { defaultLimit: 25, maxLimit: 200 });
+    const [payments, totalPayments] = await Promise.all([
+      applyPage(Payment.find({ company: companyId }).sort({ createdAt: -1 }), pg).lean(),
+      pg.enabled ? Payment.countDocuments({ company: companyId }) : null,
+    ]);
 
     const invoices = payments.map((p) => ({
       id: p.invoiceId,
@@ -294,7 +297,7 @@ const getInvoices = async (req, res) => {
       lineItems: Array.isArray(p.lineItems) ? p.lineItems : [],
     }));
 
-    return res.status(200).json(invoices);
+    return sendList(res, invoices, pg, totalPayments);
   } catch (err) {
     console.error("[Razorpay] get-invoices error:", err);
     return res.status(500).json({ message: "Failed to fetch invoices" });

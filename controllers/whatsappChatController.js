@@ -2,6 +2,7 @@
 // API endpoints used by the CRM frontend (agents + admin)
 
 const mongoose = require("mongoose");
+const { readPagination, sendObject, applyPage } = require("../utils/paginate");
 const axios = require("axios");
 const WhatsAppConfig = require("../models/WhatsAppConfig");
 const WhatsAppConversation = require("../models/WhatsAppConversation");
@@ -187,13 +188,17 @@ const getConversations = async (req, res, next) => {
     const isCompanyWideViewer = role === "admin" || role === "super_admin" || role === "superadmin";
     if (!isCompanyWideViewer) filter.assignedAgent = userId;
 
-    const conversations = await WhatsAppConversation.find(filter)
-      .populate("lead", "name mobile email status")
-      .populate("assignedAgent", "name email")
-      .sort({ lastMessageAt: -1 })
-      .lean(); // read-only response — skips Mongoose document hydration overhead
+    // Opt-in pagination (?page=&limit=) — see utils/paginate.js
+    const pg = readPagination(req, { defaultLimit: 50, maxLimit: 200 });
+    const [conversations, total] = await Promise.all([
+      applyPage(WhatsAppConversation.find(filter).sort({ lastMessageAt: -1, _id: -1 }), pg)
+        .populate("lead", "name mobile email status")
+        .populate("assignedAgent", "name email")
+        .lean(), // read-only response — skips Mongoose document hydration overhead
+      pg.enabled ? WhatsAppConversation.countDocuments(filter) : null,
+    ]);
 
-    res.json({ success: true, conversations });
+    return sendObject(res, { success: true, conversations }, pg, total);
   } catch (err) {
     console.error("getConversations error:", err.message);
     next(err);
@@ -245,9 +250,13 @@ const getMessages = async (req, res, next) => {
       ? Math.min(requestedLimit, MAX_MESSAGES)
       : 150;
 
-    const recentDesc = await WhatsAppMessage.find({
-      conversation: conversationId,
-    })
+    // "Load older": ?before=<ISO date or epoch ms> returns messages older than that.
+    const msgFilter = { conversation: conversationId };
+    if (req.query.before) {
+      const b = /^\d+$/.test(String(req.query.before)) ? new Date(Number(req.query.before)) : new Date(req.query.before);
+      if (!Number.isNaN(b.getTime())) msgFilter.waTimestamp = { $lt: b };
+    }
+    const recentDesc = await WhatsAppMessage.find(msgFilter)
       .populate("sentBy", "name")
       // Newest first so .limit() keeps the RECENT tail, not the oldest
       // messages — then we reverse back to chronological order below.
@@ -1482,13 +1491,21 @@ const getLeadsForWhatsApp = async (req, res, next) => {
     const filter = { company: companyId, mobile: { $exists: true, $ne: "" } };
     if (!isAdmin) filter.user = req.user._id;
 
-    const leads = await Lead.find(filter)
-      .select(
-        "name mobile primaryPhone secondaryPhone email status source campaign date createdAt user",
-      )
-      .populate("user", "name")
-      .sort({ createdAt: -1 })
-      .lean();
+    // Opt-in pagination (?page=&limit=) + optional ?search= on name/phone.
+    if (req.query.search && String(req.query.search).trim()) {
+      const rx = new RegExp(String(req.query.search).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      filter.$or = [{ name: rx }, { mobile: rx }, { secondaryPhone: rx }, { email: rx }];
+    }
+    const pg = readPagination(req, { defaultLimit: 100, maxLimit: 500 });
+    const [leads, total] = await Promise.all([
+      applyPage(Lead.find(filter).sort({ createdAt: -1 }), pg)
+        .select(
+          "name mobile primaryPhone secondaryPhone email status source campaign date createdAt user",
+        )
+        .populate("user", "name")
+        .lean(),
+      pg.enabled ? Lead.countDocuments(filter) : null,
+    ]);
 
     // Build phone list including secondaryPhone for conversation lookup
     const phones = leads.flatMap((l) => {
@@ -1526,7 +1543,7 @@ const getLeadsForWhatsApp = async (req, res, next) => {
       };
     });
 
-    res.json({ success: true, leads: result });
+    return sendObject(res, { success: true, leads: result }, pg, total);
   } catch (err) {
     console.error("getLeadsForWhatsApp error:", err.message);
     next(err);

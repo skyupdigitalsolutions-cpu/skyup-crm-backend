@@ -7,6 +7,7 @@
 //         then do O(1) Map lookups inside the loop. 1 DB call total.
 
 const MobileCallLog = require('../models/MobileCallLog');
+const { readPagination, sendObject, applyPage } = require('../utils/paginate');
 const Lead          = require('../models/Leads');
 const multer        = require('multer');
 const { normalizePhone } = require('../utils/normalizePhone');
@@ -239,8 +240,8 @@ const syncCallLogs = async (req, res) => {
 // ── GET /api/call-logs ────────────────────────────────────────────────────────
 const getCallLogs = async (req, res) => {
   try {
-    const page  = parseInt(req.query.page  || 1);
-    const limit = parseInt(req.query.limit || 50);
+    const page  = Math.max(1, parseInt(req.query.page || 1, 10) || 1);
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit || 50, 10) || 50), 1000);
 
     // Same admin-aware branching as getTodayCallLogs below — this route now
     // accepts protectAny (admin login on mobile), so it needs the same
@@ -345,17 +346,21 @@ const getTodayCallLogs = async (req, res) => {
       filter = { user: (req.user.userId || req.user._id), timestamp: { $gte: dayStart, $lte: dayEnd } };
     }
 
-    const logs = await MobileCallLog.find(filter)
-      .sort({ timestamp: -1 })
-      .populate('matchedLead', 'name mobile status')
-      .populate('user', 'name email');
+    const pg = readPagination(req, { defaultLimit: 100, maxLimit: 500 });
+    const [logs, total] = await Promise.all([
+      applyPage(MobileCallLog.find(filter).sort({ timestamp: -1 }), pg)
+        .populate('matchedLead', 'name mobile status')
+        .populate('user', 'name email')
+        .lean(),
+      pg.enabled ? MobileCallLog.countDocuments(filter) : null,
+    ]);
 
-    res.json({
+    return sendObject(res, {
       logs,
       date:    (dateParam || new Date().toISOString()).slice(0, 10),
       count:   logs.length,
       scoped:  isAdmin ? 'company' : 'user',
-    });
+    }, pg, total);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -511,8 +516,8 @@ const uploadRecording = async (req, res) => {
 // ── GET /api/call-logs/recordings ─────────────────────────────────────────────
 const getCompanyRecordings = async (req, res) => {
   try {
-    const page    = parseInt(req.query.page  || 1);
-    const limit   = parseInt(req.query.limit || 100);
+    const page    = Math.max(1, parseInt(req.query.page || 1, 10) || 1);
+    const limit   = Math.min(Math.max(1, parseInt(req.query.limit || 100, 10) || 100), 1000);
     const company = req.callerCompany || req.user?.company;
     if (!company) return res.status(400).json({ message: 'Company not found in token' });
     const [recordings, total] = await Promise.all([
@@ -532,7 +537,7 @@ const getCompanyRecordings = async (req, res) => {
 const getCallLogsForLead = async (req, res) => {
   try {
     const company = req.callerCompany || req.user?.company;
-    const limit   = parseInt(req.query.limit || 20);
+    const limit   = Math.min(Math.max(1, parseInt(req.query.limit || 20, 10) || 20), 1000);
     const logs = await MobileCallLog.find({ matchedLead: req.params.leadId, company })
       .sort({ timestamp: -1 }).limit(limit).populate('user', 'name email');
     res.json({ logs });
@@ -625,8 +630,8 @@ const saveRemark = async (req, res) => {
 // ── GET /api/call-logs/all ────────────────────────────────────────────────────
 const getCompanyAllLogs = async (req, res) => {
   try {
-    const page    = parseInt(req.query.page  || 1);
-    const limit   = parseInt(req.query.limit || 200);
+    const page    = Math.max(1, parseInt(req.query.page || 1, 10) || 1);
+    const limit   = Math.min(Math.max(1, parseInt(req.query.limit || 200, 10) || 200), 1000);
     const company = req.callerCompany || req.user?.company;
     if (!company) return res.status(400).json({ message: 'Company not found in token' });
 
@@ -763,8 +768,8 @@ const summarizeUnmatchedCall = async (req, res) => {
 //    page=1
 const getUncalledLeads = async (req, res) => {
   try {
-    const page  = parseInt(req.query.page  || 1);
-    const limit = parseInt(req.query.limit || 200);
+    const page  = Math.max(1, parseInt(req.query.page || 1, 10) || 1);
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit || 200, 10) || 200), 1000);
 
     // FIX: use req.admin only (not req.callerCompany) — same fix as getCallLogs
     const isAdmin = !!req.admin;
@@ -831,7 +836,7 @@ const getUncalledLeads = async (req, res) => {
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
-        .select('_id name mobile primaryPhone status remark initialRemark temperature Quality campaign source createdAt callHistory scheduledCalls date user')
+        .select('_id name mobile primaryPhone status remark initialRemark temperature Quality campaign source createdAt callHistory.calledAt scheduledCalls date user')
         .populate('user', 'name email')
         .lean(),
       Lead.countDocuments(uncalledFilter),

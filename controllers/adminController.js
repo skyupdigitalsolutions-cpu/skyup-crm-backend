@@ -881,7 +881,7 @@ const brandStorage = new CloudinaryStorage({
     const raw = req.admin?.company?._id ?? req.admin?.company;
     const cid = raw ? raw.toString() : "unknown";
     return {
-      folder:          "skyup-crm/logos",
+      folder:          await require("../services/cloudinaryService").companyFolder(raw ? cid : null, "logos"),
       resource_type:   "image",
       public_id:       `logo_${cid}_${Date.now()}`,
       allowed_formats: ["jpg", "jpeg", "png", "svg", "webp"],

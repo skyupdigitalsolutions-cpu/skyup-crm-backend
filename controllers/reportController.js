@@ -88,7 +88,7 @@ const leadInsights = async (req, res, next) => {
       temperature: req.query.temperature || null,
       search:      req.query.search || null,
       page:        req.query.page  ? Number(req.query.page)  : 1,
-      limit:       req.query.limit ? Number(req.query.limit) : 25,
+      limit:       req.query.limit ? Math.min(500, Math.max(1, Number(req.query.limit) || 25)) : 25,
       leadScope,
     });
 

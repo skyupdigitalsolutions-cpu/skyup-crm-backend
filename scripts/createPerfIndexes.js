@@ -6,7 +6,11 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 
-const MODELS = ['Leads', 'Users', 'Admin', 'Company', 'MobileCallLog', 'Attendance', 'Contact', 'Project', 'Call'];
+const MODELS = [
+  'Leads', 'Users', 'Admin', 'Company', 'MobileCallLog', 'Attendance', 'Contact', 'Project', 'Call',
+  'WhatsAppConversation', 'WhatsAppMessage', 'Message', 'ChatUser', 'Payment',
+  'GoogleAdsConfig', 'WebsiteConfig', 'MetaConfig', 'CustomReport',
+];
 
 (async () => {
   await mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/skyup-crm');

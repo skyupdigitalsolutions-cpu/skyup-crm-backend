@@ -23,4 +23,7 @@ const messageSchema = new mongoose.Schema({
 
 messageSchema.index({ company: 1, threadKey: 1, timestamp: 1 });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+messageSchema.index({ from: 1, to: 1, timestamp: 1 }); // chat history
+
 module.exports = mongoose.model('Message', messageSchema);

@@ -159,4 +159,7 @@ metaConfigSchema.plugin(encryptedFieldsPlugin, {
   fields: ["pageAccessToken", "appSecret", "verifyToken", "capiAccessToken", "adsToken"],
 });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+metaConfigSchema.index({ company: 1, pageId: 1 });
+
 module.exports = mongoose.model("MetaConfig", metaConfigSchema);

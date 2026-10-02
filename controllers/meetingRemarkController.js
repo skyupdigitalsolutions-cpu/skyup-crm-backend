@@ -31,6 +31,8 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+const { companyFolder, companyIdFromReq } = require('../services/cloudinaryService');
+
 const meetingStorage = new CloudinaryStorage({
   cloudinary,
   params: async (req, file) => {
@@ -57,7 +59,7 @@ const meetingStorage = new CloudinaryStorage({
     const isDocument = !isAudio && DOCUMENT_EXTENSIONS.includes(ext);
 
     return {
-      folder:        isAudio ? 'skyup-crm/meeting-recordings' : 'skyup-crm/meeting-docs',
+      folder:        await companyFolder(companyIdFromReq(req), isAudio ? 'meeting-recordings' : 'meeting-docs'),
       resource_type: isAudio ? 'auto' : (isDocument ? 'raw' : 'auto'),
       public_id:     `${req.user._id || req.user.userId}_${Date.now()}_${file.fieldname}_${file.originalname?.replace(/[^a-zA-Z0-9._-]/g, '_') || ''}`,
       allowed_formats: isAudio
@@ -84,7 +86,7 @@ const meetingUpload = multer({
 const screenshotStorage = new CloudinaryStorage({
   cloudinary,
   params: async (req, file) => ({
-    folder:        'skyup-crm/whatsapp-screenshots',
+    folder:        await companyFolder(companyIdFromReq(req), 'whatsapp-screenshots'),
     resource_type: 'image',
     public_id:     `${req.user?._id || req.user?.userId || req.admin?._id}_${Date.now()}`,
     allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],

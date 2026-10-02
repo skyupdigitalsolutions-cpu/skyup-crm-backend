@@ -53,4 +53,8 @@ googleAdsConfigSchema.plugin(encryptedFieldsPlugin, {
   fields: ["googleKey"],
 });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+googleAdsConfigSchema.index({ company: 1 });
+googleAdsConfigSchema.index({ isActive: 1 }); // webhook config lookup
+
 module.exports = mongoose.model("GoogleAdsConfig", googleAdsConfigSchema);

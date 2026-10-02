@@ -27,7 +27,7 @@ const { hmac }             = require("../utils/fieldCrypto");
 const Lead                 = require("../models/Leads");
 const User                 = require("../models/Users");
 const { resolveCanonicalConversation } = require("../utils/conversationMerge");
-const { getCloudinaryForCompany } = require("../services/cloudinaryService");
+const { getCloudinaryForCompany, companyFolder } = require("../services/cloudinaryService");
 const { slug, SERVICES } = require("../utils/templateNameResolver");
 const { sendWhatsAppInboundNotification } = require("../services/fcmService");
 const { notifyWhatsAppNewLead, notifyWhatsAppInbound, notifyWhatsAppOptOut } = require("../services/telegramService");
@@ -192,10 +192,11 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
       : (detectedExt || "");
     const publicId = resourceType === "raw" ? `${safeBase}${ext}` : safeBase;
 
+    const inboundFolder = await companyFolder(companyId, "whatsapp-inbound");
     const uploaded = await new Promise((resolve, reject) => {
       const stream = instance.uploader.upload_stream(
         {
-          folder: `skyup-crm/whatsapp-inbound/${companyId}`,
+          folder: inboundFolder,
           resource_type: resourceType,
           public_id: publicId,
           use_filename: true,

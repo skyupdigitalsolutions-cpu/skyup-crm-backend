@@ -91,4 +91,9 @@ mobileCallLogSchema.pre('validate', function () {
   }
 });
 
+// ── Performance indexes (list pages, reports, alerts) ─────────────────────────
+mobileCallLogSchema.index({ user: 1, matchedLead: 1, timestamp: -1 }); // Calls-by-Day 'done' stamping, per-lead history
+mobileCallLogSchema.index({ company: 1, matchedLead: 1, timestamp: -1 }); // lead call history / AI summary
+mobileCallLogSchema.index({ company: 1, user: 1, timestamp: -1 }); // admin drill-down + call monitoring
+
 module.exports = mongoose.model('MobileCallLog', mobileCallLogSchema);
