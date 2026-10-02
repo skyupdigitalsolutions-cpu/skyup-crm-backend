@@ -84,6 +84,63 @@ function callTypeToOutcome(callType) {
 
 // ── POST /api/call-logs/sync ──────────────────────────────────────────────────
 // FIX 4C: Replaced N+1 findLeadByPhone() calls with a single bulk fetch + Map.
+
+// ── Link agent remarks to their calls ────────────────────────────────────────
+// Agents usually add the remark in Lead Detail right after hanging up — BEFORE
+// the phone has pushed that call to the server. The remark lands on the lead's
+// callHistory, the call log arrives later without one, and Calls by Day showed
+// "Remark pending" forever. This copies the agent's own remark (made from just
+// before the call up to 12 h after it) onto any call log still missing one,
+// both when calls are synced and when the list is read.
+const AUTO_REMARK_RX = /^(outgoing|incoming|missed|rejected|voicemail|blocked|unknown)?\s*call\b.*from mobile app/i;
+const isRealRemark = (r) => !!(r && String(r).trim() && !AUTO_REMARK_RX.test(String(r).trim()));
+
+async function fillMissingRemarks(logs, opts = {}) {
+  try {
+    const pending = (logs || []).filter((l) => {
+      const leadId = l.matchedLead?._id || l.matchedLead;
+      return leadId && !isRealRemark(l.remark);
+    });
+    if (!pending.length) return 0;
+
+    const leadIds = [...new Set(pending.map((l) => String(l.matchedLead?._id || l.matchedLead)))];
+    const leads = await Lead.find(
+      { _id: { $in: leadIds } },
+      { callHistory: { $slice: -40 } },
+    ).lean();
+    const byLead = new Map(leads.map((l) => [String(l._id), l.callHistory || []]));
+
+    const BEFORE = 2 * 60 * 1000, AFTER = 12 * 60 * 60 * 1000;
+    const writes = [];
+    for (const log of pending) {
+      const hist = byLead.get(String(log.matchedLead?._id || log.matchedLead)) || [];
+      const t = new Date(log.timestamp).getTime();
+      const hit = hist
+        .filter((h) => isRealRemark(h.remark)
+          && (!log.user || !h.userId || String(h.userId) === String(log.user?._id || log.user))
+          && new Date(h.calledAt).getTime() >= t - BEFORE
+          && new Date(h.calledAt).getTime() <= t + AFTER)
+        .sort((a, b) => new Date(a.calledAt) - new Date(b.calledAt))[0];
+      if (!hit) continue;
+      log.remark = String(hit.remark).trim().slice(0, 500);
+      if (hit.outcome && !log.outcome) log.outcome = hit.outcome;
+      if (log._id) {
+        writes.push({ updateOne: {
+          filter: { _id: log._id, $or: [{ remark: { $exists: false } }, { remark: null }, { remark: '' }, { remark: AUTO_REMARK_RX }] },
+          update: { $set: { remark: log.remark, ...(hit.outcome ? { outcome: hit.outcome } : {}) } },
+        } });
+      }
+    }
+    if (writes.length && opts.persist !== false) {
+      await MobileCallLog.bulkWrite(writes, { ordered: false }).catch((e) => console.warn('[fillMissingRemarks]', e.message));
+    }
+    return writes.length;
+  } catch (e) {
+    console.warn('[fillMissingRemarks] skipped:', e.message);
+    return 0;
+  }
+}
+
 const syncCallLogs = async (req, res) => {
   try {
     const { logs } = req.body;
@@ -162,6 +219,17 @@ const syncCallLogs = async (req, res) => {
       },
     }));
     const result = await MobileCallLog.bulkWrite(ops);
+
+    // Remark already typed on the lead before this call reached the server →
+    // attach it now so the call never shows as "Remark pending".
+    try {
+      const matchedDocs = docs.filter((d) => d.matchedLead);
+      const syncedLogs = !matchedDocs.length ? [] : await MobileCallLog.find({
+        user: (req.user.userId || req.user._id),
+        $or: matchedDocs.map((d) => ({ phoneNumber: d.phoneNumber, timestamp: d.timestamp })),
+      }).select('_id user matchedLead timestamp remark outcome').lean();
+      if (syncedLogs.length) await fillMissingRemarks(syncedLogs);
+    } catch (e) { console.warn('[syncCallLogs] remark link skipped:', e.message); }
 
     const leadUpdates = new Map();
     for (const doc of docs) {
@@ -293,9 +361,12 @@ const getCallLogs = async (req, res) => {
     if (isAdmin) logsQuery = logsQuery.populate('user', 'name email');
 
     const [logs, total] = await Promise.all([
-      logsQuery,
+      logsQuery.lean(),
       MobileCallLog.countDocuments(filter),
     ]);
+    // Safety net: link remarks the agent already saved on the lead (fixes
+    // calls that were synced after the remark — see fillMissingRemarks).
+    await fillMissingRemarks(logs);
     res.json({ logs, page, total, totalPages: Math.ceil(total / limit) });
   } catch (error) {
     res.status(500).json({ message: error.message });

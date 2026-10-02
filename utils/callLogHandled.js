@@ -51,8 +51,10 @@ async function stamp(req, kind) {
     { $set: { remark: text, ...(req.body && req.body.outcome ? { outcome: req.body.outcome } : {}) } }
   );
 
-  const changed = res && (res.modifiedCount ?? res.nModified ?? 0);
-  if (changed) {
+  // Always clear the cached call lists after a remark/status save — even when
+  // the call itself hasn't reached the server yet (it will pick the remark up
+  // on arrival), so Calls by Day never shows a 30-second-old "pending" copy.
+  if (true) {
     try {
       const { deleteByPattern } = require("../middlewares/redisCache");
       const company = req.user.company || req.callerCompany;
