@@ -633,6 +633,10 @@ companySchema.plugin(encryptedFieldsPlugin, {
   fields: ["phone", "brevoApiKey", "msg91EmailApiKey", "razorpayTokenId", "cloudinaryConfig.apiKey", "cloudinaryConfig.apiSecret"],
 });
 
+// Auth cache invalidation — any write to this collection refreshes the
+// cached copy used by the auth middleware (see utils/authCache.js).
+try { require("../utils/authCache").attachInvalidation(companySchema, "company"); } catch (_) {}
+
 const Company = mongoose.model("Company", companySchema);
 
 module.exports = Company;

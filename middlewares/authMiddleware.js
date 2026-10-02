@@ -7,44 +7,46 @@ const Developer  = require("../models/Developer");
 const Company    = require("../models/Company");
 const { isTokenBlacklisted } = require("./rateLimiter");
 
-// ── In-process TTL cache for User + Company lookups ───────────────────────────
-// Every authenticated request previously hit MongoDB twice (User + Company).
-// With 50 agents × 10 req/min that's 1,000 DB reads/min just for auth.
-// This cache reduces that to one cold-miss read per user per 30s.
-//
-// Safety:
-//  • TTL is 30s — short enough that a role change, deactivation, or subscription
-//    expiry takes effect within one request cycle.
-//  • Logout/token blacklist is checked BEFORE the cache — a blacklisted token
-//    is rejected even if the user object is cached.
-//  • Company writes (subscription auto-expire) still run on cache miss, and the
-//    updated company is stored back into the cache immediately.
-//  • Cache is in-process only — a deploy or restart clears it automatically.
-//    For multi-instance deployments, each instance has its own cache; 30s TTL
-//    keeps them consistent enough without needing Redis for auth lookups.
-const AUTH_CACHE_TTL_MS = 30 * 1000; // 30 seconds
-const _userCache    = new Map(); // userId → { user, expiresAt }
-const _companyCache = new Map(); // companyId → { company, expiresAt }
+// ── Cached lookups (see utils/authCache.js) ──────────────────────────────────
+// Every authenticated request used to hit MongoDB 2-3 times just to identify
+// the caller. These helpers serve a per-request copy from a 20s cache that is
+// invalidated automatically whenever the User / Admin / Company is written.
+const authCache = require("../utils/authCache");
+const SUB_FIELDS = "subscriptionStatus subscriptionExpiry trialEndsAt isActive";
 
-function getCachedUser(id) {
-  const entry = _userCache.get(String(id));
-  if (!entry || Date.now() > entry.expiresAt) { _userCache.delete(String(id)); return null; }
-  return entry.user;
+async function loadUser(id) {
+  let lean = authCache.get("user", id);
+  if (!lean) {
+    lean = await User.findById(id).select("-password").lean();
+    if (!lean) return null;
+    authCache.set("user", id, lean, lean.company);
+  }
+  return User.hydrate(lean);
 }
-function setCachedUser(id, user) {
-  _userCache.set(String(id), { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+
+async function loadAdminWithCompany(id) {
+  let lean = authCache.get("admin", id);
+  if (!lean) {
+    lean = await Admin.findById(id).select("-password").populate("company").lean();
+    if (!lean) return null;
+    authCache.set("admin", id, lean, lean.company && (lean.company._id || lean.company));
+  }
+  return Admin.hydrate(lean, null, { hydratedPopulatedDocs: true });
 }
-function getCachedCompany(id) {
-  const entry = _companyCache.get(String(id));
-  if (!entry || Date.now() > entry.expiresAt) { _companyCache.delete(String(id)); return null; }
-  return entry.company;
+
+async function loadCompanySubscription(companyId) {
+  let lean = authCache.get("company", companyId);
+  if (!lean) {
+    lean = await Company.findById(companyId).select(SUB_FIELDS).lean().catch(() => null);
+    if (!lean) return null;
+    authCache.set("company", companyId, lean);
+  }
+  return { ...lean };
 }
-function setCachedCompany(id, company) {
-  _companyCache.set(String(id), { company, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
-}
-// Export so controllers can invalidate on role/subscription changes
-function invalidateUserCache(id)    { _userCache.delete(String(id)); }
-function invalidateCompanyCache(id) { _companyCache.delete(String(id)); }
+
+// Kept for backward compatibility with any controller that imported them.
+function invalidateUserCache(id)    { authCache.invalidate("user", id); }
+function invalidateCompanyCache(id) { authCache.invalidateCompany(id); }
 
 // ── User-only middleware ───────────────────────────────────────────────────────
 const protect = async (req, res, next) => {
@@ -65,12 +67,8 @@ const protect = async (req, res, next) => {
         return res.status(403).json({ message: "Access denied: not a user token" });
       }
 
-      req.user = getCachedUser(decoded.id);
-      if (!req.user) {
-        req.user = await User.findById(decoded.id).select("-password");
-        if (!req.user) return res.status(401).json({ message: "User not found" });
-        setCachedUser(decoded.id, req.user);
-      }
+      req.user = await loadUser(decoded.id);
+      if (!req.user) return res.status(401).json({ message: "User not found" });
 
       // ── Subscription enforcement for employees ──────────────────────────────
       // Admins are blocked at the auth layer (adminAuthMiddleware). Employees
@@ -80,13 +78,7 @@ const protect = async (req, res, next) => {
       // write is blocked with the SUBSCRIPTION_EXPIRED code the frontend handles.
       if (req.user.company) {
         const now = new Date();
-        let company = getCachedCompany(req.user.company);
-        if (!company) {
-          company = await Company.findById(req.user.company)
-            .select("subscriptionStatus subscriptionExpiry trialEndsAt isActive")
-            .catch(() => null);
-          if (company) setCachedCompany(req.user.company, company);
-        }
+        const company = await loadCompanySubscription(req.user.company);
 
         if (company) {
           // Auto-expire if validity has passed (keeps employee + admin views consistent)
@@ -97,8 +89,6 @@ const protect = async (req, res, next) => {
             await Company.findByIdAndUpdate(company._id, { subscriptionStatus: "expired", isActive: false }).catch(() => {});
             company.subscriptionStatus = "expired";
             company.isActive = false;
-            // Invalidate cache so next request sees the expired state immediately
-            invalidateCompanyCache(req.user.company);
           }
 
           const isReadRequest = req.method === "GET" || req.method === "HEAD";
@@ -148,8 +138,9 @@ const protectAny = async (req, res, next) => {
       if (decoded.role === "super_admin" || decoded.role === "superadmin") {
         // super_admin acting as admin — resolve a company context so dual-role
         // controllers (WhatsApp, call logs, etc.) work like they do for admin.
-        const superAdmin = await SuperAdmin.findById(decoded.id).select("-password")
-          || await Admin.findById(decoded.id).select("-password").populate("company");
+        // Admin-model super_admins are the common case → cached lookup first.
+        const superAdmin = await loadAdminWithCompany(decoded.id)
+          || await SuperAdmin.findById(decoded.id).select("-password");
 
         if (!superAdmin) return res.status(401).json({ message: "Not authorized as super_admin" });
 
@@ -220,9 +211,7 @@ const protectAny = async (req, res, next) => {
       }
 
       if (decoded.role === "admin") {
-        req.admin = await Admin.findById(decoded.id)
-          .select("-password")
-          .populate("company");
+        req.admin = await loadAdminWithCompany(decoded.id);
         if (!req.admin) return res.status(401).json({ message: "Admin not found" });
         req.callerCompany = req.admin.company?._id || req.admin.company;
         // Normalize so controllers can always read req.user.companyId / .userId / .role
@@ -234,7 +223,7 @@ const protectAny = async (req, res, next) => {
           name:      req.admin.name,
         };
       } else {
-        const userDoc = await User.findById(decoded.id).select("-password");
+        const userDoc = await loadUser(decoded.id);
         if (!userDoc) return res.status(401).json({ message: "User not found" });
         req.callerCompany = userDoc.company;
         // Normalize — controllers expect companyId/userId/role, User doc has company/_id/role
@@ -252,9 +241,7 @@ const protectAny = async (req, res, next) => {
       // shared (admin+user) endpoints.
       if (req.callerCompany) {
         const now = new Date();
-        const company = await Company.findById(req.callerCompany)
-          .select("subscriptionStatus subscriptionExpiry trialEndsAt isActive")
-          .catch(() => null);
+        const company = await loadCompanySubscription(req.callerCompany);
 
         if (company) {
           if (
@@ -306,7 +293,7 @@ const protectUnified = async (req, res, next) => {
     if (normalizedRole === "developer") {
       req.user = await Developer.findById(decoded.id).select("-password");
     } else if (["super_admin", "admin"].includes(normalizedRole)) {
-      req.user = await Admin.findById(decoded.id).select("-password").populate("company");
+      req.user = await loadAdminWithCompany(decoded.id);
       // Fall back to legacy SuperAdmin collection if not found in Admin model
       if (!req.user) {
         const legacySuperAdmin = await SuperAdmin.findById(decoded.id).select("-password");
@@ -317,7 +304,7 @@ const protectUnified = async (req, res, next) => {
       }
     } else {
       // employee / user
-      req.user = await User.findById(decoded.id).select("-password");
+      req.user = await loadUser(decoded.id);
     }
 
     // Ensure role is always normalised on req.user (covers Admin model docs with old role string)
@@ -343,4 +330,8 @@ const authorizeRoles = (...roles) => (req, res, next) => {
   next();
 };
 
-module.exports = { protect, protectAny, protectUnified, authorizeRoles };
+module.exports = {
+  protect, protectAny, protectUnified, authorizeRoles,
+  loadUser, loadAdminWithCompany, loadCompanySubscription,
+  invalidateUserCache, invalidateCompanyCache,
+};

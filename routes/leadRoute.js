@@ -1,5 +1,7 @@
 // routes/leadRoute.js — Merge Number removed; Single Additional Phone Number system
 const express = require("express");
+// Lead updates from Lead Detail also clear "Remark pending" in Calls by Day.
+const { markCallHandled } = require("../utils/callLogHandled");
 const router = express.Router();
 
 const {
@@ -90,9 +92,9 @@ router.post("/import-csv", protect, checkLimit("leads", countCompanyLeads), user
 router.post("/",           protect, checkLimit("leads", countCompanyLeads), createLead);
 
 // ── PATCH ─────────────────────────────────────────────────────────────────────
-router.patch("/:id/not-interested", protect, validateObjectId("id"), markNotInterested);
-router.patch("/:id/cold-reassign", protect, validateObjectId("id"), markColdReassign);
-router.patch("/:id/invalid", protect, validateObjectId("id"), markInvalid);
+router.patch("/:id/not-interested", protect, validateObjectId("id"), markCallHandled("not-interested"), markNotInterested);
+router.patch("/:id/cold-reassign", protect, validateObjectId("id"), markCallHandled("cold"), markColdReassign);
+router.patch("/:id/invalid", protect, validateObjectId("id"), markCallHandled("invalid"), markInvalid);
 
 // ── Phone reveal tracking ────────────────────────────────────────────────────
 router.post("/:id/reveal-phone", protect, validateObjectId("id"), logPhoneReveal);
@@ -103,16 +105,16 @@ router.post("/:id/reveal-email", protect, validateObjectId("id"), logEmailReveal
 router.post("/admin/:id/reveal-email", protectAdmin, validateObjectId("id"), logEmailReveal);
 
 router.patch("/:id/temperature", protectAdmin, validateObjectId("id"), patchLeadTemperature);
-router.patch("/:id", protect, validateObjectId("id"), patchLead);
+router.patch("/:id", protect, validateObjectId("id"), markCallHandled("status"), patchLead);
 
 // ── PUT ───────────────────────────────────────────────────────────────────────
 router.put("/admin/:id", protectAdmin, validateObjectId("id"), adminUpdateLead);
 router.put("/superadmin/:id", protectSuperAdmin, validateObjectId("id"), adminUpdateLead);
-router.put("/:id", protect, validateObjectId("id"), updateLead);
+router.put("/:id", protect, validateObjectId("id"), markCallHandled("status"), updateLead);
 
 // ── Close lead as wrong entry ─────────────────────────────────────────────────
 router.patch("/admin/:id/close-wrong-entry", protectAdmin, validateObjectId("id"), closeLeadWrongEntry);
-router.patch("/:id/close-wrong-entry",       protect, validateObjectId("id"),      closeLeadWrongEntry); // employee-level (own leads only)
+router.patch("/:id/close-wrong-entry",       protect, validateObjectId("id"),      markCallHandled("close"), closeLeadWrongEntry); // employee-level (own leads only)
 // Employee closes a lead with phone number + remark → notifies admin
 router.post("/:id/close-by-user", protect, validateObjectId("id"), closeLeadByUser);
 

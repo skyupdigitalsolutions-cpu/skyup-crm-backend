@@ -175,6 +175,10 @@ userSchema.index({ company: 1, teamLead: 1 });
 // way. Applied before model compilation so save + find hooks attach reliably.
 userSchema.plugin(encryptedFieldsPlugin, { fields: ["ipAddress", "lastIpAddress"] });
 
+// Auth cache invalidation — any write to this collection refreshes the
+// cached copy used by the auth middleware (see utils/authCache.js).
+try { require("../utils/authCache").attachInvalidation(userSchema, "user"); } catch (_) {}
+
 const User = mongoose.model("User", userSchema);
 
 module.exports = User;

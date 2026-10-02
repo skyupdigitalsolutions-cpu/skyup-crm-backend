@@ -77,10 +77,22 @@ const generalLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   store: makeStore("general"),
+  // This limiter runs BEFORE the auth middleware, so req.user/req.admin are
+  // never set here and every request used to be keyed by IP. A whole office
+  // behind one internet connection then shared ONE 1000-request bucket and
+  // pages started failing / stalling with 429s. Key by the (verified) JWT
+  // subject instead, so each logged-in person gets their own bucket.
   keyGenerator: (req) => {
     if (req.user?._id)       return `u:${req.user._id}`;
     if (req.admin?._id)      return `a:${req.admin._id}`;
     if (req.superAdmin?._id) return `s:${req.superAdmin._id}`;
+    const auth = req.headers?.authorization || "";
+    if (auth.startsWith("Bearer ") && process.env.JWT_SECRET) {
+      try {
+        const d = require("jsonwebtoken").verify(auth.slice(7), process.env.JWT_SECRET);
+        if (d && d.id) return `t:${d.role || "x"}:${d.id}`;
+      } catch (_) { /* invalid/expired token → fall back to IP */ }
+    }
     return ipKeyGenerator(req.ip);
   },
   skip: (req) => {

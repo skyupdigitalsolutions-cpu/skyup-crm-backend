@@ -162,6 +162,18 @@ app.use(helmet({
   crossOriginOpenerPolicy: false,
 }));
 
+// ── Gzip compression for every JSON/text response ───────────────
+// Lead lists, reports and dashboards are large JSON payloads; gzip shrinks them
+// ~80-90%, which is the single biggest win on slow mobile/office networks.
+// Audio/images are skipped automatically (not compressible). Optional require so
+// a server without `npm install` still boots.
+try {
+  const compression = require('compression');
+  app.use(compression({ threshold: 1024 }));
+} catch (e) {
+  console.warn('[perf] compression not installed — run `npm install` to enable gzip');
+}
+
 const server = http.createServer(app);
 
 // ═════════════════════════════════════════════════════════════════════════════

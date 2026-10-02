@@ -127,5 +127,9 @@ adminSchema.index(
   }
 );
 
+// Auth cache invalidation — any write to this collection refreshes the
+// cached copy used by the auth middleware (see utils/authCache.js).
+try { require("../utils/authCache").attachInvalidation(adminSchema, "admin"); } catch (_) {}
+
 const Admin = mongoose.model("Admin", adminSchema);
 module.exports = Admin;

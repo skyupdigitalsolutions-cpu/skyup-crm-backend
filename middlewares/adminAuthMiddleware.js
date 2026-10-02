@@ -4,6 +4,7 @@ const Admin      = require("../models/Admin");
 const SuperAdmin = require("../models/SuperAdmin");
 const Company    = require("../models/Company");
 const { isTokenBlacklisted, redisClient } = require("./rateLimiter");
+const { loadAdminWithCompany } = require("./authMiddleware");
 
 // ── Legacy SuperAdmin → Company cache ─────────────────────────────────────────
 // The legacy SuperAdmin path resolves "which company is the superadmin
@@ -58,7 +59,7 @@ const protectAdmin = async (req, res, next) => {
       // UPDATED: role check uses "super_admin" (was "superadmin")
       if (decoded.role === "super_admin") {
         // First try to find as a proper Admin document (new multi-tenant model)
-        const adminDoc = await Admin.findById(decoded.id).select("-password").populate("company");
+        const adminDoc = await loadAdminWithCompany(decoded.id);
         if (adminDoc) {
           req.admin = adminDoc;
           req.user = {
@@ -125,9 +126,7 @@ const protectAdmin = async (req, res, next) => {
         return res.status(403).json({ message: "Access denied: not an admin token" });
       }
 
-      req.admin = await Admin.findById(decoded.id)
-        .select("-password")
-        .populate("company");
+      req.admin = await loadAdminWithCompany(decoded.id);
 
       if (!req.admin) {
         return res.status(401).json({ message: "Admin not found" });

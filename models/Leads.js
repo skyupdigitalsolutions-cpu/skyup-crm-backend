@@ -691,6 +691,8 @@ leadSchema.index({ company: 1, date: 1, noFollowUpAlertLastSentAt: 1 });
 // gets filtered inline during that same index scan instead of triggering a
 // separate unindexed pass.
 leadSchema.index({ company: 1, user: 1, mergedInto: 1, createdAt: -1 });
+// Super-admin / company-wide lead list (no user filter): company + mergedInto:null, newest first.
+leadSchema.index({ company: 1, mergedInto: 1, createdAt: -1 });
 
 // ── PHONE DEDUP: Partial unique index on normalizedPhone ─────────────────────
 leadSchema.index(
