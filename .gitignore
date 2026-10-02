@@ -14,3 +14,5 @@ coverage/
 .vscode/
 *.pem
 *.key
+# APK builds are uploaded to the server directly, never committed
+public/*.apk

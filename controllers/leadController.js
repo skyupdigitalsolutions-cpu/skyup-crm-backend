@@ -1750,6 +1750,28 @@ const patchLead = async (req, res) => {
       }
     }
 
+    // BUG FIX ("I picked a date but the follow-up went to the next day"):
+    // closing the oldest pending follow-up ($set scheduledCalls.N.done) and
+    // adding the new one ($push scheduledCalls) in the SAME update is rejected
+    // by MongoDB ("would create a conflict at 'scheduledCalls'"), so the whole
+    // save failed — the agent's chosen date was never stored and the old
+    // auto "next day" follow-up stayed. Now the array is rebuilt once and
+    // written with a single $set.
+    const newFollowUp = pushOps.scheduledCalls || null;
+    const scSetKeys = Object.keys(setOps).filter((k) => k.startsWith("scheduledCalls."));
+    if (pushOps.scheduledCalls && scSetKeys.length) {
+      const arr = (lead.scheduledCalls || []).map((sc) => (sc && sc.toObject ? sc.toObject() : { ...sc }));
+      for (const k of scSetKeys) {
+        const [, idxStr, field] = k.split(".");
+        const i = Number(idxStr);
+        if (arr[i] && field) arr[i][field] = setOps[k];
+        delete setOps[k];
+      }
+      arr.push(pushOps.scheduledCalls);
+      delete pushOps.scheduledCalls;
+      setOps.scheduledCalls = arr;
+    }
+
     if (Object.keys(pushOps).length > 0) update.$push = pushOps;
     if (Object.keys(setOps).length > 0)
       update.$set = { ...(update.$set || {}), ...setOps };
@@ -1762,7 +1784,7 @@ const patchLead = async (req, res) => {
     // followUpReminderJob.js, which nudges the LEAD, not the employee.
     // Company-gated + silently skipped if Telegram isn't configured, same as
     // every other Telegram call site. Fire-and-forget, never blocks the response.
-    if (updatedLead && pushOps.scheduledCalls) {
+    if (updatedLead && newFollowUp) {
       const followUpCompanyId = lead.company?._id || lead.company || getCompanyId(req);
       const assignedEmployeeId = updatedLead.user?._id || updatedLead.user || req.user?._id;
       if (followUpCompanyId && assignedEmployeeId) {
@@ -1770,8 +1792,8 @@ const patchLead = async (req, res) => {
           assignedEmployeeId,
           updatedLead,
           followUpCompanyId,
-          pushOps.scheduledCalls.scheduledAt,
-          pushOps.scheduledCalls.note
+          newFollowUp.scheduledAt,
+          newFollowUp.note
         ).catch((err) =>
           console.error("[telegram] notifyEmployeeFollowUp patchLead trigger error:", err.message)
         );

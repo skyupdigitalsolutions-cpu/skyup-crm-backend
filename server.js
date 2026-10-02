@@ -488,19 +488,59 @@ if (require('fs').existsSync(path.join(__dirname, 'routes', 'queueRoutes.js'))) 
 }
 
 // ── APK Download Routes ───────────────────────────────────────────────────────
+// Always serves the NEWEST .apk in /public (by upload time), whatever its file
+// name — e.g. SkyUpCRM-v1.1.0.apk or skyupcrm.apk. Previously only the fixed
+// name skyupcrm.apk was served, so a newly uploaded build with a different
+// name was ignored and phones kept getting the old app. Responses are never
+// cached and the link carries a version stamp, so browsers can't reuse an old
+// download either.
+function latestApk() {
+  const fs = require('fs');
+  const dir = path.join(__dirname, 'public');
+  try {
+    const files = fs.readdirSync(dir)
+      .filter((f) => f.toLowerCase().endsWith('.apk'))
+      .map((f) => {
+        const st = fs.statSync(path.join(dir, f));
+        return { file: f, full: path.join(dir, f), mtime: st.mtimeMs, size: st.size };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+    if (!files.length) return null;
+    const top = files[0];
+    const m = /v?(\d+\.\d+(?:\.\d+)?)/i.exec(top.file);
+    top.version = m ? m[1] : null;
+    return top;
+  } catch { return null; }
+}
+
 app.get('/download', (req, res) => {
-  const apkPath = path.join(__dirname, 'public', 'skyupcrm.apk');
-  res.download(apkPath, 'SkyUpCRM.apk', (err) => {
-    if (err) res.status(404).json({ message: 'APK not found' });
+  const apk = latestApk();
+  if (!apk) return res.status(404).json({ message: 'APK not found' });
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+    Pragma: 'no-cache',
+    Expires: '0',
+    'Content-Type': 'application/vnd.android.package-archive',
+  });
+  const name = apk.version ? `SkyUpCRM-v${apk.version}.apk` : 'SkyUpCRM.apk';
+  res.download(apk.full, name, { cacheControl: false, lastModified: false, etag: false }, (err) => {
+    if (err && !res.headersSent) res.status(404).json({ message: 'APK not found' });
   });
 });
 
 app.get('/install', (req, res) => {
+  const apk = latestApk();
+  const ver = apk ? (apk.version ? `Version ${apk.version}` : 'Latest version') : 'Not available yet';
+  const when = apk ? new Date(apk.mtime).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+  const sizeMb = apk ? (apk.size / 1048576).toFixed(1) + ' MB' : '';
+  const href = apk ? `/download?v=${Math.round(apk.mtime)}` : '#';
+  res.set({ 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', Pragma: 'no-cache', Expires: '0' });
   res.send(`
     <!DOCTYPE html>
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta http-equiv="Cache-Control" content="no-store" />
         <title>Install SkyUp CRM</title>
         <style>
           * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -508,19 +548,23 @@ app.get('/install', (req, res) => {
           .card { background: white; padding: 35px 30px; border-radius: 20px; max-width: 400px; width: 100%; box-shadow: 0 8px 30px rgba(0,0,0,0.12); text-align: center; }
           .logo { font-size: 48px; margin-bottom: 10px; }
           h1 { color: #1a1a2e; font-size: 24px; margin-bottom: 5px; }
-          .version { color: #999; font-size: 13px; margin-bottom: 25px; }
+          .version { color: #555; font-size: 14px; font-weight: bold; }
+          .meta { color: #999; font-size: 12px; margin: 4px 0 25px; }
           .btn { background: #4f46e5; color: white; padding: 16px 40px; border-radius: 12px; text-decoration: none; font-size: 18px; font-weight: bold; display: inline-block; margin-bottom: 25px; }
+          .btn.off { background: #9ca3af; pointer-events: none; }
           .steps { text-align: left; background: #f8f9ff; padding: 20px; border-radius: 12px; }
           .steps p { font-weight: bold; margin-bottom: 10px; color: #333; }
           .step { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; color: #555; font-size: 15px; }
+          .note { margin-top: 14px; font-size: 12px; color: #b45309; background: #fffbeb; padding: 10px; border-radius: 10px; text-align: left; }
         </style>
       </head>
       <body>
         <div class="card">
           <div class="logo">📱</div>
           <h1>SkyUp CRM</h1>
-          <p class="version">Version 1.0.0 • Android</p>
-          <a class="btn" href="/download">⬇️ Download App</a>
+          <p class="version">${ver} • Android</p>
+          <p class="meta">${apk ? `Updated ${when} • ${sizeMb}` : ''}</p>
+          <a class="btn ${apk ? '' : 'off'}" href="${href}">⬇️ Download App</a>
           <div class="steps">
             <p>📋 How to Install:</p>
             <div class="step">1️⃣ Tap Download App above</div>
@@ -528,6 +572,7 @@ app.get('/install', (req, res) => {
             <div class="step">3️⃣ Allow unknown sources if asked</div>
             <div class="step">4️⃣ Tap Install ✅</div>
           </div>
+          <div class="note">If Android says <b>"App not installed"</b>, uninstall the old SkyUp CRM first, then install this one.</div>
         </div>
       </body>
     </html>
