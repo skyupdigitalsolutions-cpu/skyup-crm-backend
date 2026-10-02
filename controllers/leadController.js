@@ -19,6 +19,7 @@ function getCallerId(req) {
 
 const Lead = require("../models/Leads");
 const User = require("../models/Users");
+const mongoose = require("mongoose");
 const Company = require("../models/Company");
 const { normalizePhone } = require("../utils/normalizePhone");
 const { computeQuality } = require("../utils/qualityHelper");
@@ -406,10 +407,28 @@ const createLead = async (req, res) => {
     if (cf.errors.length) return res.status(400).json({ message: cf.errors.join(" "), errors: cf.errors });
 
     const lc = cust.workflows.leadCreation;
+
+    // ── Who owns the new lead ────────────────────────────────────────────────
+    // Employee → always themselves. Team Lead → themselves, or (if "Can
+    // reassign leads" is on for Team Leads) any member of their own team.
+    // Previously `req.body.user` was trusted blindly, so any id was accepted.
+    const selfId = String(req.user._id);
+    let ownerId = selfId;
+    const wanted = req.body && req.body.user ? String(req.body.user) : "";
+    if (wanted && wanted !== selfId) {
+      const allowed = req.user.isTeamLead
+        && custSvc.permission(cust, "teamLead", "canReassignLeads")
+        && (await teamScope.isInTeam(companyId, selfId, wanted));
+      if (!allowed) {
+        return res.status(403).json({ message: "You can only assign a new lead to yourself or a member of your own team." });
+      }
+      ownerId = wanted;
+    }
+
     // Strip anything the client must not set directly on create.
     const {
       company: _c, customFields: _cf, isClosed: _ic, mergedInto: _mi, callHistory: _ch,
-      scheduledCalls: _sc, activityTimeline: _at, previousAgents: _pa, ...body
+      scheduledCalls: _sc, activityTimeline: _at, previousAgents: _pa, user: _u, ...body
     } = req.body || {};
     const lead = await Lead.create({
       ...body,
@@ -422,10 +441,24 @@ const createLead = async (req, res) => {
       mobile:        primaryMobile,
       primaryPhone:  primaryMobile,
       secondaryPhone: normSecondary ? secondaryMobile : null,
-      user:    req.body.user || req.user._id,
+      user:    ownerId,
       company: companyId,
       addedManually: true,
+      ...(ownerId !== selfId ? {
+        activityTimeline: [{
+          action: "assigned", performedBy: req.user._id, role: "team_lead", timestamp: new Date(),
+          note: `Added and assigned by Team Lead ${req.user.name || ""}`.trim(),
+        }],
+      } : {}),
     });
+
+    if (ownerId !== selfId) {
+      try { global._io && global._io.to(`agent:${ownerId}`).emit("new_lead_assigned", { leadId: String(lead._id), leadName: lead.name, count: 1, eventType: "assigned" }); } catch { /* ignore */ }
+      try {
+        const { sendReassignedLeadNotification } = require("../services/fcmService");
+        if (typeof sendReassignedLeadNotification === "function") sendReassignedLeadNotification(ownerId, lead).catch(() => {});
+      } catch { /* push is best-effort */ }
+    }
 
     autoSendTemplates(lead, companyId);
     // SECURITY: mask PII in create response
@@ -877,6 +910,36 @@ const userImportCSV = async (req, res) => {
     const results = [],
       errors = [];
 
+    // ── Who gets the imported leads ──────────────────────────────────────────
+    // Employee → always themselves. Team Lead (with "Can reassign leads") can
+    // send the whole file to ONE member, or split it round-robin across the
+    // team (optionally including themselves):
+    //   assignMode: "me" (default) | "member" + assignTo | "team"  (+ includeSelf)
+    const selfId = String(req.user._id);
+    const assignMode = String(req.body.assignMode || "me");
+    let owners = [selfId];
+    if (assignMode !== "me") {
+      const canTeam = req.user.isTeamLead && custSvc.permission(cust, "teamLead", "canReassignLeads");
+      if (!canTeam) {
+        return res.status(403).json({ message: "Only a Team Lead can assign imported leads to team members." });
+      }
+      if (assignMode === "member") {
+        const target = String(req.body.assignTo || "");
+        if (!target || !(await teamScope.isInTeam(companyId, selfId, target))) {
+          return res.status(403).json({ message: "You can only assign leads to members of your own team." });
+        }
+        owners = [target];
+      } else if (assignMode === "team") {
+        const members = await teamScope.getTeamMemberIds(companyId, selfId);
+        owners = req.body.includeSelf ? [selfId, ...members] : members;
+        if (!owners.length) return res.status(400).json({ message: "Your team has no members yet." });
+      } else {
+        return res.status(400).json({ message: "Unknown assignment option." });
+      }
+    }
+    let rr = 0;
+    const perOwner = {};
+
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       try {
@@ -986,11 +1049,24 @@ const userImportCSV = async (req, res) => {
               },
               csvExtraAnswers.length,
             ),
-          user: req.user._id,
+          user: new mongoose.Types.ObjectId(owners[rr % owners.length]),
           company: companyId,
+          // insertOne bypasses the schema's pre-validate hook, so the dedup key
+          // must be set here — otherwise these leads were invisible to the
+          // duplicate-phone check forever after.
+          normalizedPhone: normPrimary || null,
+          ...(owners[rr % owners.length] !== selfId ? {
+            activityTimeline: [{
+              action: "assigned", performedBy: req.user._id, role: "team_lead", timestamp: new Date(),
+              note: `Imported and assigned by Team Lead ${req.user.name || ""}`.trim(),
+            }],
+          } : {}),
         };
 
         const lead = await Lead.collection.insertOne(userDoc);
+        const ownerKey = owners[rr % owners.length];
+        perOwner[ownerKey] = (perOwner[ownerKey] || 0) + 1;
+        rr++;
         const savedLead = await Lead.findById(lead.insertedId)
           .populate("user", "name email")
           .populate("previousAgents", "name email");
@@ -1001,13 +1077,32 @@ const userImportCSV = async (req, res) => {
         errors.push({ index: i, row: row.name || i, message: err.message });
       }
     }
+    // Tell each team member how many leads just landed in their list.
+    const otherOwners = Object.keys(perOwner).filter((id) => id !== selfId);
+    let names = {};
+    if (otherOwners.length) {
+      const us = await User.find({ _id: { $in: otherOwners } }).select("name").lean();
+      names = Object.fromEntries(us.map((u) => [String(u._id), u.name]));
+      for (const id of otherOwners) {
+        try { global._io && global._io.to(`agent:${id}`).emit("new_lead_assigned", { count: perOwner[id], eventType: "imported" }); } catch { /* ignore */ }
+      }
+    }
+    const breakdown = Object.entries(perOwner).map(([id, count]) => ({
+      userId: id, name: id === selfId ? "You" : (names[id] || "Member"), count,
+    }));
+    const message = !otherOwners.length
+      ? `${results.length} leads imported and assigned to you.`
+      : `${results.length} leads imported — ` + breakdown.map((b) => `${b.name}: ${b.count}`).join(", ") + ".";
+
     res.status(207).json({
-      saved: results,
+      // Only leads that stayed with the importer go back into their own list.
+      saved: results.filter((l) => String(l.user?._id || l.user) === selfId),
       errors,
       total: rows.length,
       savedCount: results.length,
       errorCount: errors.length,
-      message: `${results.length} leads imported and assigned to you.`,
+      breakdown,
+      message,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -2609,6 +2704,9 @@ const adminGetAllLeads = async (req, res) => {
     const scope = await getAdminLeadScope(req, companyId);
     const query = mergeLeadScope({ company: companyId, mergedInto: null }, scope);
 
+    // PERF: the total count is only needed on page 1 (the client reads
+    // `pages` from page 1 and then fetches the rest). Counting again on every
+    // later page doubled the DB work for big companies.
     const [leads, total] = await Promise.all([
       Lead.find(query)
         .sort({ createdAt: -1 })
@@ -2617,14 +2715,14 @@ const adminGetAllLeads = async (req, res) => {
         .select(ADMIN_LIST_PROJECTION)
         .populate("user", "name email")
         .lean(),
-      Lead.countDocuments(query),
+      page === 1 || req.query.count === "1" ? Lead.countDocuments(query) : Promise.resolve(null),
     ]);
 
     // SECURITY: mask PII based on caller role
     const _callerRole = getCallerRole(req);
     const _callerId = getCallerId(req);
     const maskedLeads = leads.map(l => maskLeadPII(l.toObject ? l.toObject() : l, _callerRole, _callerId));
-    res.status(200).json({ leads: maskedLeads, total, page, limit, pages: Math.ceil(total / limit) || 1 });
+    res.status(200).json({ leads: maskedLeads, total, page, limit, pages: total == null ? null : (Math.ceil(total / limit) || 1) });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
