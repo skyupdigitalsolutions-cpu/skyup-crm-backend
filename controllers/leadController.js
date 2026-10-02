@@ -396,19 +396,21 @@ const createLead = async (req, res) => {
     if (!normPrimary) {
       return res.status(400).json({ message: "A valid primary phone number is required." });
     }
-    if (normSecondary) {
-      if (normSecondary === normPrimary) {
-        return res.status(400).json({ message: "Secondary phone cannot be the same as primary." });
-      }
-      const conflict = await findLeadByPhone(companyId, normSecondary);
-      if (conflict) {
-        return res.status(409).json({
-          message: `Secondary number already belongs to lead "${conflict.name}"`,
-          duplicate: true, lead: conflict,
-        });
-      }
+    if (normSecondary && normSecondary === normPrimary) {
+      return res.status(400).json({ message: "Secondary phone cannot be the same as primary." });
     }
-    const conflict = await findLeadByPhone(companyId, normPrimary);
+    // PERF: both duplicate checks + customization in ONE parallel round trip.
+    const [secConflict, conflict, cust] = await Promise.all([
+      normSecondary ? findLeadByPhone(companyId, normSecondary) : null,
+      findLeadByPhone(companyId, normPrimary),
+      getCust(companyId),
+    ]);
+    if (secConflict) {
+      return res.status(409).json({
+        message: `Secondary number already belongs to lead "${secConflict.name}"`,
+        duplicate: true, lead: secConflict,
+      });
+    }
     if (conflict) {
       return res.status(409).json({
         message: `Primary number already belongs to lead "${conflict.name}"`,
@@ -416,7 +418,6 @@ const createLead = async (req, res) => {
       });
     }
 
-    const cust = await getCust(companyId);
     if (employeeDenied(req, res, cust, "canAddLeads", "adding leads")) return;
     const missing = missingRequiredLeadFields(cust, req.body);
     if (missing.length) return res.status(400).json({ message: `Required: ${missing.join(", ")}` });
@@ -584,7 +585,7 @@ const adminCreateLead = async (req, res) => {
 
     const io = global._io;
     if (io) {
-      io.to("wa_admin").emit("wa_new_lead", {
+      io.to(`wa_admin_${String(companyId)}`).emit("wa_new_lead", {
         lead: {
           _id: lead._id,
           name: lead.name,
@@ -1140,7 +1141,11 @@ const updateLead = async (req, res) => {
   try {
     const { id } = req.params;
     const companyId = getCompanyId(req);
-    const lead = await Lead.findOne({ _id: id, company: companyId });
+    // PERF: lead + customization in parallel (was sequential).
+    const [lead, cust] = await Promise.all([
+      Lead.findOne({ _id: id, company: companyId }),
+      getCust(companyId),
+    ]);
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     // Strip fields that must never be changed via this endpoint
@@ -1150,7 +1155,6 @@ const updateLead = async (req, res) => {
       mergedFrom, customFields: _rawCustom, ...safeBody
     } = req.body;
 
-    const cust = await getCust(companyId);
     if (employeeDenied(req, res, cust, "canEditLeadDetails", "editing lead details")) return;
     const touchesPhone = safeBody.mobile !== undefined || safeBody.primaryPhone !== undefined || safeBody.secondaryPhone !== undefined;
     if (touchesPhone && employeeDenied(req, res, cust, "canEditPhoneNumbers", "editing phone numbers")) return;
@@ -1528,7 +1532,15 @@ const getMyLeads = async (req, res) => {
     // Run countDocuments in parallel with the data fetch so the web dashboard
     // can compute total pages and fetch all of them (mobile app uses hasMore).
     // countDocuments on an indexed query is fast (covered by company+user index).
-    const total = await Lead.countDocuments(query);
+    // PERF: count runs IN PARALLEL with the data query (was awaited first —
+    // one extra ~150 ms round trip on every page) and is skipped entirely for
+    // delta refreshes, which never used it.
+    const totalP = req.query.since ? null : Lead.countDocuments(query);
+    // Employees only ever get their OWN leads here, so "user" is the caller —
+    // fill it in directly instead of a second populate() round trip.
+    const selfUser = isAdminSession ? null : { _id: req.user._id || req.user.userId, name: req.user.name, email: req.user.email };
+    const withUser = (q) => (selfUser ? q : q.populate("user", "name email"));
+    const fillUser = (rows) => (selfUser ? rows.map((l) => (l.user ? { ...l, user: selfUser } : l)) : rows);
 
     // ── Delta fetch: ?since=<ISO timestamp> ──────────────────────────────────
     // Mobile app sends this on stale-check refreshes (every 5 min tab focus).
@@ -1540,12 +1552,11 @@ const getMyLeads = async (req, res) => {
       const since = new Date(req.query.since);
       if (!isNaN(since.getTime())) {
         const DELTA_LIMIT = 100;
-        const changed = await Lead.find({ ...query, updatedAt: { $gt: since } })
+        const changed = fillUser(await withUser(Lead.find({ ...query, updatedAt: { $gt: since } })
           .sort({ updatedAt: -1 })
           .limit(DELTA_LIMIT + 1)          // fetch one extra to detect overflow
-          .select(MOBILE_LIST_PROJECTION)
-          .populate("user", "name email")
-          .lean();
+          .select(MOBILE_LIST_PROJECTION))
+          .lean());
 
         const hasMore = changed.length > DELTA_LIMIT;
         const leads   = hasMore ? changed.slice(0, DELTA_LIMIT) : changed;
@@ -1559,13 +1570,16 @@ const getMyLeads = async (req, res) => {
     // ── Normal paginated fetch ────────────────────────────────────────────────
     // No countDocuments() — use the one-extra trick to compute hasMore.
     // Eliminates a full index scan on every mobile request.
-    const raw = await Lead.find(query)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit + 1)                    // fetch one extra to detect next page
-      .select(MOBILE_LIST_PROJECTION)
-      .populate("user", "name email")
-      .lean();
+    const [rawRows, total] = await Promise.all([
+      withUser(Lead.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit + 1)                  // fetch one extra to detect next page
+        .select(MOBILE_LIST_PROJECTION))
+        .lean(),
+      totalP,
+    ]);
+    const raw = fillUser(rawRows);
 
     const hasMore = raw.length > limit;
     const rawLeads = hasMore ? raw.slice(0, limit) : raw;
@@ -1590,7 +1604,14 @@ const getMyLeads = async (req, res) => {
 const patchLead = async (req, res) => {
   try {
     const { id } = req.params;
-    const lead = await Lead.findOne({ _id: id, company: getCompanyId(req) });
+    // PERF: lead + customization + entitlements are independent → fetch them
+    // together (was 3 sequential round trips ≈ 0.45 s to a remote database).
+    const reqCompanyStr = String(getCompanyId(req) || "");
+    const [lead, custPre, entsPre] = await Promise.all([
+      Lead.findOne({ _id: id, company: getCompanyId(req) }),
+      getCust(reqCompanyStr),
+      getCompanyEntitlements(reqCompanyStr).catch(() => null),
+    ]);
     if (!lead) return res.status(404).json({ message: "Lead Not Found!.." });
 
     const { remark, followUpDate, temperature, Quality, industry, service } = req.body;
@@ -1598,7 +1619,7 @@ const patchLead = async (req, res) => {
     const update = {};
 
     const companyIdStr = String(lead.company?._id || lead.company || "");
-    const cust = await getCust(companyIdStr);
+    const cust = companyIdStr === reqCompanyStr ? custPre : await getCust(companyIdStr);
     const lu = cust.workflows.leadUpdate;
 
     // ── Canonicalise status / outcome against the company's customization ───
@@ -1621,7 +1642,7 @@ const patchLead = async (req, res) => {
     // key on ents (spread from planLimits.features at build time). The broken
     // path always returned undefined → false → silently dropped industry/service
     // on every save even when the toggle was ON.
-    const ents = await getCompanyEntitlements(companyIdStr).catch(() => null);
+    const ents = companyIdStr === reqCompanyStr ? entsPre : await getCompanyEntitlements(companyIdStr).catch(() => null);
     // Nurture is fully multi-tenant now (jobs/nurtureSequenceJob.js gates on
     // this exact same entitlement flag via getNurtureEnabledCompanyIds()), so
     // there's no longer a hardcoded company to bypass this check for.
@@ -2971,18 +2992,19 @@ const getPendingNotifications = async (req, res) => {
       callHistory: { $size: 0 },
     };
 
-    const noAction2h = !na.enabled ? [] : await Lead.find({ ...noActionBase, createdAt: { $lte: twoHoursAgo } })
-      .select("_id name user").populate("user", "name").lean();
-    const twoHourIds = new Set(noAction2h.map(l => String(l._id)));
-    const noAction1h = !na.enabled ? [] : (await Lead.find({ ...noActionBase, createdAt: { $lte: oneHourAgo } })
-      .select("_id name user").populate("user", "name").lean())
-      .filter(l => !twoHourIds.has(String(l._id))); // 1h list excludes those already 2h+
-
-    // ── Follow-up leads (scheduled call not done, overdue or due today) ───────
-    const fuLeads = await Lead.find({
-      ...scope,
-      scheduledCalls: { $elemMatch: { done: false, scheduledAt: { $lte: todayEnd } } },
-    }).select("_id name scheduledCalls").lean();
+    // PERF: ONE no-action query (1h list is a superset of the 2h list) run in
+    // parallel with the follow-up query — was 3 sequential round trips.
+    const [noActionAll, fuLeads] = await Promise.all([
+      !na.enabled ? [] : Lead.find({ ...noActionBase, createdAt: { $lte: oneHourAgo } })
+        .select("_id name user createdAt").populate("user", "name").lean(),
+      // ── Follow-up leads (scheduled call not done, overdue or due today) ────
+      Lead.find({
+        ...scope,
+        scheduledCalls: { $elemMatch: { done: false, scheduledAt: { $lte: todayEnd } } },
+      }).select("_id name scheduledCalls").lean(),
+    ]);
+    const noAction2h = noActionAll.filter(l => new Date(l.createdAt) <= twoHoursAgo);
+    const noAction1h = noActionAll.filter(l => new Date(l.createdAt) > twoHoursAgo); // 1h list excludes those already 2h+
 
     const overdue = [], dueToday = [];
     for (const lead of fuLeads) {

@@ -151,7 +151,9 @@ const receiveWebsiteWebhook = async (req, res) => {
       const io = global._io;
       if (io) {
         const populatedLead = await Lead.findById(newLead._id).populate("user", "name email").lean();
-        io.emit("new_website_lead", {
+        // Company-scoped: only this company's admins (was io.emit → every
+        // connected client of every company received the full lead).
+        io.to(`company_admin:${String(config.company)}`).emit("new_website_lead", {
           lead:     populatedLead,
           campaign: config.sourceName,
           company:  String(config.company),

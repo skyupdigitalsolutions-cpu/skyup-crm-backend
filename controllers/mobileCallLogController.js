@@ -150,9 +150,32 @@ const syncCallLogs = async (req, res) => {
     // ── Company-level call-log sync gate ─────────────────────────────────────
     // Super admin can disable device call-log sync per company.
     const Company = require('../models/Company');
-    const company = await Company.findById((req.user.companyId || req.user.company))
-      .select('callLogSyncEnabled')
-      .lean();
+    const companyId = (req.user.companyId || req.user.company);
+    const batch = logs.slice(0, 500);
+
+    // PERF: this used to load EVERY lead in the company (all phone fields) on
+    // every sync — every agent's phone syncs every couple of minutes, so that
+    // was thousands of documents over a ~150 ms link each time. Now only the
+    // leads whose numbers appear in this batch are fetched (indexed lookup),
+    // in parallel with the company gate check.
+    const nums = [...new Set(batch.map((l) => normalizePhone(l.phoneNumber || '')).filter(Boolean))];
+    const rawVariants = [...new Set(nums.flatMap((n) => [n, `91${n}`, `+91${n}`, `0${n}`]))];
+    const [company, companyLeads] = await Promise.all([
+      Company.findById(companyId).select('callLogSyncEnabled').lean(),
+      nums.length
+        ? Lead.find(
+            {
+              company: companyId,
+              $or: [
+                { normalizedPhone: { $in: nums } },
+                { normalizedSecondaryPhone: { $in: nums } },
+                { mobile: { $in: rawVariants } },          // legacy rows without normalizedPhone
+              ],
+            },
+            { mobile: 1, primaryPhone: 1, secondaryPhone: 1, normalizedPhone: 1, normalizedSecondaryPhone: 1, _id: 1, name: 1, status: 1 }
+          ).lean()
+        : [],
+    ]);
     if (company && company.callLogSyncEnabled === false) {
       return res.status(403).json({
         message: 'Device call-log sync is disabled for your company.',
@@ -161,24 +184,12 @@ const syncCallLogs = async (req, res) => {
     }
 
     // ── Per-user call-log sync gate ──────────────────────────────────────────
-    // Super admin can disable sync for an individual employee even when the
-    // company-wide flag is on. req.user is the full User doc (loaded by
-    // `protect`), so the flag is available here. Treat only an explicit `false`
-    // as disabled, so users created before this field existed keep syncing.
     if (req.user.callLogSyncEnabled === false) {
       return res.status(403).json({
         message: 'Device call-log sync is disabled for your account. Contact your administrator.',
         code:    'call_log_sync_disabled_user',
       });
     }
-
-    const batch = logs.slice(0, 500);
-
-    // ── Load all company leads ONCE, build phone Maps (primary + secondary) ──
-    const companyLeads = await Lead.find(
-      { company: (req.user.companyId || req.user.company) },
-      { mobile: 1, primaryPhone: 1, secondaryPhone: 1, normalizedPhone: 1, normalizedSecondaryPhone: 1, _id: 1, name: 1, status: 1 }
-    ).lean();
 
     const leadMapByPrimary   = new Map();
     const leadMapBySecondary = new Map();
@@ -222,14 +233,17 @@ const syncCallLogs = async (req, res) => {
 
     // Remark already typed on the lead before this call reached the server →
     // attach it now so the call never shows as "Remark pending".
-    try {
-      const matchedDocs = docs.filter((d) => d.matchedLead);
-      const syncedLogs = !matchedDocs.length ? [] : await MobileCallLog.find({
-        user: (req.user.userId || req.user._id),
-        $or: matchedDocs.map((d) => ({ phoneNumber: d.phoneNumber, timestamp: d.timestamp })),
-      }).select('_id user matchedLead timestamp remark outcome').lean();
-      if (syncedLogs.length) await fillMissingRemarks(syncedLogs);
-    } catch (e) { console.warn('[syncCallLogs] remark link skipped:', e.message); }
+    // Runs in the background — the phone doesn't wait for it.
+    (async () => {
+      try {
+        const matchedDocs = docs.filter((d) => d.matchedLead);
+        const syncedLogs = !matchedDocs.length ? [] : await MobileCallLog.find({
+          user: (req.user.userId || req.user._id),
+          $or: matchedDocs.map((d) => ({ phoneNumber: d.phoneNumber, timestamp: d.timestamp })),
+        }).select('_id user matchedLead timestamp remark outcome').lean();
+        if (syncedLogs.length) await fillMissingRemarks(syncedLogs);
+      } catch (e) { console.warn('[syncCallLogs] remark link skipped:', e.message); }
+    })();
 
     const leadUpdates = new Map();
     for (const doc of docs) {

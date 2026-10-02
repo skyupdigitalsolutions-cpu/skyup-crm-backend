@@ -276,9 +276,9 @@ const getMessages = async (req, res, next) => {
     // times/minute per open chat, for every agent with a chat open, even
     // when there was nothing to clear. Only write when it's actually != 0.
     if (conversation.unreadCount) {
-      await WhatsAppConversation.findByIdAndUpdate(conversationId, {
-        unreadCount: 0,
-      });
+      // PERF: fire-and-forget — the reader doesn't need to wait for this write.
+      WhatsAppConversation.updateOne({ _id: conversationId }, { $set: { unreadCount: 0 } })
+        .catch((e) => console.warn("getMessages unread reset:", e.message));
       // Keep the object we're about to return in sync with the write above —
       // the original code left this stale (still showing the pre-clear
       // count) since `conversation` was read before the update.
@@ -442,7 +442,7 @@ const sendMessage = async (req, res, next) => {
         waPhone: conversation.waPhone,
         companyId: companyId.toString(),
       };
-      io.to("wa_admin").emit("wa_message", payload);
+      io.to(`wa_admin_${companyId.toString()}`).emit("wa_message", payload);
       io.to(`wa_agent_${conversation.assignedAgent?.toString()}`).emit(
         "wa_message",
         payload,
@@ -963,7 +963,7 @@ const startConversation = async (req, res, next) => {
         .populate("lead", "name mobile email status")
         .populate("assignedAgent", "name email");
       const convPayload = { conversation: populatedConv };
-      io.to("wa_admin").emit("wa_new_conversation", convPayload);
+      io.to(`wa_admin_${companyId.toString()}`).emit("wa_new_conversation", convPayload);
       if (userId)
         io.to(`wa_agent_${userId}`).emit("wa_new_conversation", convPayload);
       io.to(`wa_company_${companyId.toString()}`).emit(
@@ -990,7 +990,7 @@ const startConversation = async (req, res, next) => {
         companyId: companyId.toString(),
         assignedAgent: userId?.toString(),
       };
-      io.to("wa_admin").emit("wa_message", msgPayload);
+      io.to(`wa_admin_${companyId.toString()}`).emit("wa_message", msgPayload);
       if (userId) io.to(`wa_agent_${userId}`).emit("wa_message", msgPayload);
       io.to(`wa_company_${companyId.toString()}`).emit(
         "wa_message",
@@ -1791,6 +1791,7 @@ function callerCtx(req) {
 // Returned as two maps so the UI can match either way:
 //   byLead  → { "<leadId>": 3 }
 //   byPhone → { "<last10digits>": 3 }   (covers convs not yet linked to a lead)
+const _myLeadIdsCache = new Map(); // "company:user" → { ids, exp }
 const getUnreadCounts = async (req, res, next) => {
   try {
     const { companyId, userId, role } = callerCtx(req);
@@ -1810,8 +1811,18 @@ const getUnreadCounts = async (req, res, next) => {
     const scopeQuery = { company: companyId };
     if (!isAdmin) {
       // Employees only see counts for their own leads / conversations.
-      const myLeads = await Lead.find({ company: companyId, user: userId }).select("_id").lean();
-      const leadIds = myLeads.map((l) => l._id);
+      // PERF: this endpoint is polled every minute by every open screen; the
+      // employee's lead-id list is cached for 60s instead of re-read each time.
+      const ck = String(companyId) + ":" + String(userId);
+      const hit = _myLeadIdsCache.get(ck);
+      let leadIds;
+      if (hit && hit.exp > Date.now()) leadIds = hit.ids;
+      else {
+        const myLeads = await Lead.find({ company: companyId, user: userId }).select("_id").lean();
+        leadIds = myLeads.map((l) => l._id);
+        if (_myLeadIdsCache.size > 5000) _myLeadIdsCache.clear();
+        _myLeadIdsCache.set(ck, { ids: leadIds, exp: Date.now() + 60 * 1000 });
+      }
       scopeQuery.$or = [{ assignedAgent: userId }, { lead: { $in: leadIds } }];
     }
 
@@ -2105,7 +2116,7 @@ const sendMedia = async (req, res, next) => {
         waPhone:   conversation.waPhone,
         companyId: companyId.toString(),
       };
-      io.to("wa_admin").emit("wa_message", payload);
+      io.to(`wa_admin_${companyId.toString()}`).emit("wa_message", payload);
       io.to(`wa_agent_${conversation.assignedAgent?.toString()}`).emit("wa_message", payload);
       io.to(`wa_company_${companyId.toString()}`).emit("wa_message", payload);
     }

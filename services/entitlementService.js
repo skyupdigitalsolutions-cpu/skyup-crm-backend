@@ -39,13 +39,30 @@ const { redisClient } = require("../middlewares/rateLimiter");
 // TTL is intentionally short (60s) so a plan/addon/benefit change becomes
 // visible quickly even if invalidateEntitlementCache() is missed somewhere.
 const ENTITLEMENT_CACHE_TTL_SECONDS = 60;
-const entitlementCacheKey = (companyId) => `ent:${companyId}`;
+// Always key by the plain id string — a populated/lean company object would
+// otherwise stringify to "[object Object]" and companies could share a key.
+const cid = (v) => (v == null ? "" : String(v._id || v));
+const entitlementCacheKey = (companyId) => `ent:${cid(companyId)}`;
+
+// PERF: in-process layer in front of Redis. Without Redis every request
+// recomputed entitlements with 4 sequential DB round trips (~150 ms each to
+// Atlas Mumbai) — ~0.6 s added to EVERY API call. 30s per server process;
+// invalidateEntitlementCache() clears it immediately on this process.
+const _entLocal = new Map(); // companyId → { ent, exp }
+const ENT_LOCAL_TTL_MS = 30 * 1000;
 
 async function getCachedEntitlements(companyId) {
+  const hit = _entLocal.get(cid(companyId));
+  if (hit && hit.exp > Date.now()) return hit.ent;
   try {
     if (!redisClient.isReady) return null; // Redis down — fall through to DB
     const cached = await redisClient.get(entitlementCacheKey(companyId));
-    return cached ? JSON.parse(cached) : null;
+    if (cached) {
+      const ent = JSON.parse(cached);
+      _entLocal.set(cid(companyId), { ent, exp: Date.now() + ENT_LOCAL_TTL_MS });
+      return ent;
+    }
+    return null;
   } catch (err) {
     console.error("[entitlements] cache read failed:", err.message);
     return null;
@@ -53,6 +70,8 @@ async function getCachedEntitlements(companyId) {
 }
 
 async function setCachedEntitlements(companyId, ent) {
+  if (_entLocal.size > 5000) _entLocal.clear();
+  _entLocal.set(cid(companyId), { ent, exp: Date.now() + ENT_LOCAL_TTL_MS });
   try {
     if (!redisClient.isReady) return; // Redis down — skip silently
     await redisClient.set(
@@ -75,6 +94,7 @@ async function setCachedEntitlements(companyId, ent) {
  * @param {string|ObjectId} companyId
  */
 async function invalidateEntitlementCache(companyId) {
+  _entLocal.delete(cid(companyId));
   try {
     if (!redisClient.isReady) return;
     await redisClient.del(entitlementCacheKey(companyId));
@@ -307,7 +327,8 @@ function currentMonth() {
  * @returns {Promise<Object>} entitlements
  */
 async function getCompanyEntitlements(companyId) {
-  const idStr = String(companyId);
+  const idStr = cid(companyId);
+  if (!idStr || idStr === "[object Object]") throw new Error("getCompanyEntitlements: invalid companyId");
 
   // ── 0. Serve from cache if present ─────────────────────────────────────────
   const cached = await getCachedEntitlements(idStr);

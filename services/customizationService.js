@@ -20,7 +20,7 @@ const CompanyCustomization = require("../models/CompanyCustomization");
 const R = require("../utils/customizationResolver");
 
 const REDIS_TTL_SECONDS = 60;
-const LOCAL_TTL_MS      = 5 * 1000;
+const LOCAL_TTL_MS      = 30 * 1000;  // PERF: was 5s → a DB read (~150 ms) every 5s per company when Redis is off; saves clear it instantly
 const cacheKey = (id) => `cust:${id}`;
 const _local = new Map(); // id → { value, expiresAt }
 

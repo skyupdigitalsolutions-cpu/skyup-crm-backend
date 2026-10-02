@@ -18,6 +18,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 const User = require("../models/Users");
 
+const _scopeCache = new Map(); // "company:admin" → { ids, exp }
+function clearAdminLeadScopeCache() { _scopeCache.clear(); }
+
 function resolveRole(req) {
   if (req.admin && req.admin.role) return req.admin.role;
   if (req.user && req.user.role) return req.user.role;
@@ -53,10 +56,20 @@ async function getAdminLeadScope(req, companyId) {
   if (!adminId) return {};
 
   // Employees this admin created — their leads count as this admin's leads.
-  const employees = await User.find({ company: companyId, createdBy: adminId })
-    .select("_id")
-    .lean();
-  const employeeIds = employees.map(function (u) { return u._id; });
+  // PERF: cached 20s per admin (was a DB round trip on every lead request).
+  const key = String(companyId) + ":" + String(adminId);
+  const hit = _scopeCache.get(key);
+  let employeeIds;
+  if (hit && hit.exp > Date.now()) {
+    employeeIds = hit.ids;
+  } else {
+    const employees = await User.find({ company: companyId, createdBy: adminId })
+      .select("_id")
+      .lean();
+    employeeIds = employees.map(function (u) { return u._id; });
+    if (_scopeCache.size > 2000) _scopeCache.clear();
+    _scopeCache.set(key, { ids: employeeIds, exp: Date.now() + 20 * 1000 });
+  }
 
   const or = [{ assignedAdmin: adminId }];
   if (employeeIds.length > 0) or.push({ user: { $in: employeeIds } });
@@ -93,4 +106,5 @@ function getAdminConfigScope(req) {
   return { $or: [{ createdBy: adminId }, { createdBy: null }, { createdBy: { $exists: false } }] };
 }
 
-module.exports = { getAdminLeadScope, mergeLeadScope, isSuperAdminRole, getAdminConfigScope, resolveAdminId };
+module.exports = {
+  clearAdminLeadScopeCache, getAdminLeadScope, mergeLeadScope, isSuperAdminRole, getAdminConfigScope, resolveAdminId };

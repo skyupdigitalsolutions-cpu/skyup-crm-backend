@@ -30,6 +30,7 @@ const ChatUser = require('../models/ChatUser');
 const Admin    = require('../models/Admin');
 const User     = require('../models/Users');
 const Lead     = require('../models/Leads');
+const { socketAuthMiddleware } = require('../utils/socketAuth');
 
 // ── Push pending follow-up alerts to a freshly connected admin ───────────────
 // Called on admin_join so the bell is pre-populated without waiting for the
@@ -150,112 +151,114 @@ async function fetchHistory(companyId, usernameA, usernameB) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 const initSocket = (io) => {
-  io.on('connection', (socket) => {
+  // SECURITY: verify the JWT once per connection → socket.data.auth.
+  // Every handler below uses that verified identity; ids in payloads are ignored.
+  io.use(socketAuthMiddleware);
 
-    // ── Attendance room (unchanged) ──────────────────────────────────────────
-    socket.on('att_join', ({ userId }) => {
-      if (userId) socket.join(`att:${userId}`);
+  io.on('connection', (socket) => {
+    const me = () => socket.data && socket.data.auth;
+    const isAdminKind = (a) => !!a && a.kind === 'admin' && !!a.company;
+
+    // ── Attendance room ──────────────────────────────────────────────────────
+    // Employees: their own room only. Admins: a user of their own company.
+    socket.on('att_join', async (payload = {}) => {
+      const a = me();
+      if (!a) return;
+      if (a.kind === 'employee') { socket.join(`att:${a.id}`); return; }
+      const userId = payload && payload.userId;
+      if (isAdminKind(a) && userId && mongoose.Types.ObjectId.isValid(String(userId))) {
+        const ok = await User.exists({ _id: userId, company: a.company }).catch(() => null);
+        if (ok) socket.join(`att:${userId}`);
+      }
     });
 
-    // ── WhatsApp rooms (unchanged) ───────────────────────────────────────────
-    socket.on('wa_admin_join',        ()           => socket.join('wa_admin'));
-    socket.on('wa_agent_join',        ({ agentId }) => {
-      if (!agentId) { console.warn('[Socket] wa_agent_join called with NO agentId — skipped'); return; }
-      socket.join(`wa_agent_${agentId}`);
-      console.log(`[Socket] joined room wa_agent_${agentId}`);
+    // ── WhatsApp rooms ───────────────────────────────────────────────────────
+    // Admin firehose is now PER COMPANY (was one global room for all tenants).
+    socket.on('wa_admin_join', () => {
+      const a = me();
+      if (isAdminKind(a)) socket.join(`wa_admin_${a.company}`);
+    });
+    socket.on('wa_agent_join', () => {
+      const a = me();
+      if (a && a.id) socket.join(`wa_agent_${a.id}`);
     });
 
     // ── Agent personal room — for new_lead_assigned push ─────────────────────
-    // Mobile app emits 'agent_join' with { userId } on connect/reconnect.
-    // Backend uses this room in leadController to push new_lead_assigned events
-    // directly to the right agent's socket without broadcasting to everyone.
-    socket.on('agent_join', ({ userId }) => {
-      if (userId) {
-        socket.join(`agent:${userId}`);
-        console.log(`[Socket] Agent ${userId} joined personal room agent:${userId}`);
-      }
+    socket.on('agent_join', () => {
+      const a = me();
+      if (a && a.id) socket.join(`agent:${a.id}`);
     });
 
-    // Company-wide WhatsApp room — every employee joins their company's room
-    // and receives every inbound/outbound for the company. The frontend filters
-    // by which leads belong to the logged-in user. This mirrors the admin's
-    // wa_admin firehose so employees don't depend on conversation.assignedAgent
-    // being perfectly in sync with lead ownership.
-    socket.on('wa_company_join',      ({ companyId }) => {
-      if (!companyId) { console.warn('[Socket] wa_company_join called with NO companyId — skipped'); return; }
-      socket.join(`wa_company_${companyId}`);
-      console.log(`[Socket] joined room wa_company_${companyId}`);
+    // Company-wide WhatsApp room — own company only.
+    socket.on('wa_company_join', () => {
+      const a = me();
+      if (a && a.company) socket.join(`wa_company_${a.company}`);
+    });
+
+    // Company admin room (used by Campaigns page for new_website_lead).
+    socket.on('company_admin_join', () => {
+      const a = me();
+      if (isAdminKind(a)) socket.join(`company_admin:${a.company}`);
     });
 
     // ════════════════════════════════════════════════════════════════════════
-    // EMPLOYEE joins
-    // Payload: { username, userId, company, adminId }
+    // EMPLOYEE joins — identity comes from the token
     // ════════════════════════════════════════════════════════════════════════
     socket.on('user_join', async (payload) => {
-      // Legacy: payload may be just a username string (old clients)
-      if (typeof payload === 'string') {
-        payload = { username: payload };
-      }
+      const a = me();
+      if (!a || a.kind !== 'employee' || !a.company) return;
+      if (typeof payload === 'string') payload = { username: payload };
+      payload = payload || {};
 
-      const { username, userId, company, displayName } = payload;
-      let { adminId } = payload;
+      const username = a.name || payload.username;
       if (!username) return;
-
-      // If adminId is missing (old login response), look it up from the User record
-      if (!adminId && userId) {
-        const userDoc = await User.findById(userId).lean();
-        if (userDoc?.createdBy) adminId = String(userDoc.createdBy);
-      }
+      const company = a.company;
+      const adminId = a.adminId;
 
       const identity = {
         username,
-        displayName: displayName || username,
+        displayName: payload.displayName || username,
         role: 'employee',
-        company: company || null,
+        company,
         adminId: adminId || null,
-        userId:  userId  || null,
+        userId:  a.id,
       };
       onlineUsers[socket.id] = identity;
 
-      // Upsert ChatUser (always write adminId so it's correct going forward)
-      await ChatUser.findOneAndUpdate(
-        { username },
-        { lastSeen: new Date(), company, role: 'employee', adminId, userId, displayName: identity.displayName },
-        { upsert: true, new: true }
-      );
+      try {
+        await ChatUser.findOneAndUpdate(
+          { username },
+          { lastSeen: new Date(), company, role: 'employee', adminId, userId: a.id, displayName: identity.displayName },
+          { upsert: true, new: true }
+        );
 
-      // Send chat history with their admin
-      if (adminId && company) {
-        const adminUsername = await resolveAdminUsername(adminId);
-        if (adminUsername) {
-          const history = await fetchHistory(company, username, adminUsername);
-          socket.emit('chat_history', history);
+        if (adminId) {
+          const adminUsername = await resolveAdminUsername(adminId, company);
+          if (adminUsername) {
+            const history = await fetchHistory(company, username, adminUsername);
+            socket.emit('chat_history', history);
+          }
         }
+      } catch (err) {
+        console.error('[Socket] user_join error:', err.message);
       }
 
-      // Notify admins in same company about updated online status
-      if (company) broadcastOnlineMap(io, company);
+      broadcastOnlineMap(io, company);
     });
 
     // ════════════════════════════════════════════════════════════════════════
-    // ADMIN joins (role = 'admin')
-    // Payload: { adminId, company, displayName }
+    // ADMIN joins — identity comes from the token
     // ════════════════════════════════════════════════════════════════════════
     socket.on('admin_join', async (payload = {}) => {
-      const { adminId, company, displayName } = payload;
-
-      // Legacy clients send no payload — keep them working as before
-      if (!adminId) {
-        socket.join('admin');
-        const allUsers = await ChatUser.find().sort({ lastSeen: -1 });
-        socket.emit('all_users_db', allUsers);
-        return;
-      }
+      const a = me();
+      if (!isAdminKind(a)) return;
+      const adminId = a.id;
+      const company = a.company;
 
       const username = `admin:${adminId}`;
       const identity = {
         username,
-        displayName: displayName || 'Admin',
+        displayName: (payload && payload.displayName) || a.name || 'Admin',
         role: 'admin',
         company,
         adminId,
@@ -263,31 +266,24 @@ const initSocket = (io) => {
       };
       onlineUsers[socket.id] = identity;
 
-      // Legacy room kept for backward compat
-      socket.join('admin');
       socket.join(`admin_room:${adminId}`);
-      // Named room used by fcmService socket push (no_action_alert, follow_up_alert)
       socket.join(`admin:${adminId}`);
-      // Company-wide admin room — fallback target for events that emit to
-      // company_admin:${company} (e.g. lead_closed_by_user, meeting_permission_
-      // requested). Without this join those company-wide fallbacks went nowhere.
-      if (company) socket.join(`company_admin:${company}`);
+      socket.join(`company_admin:${company}`);
 
-      await ChatUser.findOneAndUpdate(
-        { username },
-        { lastSeen: new Date(), company, role: 'admin', adminId, userId: adminId, displayName: identity.displayName },
-        { upsert: true, new: true }
-      );
-
-      // Send scoped user list (their employees + super_admin)
-      const contactList = await buildContactList('admin', adminId, company);
-      socket.emit('all_users_db', contactList);
+      try {
+        await ChatUser.findOneAndUpdate(
+          { username },
+          { lastSeen: new Date(), company, role: 'admin', adminId, userId: adminId, displayName: identity.displayName },
+          { upsert: true, new: true }
+        );
+        const contactList = await buildContactList('admin', adminId, company);
+        socket.emit('all_users_db', contactList);
+      } catch (err) {
+        console.error('[Socket] admin_join error:', err.message);
+      }
 
       broadcastOnlineMap(io, company);
 
-      // Push pending follow-up alerts ONLY on the first admin_join per socket connection.
-      // If the client re-emits admin_join (e.g. due to React effect re-runs or component
-      // remounts), we skip pushPendingFollowUps to prevent duplicate bell notifications.
       if (!socket._adminJoinHandled) {
         socket._adminJoinHandled = true;
         pushPendingFollowUps(socket, adminId, company, 'admin');
@@ -295,30 +291,25 @@ const initSocket = (io) => {
     });
 
     // ════════════════════════════════════════════════════════════════════════
-    // SUPER_ADMIN joins
-    // Payload: { adminId, company, displayName }
+    // SUPER_ADMIN joins — only a real super_admin token is accepted
     // ════════════════════════════════════════════════════════════════════════
     socket.on('super_admin_join', async (payload = {}) => {
-      const { adminId, company, displayName } = payload;
-
-      // DIAGNOSTIC: this guard previously failed completely silently, which
-      // is the #1 cause of "0 online" + "No contacts yet" for super admin —
-      // it means the frontend sent an empty/missing companyId (stale
-      // localStorage user object from before login fix, or the Admin doc's
-      // role isn't exactly "super_admin"). Log it so it's visible in server
-      // logs instead of only manifesting as an empty chat panel.
-      if (!adminId || !company) {
-        console.warn(
-          '[Socket] super_admin_join aborted — missing adminId or company.',
-          'payload=', payload
-        );
+      const a = me();
+      let adminId, company;
+      if (a && a.kind === 'admin' && a.role === 'super_admin' && a.company) {
+        adminId = a.id; company = a.company;
+      } else if (a && a.kind === 'platform' && a.role === 'super_admin' && payload && payload.company) {
+        // Legacy platform-level super admin (no company of its own).
+        adminId = a.id; company = String(payload.company);
+      } else {
+        console.warn('[Socket] super_admin_join rejected — token is not a super_admin with a company.');
         return;
       }
 
       const username = `superadmin:${adminId}`;
       const identity = {
         username,
-        displayName: displayName || 'Super Admin',
+        displayName: (payload && payload.displayName) || a.name || 'Super Admin',
         role: 'super_admin',
         company,
         adminId,
@@ -326,190 +317,162 @@ const initSocket = (io) => {
       };
       onlineUsers[socket.id] = identity;
 
-      socket.join('admin');
       socket.join(`admin_room:${adminId}`);
-      // Named room used by fcmService socket push (lead_reassigned_notify, no_action_alert, follow_up_alert)
       socket.join(`superadmin:${adminId}`);
-      // Company-wide admin room — fallback for company_admin:${company} emits.
-      if (company) socket.join(`company_admin:${company}`);
+      socket.join(`company_admin:${company}`);
 
-      await ChatUser.findOneAndUpdate(
-        { username },
-        { lastSeen: new Date(), company, role: 'super_admin', adminId, userId: adminId, displayName: identity.displayName },
-        { upsert: true, new: true }
-      );
+      try {
+        await ChatUser.findOneAndUpdate(
+          { username },
+          { lastSeen: new Date(), company, role: 'super_admin', adminId, userId: adminId, displayName: identity.displayName },
+          { upsert: true, new: true }
+        );
+        const contactList = await buildContactList('super_admin', adminId, company);
+        socket.emit('all_users_db', contactList);
+      } catch (err) {
+        console.error('[Socket] super_admin_join error:', err.message);
+      }
 
-      // Super admin sees all admins + all employees in their company
-      const contactList = await buildContactList('super_admin', adminId, company);
-      console.log(`[Socket] super_admin_join ok — company=${company} adminId=${adminId} contacts=${contactList.length}`);
-      socket.emit('all_users_db', contactList);
-
-      const onlineMap = buildOnlineMap(company, 'super_admin', adminId);
-      socket.emit('users_list', onlineMap);
-
+      socket.emit('users_list', buildOnlineMap(company, 'super_admin', adminId));
       broadcastOnlineMap(io, company);
-
-      // super_admin does not receive on-connect follow-up alerts.
-      // Their notifications come from lead_reassigned_notify only.
-      // Guard flag prevents any future pushPendingFollowUps calls on re-emit.
       socket._adminJoinHandled = true;
     });
 
     // ════════════════════════════════════════════════════════════════════════
     // EMPLOYEE → sends message to their admin
-    // Payload: { message, username }  (username optionally sent for safety)
     // ════════════════════════════════════════════════════════════════════════
-    socket.on('user_message', async ({ message, username: _username }) => {
+    socket.on('user_message', async (payload = {}) => {
       const identity = onlineUsers[socket.id];
-      if (!identity) return;
+      if (!identity || identity.role !== 'employee') return;
+      const message = typeof payload.message === 'string' ? payload.message : '';
+      if (!message.trim()) return;
 
       const { username, company, adminId } = identity;
       if (!company || !adminId) {
-        // Legacy fallback: broadcast to 'admin' room as before
-        const saved = await Message.create({
-          from: username, to: 'admin', message,
-          company: '000000000000000000000000', // placeholder
-          threadKey: `legacy:${username}`,
-        }).catch(() => null);
-        io.to('admin').emit('receive_user_message', { from: username, socketId: socket.id, message, _id: saved?._id });
-        socket.emit('message_saved', { _id: saved?._id, message, from: username });
+        socket.emit('chat_error', { message: 'No admin is assigned to you yet.' });
         return;
       }
 
-      const adminUsername = await resolveAdminUsername(adminId);
-      if (!adminUsername) return;
+      try {
+        const adminUsername = await resolveAdminUsername(adminId, company);
+        if (!adminUsername) return;
 
-      const key  = threadKey(company, username, adminUsername);
-      const saved = await Message.create({ from: username, to: adminUsername, message, company, adminId, threadKey: key });
+        const key  = threadKey(company, username, adminUsername);
+        const saved = await Message.create({ from: username, to: adminUsername, message, company, adminId, threadKey: key });
 
-      // Notify the assigned admin's room
-      io.to(`admin_room:${adminId}`).emit('receive_user_message', {
-        from: username,
-        displayName: identity.displayName,
-        socketId: socket.id,
-        message,
-        _id: saved._id,
-      });
-
-      // Also notify super_admin of the same company
-      notifySuperAdmin(io, company, 'receive_user_message', {
-        from: username,
-        displayName: identity.displayName,
-        message,
-        _id: saved._id,
-      });
-
-      socket.emit('message_saved', { _id: saved._id, message, from: username });
+        io.to(`admin_room:${adminId}`).emit('receive_user_message', {
+          from: username,
+          displayName: identity.displayName,
+          socketId: socket.id,
+          message,
+          _id: saved._id,
+        });
+        notifySuperAdmin(io, company, 'receive_user_message', {
+          from: username,
+          displayName: identity.displayName,
+          message,
+          _id: saved._id,
+        });
+        socket.emit('message_saved', { _id: saved._id, message, from: username });
+      } catch (err) {
+        console.error('[Socket] user_message error:', err.message);
+      }
     });
 
     // ════════════════════════════════════════════════════════════════════════
-    // ADMIN / SUPER_ADMIN → sends message to a contact
-    // Payload: { toSocketId, toUsername, message }
-    //   toUsername: the target's username string (e.g. 'employee_name' or 'superadmin:<id>')
+    // ADMIN / SUPER_ADMIN → sends message to a contact in THEIR company
     // ════════════════════════════════════════════════════════════════════════
-    socket.on('admin_message', async ({ toSocketId, toUsername, message }) => {
+    socket.on('admin_message', async (payload = {}) => {
       const sender = onlineUsers[socket.id];
-      if (!sender) return;
+      if (!sender || (sender.role !== 'admin' && sender.role !== 'super_admin')) return;
+      const { toSocketId, toUsername } = payload;
+      const message = typeof payload.message === 'string' ? payload.message : '';
+      if (!toUsername || !message.trim()) return;
 
       const { username: fromUsername, company, adminId, role } = sender;
 
-      // ── ACL check ──────────────────────────────────────────────────────────
-      const allowed = await canSendTo(role, adminId, company, toUsername);
-      if (!allowed) {
-        socket.emit('chat_error', { message: 'You are not allowed to message this contact.' });
-        return;
-      }
+      try {
+        const allowed = await canSendTo(role, adminId, company, String(toUsername));
+        if (!allowed) {
+          socket.emit('chat_error', { message: 'You are not allowed to message this contact.' });
+          return;
+        }
 
-      const key   = threadKey(company, fromUsername, toUsername);
-      const saved = await Message.create({
-        from: fromUsername, to: toUsername, message,
-        company, adminId: resolveAdminIdForThread(role, adminId, toUsername),
-        threadKey: key,
-      });
+        const key   = threadKey(company, fromUsername, toUsername);
+        const saved = await Message.create({
+          from: fromUsername, to: toUsername, message,
+          company, adminId: resolveAdminIdForThread(role, adminId, toUsername),
+          threadKey: key,
+        });
 
-      socket.emit('admin_message_sent', { toUsername, message, _id: saved._id });
+        socket.emit('admin_message_sent', { toUsername, message, _id: saved._id });
 
-      // Deliver to target if online
-      if (toSocketId) {
-        io.to(toSocketId).emit('receive_admin_message', { message, _id: saved._id, from: fromUsername, displayName: sender.displayName });
-      } else {
-        // Try to find socket by username
-        const targetSid = findSocketId(toUsername);
+        // Deliver only to a socket that really is that user in THIS company.
+        const target = toSocketId && onlineUsers[toSocketId];
+        const targetSid = (target && target.username === toUsername && String(target.company) === String(company))
+          ? toSocketId
+          : findSocketId(toUsername, company);
         if (targetSid) {
           io.to(targetSid).emit('receive_admin_message', { message, _id: saved._id, from: fromUsername, displayName: sender.displayName });
         }
+      } catch (err) {
+        console.error('[Socket] admin_message error:', err.message);
       }
     });
 
     // ════════════════════════════════════════════════════════════════════════
     // Fetch history for a specific thread (admin/superadmin side)
-    // Payload: { username }  — the other party's username
     // ════════════════════════════════════════════════════════════════════════
-    socket.on('admin_fetch_history', async ({ username: otherUsername }) => {
+    socket.on('admin_fetch_history', async (payload = {}) => {
       const viewer = onlineUsers[socket.id];
-
-      // Legacy support
-      if (!viewer) {
-        const history = await Message.find({
-          $or: [
-            { from: otherUsername, to: 'admin' },
-            { from: 'admin', to: otherUsername },
-          ]
-        }).sort({ timestamp: 1 }).lean();
-        socket.emit('admin_chat_history', { username: otherUsername, history });
+      const otherUsername = payload && payload.username;
+      if (!viewer || !otherUsername) {
+        socket.emit('admin_chat_history', { username: otherUsername, history: [] });
         return;
       }
-
-      const { username: myUsername, company } = viewer;
-      const history = await fetchHistory(company, myUsername, otherUsername);
-      socket.emit('admin_chat_history', { username: otherUsername, history });
+      try {
+        const history = await fetchHistory(viewer.company, viewer.username, String(otherUsername));
+        socket.emit('admin_chat_history', { username: otherUsername, history });
+      } catch (err) {
+        console.error('[Socket] admin_fetch_history error:', err.message);
+      }
     });
 
     // ════════════════════════════════════════════════════════════════════════
-    // Edit message
-    // Payload: { _id, newText, requester }
+    // Edit / delete message — sender, or an admin of that thread, same company
     // ════════════════════════════════════════════════════════════════════════
-    socket.on('edit_message', async ({ _id, newText, requester }) => {
+    socket.on('edit_message', async (payload = {}) => {
       try {
-        const msg = await Message.findById(_id);
-        if (!msg || msg.isDeleted) return;
-
+        const { _id, newText } = payload;
+        if (!_id || !mongoose.Types.ObjectId.isValid(String(_id))) return;
+        if (typeof newText !== 'string' || !newText.trim()) return;
         const sender = onlineUsers[socket.id];
-        const isAdmin = sender?.role === 'admin' || sender?.role === 'super_admin' || requester === 'admin';
-        const isSender = msg.from === (sender?.username || requester);
-        if (!isAdmin && !isSender) return;
+        const msg = await Message.findById(_id);
+        if (!msg || msg.isDeleted || !canModifyMessage(sender, msg)) return;
 
         msg.message  = newText.trim();
         msg.editedAt = new Date();
         await msg.save();
 
-        const payload = { _id: msg._id.toString(), newText: msg.message, editedAt: msg.editedAt };
-
-        broadcastToThread(io, msg, payload, 'message_edited');
+        broadcastToThread(io, msg, { _id: msg._id.toString(), newText: msg.message, editedAt: msg.editedAt }, 'message_edited');
       } catch (err) {
         console.error('edit_message error', err);
       }
     });
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Delete message
-    // ════════════════════════════════════════════════════════════════════════
-    socket.on('delete_message', async ({ _id, requester }) => {
+    socket.on('delete_message', async (payload = {}) => {
       try {
-        const msg = await Message.findById(_id);
-        if (!msg) return;
-
+        const { _id } = payload;
+        if (!_id || !mongoose.Types.ObjectId.isValid(String(_id))) return;
         const sender = onlineUsers[socket.id];
-        const isAdmin = sender?.role === 'admin' || sender?.role === 'super_admin' || requester === 'admin';
-        const isSender = msg.from === (sender?.username || requester);
-        if (!isAdmin && !isSender) return;
+        const msg = await Message.findById(_id);
+        if (!msg || !canModifyMessage(sender, msg)) return;
 
         msg.isDeleted = true;
         msg.message   = 'This message was deleted';
         await msg.save();
 
-        const payload = { _id: msg._id.toString() };
-        broadcastToThread(io, msg, payload, 'message_deleted');
+        broadcastToThread(io, msg, { _id: msg._id.toString() }, 'message_deleted');
       } catch (err) {
         console.error('delete_message error', err);
       }
@@ -520,7 +483,6 @@ const initSocket = (io) => {
       const identity = onlineUsers[socket.id];
       delete onlineUsers[socket.id];
       if (identity?.company) broadcastOnlineMap(io, identity.company);
-      else io.emit('users_list', onlineUsers); // legacy fallback
     });
 
   }); // end io.on connection
@@ -528,17 +490,31 @@ const initSocket = (io) => {
 
 // ── Utility functions ─────────────────────────────────────────────────────────
 
-/** Look up admin username string from their _id */
-async function resolveAdminUsername(adminId) {
-  const admin = await Admin.findById(adminId).lean();
+/** Look up admin username string from their _id (must belong to `company` when given) */
+async function resolveAdminUsername(adminId, company) {
+  if (!adminId || !mongoose.Types.ObjectId.isValid(String(adminId))) return null;
+  const admin = await Admin.findById(adminId).select('role company').lean();
   if (!admin) return null;
+  if (company && String(admin.company) !== String(company)) return null;
   const prefix = admin.role === 'super_admin' ? 'superadmin' : 'admin';
   return `${prefix}:${adminId}`;
 }
 
-/** Find a socket id for a given username */
-function findSocketId(username) {
-  return Object.entries(onlineUsers).find(([, info]) => info.username === username)?.[0] ?? null;
+/** Find a socket id for a given username inside one company */
+function findSocketId(username, company) {
+  return Object.entries(onlineUsers).find(([, info]) =>
+    info.username === username && (company == null || String(info.company) === String(company))
+  )?.[0] ?? null;
+}
+
+/** Sender (or an admin of that thread) in the SAME company may edit/delete. */
+function canModifyMessage(sender, msg) {
+  if (!sender || !msg) return false;
+  if (!msg.company || String(msg.company) !== String(sender.company)) return false;
+  if (msg.from === sender.username) return true;
+  if (sender.role === 'super_admin') return true;
+  if (sender.role === 'admin') return String(msg.adminId || '') === String(sender.adminId) || msg.to === sender.username;
+  return false;
 }
 
 /** Notify the super_admin socket of a company about an event */
@@ -556,19 +532,11 @@ function notifySuperAdmin(io, company, event, payload) {
  */
 function broadcastToThread(io, msg, payload, event) {
   const participants = new Set([msg.from, msg.to]);
-
   for (const [sid, info] of Object.entries(onlineUsers)) {
-    if (participants.has(info.username)) {
+    if (participants.has(info.username) && String(info.company) === String(msg.company)) {
       io.to(sid).emit(event, payload);
     }
   }
-
-  // Also notify admin room if one side is admin / superadmin
-  if (msg.from === 'admin' || msg.to === 'admin') {
-    io.to('admin').emit(event, payload);
-  }
-
-  // Notify specific admin room if adminId is set
   if (msg.adminId) {
     io.to(`admin_room:${msg.adminId}`).emit(event, payload);
   }
@@ -589,14 +557,22 @@ function resolveAdminIdForThread(senderRole, senderAdminId, toUsername) {
  * employee    → not handled here (uses user_message)
  */
 async function canSendTo(role, adminId, company, toUsername) {
-  if (role === 'super_admin') return true; // super_admin can message anyone in company
+  if (!company || !toUsername) return false;
+  const m = /^(admin|superadmin):([a-f0-9]{24})$/i.exec(toUsername);
+
+  if (role === 'super_admin') {
+    // Anyone — but only inside the same company.
+    if (m) return !!(await Admin.exists({ _id: m[2], company }));
+    return !!(await User.exists({ name: toUsername, company }));
+  }
 
   if (role === 'admin') {
-    // Can message super_admin
-    if (toUsername.startsWith('superadmin:')) return true;
-    // Can message their own employees
-    const employee = await ChatUser.findOne({ username: toUsername, company, adminId }).lean();
-    return !!employee;
+    // The company's super_admin …
+    if (m) return m[1].toLowerCase() === 'superadmin' && !!(await Admin.exists({ _id: m[2], company, role: 'super_admin' }));
+    // … or their own employees.
+    const emp = await User.exists({ name: toUsername, company, createdBy: adminId });
+    if (emp) return true;
+    return !!(await ChatUser.exists({ username: toUsername, company, adminId }));
   }
 
   return false;

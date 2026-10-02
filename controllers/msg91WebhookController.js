@@ -226,7 +226,7 @@ async function mirrorInboundMedia({ rawUrl, companyId, config, messageId, conver
         messageId: String(messageId),
         mediaUrl: publicUrl,
       };
-      io.to("wa_admin").emit("wa_media_ready", evt);
+      io.to(`wa_admin_${String(companyId)}`).emit("wa_media_ready", evt);
       io.to(`wa_company_${String(companyId)}`).emit("wa_media_ready", evt);
     }
     return { ok: true, mediaUrl: publicUrl };
@@ -510,8 +510,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
               status:         newStatus,
               conversationId: updated.conversation?.toString(),
             };
-            io.to("wa_admin").emit("wa_message_status", payload); // legacy — no one joins this room anymore
-            // FIX: this only ever emitted to "wa_admin", which the frontend
+                        // FIX: this only ever emitted to "wa_admin", which the frontend
             // stopped joining a while back (company-scoping security fix —
             // see the matching comment in whatsappChatController.js). That
             // meant delivery/read ticks never updated live for ANYONE —
@@ -522,6 +521,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
               const conv = await WhatsAppConversation.findById(updated.conversation).select("company").lean();
               if (conv?.company) {
                 io.to(`wa_company_${conv.company.toString()}`).emit("wa_message_status", payload);
+                io.to(`wa_admin_${conv.company.toString()}`).emit("wa_message_status", payload);
               }
             }
           }
@@ -1065,17 +1065,11 @@ async function processMSG91Payload(rawBody, opts = {}) {
         io.to(`wa_agent_${agentId}`).emit("wa_message", socketPayload);
       });
       // Admin firehose
-      io.to("wa_admin").emit("wa_message", socketPayload);
-      // Company firehose
+      io.to(`wa_admin_${config.company.toString()}`).emit("wa_message", socketPayload);
+      // Company firehose — ONLY the company that owns this WhatsApp number.
+      // (Previously also emitted to the company of any lead owner / agent,
+      // which could push one tenant's messages into another tenant's room.)
       const companyRooms = new Set([config.company.toString()]);
-      if (leadOwnerIds.length > 0) {
-        const ownerDocs = await User.find({ _id: { $in: leadOwnerIds } }, { company: 1 }).lean();
-        ownerDocs.forEach((u) => { if (u.company) companyRooms.add(u.company.toString()); });
-      }
-      if (assignedAgentId) {
-        const agentDoc = await User.findById(assignedAgentId, { company: 1 }).lean();
-        if (agentDoc?.company) companyRooms.add(agentDoc.company.toString());
-      }
       companyRooms.forEach((cid) => {
         io.to(`wa_company_${cid}`).emit("wa_message", socketPayload);
       });

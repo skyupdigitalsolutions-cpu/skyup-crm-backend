@@ -209,13 +209,13 @@ const me = async (req, res) => {
   try {
     const id = req.user?._id || req.user?.userId;
     const info = await teamScope.getTeamInfo(id);
-    let members = [];
-    if (info.isTL) {
-      members = await User.find({ company: employeeCompanyId(req), teamLead: id })
-        .select("name email lastLoginAt").sort({ name: 1 }).lean();
-    }
-    let teamLead = null;
-    if (info.teamLead) teamLead = await User.findById(info.teamLead).select("name email").lean();
+    // PERF: members + team lead fetched in parallel (was sequential).
+    const [members, teamLead] = await Promise.all([
+      info.isTL
+        ? User.find({ company: employeeCompanyId(req), teamLead: id }).select("name email lastLoginAt").sort({ name: 1 }).lean()
+        : [],
+      info.teamLead ? User.findById(info.teamLead).select("name email").lean() : null,
+    ]);
     return res.json({ success: true, isTeamLead: info.isTL, teamLead, members });
   } catch (err) {
     return res.status(500).json({ message: err.message });

@@ -286,7 +286,7 @@ async function handleInboundMessage(msg, value, config) {
     }
 
     // Legacy — no one joins this room anymore (see company-room fix below)
-    io.to("wa_admin").emit("wa_message", payload);
+    io.to(`wa_admin_${config.company.toString()}`).emit("wa_message", payload);
 
     // FIX: this handler only ever emitted to wa_agent_<assignedAgent> and the
     // dead wa_admin room. The frontend migrated off wa_admin a while back to
@@ -331,11 +331,11 @@ async function handleStatusUpdate(status, config) {
       status: newStatus,
       recipientPhone: recipient_id,
     };
-    io.to("wa_admin").emit("wa_status_update", payload); // legacy — no one joins this room anymore
-    // FIX: same company-room gap as handleInboundMessage above — delivery/
+        // FIX: same company-room gap as handleInboundMessage above — delivery/
     // read ticks never reached anyone without this.
     if (config?.company) {
       io.to(`wa_company_${config.company.toString()}`).emit("wa_status_update", payload);
+      io.to(`wa_admin_${config.company.toString()}`).emit("wa_status_update", payload);
     }
   }
 

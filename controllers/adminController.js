@@ -269,6 +269,7 @@ const reassignCompanyUser = async (req, res) => {
         metadata: { targetEmail: user.email, changeType: "reassign_admin", previousValue: previous, newValue: String(owner._id) },
       });
       try { require("../utils/teamScope").invalidateTeam(companyId); } catch { /* best effort */ }
+      try { require("../utils/adminLeadScope").clearAdminLeadScopeCache(); } catch { /* ignore */ }
     }
 
     res.status(200).json({
@@ -330,6 +331,7 @@ const createCompanyUser = async (req, res) => {
     // the create-user form; echoing it back once here is not a new
     // disclosure and is never persisted.
 
+    try { require("../utils/adminLeadScope").clearAdminLeadScopeCache(); } catch { /* ignore */ }
     logAuditEvent({
       action: "create", resourceType: "User", req,
       actorId: req.admin?._id, actorModel: "Admin", actorEmail: req.admin?.email,
@@ -567,6 +569,57 @@ const getDashboardStats = async (req, res) => {
     // FIX PERFORMANCE: Collapse 6 separate DB round trips into 1 aggregate
     // Previously: 4 countDocuments + 2 aggregates = 6 round trips to MongoDB
     // Now: 1 aggregate covers all counts + reveal stats = 1 round trip
+    // PERF: start the super-admin reveal aggregates NOW, in parallel with the
+    // main stats (they used to run only after the stats finished).
+    const saAggP = req.admin?.role === "super_admin" ? Promise.all([
+          Lead.aggregate([
+            { $match: { company: companyId, "phoneRevealLog.0": { $exists: true } } },
+            { $unwind: "$phoneRevealLog" },
+            // First group by (admin, lead) so we get a per-lead reveal count…
+            { $group: {
+                _id:          { userId: "$phoneRevealLog.userId", leadId: "$_id" },
+                adminName:    { $first: "$phoneRevealLog.userName" },
+                leadName:     { $first: "$name" },
+                leadMobile:   { $first: "$mobile" },
+                count:        { $sum: 1 },
+            }},
+            // …then roll those up per admin, carrying the lead breakdown along.
+            { $group: {
+                _id:          "$_id.userId",
+                adminName:    { $first: "$adminName" },
+                totalReveals: { $sum: "$count" },
+                leadsRevealed:{ $sum: 1 },
+                leads:        { $push: { name: "$leadName", mobile: "$leadMobile", count: "$count" } },
+            }},
+            { $project: { adminName: 1, totalReveals: 1, leadsRevealed: 1, leads: 1 } },
+            { $sort: { totalReveals: -1 } },
+            { $limit: 20 },
+          ]),
+          Lead.aggregate([
+            { $match: { company: companyId, "emailRevealLog.0": { $exists: true } } },
+            { $unwind: "$emailRevealLog" },
+            { $group: {
+                _id:          { userId: "$emailRevealLog.userId", leadId: "$_id" },
+                adminName:    { $first: "$emailRevealLog.userName" },
+                adminEmail:   { $first: "$emailRevealLog.userEmail" },
+                leadName:     { $first: "$name" },
+                leadEmail:    { $first: "$email" },
+                count:        { $sum: 1 },
+            }},
+            { $group: {
+                _id:          "$_id.userId",
+                adminName:    { $first: "$adminName" },
+                adminEmail:   { $first: "$adminEmail" },
+                totalReveals: { $sum: "$count" },
+                leadsRevealed:{ $sum: 1 },
+                leads:        { $push: { name: "$leadName", email: "$leadEmail", count: "$count" } },
+            }},
+            { $project: { adminName: 1, adminEmail: 1, totalReveals: 1, leadsRevealed: 1, leads: 1 } },
+            { $sort: { totalReveals: -1 } },
+            { $limit: 20 },
+          ]),
+        ]) : null;
+
     const [statsAgg, topRevealed, topEmailRevealed] = await Promise.all([
       Lead.aggregate([
         { $match: statsMatch },
@@ -602,54 +655,7 @@ const getDashboardStats = async (req, res) => {
       // FIX PERFORMANCE: Replace JS-side grouping with MongoDB $unwind aggregate
       // Previously: fetched ALL leads with revealLogs into Node memory, grouped in JS
       // Now: MongoDB does grouping server-side — only results travel over the wire
-      const [phoneAgg, emailAgg] = await Promise.all([
-        Lead.aggregate([
-          { $match: { company: companyId, "phoneRevealLog.0": { $exists: true } } },
-          { $unwind: "$phoneRevealLog" },
-          // First group by (admin, lead) so we get a per-lead reveal count…
-          { $group: {
-              _id:          { userId: "$phoneRevealLog.userId", leadId: "$_id" },
-              adminName:    { $first: "$phoneRevealLog.userName" },
-              leadName:     { $first: "$name" },
-              leadMobile:   { $first: "$mobile" },
-              count:        { $sum: 1 },
-          }},
-          // …then roll those up per admin, carrying the lead breakdown along.
-          { $group: {
-              _id:          "$_id.userId",
-              adminName:    { $first: "$adminName" },
-              totalReveals: { $sum: "$count" },
-              leadsRevealed:{ $sum: 1 },
-              leads:        { $push: { name: "$leadName", mobile: "$leadMobile", count: "$count" } },
-          }},
-          { $project: { adminName: 1, totalReveals: 1, leadsRevealed: 1, leads: 1 } },
-          { $sort: { totalReveals: -1 } },
-          { $limit: 20 },
-        ]),
-        Lead.aggregate([
-          { $match: { company: companyId, "emailRevealLog.0": { $exists: true } } },
-          { $unwind: "$emailRevealLog" },
-          { $group: {
-              _id:          { userId: "$emailRevealLog.userId", leadId: "$_id" },
-              adminName:    { $first: "$emailRevealLog.userName" },
-              adminEmail:   { $first: "$emailRevealLog.userEmail" },
-              leadName:     { $first: "$name" },
-              leadEmail:    { $first: "$email" },
-              count:        { $sum: 1 },
-          }},
-          { $group: {
-              _id:          "$_id.userId",
-              adminName:    { $first: "$adminName" },
-              adminEmail:   { $first: "$adminEmail" },
-              totalReveals: { $sum: "$count" },
-              leadsRevealed:{ $sum: 1 },
-              leads:        { $push: { name: "$leadName", email: "$leadEmail", count: "$count" } },
-          }},
-          { $project: { adminName: 1, adminEmail: 1, totalReveals: 1, leadsRevealed: 1, leads: 1 } },
-          { $sort: { totalReveals: -1 } },
-          { $limit: 20 },
-        ]),
-      ]);
+      const [phoneAgg, emailAgg] = await saAggP;
 
       // Sort each admin's lead breakdown by reveal count (highest first) so the
       // drill-down list is ranked, matching the frontend's expectation.
