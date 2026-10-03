@@ -48,6 +48,9 @@ const protectMarketing = async (req, res, next) => {
     if (!company || !company.isActive) {
       return res.status(403).json({ message: "Company is suspended." });
     }
+    if (!(await marketingEnabled(company._id))) {
+      return res.status(403).json({ message: "Digital Marketing Dashboard is not enabled for your company." });
+    }
 
     req.admin = admin;
     req.marketingPanel = true;
@@ -57,4 +60,15 @@ const protectMarketing = async (req, res, next) => {
   }
 };
 
-module.exports = { protectMarketing };
+
+// Digital Marketing Dashboard is OFF unless the Developer panel turns it ON
+// for the company (Company → Digital Marketing Dashboard).
+async function marketingEnabled(companyId) {
+  try {
+    const { getCompanyEntitlements } = require("../services/entitlementService");
+    const ent = await getCompanyEntitlements(String(companyId?._id || companyId));
+    return ent?.marketingDashboard === true;
+  } catch { return false; }
+}
+
+module.exports = { protectMarketing, marketingEnabled };
