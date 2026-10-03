@@ -60,13 +60,23 @@ const loginAdmin = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const admin = await Admin.findOne({ email }).populate("company");
-    if (!admin || !(await admin.matchPassword(password))) {
-      return res.status(401).json({ message: "Invalid email or password" });
+    if (!email || !password) {
+      return res.status(400).json({ message: "Please enter your email and password.", field: !email ? "email" : "password" });
     }
 
+    const admin = await Admin.findOne({ email }).populate("company");
+    if (!admin) {
+      return res.status(401).json({ message: "No account found with this email.", code: "EMAIL_NOT_FOUND", field: "email" });
+    }
+    if (!(await admin.matchPassword(password))) {
+      return res.status(401).json({ message: "Incorrect password. Please try again.", code: "WRONG_PASSWORD", field: "password" });
+    }
+
+    if (!admin.company) {
+      return res.status(403).json({ message: "This account is not linked to any company. Please contact support." });
+    }
     if (!admin.company.isActive) {
-      return res.status(403).json({ message: "Your company is deactivated" });
+      return res.status(403).json({ message: "Your company account is deactivated. Please contact support." });
     }
 
     // Decrypt the per-company encryption key and send it to the frontend.
@@ -91,7 +101,8 @@ const loginAdmin = async (req, res) => {
       companyKey, // null if key not yet generated (old company pre-encryption)
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("[login]", error);
+    res.status(500).json({ message: "Login failed due to a server problem. Please try again in a minute." });
   }
 };
 
