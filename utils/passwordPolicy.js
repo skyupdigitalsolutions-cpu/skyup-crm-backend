@@ -59,7 +59,7 @@ function validatePassword(password, context = {}) {
   if (local && local.length >= 3 && lower.includes(local)) errors.push("Password must not contain your email address.");
   if (name) {
     for (const part of name.split(/\s+/)) {
-      if (part.length >= 3 && lower.includes(part)) {
+      if (part.length >= 4 && lower.includes(part)) {
         errors.push("Password must not contain your name.");
         break;
       }
