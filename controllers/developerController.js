@@ -153,8 +153,14 @@ const _createCompanyHandler = async (req, res) => {
       return res.status(400).json({ message: "Company name and email are required" });
 
     const exists = await Company.findOne({ email });
-    if (exists)
+    if (exists) {
+      // A previous attempt created the company but its super admin failed
+      // (e.g. password rejected). Re-use that half-created company instead of
+      // blocking the retry with "already exists".
+      const hasSuperAdmin = await Admin.exists({ company: exists._id, role: "super_admin" });
+      if (!hasSuperAdmin) return res.status(200).json({ ...exists.toObject(), resumed: true });
       return res.status(400).json({ message: "A company with this email already exists" });
+    }
 
     const { headerName } = body;
     const companyData = {
@@ -296,6 +302,10 @@ const createCompanySuperAdmin = async (req, res) => {
     res.status(201).json({ _id: superAdmin._id, name: superAdmin.name, email: superAdmin.email, role: superAdmin.role });
   } catch (error) {
     // Surface a friendly message for any remaining unique-key collision
+    if (error?.name === "ValidationError") {
+      const first = Object.values(error.errors || {})[0];
+      return res.status(400).json({ message: first?.message || "Please check the details and try again." });
+    }
     if (error?.code === 11000) {
       return res.status(400).json({ message: "An account with this email already exists. Use a different email." });
     }
