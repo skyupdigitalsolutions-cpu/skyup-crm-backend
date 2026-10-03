@@ -52,19 +52,11 @@ function validatePassword(password, context = {}) {
   const lower = pw.toLowerCase();
   if (COMMON.has(lower)) errors.push("This password is too common — choose something less predictable.");
 
-  // Reject passwords built from the account's own identifiers.
+  // Reject passwords built from the account's email.
   const email = String(context.email || "").toLowerCase();
   const local = email.split("@")[0];
-  const name  = String(context.name || "").toLowerCase();
   if (local && local.length >= 3 && lower.includes(local)) errors.push("Password must not contain your email address.");
-  if (name) {
-    for (const part of name.split(/\s+/)) {
-      if (part.length >= 4 && lower.includes(part)) {
-        errors.push("Password must not contain your name.");
-        break;
-      }
-    }
-  }
+  // Name rule removed on request — passwords may contain the person's name.
 
   return { valid: errors.length === 0, errors };
 }

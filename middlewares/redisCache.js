@@ -112,6 +112,8 @@ async function readHandler(req, res, next, ttlOverride) {
     if (req.method !== 'GET' || !redisReady()) return next();
     const url = req.originalUrl;
     if (NO_CACHE_PATTERNS.some((p) => p.test(url))) return next();
+    // Incremental (?since=) requests are unique every time — never cache them.
+    if (req.query && req.query.since) return next();
 
     const ttl = ttlOverride || getTTL(url);
     const key = buildKey(req);

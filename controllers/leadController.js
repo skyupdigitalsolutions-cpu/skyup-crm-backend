@@ -1560,10 +1560,17 @@ const getMyLeads = async (req, res) => {
 
         const hasMore = changed.length > DELTA_LIMIT;
         const leads   = hasMore ? changed.slice(0, DELTA_LIMIT) : changed;
+        // ?withIds=1 → also send the ids of ALL current leads (ids only — tiny)
+        // so the app can drop leads that were reassigned away / closed without
+        // re-downloading everything.
+        let ids;
+        if (req.query.withIds === "1" && !hasMore && !isAdminSession) {
+          ids = (await Lead.find(query).select("_id").lean()).map((d) => String(d._id));
+        }
         // SECURITY: mask PII in delta response
         const _callerRole = getCallerRole(req);
         const _callerId = getCallerId(req);
-        return res.status(200).json({ leads: leads.map(l => maskLeadPII(l, _callerRole, _callerId)), delta: true, hasMore });
+        return res.status(200).json({ leads: leads.map(l => maskLeadPII(l, _callerRole, _callerId)), delta: true, hasMore, ids, serverTime: new Date().toISOString() });
       }
     }
 
@@ -1716,19 +1723,6 @@ const patchLead = async (req, res) => {
       pushOps.callHistory = histEntry;
     }
 
-    if (lu.completeOldestPendingOnUpdate !== false) {
-      const pendingCalls = lead.scheduledCalls
-        .map((sc, idx) => ({ sc, idx }))
-        .filter(({ sc }) => !sc.done)
-        .sort((a, b) => new Date(a.sc.scheduledAt) - new Date(b.sc.scheduledAt));
-
-      if (pendingCalls.length > 0) {
-        const { idx } = pendingCalls[0];
-        setOps[`scheduledCalls.${idx}.done`] = true;
-        setOps[`scheduledCalls.${idx}.doneAt`] = new Date();
-      }
-    }
-
     // ── Follow-up scheduling — driven by the outcome's follow-up rule ────────
     //   none     → never     optional → only if a date is picked
     //   required → a date must be picked    auto → picked date, else N days later
@@ -1768,6 +1762,32 @@ const patchLead = async (req, res) => {
           doneAt: null,
           note: `Follow-up after status "${status !== undefined ? status : lead.status}" — outcome: ${outcome || lu.defaultOutcomeWhenMissing || "Call Back"}`,
         };
+      }
+    }
+
+    // ── Close the previous pending follow-up — only when it was really handled ──
+    // FOLLOW-UP PING FIX: this used to run on EVERY patch, so changing just the
+    // temperature or status right after setting a follow-up silently marked it
+    // done and its reminder never fired. Now:
+    //   • a NEW follow-up is being set      → the old pending one is replaced
+    //   • a call/remark is being logged     → close the oldest one only if it is
+    //                                         already due (≤ 30 min from now)
+    //   • anything else (temperature, plain status change) → leave it pending
+    if (lu.completeOldestPendingOnUpdate !== false) {
+      const pendingCalls = (lead.scheduledCalls || [])
+        .map((sc, idx) => ({ sc, idx }))
+        .filter(({ sc }) => sc && !sc.done)
+        .sort((a, b) => new Date(a.sc.scheduledAt) - new Date(b.sc.scheduledAt));
+
+      if (pendingCalls.length > 0) {
+        const { sc, idx } = pendingCalls[0];
+        const settingNew = !!pushOps.scheduledCalls;
+        const loggedCall = isGenuineCall || hasRemark;
+        const isDue = new Date(sc.scheduledAt).getTime() <= Date.now() + 30 * 60 * 1000;
+        if (settingNew || (loggedCall && isDue)) {
+          setOps[`scheduledCalls.${idx}.done`] = true;
+          setOps[`scheduledCalls.${idx}.doneAt`] = new Date();
+        }
       }
     }
 

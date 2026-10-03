@@ -361,6 +361,36 @@ const getCallLogs = async (req, res) => {
       filter.timestamp = { $gte: dayStartUTC, $lt: dayEndUTC };
     }
 
+    // ── Incremental refresh: ?since=<ISO> ─────────────────────────────────────
+    // Calls by Day polls every minute. Instead of re-downloading the whole day,
+    // the app asks only for logs that are new/changed since its last fetch, or
+    // whose lead changed (status / remark / follow-up) since then.
+    const serverTime = new Date().toISOString();
+    if (req.query.since) {
+      const since = new Date(req.query.since);
+      if (!Number.isNaN(since.getTime())) {
+        const leadScope = isAdmin
+          ? { company, updatedAt: { $gt: since } }
+          : { user: (req.user.userId || req.user._id), updatedAt: { $gt: since } };
+        const changedLeadIds = await Lead.find(leadScope).select('_id').limit(2000).lean()
+          .then((r) => r.map((x) => x._id)).catch(() => []);
+        const deltaFilter = {
+          ...filter,
+          $or: [
+            { updatedAt: { $gt: since } },
+            { createdAt: { $gt: since } },
+            ...(changedLeadIds.length ? [{ matchedLead: { $in: changedLeadIds } }] : []),
+          ],
+        };
+        let dq = MobileCallLog.find(deltaFilter).sort({ timestamp: -1 }).limit(1000)
+          .populate('matchedLead', 'name mobile status scheduledCalls');
+        if (isAdmin) dq = dq.populate('user', 'name email');
+        const changed = await dq.lean();
+        await fillMissingRemarks(changed);
+        return res.json({ logs: changed, delta: true, serverTime });
+      }
+    }
+
     let logsQuery = MobileCallLog.find(filter)
       .sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit)
       // FIX: extend matchedLead populate to include remark + scheduledCalls
@@ -381,7 +411,7 @@ const getCallLogs = async (req, res) => {
     // Safety net: link remarks the agent already saved on the lead (fixes
     // calls that were synced after the remark — see fillMissingRemarks).
     await fillMissingRemarks(logs);
-    res.json({ logs, page, total, totalPages: Math.ceil(total / limit) });
+    res.json({ logs, page, total, totalPages: Math.ceil(total / limit), serverTime });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -915,6 +945,24 @@ const getUncalledLeads = async (req, res) => {
         { 'callHistory.calledAt': { $gte: dayStart } }
       ],
     };
+
+    // ?search= — find ANY not-called lead by name / number / campaign, not just
+    // the page the app happened to have loaded.
+    const rawSearch = String(req.query.search || '').trim().slice(0, 60);
+    if (rawSearch) {
+      const esc = rawSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const digits = rawSearch.replace(/\D/g, '');
+      const ors = [
+        { name: { $regex: esc, $options: 'i' } },
+        { campaign: { $regex: esc, $options: 'i' } },
+      ];
+      if (digits.length >= 3) {
+        ors.push({ normalizedPhone: { $regex: digits } });
+        ors.push({ mobile: { $regex: digits } });
+        ors.push({ primaryPhone: { $regex: digits } });
+      }
+      uncalledFilter.$and = [{ $or: ors }];
+    }
 
     const [leads, total] = await Promise.all([
       Lead.find(uncalledFilter)

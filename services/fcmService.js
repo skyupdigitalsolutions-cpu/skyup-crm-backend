@@ -823,11 +823,14 @@ async function sendScheduledCallReminder(recipient, lead, scheduledCall) {
       });
     }
 
-    if (!messaging || !recipient.fcmToken) return;
+    if (!messaging || !recipient.fcmToken) {
+      console.warn(`[FCM] ⚠️ Follow-up reminder for "${lead.name}" not pushed — ${!messaging ? 'Firebase not configured' : `"${recipient.name}" has no FCM token (app not logged in / notifications off)`}`);
+      return 'no_channel';
+    }
     await messaging.send({
       token: recipient.fcmToken,
       notification: { title, body },
-      data: { type: 'scheduled_call_reminder', leadId: String(lead._id) },
+      data: { type: 'scheduled_call_reminder', leadId: String(lead._id), leadName: String(lead.name || ''), scheduledAt: new Date(scheduledCall.scheduledAt).toISOString(), title, body },
       android: {
         priority: 'high',
         notification: { channelId: 'new_lead_channel_v2', priority: 'max', defaultSound: true, defaultVibrateTimings: true },
@@ -838,6 +841,7 @@ async function sendScheduledCallReminder(recipient, lead, scheduledCall) {
       },
     });
     console.log(`[FCM] ✅ Scheduled call reminder sent to "${recipient.name}" for lead "${lead.name}"`);
+    return 'sent';
   } catch (err) {
     if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
       const role = String(recipient.role || '').toLowerCase();
@@ -850,7 +854,9 @@ async function sendScheduledCallReminder(recipient, lead, scheduledCall) {
       }
     } else {
       console.error(`[FCM] ❌ sendScheduledCallReminder failed for "${recipient.name}":`, err.message);
+      return 'error'; // transient — the job retries on its next tick
     }
+    return 'no_channel'; // dead token was cleared — nothing to retry with
   }
 }
 

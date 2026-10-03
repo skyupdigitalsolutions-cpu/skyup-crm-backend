@@ -577,6 +577,10 @@ async function runScheduledCallRemindersWindow(minutesBefore, companyIds) {
   try {
     const now     = new Date();
     const in15Min = new Date(now.getTime() + minutesBefore * 60 * 1000);
+    // FOLLOW-UP PING FIX: also catch follow-ups whose time passed in the last
+    // 30 min without a reminder — a follow-up set < 5 min ahead, or one that
+    // fell between ticks / during a server restart, used to be skipped forever.
+    const catchUpFrom = new Date(now.getTime() - 30 * 60 * 1000);
 
     // $elemMatch is required here, not separate top-level dot-path
     // conditions — without it, Mongo can match each condition against a
@@ -591,7 +595,7 @@ async function runScheduledCallRemindersWindow(minutesBefore, companyIds) {
       user:       { $ne: null },
       scheduledCalls: {
         $elemMatch: {
-          scheduledAt:    { $gte: now, $lte: in15Min },
+          scheduledAt:    { $gte: catchUpFrom, $lte: in15Min },
           done:           { $ne: true },
           reminderSentAt: null,
         },
@@ -621,13 +625,16 @@ async function runScheduledCallRemindersWindow(minutesBefore, companyIds) {
       const dueEntries = (lead.scheduledCalls || []).filter(sc =>
         !sc.done &&
         !sc.reminderSentAt &&
-        sc.scheduledAt >= now &&
-        sc.scheduledAt <= in15Min
+        new Date(sc.scheduledAt) >= catchUpFrom &&
+        new Date(sc.scheduledAt) <= in15Min
       );
 
       for (const entry of dueEntries) {
-        await sendScheduledCallReminder(user, lead, entry);
-        sentCount++;
+        const result = await sendScheduledCallReminder(user, lead, entry);
+        // A transient FCM error → leave it un-stamped so the next 5-min tick
+        // retries (bounded by the 30-min catch-up window above).
+        if (result === 'error') continue;
+        if (result === 'sent') sentCount++;
 
         // Positional update targeting ONLY this specific array entry —
         // matched by its exact scheduledAt timestamp, since scheduledCalls
