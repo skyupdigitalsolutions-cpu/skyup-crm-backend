@@ -29,7 +29,23 @@ const {
 const { protectAdmin } = require("../middlewares/adminAuthMiddleware");
 const { requireFeature } = require("../middlewares/entitlementMiddleware");
 
-router.use(protectAdmin, requireFeature("whatsappBlast"));
+// Festival Campaigns is OFF for every company unless the Developer panel turns
+// it ON for that company (Company → Festival Campaigns). Applies to super admins too.
+async function requireFestivalModule(req, res, next) {
+  try {
+    const { getCompanyEntitlements } = require("../services/entitlementService");
+    const companyId = req.admin?.company?._id || req.admin?.company;
+    const ent = await getCompanyEntitlements(companyId);
+    if (ent?.festivalCampaigns !== true) {
+      return res.status(403).json({ message: "Festival Campaigns is not enabled for your company.", code: "MODULE_DISABLED" });
+    }
+    next();
+  } catch (e) {
+    return res.status(500).json({ message: "Could not verify module access." });
+  }
+}
+
+router.use(protectAdmin, requireFestivalModule, requireFeature("whatsappBlast"));
 
 // ── Festival Auto-Blast — the "flip it on once" fully-automatic path ─────────
 // No manual per-festival campaign needed: every template in
