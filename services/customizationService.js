@@ -207,7 +207,9 @@ function applyModulesToEntitlements(ent, cust, devToggles = {}) {
   for (const m of R.MODULE_CATALOG) {
     const companyOn = R.isModuleOn(cust, m.key);
     if (m.navOnly) {
-      const dev = Object.prototype.hasOwnProperty.call(devToggles, m.key) ? !!devToggles[m.key] : true;
+      // defaultOff modules (Festival Campaigns, Digital Marketing Dashboard)
+      // stay hidden until the Developer panel switches them ON for a company.
+      const dev = Object.prototype.hasOwnProperty.call(devToggles, m.key) ? !!devToggles[m.key] : !m.defaultOff;
       ent[m.key] = dev && companyOn;
     } else if (Object.prototype.hasOwnProperty.call(ent, m.key)) {
       ent[m.key] = !!ent[m.key] && companyOn;
