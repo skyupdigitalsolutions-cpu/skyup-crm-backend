@@ -81,7 +81,6 @@ async function checkBreached(password) {
     return false; // fail open
   }
 }
-
 /**
  * Prevent reuse of a recent password.
  * @param {string} newPassword
