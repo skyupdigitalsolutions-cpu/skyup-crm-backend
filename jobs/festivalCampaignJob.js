@@ -37,6 +37,19 @@ const { getFestivalCatalog }      = require("../utils/festivalTemplateCatalog");
 const { istDayKey, IST_TIMEZONE } = require("../utils/istDate");
 const { sendAutoWhatsApp, sendAutoEmail } = require("../services/autoTemplateService");
 
+// Festival Campaigns must be switched ON for the company in the Developer
+// panel. Off → nothing is sent for that company.
+async function festivalModuleOn(companyId) {
+  try {
+    const { getCompanyEntitlements } = require("../services/entitlementService");
+    const ent = await getCompanyEntitlements(companyId);
+    return ent?.festivalCampaigns === true;
+  } catch (e) {
+    console.error("[festivalCampaign] module check failed:", e.message);
+    return false; // fail closed — never blast a company by mistake
+  }
+}
+
 const CONCURRENCY    = 5;   // leads processed in parallel per chunk — same pool size as sms/email campaign controllers
 const LEAD_PAGE_SIZE = 500; // fetched from Mongo this many at a time so a huge company's lead list is never all loaded in memory at once
 
@@ -194,7 +207,9 @@ async function runAutoBlastTick(todayKey) {
   if (!dueEntries.length) return;
 
   const year = Number(todayKey.split("-")[0]);
-  const companies = await Company.find({ "festivalAutoBlast.enabled": true }, { festivalAutoBlast: 1 }).lean();
+  const optedIn = await Company.find({ "festivalAutoBlast.enabled": true }, { festivalAutoBlast: 1 }).lean();
+  const companies = [];
+  for (const c of optedIn) { if (await festivalModuleOn(c._id)) companies.push(c); }
   if (!companies.length) return;
 
   console.log(`[festivalCampaign] 🔎 Auto-blast: ${dueEntries.length} catalog festival(s) due today (${todayKey}) for ${companies.length} opted-in company(ies)`);
@@ -210,6 +225,9 @@ async function runAutoBlastTick(todayKey) {
 // 2. MANUAL CAMPAIGNS — optional, custom one-off festivals not in the catalog
 // ═══════════════════════════════════════════════════════════════════════════
 async function runManualCampaign(campaign) {
+  if (!(await festivalModuleOn(campaign.company))) {
+    throw new Error("Festival Campaigns is turned off for this company");
+  }
   const leadQuery = buildLeadQuery(campaign.company, campaign.targetAudience);
 
   console.log(`[festivalCampaign] ▶️ Manual campaign "${campaign.festivalName}" → company ${campaign.company}`);
