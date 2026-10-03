@@ -213,6 +213,11 @@ const verifyOtpAndReset = async (req, res) => {
     return res.status(200).json({ message: "Password reset successfully. You can now log in." });
   } catch (err) {
     console.error("[ForgotPassword] verifyOtpAndReset error:", err);
+    // Show the real reason (e.g. a password rule) instead of a generic error.
+    if (err?.name === "ValidationError") {
+      const first = Object.values(err.errors || {})[0];
+      return res.status(400).json({ message: first?.message || "Please check the new password and try again." });
+    }
     res.status(500).json({ message: "Something went wrong. Please try again." });
   }
 };
