@@ -98,9 +98,17 @@ router.delete ("/custom-reports/:id",        protectSuperAdmin, deleteCustomRepo
 
 
 // ── Marketing Panel credential management ─────────────────────────────────────
-router.post("/marketing-users",             protectUnified, authorizeRoles("super_admin"), companyIsolation, createMarketingUser);
-router.get("/marketing-users",              protectUnified, authorizeRoles("super_admin"), companyIsolation, listMarketingUsers);
-router.patch("/marketing-users/:id/toggle", protectUnified, authorizeRoles("super_admin"), companyIsolation, toggleMarketingAccess);
-router.delete("/marketing-users/:id",       protectUnified, authorizeRoles("super_admin"), companyIsolation, deleteMarketingUser);
+// Marketing-dashboard logins only for companies where it is enabled.
+async function requireMarketingModule(req, res, next) {
+  const { marketingEnabled } = require("../middlewares/marketingAuthMiddleware");
+  const companyId = req.callerCompany || req.user?.company || req.admin?.company;
+  if (await marketingEnabled(companyId)) return next();
+  return res.status(403).json({ message: "Digital Marketing Dashboard is not enabled for your company." });
+}
+
+router.post("/marketing-users",             protectUnified, authorizeRoles("super_admin"), companyIsolation, requireMarketingModule, createMarketingUser);
+router.get("/marketing-users",              protectUnified, authorizeRoles("super_admin"), companyIsolation, requireMarketingModule, listMarketingUsers);
+router.patch("/marketing-users/:id/toggle", protectUnified, authorizeRoles("super_admin"), companyIsolation, requireMarketingModule, toggleMarketingAccess);
+router.delete("/marketing-users/:id",       protectUnified, authorizeRoles("super_admin"), companyIsolation, requireMarketingModule, deleteMarketingUser);
 
 module.exports = router;
