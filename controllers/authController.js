@@ -152,7 +152,8 @@ const login = async (req, res) => {
       });
     }
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("[login]", error);
+    res.status(500).json({ message: "Login failed due to a server problem. Please try again in a minute." });
   }
 };
 
@@ -355,7 +356,8 @@ const loginUnified = async (req, res) => {
       field: "password",
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("[login]", error);
+    res.status(500).json({ message: "Login failed due to a server problem. Please try again in a minute." });
   }
 };
 
