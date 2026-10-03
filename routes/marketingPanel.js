@@ -43,6 +43,9 @@ router.post("/login", ipFloodLimiter, authLimiter, async function (req, res) {
     if (!admin.company || !admin.company.isActive) {
       return res.status(403).json({ message: "Company is suspended." });
     }
+    if (!(await require("../middlewares/marketingAuthMiddleware").marketingEnabled(admin.company._id))) {
+      return res.status(403).json({ message: "Digital Marketing Dashboard is not enabled for your company." });
+    }
 
     const isSuperAdmin = admin.role === "super_admin" || admin.role === "superadmin";
     const isMarketingUser = admin.role === "marketing_user" || admin.marketingAccess;
