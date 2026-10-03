@@ -112,7 +112,9 @@ const MODULE_CATALOG = [
   { key: "smsBlast",             group: "Communication", label: "SMS Blast" },
   { key: "emailBlast",           group: "Communication", label: "Email Blast" },
   { key: "whatsappAutomation",   group: "Communication", label: "WhatsApp Automation" },
-  { key: "festivalCampaigns",    group: "Communication", label: "Festival Campaigns",        navOnly: true },
+  // defaultOff: hidden for every company unless the Developer panel turns it ON for that company.
+  { key: "festivalCampaigns",    group: "Communication", label: "Festival Campaigns",        navOnly: true, defaultOff: true },
+  { key: "marketingDashboard",   group: "Communication", label: "Digital Marketing Dashboard", navOnly: true, defaultOff: true },
   { key: "leadNurtureSequence",  group: "Communication", label: "Lead Nurture" },
   { key: "telegramNotification", group: "Communication", label: "Telegram Notifications" },
   { key: "whatsappScreenshots",  group: "Communication", label: "WhatsApp Screenshot Proof", navOnly: true },
@@ -146,7 +148,7 @@ function defaultModules() {
   }
   // Same visibility the old sidebar had for employees.
   for (const k of ["campaigns", "callMonitoring", "basicReports", "customReports", "leadIntelligence",
-    "leadNurtureSequence", "attendance", "payroll", "festivalCampaigns", "pipelineBoard"]) {
+    "leadNurtureSequence", "attendance", "payroll", "festivalCampaigns", "pipelineBoard", "marketingDashboard"]) {
     out[k].employee = false;
   }
   return out;
