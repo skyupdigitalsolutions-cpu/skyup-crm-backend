@@ -20,6 +20,7 @@ developerSchema.pre("save", async function () {
 });
 
 developerSchema.methods.matchPassword = async function (p) {
+  if (typeof p !== "string" || !this.password) return false;
   return await bcrypt.compare(p, this.password);
 };
 
