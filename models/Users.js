@@ -156,6 +156,9 @@ userSchema.pre("save", async function () {
 
 // Compare the hashed password from DB to verify
 userSchema.methods.matchPassword = async function (enteredPassword) {
+  // A non-string password or a record with no hash would make bcrypt throw —
+  // treat both as a mismatch.
+  if (typeof enteredPassword !== "string" || !this.password) return false;
   return await bcrypt.compare(enteredPassword, this.password);
 };
 
