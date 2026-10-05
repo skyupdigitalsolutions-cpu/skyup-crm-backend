@@ -691,15 +691,15 @@ async function processMSG91Payload(rawBody, opts = {}) {
             companyId: config.company,
             lead,
             waPhone,
-            msgBody: msgBody || msgText || "",
+            msgBody: msgText || "",
           }).catch((e) => console.error("[Telegram-WA] notifyWhatsAppNewLead failed:", e.message));
 
           // Bot notification for new cold lead
           if (config.botWebhookUrl) {
             axios.post(config.botWebhookUrl, {
               event: "new_lead", leadId: lead._id.toString(), leadName: lead.name,
-              waPhone, contactName: resolvedContactName, companyId: config.company.toString(),
-              message: { body: msgBody || msgText || "", type: contentType, timestamp: timestamp || new Date() },
+              waPhone, contactName: isRealName(contactName) ? contactName.trim() : null, companyId: config.company.toString(),
+              message: { body: msgText || "", type: contentType, timestamp: timestamp || new Date() },
             }, {
               headers: { "Content-Type": "application/json", ...(config.botSecret ? { "X-Bot-Secret": config.botSecret } : {}) },
               timeout: 10000,
