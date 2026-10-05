@@ -553,7 +553,7 @@ function resolveAdminIdForThread(senderRole, senderAdminId, toUsername) {
  * ACL check: can this role/admin send to toUsername?
  *
  * super_admin → anyone in the same company
- * admin       → their own employees + the super_admin
+ * admin       → their own employees + the company's super_admins
  * employee    → not handled here (uses user_message)
  */
 async function canSendTo(role, adminId, company, toUsername) {
@@ -567,7 +567,7 @@ async function canSendTo(role, adminId, company, toUsername) {
   }
 
   if (role === 'admin') {
-    // The company's super_admin …
+    // Any of the company's super_admins …
     if (m) return m[1].toLowerCase() === 'superadmin' && !!(await Admin.exists({ _id: m[2], company, role: 'super_admin' }));
     // … or their own employees.
     const emp = await User.exists({ name: toUsername, company, createdBy: adminId });
@@ -621,6 +621,18 @@ async function buildContactList(role, adminId, company) {
       contacts.push(doc);
     }
 
+    // Fellow super admins (a company can have more than one)
+    const otherSupers = await Admin.find({ company: companyMatch, role: 'super_admin', _id: { $ne: adminId } }).lean();
+    for (const sa of otherSupers) {
+      const username = `superadmin:${sa._id}`;
+      const doc = await ChatUser.findOneAndUpdate(
+        { username },
+        { username, company, role: 'super_admin', adminId: sa._id, userId: sa._id, displayName: sa.name, lastSeen: new Date() },
+        { upsert: true, new: true }
+      ).lean();
+      contacts.push(doc);
+    }
+
     // All employees in this company
     const employees = await User.find({ company: companyMatch }).lean();
     for (const u of employees) {
@@ -634,9 +646,9 @@ async function buildContactList(role, adminId, company) {
     }
 
   } else if (role === 'admin') {
-    // Super admin of this company
-    const superAdminDoc = await Admin.findOne({ company: companyMatch, role: 'super_admin' }).lean();
-    if (superAdminDoc) {
+    // Super admins of this company (there can be several)
+    const superAdminDocs = await Admin.find({ company: companyMatch, role: 'super_admin' }).lean();
+    for (const superAdminDoc of superAdminDocs) {
       const username = `superadmin:${superAdminDoc._id}`;
       const doc = await ChatUser.findOneAndUpdate(
         { username },
