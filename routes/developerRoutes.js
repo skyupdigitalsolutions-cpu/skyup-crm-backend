@@ -11,6 +11,8 @@ const {
   getDeveloperDashboard,
   createCompany,
   createCompanySuperAdmin,
+  listCompanySuperAdmins,
+  deleteCompanySuperAdmin,
   getCompanies,
   updateCompany,
   deleteCompany,
@@ -65,6 +67,9 @@ router.get("/dashboard", getDeveloperDashboard);
 router.get("/companies",                  getCompanies);
 router.post("/companies",                 createCompany);
 router.post("/companies/:id/super-admin", createCompanySuperAdmin);
+router.get("/companies/:id/super-admins",            listCompanySuperAdmins);
+router.post("/companies/:id/super-admins",           createCompanySuperAdmin);
+router.delete("/companies/:id/super-admins/:adminId", deleteCompanySuperAdmin);
 router.put("/companies/:id",              updateCompany);
 router.delete("/companies/:id",           deleteCompany);
 router.put("/companies/:id/toggle",       toggleCompanyStatus);
