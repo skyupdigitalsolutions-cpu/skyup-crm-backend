@@ -30,6 +30,7 @@ const {
   syncWhatsAppTemplates,
   listLeadSources,
   createLeadFromConversation,
+  updateConversationContact,
   botReply,
 } = require("../controllers/whatsappChatController");
 const { makeCompanyUploadMiddleware } = require("../services/cloudinaryService");
@@ -83,6 +84,7 @@ router.post("/messages/:id/refresh-media", protectAny, refreshMedia);
 // Clear the unread badge for a conversation the agent is actively reading
 router.post("/conversations/:id/mark-read", protectAny, markConversationRead);
 router.post("/conversations/:id/create-lead", protectAny, createLeadFromConversation);
+router.patch("/conversations/:id/contact",    protectAny, updateConversationContact);
 router.post("/bot-reply", botReply);
 
 // ─── Admin or agent starts a fresh conversation with any client number ────────
