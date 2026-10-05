@@ -12,8 +12,17 @@
 //   if (!valid) return res.status(400).json({ message: errors[0], errors });
 // ─────────────────────────────────────────────────────────────────────────────
 
-const MIN_LENGTH = Number(process.env.PASSWORD_MIN_LENGTH) || 12;
-const MAX_LENGTH = 128; // bcrypt truncates past 72 bytes; cap input politely
+// Rules (shown to the user as a live checklist in the frontend):
+//   • 10–28 characters
+//   • at least one capital letter  [A-Z]
+//   • at least one small letter    [a-z]
+//   • at least one number          [0-9]
+//   • at least two special characters
+//   • no spaces
+//   • must not contain the user ID (email username), first name or last name
+const MIN_LENGTH = Number(process.env.PASSWORD_MIN_LENGTH) || 10;
+const MAX_LENGTH = Number(process.env.PASSWORD_MAX_LENGTH) || 28;
+const MIN_SPECIAL = 2;
 
 // Small deny-list of the most abused passwords. This is NOT a substitute for a
 // breach-corpus check — for that, wire in the Have I Been Pwned k-anonymity
@@ -25,38 +34,48 @@ const COMMON = new Set([
   "football", "changeme", "passw0rd", "p@ssw0rd", "test1234", "india123",
 ]);
 
+// Identity fragments the password must not contain: email username plus each
+// word of the person's name (first / last). Fragments under 3 chars are ignored
+// so short names like "Al" don't block half the dictionary.
+function identityParts({ email, name } = {}) {
+  const parts = [];
+  const local = String(email || "").toLowerCase().split("@")[0].trim();
+  if (local.length >= 3) parts.push(local);
+  String(name || "").toLowerCase().split(/[\s._-]+/).forEach((w) => {
+    if (w.length >= 3) parts.push(w);
+  });
+  return [...new Set(parts)];
+}
+
 /**
  * Validate a password against the policy.
  * @param {string} password
  * @param {{email?:string,name?:string}} [context] - used to reject passwords
- *        that simply echo the user's own identifiers.
+ *        that contain the user's own identifiers.
  * @returns {{valid:boolean, errors:string[]}}
  */
 function validatePassword(password, context = {}) {
   const errors = [];
   const pw = String(password || "");
 
-  if (pw.length < MIN_LENGTH) errors.push(`Password must be at least ${MIN_LENGTH} characters.`);
-  if (pw.length > MAX_LENGTH) errors.push(`Password must be at most ${MAX_LENGTH} characters.`);
+  if (pw.length < MIN_LENGTH || pw.length > MAX_LENGTH) {
+    errors.push(`Password must be ${MIN_LENGTH}-${MAX_LENGTH} characters long.`);
+  }
+  if (!/[A-Z]/.test(pw)) errors.push("Password must contain at least one capital letter (A-Z).");
+  if (!/[a-z]/.test(pw)) errors.push("Password must contain at least one small letter (a-z).");
+  if (!/[0-9]/.test(pw)) errors.push("Password must contain at least one number.");
+  const specials = (pw.match(/[^A-Za-z0-9\s]/g) || []).length;
+  if (specials < MIN_SPECIAL) errors.push(`Password must contain at least ${MIN_SPECIAL} special characters.`);
+  if (/\s/.test(pw)) errors.push("Password must not contain spaces.");
 
-  // Complexity: require 3 of 4 character classes. This is friendlier than
-  // demanding all four while still ruling out trivially weak strings.
-  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((re) => re.test(pw)).length;
-  if (classes < 3) {
-    errors.push("Password must include at least three of: lowercase, uppercase, number, symbol.");
+  const lower = pw.toLowerCase();
+  if (identityParts(context).some((part) => lower.includes(part))) {
+    errors.push("Password must not contain your user ID, first name or last name.");
   }
 
   if (/^(.)\1+$/.test(pw)) errors.push("Password cannot be a single repeated character.");
-  if (/^(?:0123456789|abcdefghij|qwertyuiop)/i.test(pw)) errors.push("Password cannot be a simple sequence.");
-
-  const lower = pw.toLowerCase();
+  if (/^(?:0123456789|abcdefghij|qwertyuiop)/i.test(pw)) errors.push("Password cannot start with a simple sequence.");
   if (COMMON.has(lower)) errors.push("This password is too common — choose something less predictable.");
-
-  // Reject passwords built from the account's email.
-  const email = String(context.email || "").toLowerCase();
-  const local = email.split("@")[0];
-  if (local && local.length >= 3 && lower.includes(local)) errors.push("Password must not contain your email address.");
-  // Name rule removed on request — passwords may contain the person's name.
 
   return { valid: errors.length === 0, errors };
 }
@@ -97,4 +116,4 @@ async function isReused(newPassword, previousHashes = []) {
   return false;
 }
 
-module.exports = { validatePassword, checkBreached, isReused, MIN_LENGTH };
+module.exports = { validatePassword, checkBreached, isReused, MIN_LENGTH, MAX_LENGTH, MIN_SPECIAL };
