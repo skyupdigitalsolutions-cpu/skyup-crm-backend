@@ -1503,26 +1503,33 @@ const getMarketingDashboard = async (req, res, next) => {
 // (can't recover a still-active password) but is the correct trade-off —
 // authentication information should never be recoverable, only resettable.
 
-// Generates a random, readable-but-strong password: 12 chars, mixed case +
-// digits + one symbol, avoiding visually-ambiguous characters (0/O, 1/l/I).
-function generateSecurePassword() {
+// Generates a random, readable-but-strong password: 14 chars, mixed case +
+// digits + two symbols, avoiding visually-ambiguous characters (0/O, 1/l/I).
+// Always satisfies utils/passwordPolicy.js (10-28 chars, A-Z, a-z, 0-9,
+// 2+ special, no spaces, no identity fragments).
+function generateSecurePassword(context = {}) {
+  const { validatePassword } = require("../utils/passwordPolicy");
   const upper  = "ABCDEFGHJKMNPQRSTUVWXYZ";
   const lower  = "abcdefghjkmnpqrstuvwxyz";
   const digits = "23456789";
-  const symbol = "!@#$%&*";
+  const symbol = "!@#$%&*_-";
   const all    = upper + lower + digits + symbol;
 
   const pick = (set) => set[crypto.randomInt(0, set.length)];
-  const required = [pick(upper), pick(lower), pick(digits), pick(symbol)];
-  const rest = Array.from({ length: 8 }, () => pick(all));
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const required = [pick(upper), pick(lower), pick(digits), pick(symbol), pick(symbol)];
+    const rest = Array.from({ length: 9 }, () => pick(all));
 
-  // Shuffle so the required-character positions aren't predictable.
-  const chars = [...required, ...rest];
-  for (let i = chars.length - 1; i > 0; i--) {
-    const j = crypto.randomInt(0, i + 1);
-    [chars[i], chars[j]] = [chars[j], chars[i]];
+    // Shuffle so the required-character positions aren't predictable.
+    const chars = [...required, ...rest];
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(0, i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    const pw = chars.join("");
+    if (validatePassword(pw, context).valid) return pw;
   }
-  return chars.join("");
+  throw new Error("Could not generate a compliant password");
 }
 
 // PATCH /api/admin/:id/reset-password — reset another ADMIN's password
@@ -1539,7 +1546,7 @@ const resetAdminPassword = async (req, res, next) => {
       return res.status(403).json({ message: "Admin not in your company" });
     }
 
-    const newPassword = generateSecurePassword();
+    const newPassword = generateSecurePassword({ email: target.email, name: target.name });
     target.password = newPassword; // pre-save hook hashes it — never stored plain
     await target.save();
 
@@ -1561,7 +1568,7 @@ const resetUserPassword = async (req, res, next) => {
     const target = await User.findOne({ _id: req.params.id, company: companyId });
     if (!target) return res.status(404).json({ message: "User not found" });
 
-    const newPassword = generateSecurePassword();
+    const newPassword = generateSecurePassword({ email: target.email, name: target.name });
     target.password = newPassword; // pre-save hook hashes it — never stored plain
     await target.save();
 
