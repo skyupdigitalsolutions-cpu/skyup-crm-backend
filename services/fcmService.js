@@ -272,11 +272,11 @@ async function sendReassignedLeadNotification(userId, lead) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function notifySuperAdminReassignment(companyId, { lead, fromAdminName, toUserName, reason }) {
   try {
-    // Find the super_admin for this company
-    const superAdmin = await Admin.findOne({ company: companyId, role: 'super_admin' })
+    // A company can have several super admins — notify every one of them.
+    const superAdmins = await Admin.find({ company: companyId, role: 'super_admin' })
       .select('_id name fcmToken')
       .lean();
-    if (!superAdmin) return; // No super_admin configured — silently skip
+    if (!superAdmins.length) return; // No super_admin configured — silently skip
 
     const leadName   = lead.name   || 'Lead';
     const reasonText = reason      ? ` — Reason: ${reason}` : '';
@@ -285,70 +285,75 @@ async function notifySuperAdminReassignment(companyId, { lead, fromAdminName, to
     // ── 1. Socket push ────────────────────────────────────────────────────────
     const _io = global._io;
     if (_io) {
-      _io.to(`superadmin:${superAdmin._id}`).emit('lead_reassigned_notify', {
-        leadId:        String(lead._id),
-        leadName,
-        fromAdminName,
-        toUserName,
-        reason:        reason || '',
-        timestamp:     new Date().toISOString(),
-      });
+      for (const sa of superAdmins) {
+        _io.to(`superadmin:${sa._id}`).emit('lead_reassigned_notify', {
+          leadId:        String(lead._id),
+          leadName,
+          fromAdminName,
+          toUserName,
+          reason:        reason || '',
+          timestamp:     new Date().toISOString(),
+        });
+      }
     }
 
     // ── 2. FCM push ───────────────────────────────────────────────────────────
     const messaging = getMessaging();
-    if (!messaging || !superAdmin.fcmToken) return;
+    if (!messaging) return;
 
-    await messaging.send({
-      token: superAdmin.fcmToken,
-      notification: {
-        title: '🔄 Lead Reassigned',
-        body,
-      },
-      data: {
-        type:          'lead_reassigned_notify',
-        leadId:        String(lead._id),
-        leadName,
-        fromAdminName,
-        toUserName,
-        reason:        reason || '',
-      },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId:             'new_lead_channel_v2',
-          priority:              'max',
-          defaultSound:          true,
-          defaultVibrateTimings: true,
-        },
-      },
-      apns: {
-        payload: {
-          aps: {
-            alert: { title: '🔄 Lead Reassigned', body },
-            sound: 'default',
-            badge: 1,
-            'content-available': 1,
+    for (const superAdmin of superAdmins) {
+      if (!superAdmin.fcmToken) continue;
+      try {
+        await messaging.send({
+          token: superAdmin.fcmToken,
+          notification: {
+            title: '🔄 Lead Reassigned',
+            body,
           },
-        },
-        headers: { 'apns-priority': '10' },
-      },
-    });
-
-    console.log(`[FCM] ✅ Reassign alert sent to super_admin "${superAdmin.name}" for lead "${leadName}"`);
-  } catch (err) {
-    if (
-      err.code === 'messaging/registration-token-not-registered' ||
-      err.code === 'messaging/invalid-registration-token'
-    ) {
-      await Admin.findByIdAndUpdate(
-        (await Admin.findOne({ company: companyId, role: 'super_admin' }).select('_id').lean())?._id,
-        { $set: { fcmToken: null } }
-      ).catch(() => {});
-      console.warn('[FCM] Cleared stale FCM token for super_admin');
-    } else {
-      console.error('[FCM] notifySuperAdminReassignment error:', err.message);
+          data: {
+            type:          'lead_reassigned_notify',
+            leadId:        String(lead._id),
+            leadName,
+            fromAdminName,
+            toUserName,
+            reason:        reason || '',
+          },
+          android: {
+            priority: 'high',
+            notification: {
+              channelId:             'new_lead_channel_v2',
+              priority:              'max',
+              defaultSound:          true,
+              defaultVibrateTimings: true,
+            },
+          },
+          apns: {
+            payload: {
+              aps: {
+                alert: { title: '🔄 Lead Reassigned', body },
+                sound: 'default',
+                badge: 1,
+                'content-available': 1,
+              },
+            },
+            headers: { 'apns-priority': '10' },
+          },
+        });
+        console.log(`[FCM] ✅ Reassign alert sent to super_admin "${superAdmin.name}" for lead "${leadName}"`);
+      } catch (err) {
+        if (
+          err.code === 'messaging/registration-token-not-registered' ||
+          err.code === 'messaging/invalid-registration-token'
+        ) {
+          await Admin.findByIdAndUpdate(superAdmin._id, { $set: { fcmToken: null } }).catch(() => {});
+          console.warn(`[FCM] Cleared stale FCM token for super_admin "${superAdmin.name}"`);
+        } else {
+          console.error('[FCM] notifySuperAdminReassignment send error:', err.message);
+        }
+      }
     }
+  } catch (err) {
+    console.error('[FCM] notifySuperAdminReassignment error:', err.message);
   }
 }
 
