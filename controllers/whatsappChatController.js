@@ -607,27 +607,6 @@ const sendTemplate = async (req, res, next) => {
   }
 };
 
-const assignConversation = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { agentId } = req.body;
-    const updated = await WhatsAppConversation.findByIdAndUpdate(
-      id,
-      { assignedAgent: agentId },
-      { new: true },
-    ).populate("assignedAgent", "name email");
-    const io = global._io;
-    if (io)
-      io.to(`wa_agent_${agentId}`).emit("wa_assigned", {
-        conversationId: id,
-        message: "A new WhatsApp conversation has been assigned to you",
-      });
-    res.json({ success: true, conversation: updated });
-  } catch (err) {
-    next(err);
-  }
-};
-
 const closeConversation = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -2433,39 +2412,6 @@ const getTemplateBody = async (req, res, next) => {
 // POST /whatsapp/conversations/:id/create-lead
 // Agent promotes an unknown inbox contact to a CRM lead.
 // ─────────────────────────────────────────────────────────────────────────────
-const createLeadFromConversation = async (req, res, next) => {
-  try {
-    const { id: conversationId } = req.params;
-    const { companyId, userId }  = callerCtx(req);
-    const conversation = await WhatsAppConversation.findOne({ _id: conversationId, company: companyId });
-    if (!conversation) return res.status(404).json({ success: false, message: "Conversation not found" });
-    if (conversation.lead) {
-      const existing = await Lead.findById(conversation.lead).lean();
-      if (existing) return res.json({ success: true, lead: existing, created: false, message: "Already linked to a lead" });
-    }
-    const waPhone  = conversation.waPhone;
-    const lastTen  = waPhone.slice(-10);
-    const existing = await Lead.findOne({ company: companyId, $or: [{ mobile: waPhone }, { mobile: lastTen }, { mobile: `+${waPhone}` }] }).lean();
-    if (existing) {
-      await WhatsAppConversation.findByIdAndUpdate(conversationId, { lead: existing._id });
-      return res.json({ success: true, lead: existing, created: false, message: "Linked to existing lead" });
-    }
-    const resolvedName = req.body.name?.trim() ||
-      (isRealName(conversation.contactName) ? conversation.contactName.trim() : null) ||
-      "Sir/Madam";
-    const remark = req.body.remark?.trim() || "Promoted from WhatsApp inbox by agent";
-    const newLead = await Lead.create({
-      name: resolvedName, mobile: waPhone, source: "WhatsApp", status: (() => { const _c = require("../services/customizationService").peekCustomization(companyId); return (req.body.status && (require("../services/customizationService").findStatus(_c, req.body.status.trim()) || {}).key) || require("../services/customizationService").defaultStatusKey(_c); })(),
-      date: new Date(), remark, initialRemark: remark, user: userId || undefined, company: companyId,
-    });
-    await WhatsAppConversation.findByIdAndUpdate(conversationId, { lead: newLead._id });
-    console.log(`[WhatsApp] ✅ Agent promoted ${waPhone} → Lead "${newLead.name}"`);
-    const agentName = req.admin?.name || req.user?.name || "Admin";
-    notifyWhatsAppLeadCreated({ companyId, leadName: newLead.name, waPhone, agentName })
-      .catch((e) => console.error("[Telegram-WA] notifyWhatsAppLeadCreated threw:", e.message));
-    return res.status(201).json({ success: true, lead: newLead, created: true });
-  } catch (err) { console.error("createLeadFromConversation error:", err.message); next(err); }
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /whatsapp/bot-reply — bot sends reply back through the CRM
@@ -2526,6 +2472,245 @@ const botReply = async (req, res, next) => {
   } catch (err) { console.error("botReply error:", err.message); next(err); }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WhatsApp inbox → lead helpers
+// A reply to one of OUR templates/blasts does not auto-create a lead (by
+// design — see msg91WebhookController), so those chats show up as
+// "Sir/Madam" with no lead attached. The three endpoints below let the inbox
+// rename the contact, save it as a lead, and assign it to an employee.
+// ─────────────────────────────────────────────────────────────────────────────
+const User = require("../models/Users");
+
+const isAdminRole = (role) => ["admin", "super_admin", "superadmin"].includes(role);
+
+// Find this company's lead for a WhatsApp number in any stored format.
+async function findLeadForWaPhone(waPhone, companyId) {
+  const digits  = String(waPhone || "").replace(/\D/g, "");
+  if (!digits) return null;
+  const lastTen = digits.slice(-10);
+  const norm    = _sharedNormalizePhone(digits);
+  const or = [{ mobile: digits }, { mobile: lastTen }, { mobile: `+${digits}` }, { mobile: `91${lastTen}` }];
+  if (norm) or.push({ normalizedPhone: norm }, { normalizedSecondaryPhone: norm });
+  return Lead.findOne({ company: companyId, mergedInto: null, $or: or }).sort({ updatedAt: -1 });
+}
+
+// Employee (User) inside this company, or null.
+async function findCompanyEmployee(companyId, employeeId) {
+  if (!employeeId || !mongoose.Types.ObjectId.isValid(String(employeeId))) return null;
+  return User.findOne({ _id: employeeId, company: companyId }).select("_id name createdBy").lean();
+}
+
+// Point a lead at an employee and log it like an admin reassignment.
+async function assignLeadToEmployee(lead, employee, req, note) {
+  const previous = lead.user ? String(lead.user) : null;
+  if (previous === String(employee._id)) return lead;
+  lead.user = employee._id;
+  // Keep the lead inside the employee's admin's scope so that admin can see
+  // and edit it (admins only see leads with assignedAdmin = them or owned by
+  // their employees — a lead with neither is invisible to every admin).
+  if (employee.createdBy) lead.assignedAdmin = employee.createdBy;
+  lead.noActionAlert1hSentAt = null;
+  lead.noActionAlert2hSentAt = null;
+  if (Array.isArray(lead.activityTimeline)) {
+    lead.activityTimeline.push({
+      action: "reassigned",
+      performedBy: req.admin?._id || req.user?._id || null,
+      role: req.admin?.role === "admin" ? "admin" : "superadmin",
+      timestamp: new Date(),
+      note: note || "Assigned from WhatsApp inbox",
+    });
+  }
+  await lead.save();
+  const io = global._io;
+  if (io) {
+    io.to(`agent:${employee._id}`).emit("new_lead_assigned", {
+      leadId: String(lead._id), leadName: lead.name, source: lead.source || "", eventType: "reassigned",
+    });
+  }
+  return lead;
+}
+
+const isPlaceholderName = (name) => !isRealName(name);
+
+// ── POST /whatsapp/conversations/:id/create-lead ─────────────────────────────
+// Body: { name?, remark?, status?, assignTo? }
+// Links the chat to an existing lead with the same number, or creates one.
+// Admins may pass assignTo (employee id); an employee becomes the owner.
+const createLeadFromConversation = async (req, res, next) => {
+  try {
+    const { id: conversationId } = req.params;
+    const { companyId, userId, role } = callerCtx(req);
+    if (!companyId) return res.status(400).json({ success: false, message: "Company not found for this account." });
+
+    const conversation = await WhatsAppConversation.findOne({ _id: conversationId, company: companyId });
+    if (!conversation) return res.status(404).json({ success: false, message: "Conversation not found" });
+
+    const admin = isAdminRole(role);
+    if (!admin && String(conversation.assignedAgent || "") !== String(userId)) {
+      return res.status(403).json({ success: false, message: "This chat is assigned to someone else." });
+    }
+
+    const typedName = String(req.body?.name || "").trim().slice(0, 120);
+    const name = (isRealName(typedName) && typedName) ||
+      (isRealName(conversation.contactName) && conversation.contactName.trim()) ||
+      "Sir/Madam";
+
+    // Who should own the lead?
+    let employee = null;
+    if (admin && req.body?.assignTo) {
+      employee = await findCompanyEmployee(companyId, req.body.assignTo);
+      if (!employee) return res.status(400).json({ success: false, message: "Choose an employee from your company." });
+    } else if (!admin) {
+      employee = await User.findOne({ _id: userId, company: companyId }).select("_id name createdBy").lean();
+    }
+
+    // 1) Already linked, or 2) a lead with this number exists → link + update.
+    let lead = conversation.lead ? await Lead.findOne({ _id: conversation.lead, company: companyId }) : null;
+    if (!lead) lead = await findLeadForWaPhone(conversation.waPhone, companyId);
+
+    let created = false;
+    if (lead) {
+      if (isRealName(typedName) && isPlaceholderName(lead.name)) {
+        lead.name = typedName;
+        await lead.save();
+      }
+    } else {
+      const custSvc = require("../services/customizationService");
+      const cust    = await custSvc.getCustomization(companyId);
+      const status  = (req.body?.status && (custSvc.findStatus(cust, String(req.body.status).trim()) || {}).key) ||
+        custSvc.defaultStatusKey(cust);
+      const remark  = String(req.body?.remark || "").trim() || "Saved from WhatsApp inbox";
+      try {
+        lead = await Lead.create({
+          name,
+          mobile:        conversation.waPhone,
+          source:        "WhatsApp",
+          status,
+          date:          new Date(),
+          remark,
+          initialRemark: remark,
+          company:       companyId,
+          user:          employee?._id || null,
+          // An admin who saves an unassigned chat keeps the lead in their scope.
+          assignedAdmin: employee?.createdBy || (role === "admin" ? req.admin?._id : null) || null,
+        });
+        created = true;
+      } catch (e) {
+        // Same number saved a moment ago (or stored in a format we didn't
+        // match) — fall back to linking that lead instead of failing.
+        if (e?.code === 11000) lead = await findLeadForWaPhone(conversation.waPhone, companyId);
+        if (!lead) throw e;
+      }
+    }
+
+    if (employee && (!lead.user || String(lead.user) !== String(employee._id))) {
+      lead = await assignLeadToEmployee(lead, employee, req, "Assigned when saved from WhatsApp inbox");
+    }
+
+    const convPatch = { lead: lead._id };
+    if (isRealName(name)) convPatch.contactName = name;
+    if (employee) convPatch.assignedAgent = employee._id;
+    const updatedConv = await WhatsAppConversation.findByIdAndUpdate(conversationId, convPatch, { new: true })
+      .populate("assignedAgent", "name email")
+      .populate("lead", "name mobile email status user");
+
+    if (created) {
+      console.log(`[WhatsApp] ✅ Saved ${conversation.waPhone} as lead "${lead.name}"`);
+      const agentName = req.admin?.name || req.user?.name || "Admin";
+      notifyWhatsAppLeadCreated({ companyId, leadName: lead.name, waPhone: conversation.waPhone, agentName })
+        .catch((e) => console.error("[Telegram-WA] notifyWhatsAppLeadCreated threw:", e.message));
+    }
+
+    return res.status(created ? 201 : 200).json({
+      success: true,
+      created,
+      message: created ? "Lead saved" : "Linked to existing lead",
+      lead: { _id: lead._id, name: lead.name, status: lead.status, user: lead.user },
+      conversation: updatedConv,
+    });
+  } catch (err) { console.error("createLeadFromConversation error:", err.message); next(err); }
+};
+
+// ── PATCH /whatsapp/conversations/:id/assign   (admin / super admin) ─────────
+// Body: { agentId }  — assigns the chat AND its linked lead to that employee.
+const assignConversation = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { companyId } = callerCtx(req);
+    const agentId = req.body?.agentId;
+    if (!agentId) return res.status(400).json({ success: false, message: "Choose an employee." });
+
+    const conversation = await WhatsAppConversation.findOne({ _id: id, company: companyId });
+    if (!conversation) return res.status(404).json({ success: false, message: "Conversation not found" });
+
+    const employee = await findCompanyEmployee(companyId, agentId);
+    if (!employee) return res.status(400).json({ success: false, message: "Choose an employee from your company." });
+
+    await WhatsAppConversation.updateOne({ _id: conversation._id }, { assignedAgent: employee._id });
+
+    // Keep the linked lead in step, otherwise the chat moves but the lead
+    // stays unassigned (and invisible to admins).
+    let lead = conversation.lead ? await Lead.findOne({ _id: conversation.lead, company: companyId }) : null;
+    if (!lead) {
+      lead = await findLeadForWaPhone(conversation.waPhone, companyId);
+      if (lead) await WhatsAppConversation.updateOne({ _id: conversation._id }, { lead: lead._id });
+    }
+    if (lead) await assignLeadToEmployee(lead, employee, req, "Assigned from WhatsApp inbox");
+
+    const updated = await WhatsAppConversation.findById(conversation._id)
+      .populate("assignedAgent", "name email")
+      .populate("lead", "name mobile email status user");
+
+    const io = global._io;
+    if (io) {
+      io.to(`wa_agent_${employee._id}`).emit("wa_assigned", {
+        conversationId: id,
+        message: "A new WhatsApp conversation has been assigned to you",
+      });
+    }
+    res.json({ success: true, conversation: updated, leadAssigned: !!lead });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── PATCH /whatsapp/conversations/:id/contact ────────────────────────────────
+// Body: { name } — rename the chat contact. A linked lead still named with a
+// placeholder ("Sir/Madam …") is renamed too; a real lead name is left alone.
+const updateConversationContact = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { companyId, userId, role } = callerCtx(req);
+    const name = String(req.body?.name || "").trim().slice(0, 120);
+    if (!isRealName(name)) return res.status(400).json({ success: false, message: "Enter the contact's name." });
+
+    const conversation = await WhatsAppConversation.findOne({ _id: id, company: companyId });
+    if (!conversation) return res.status(404).json({ success: false, message: "Conversation not found" });
+    if (!isAdminRole(role) && String(conversation.assignedAgent || "") !== String(userId)) {
+      return res.status(403).json({ success: false, message: "This chat is assigned to someone else." });
+    }
+
+    await WhatsAppConversation.updateOne({ _id: conversation._id }, { contactName: name });
+
+    let leadRenamed = false;
+    if (conversation.lead) {
+      const lead = await Lead.findOne({ _id: conversation.lead, company: companyId });
+      if (lead && isPlaceholderName(lead.name)) {
+        lead.name = name;
+        await lead.save();
+        leadRenamed = true;
+      }
+    }
+
+    const updated = await WhatsAppConversation.findById(conversation._id)
+      .populate("assignedAgent", "name email")
+      .populate("lead", "name mobile email status user");
+    res.json({ success: true, conversation: updated, leadRenamed });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getConversations,
   getMessages,
@@ -2553,5 +2738,6 @@ module.exports = {
   syncWhatsAppTemplates,
   listLeadSources,
   createLeadFromConversation,
+  updateConversationContact,
   botReply,
 };
