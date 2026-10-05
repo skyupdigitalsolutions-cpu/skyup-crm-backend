@@ -40,6 +40,12 @@ function isRealName(name) {
   // CRM auto-generated fallback ("WhatsApp 919876543210")
   if (/^whatsapp\s+\d+$/i.test(trimmed)) return false;
 
+  // The CRM's own placeholders for nameless WhatsApp contacts:
+  // "Sir/Madam" and "Sir/Madam (919876543210)". Treating these as real names
+  // made them stick forever (a real WhatsApp profile name never replaced them)
+  // and put the raw phone number into greetings ("Hi Sir/Madam (9198…)").
+  if (/^sir\s*\/\s*madam\b/i.test(trimmed)) return false;
+
   // Only non-letter characters (emoji, punctuation, symbols)
   if (!/[a-zA-Z\u0080-\uFFFF]/.test(trimmed)) return false;
 
