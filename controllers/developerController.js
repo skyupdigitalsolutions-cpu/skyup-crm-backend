@@ -245,17 +245,31 @@ const _createCompanyHandler = async (req, res) => {
 };
 const createCompany = withOptionalLogo(_createCompanyHandler);
 
+const MAX_SUPER_ADMINS_PER_COMPANY = Number(process.env.MAX_SUPER_ADMINS_PER_COMPANY) || 10;
+
 // ── Create super_admin ────────────────────────────────────────────────────────
 const createCompanySuperAdmin = async (req, res) => {
   try {
     const { id: companyId } = req.params;
-    const { name, email, password } = req.body;
+    const name     = String(req.body?.name  || "").trim();
+    const email    = String(req.body?.email || "").trim();
+    const password = req.body?.password;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "Name, email and password are required." });
+    }
 
     const company = await Company.findById(companyId);
     if (!company) return res.status(404).json({ message: "Company not found" });
 
-    const exists = await Admin.findOne({ company: companyId, role: "super_admin" });
-    if (exists) return res.status(400).json({ message: "This company already has a super admin" });
+    // A company may have several super admins. A soft cap keeps a typo'd loop
+    // or script from flooding the tenant with full-access accounts.
+    const superAdminCount = await Admin.countDocuments({ company: companyId, role: "super_admin" });
+    if (superAdminCount >= MAX_SUPER_ADMINS_PER_COMPANY) {
+      return res.status(400).json({
+        message: `A company can have at most ${MAX_SUPER_ADMINS_PER_COMPANY} super admins.`,
+      });
+    }
 
     // ── Orphan-safe email reclaim ─────────────────────────────────────────────
     // Admin.email is GLOBALLY unique. If a company was deleted directly in the DB
@@ -299,7 +313,7 @@ const createCompanySuperAdmin = async (req, res) => {
       metadata: { createdEmail: superAdmin.email, createdRole: "super_admin", via: "developer_panel" },
     });
 
-    res.status(201).json({ _id: superAdmin._id, name: superAdmin.name, email: superAdmin.email, role: superAdmin.role });
+    res.status(201).json({ _id: superAdmin._id, name: superAdmin.name, email: superAdmin.email, role: superAdmin.role, createdAt: superAdmin.createdAt });
   } catch (error) {
     // Surface a friendly message for any remaining unique-key collision
     if (error?.name === "ValidationError") {
@@ -309,6 +323,56 @@ const createCompanySuperAdmin = async (req, res) => {
     if (error?.code === 11000) {
       return res.status(400).json({ message: "An account with this email already exists. Use a different email." });
     }
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── List a company's super admins ────────────────────────────────────────────
+// GET /api/developer/companies/:id/super-admins
+const listCompanySuperAdmins = async (req, res) => {
+  try {
+    const { id: companyId } = req.params;
+    const company = await Company.findById(companyId).select("_id name").lean();
+    if (!company) return res.status(404).json({ message: "Company not found" });
+
+    const superAdmins = await Admin.find({ company: companyId, role: "super_admin" })
+      .select("_id name email role createdAt")
+      .sort({ createdAt: 1 })
+      .lean();
+
+    res.json({ superAdmins, max: MAX_SUPER_ADMINS_PER_COMPANY });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── Remove one super admin ───────────────────────────────────────────────────
+// DELETE /api/developer/companies/:id/super-admins/:adminId
+// Refuses to remove the last super admin so a company is never left without one.
+const deleteCompanySuperAdmin = async (req, res) => {
+  try {
+    const { id: companyId, adminId } = req.params;
+
+    const target = await Admin.findOne({ _id: adminId, company: companyId, role: "super_admin" });
+    if (!target) return res.status(404).json({ message: "Super admin not found for this company." });
+
+    const count = await Admin.countDocuments({ company: companyId, role: "super_admin" });
+    if (count <= 1) {
+      return res.status(400).json({ message: "A company needs at least one super admin. Add another before removing this one." });
+    }
+
+    await Admin.deleteOne({ _id: target._id });
+
+    logAuditEvent({
+      action: "delete", resourceType: "Admin", req,
+      actorId: req.user?._id, actorModel: "Developer", actorEmail: req.user?.email,
+      actorRole: req.user?.role || "developer", company: companyId,
+      resourceId: target._id, statusCode: 200,
+      metadata: { deletedEmail: target.email, deletedRole: "super_admin", via: "developer_panel" },
+    });
+
+    res.json({ success: true, message: "Super admin removed." });
+  } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
@@ -1043,6 +1107,8 @@ module.exports = {
   getDeveloperDashboard,
   createCompany,
   createCompanySuperAdmin,
+  listCompanySuperAdmins,
+  deleteCompanySuperAdmin,
   getCompanies,
   updateCompany,
   deleteCompany,
