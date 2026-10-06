@@ -467,14 +467,27 @@ const getMonitoringHistory = async (req, res) => {
         .limit(limit)
         .select("-recordings.transcript")
         .populate("user", "name email")
-        .populate("matchedLead", "name status")
+        .populate("matchedLead", "name status remark")
         .lean(),
       MobileCallLog.countDocuments(filter),
     ]);
 
     // Drop placeholder recordings (auto-summary rows have an empty url).
+    // Remarks: the agent's remark for this call when there is one; otherwise
+    // the lead's latest remark (marked as such). Auto-generated texts like
+    // "Outgoing call from mobile app (2m)" don't count as remarks.
+    const AUTO_REMARK = /^(outgoing|incoming|missed|rejected|voicemail|blocked|unknown) call from mobile app/i;
+    const realRemark = (r) => {
+      const t = String(r || "").trim();
+      return t && !AUTO_REMARK.test(t) ? t : "";
+    };
     for (const l of logs) {
       l.recordings = (l.recordings || []).filter((r) => r && r.url);
+      const callRemark = realRemark(l.remark);
+      const leadRemark = realRemark(l.matchedLead && l.matchedLead.remark);
+      l.remark = callRemark || null;
+      l.leadRemark = leadRemark || null;
+      if (l.matchedLead) delete l.matchedLead.remark;
     }
 
     res.json({ logs, total, page, limit, totalPages: Math.ceil(total / limit) });
