@@ -2,10 +2,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-admin lead visibility.
 //
-// Within ONE company there can be many admins plus a single super_admin.
-// Requirement: an admin must ONLY see the leads that belong to them; leads that
-// belong to another admin must be invisible. The super_admin sees everything in
-// the company.
+// Within ONE company there can be many admins plus super_admins.
+// An admin sees the leads that belong to them OR to any admin in the same
+// AdminGroup (groups share leads), plus unassigned "pool" leads offered to them.
+// Leads of admins outside their groups stay invisible. A super_admin sees
+// everything in the company.
 //
 // Ownership model (matches the existing convention in leadController.js where a
 // lead's owning admin is resolved as `lead.assignedAdmin || employee.createdBy`):
@@ -45,35 +46,53 @@ function isSuperAdminRole(role) {
 //                                         `user` themselves; never restrict here)
 // Callers should combine it with their base query via mergeLeadScope() so that
 // an existing `$or` in the base query is never clobbered.
+// Admin ids whose leads this admin may see: the admin plus every admin that
+// shares an AdminGroup with them. Cached with the employee list below.
+async function getGroupAdminIds(companyId, adminId) {
+  const AdminGroup = require("../models/AdminGroup");
+  const groups = await AdminGroup.find({ company: companyId, admins: adminId }).select("admins").lean();
+  const ids = new Map();
+  ids.set(String(adminId), adminId);
+  groups.forEach(function (g) {
+    (g.admins || []).forEach(function (a) { ids.set(String(a), a); });
+  });
+  return Array.from(ids.values());
+}
+
+// Cached { adminIds, employeeIds } for an admin (20s).
+async function getAdminReach(companyId, adminId) {
+  const key = String(companyId) + ":" + String(adminId);
+  const hit = _scopeCache.get(key);
+  if (hit && hit.exp > Date.now()) return hit.value;
+  const adminIds = await getGroupAdminIds(companyId, adminId);
+  const employees = await User.find({ company: companyId, createdBy: { $in: adminIds } })
+    .select("_id")
+    .lean();
+  const value = { adminIds: adminIds, employeeIds: employees.map(function (u) { return u._id; }) };
+  if (_scopeCache.size > 2000) _scopeCache.clear();
+  _scopeCache.set(key, { value: value, exp: Date.now() + 20 * 1000 });
+  return value;
+}
+
 async function getAdminLeadScope(req, companyId) {
   const role = resolveRole(req);
-
   // ONLY a plain "admin" is restricted. super_admin sees everything; employees
   // and any other role are left untouched so shared handlers keep working.
   if (role !== "admin") return {};
-
   const adminId = resolveAdminId(req);
   if (!adminId) return {};
 
-  // Employees this admin created — their leads count as this admin's leads.
+  // Admin groups: admins in the same group share each other's leads, so the
+  // ownership checks below run over every admin in the caller's groups.
   // PERF: cached 20s per admin (was a DB round trip on every lead request).
-  const key = String(companyId) + ":" + String(adminId);
-  const hit = _scopeCache.get(key);
-  let employeeIds;
-  if (hit && hit.exp > Date.now()) {
-    employeeIds = hit.ids;
-  } else {
-    const employees = await User.find({ company: companyId, createdBy: adminId })
-      .select("_id")
-      .lean();
-    employeeIds = employees.map(function (u) { return u._id; });
-    if (_scopeCache.size > 2000) _scopeCache.clear();
-    _scopeCache.set(key, { ids: employeeIds, exp: Date.now() + 20 * 1000 });
-  }
+  const reach = await getAdminReach(companyId, adminId);
 
-  const or = [{ assignedAdmin: adminId }];
-  if (employeeIds.length > 0) or.push({ user: { $in: employeeIds } });
-
+  const or = [{ assignedAdmin: { $in: reach.adminIds } }];
+  if (reach.employeeIds.length > 0) or.push({ user: { $in: reach.employeeIds } });
+  // Shared pool: unassigned leads offered to this admin (or a group mate).
+  // `user: null` makes a pool lead drop out of everyone else's view the
+  // moment one admin assigns it to an employee.
+  or.push({ poolAdmins: { $in: reach.adminIds }, user: null });
   return { $or: or };
 }
 
@@ -107,4 +126,5 @@ function getAdminConfigScope(req) {
 }
 
 module.exports = {
-  clearAdminLeadScopeCache, getAdminLeadScope, mergeLeadScope, isSuperAdminRole, getAdminConfigScope, resolveAdminId };
+  clearAdminLeadScopeCache, getAdminLeadScope, mergeLeadScope, isSuperAdminRole, getAdminConfigScope, resolveAdminId,
+  getAdminReach };
