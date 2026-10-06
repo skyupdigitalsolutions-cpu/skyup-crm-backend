@@ -309,6 +309,15 @@ const leadSchema = mongoose.Schema(
       default: null,
     },
 
+    // ── Shared pool (manual import) ──────────────────────────────────────────
+    // Admins who may claim this lead while it has no employee. Every listed
+    // admin sees it as "Unassigned"; the first to assign it to an employee
+    // takes it (the claim clears this list). Empty for normal leads.
+    poolAdmins: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Admin" }],
+      default: [],
+    },
+
     // ── Full audit trail of every action on this lead ─────────────────────────
     activityTimeline: [
       {
@@ -844,6 +853,7 @@ leadSchema.index({ company: 1, metaConfigId: 1 }); // Meta page / ad-set lead li
 leadSchema.index({ company: 1, adSetName: 1 }); // ad-set rescoring + drill-down
 leadSchema.index({ company: 1, campaign: 1, adSetName: 1, createdAt: -1 }); // campaign drill-down
 leadSchema.index({ company: 1, assignedAdmin: 1 }); // per-admin lead scope
+leadSchema.index({ company: 1, poolAdmins: 1, user: 1 }); // shared-pool "Unassigned" list
 leadSchema.index({ company: 1, user: 1, updatedAt: -1 }); // Team Lead lead list
 leadSchema.index({ company: 1, 'scheduledCalls.done': 1, 'scheduledCalls.scheduledAt': 1 }); // follow-up alerts
 leadSchema.index({ company: 1, 'phoneRevealLog.userId': 1 }); // reveal audits per admin
