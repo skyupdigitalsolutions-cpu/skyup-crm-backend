@@ -72,6 +72,17 @@ const countCompanyLeads = async (req) => {
   router.delete("/assignment/groups/:groupId", protectAdmin, la.deleteGroup);
 }
 
+// ── Lead export with super-admin approval (single use, expires at midnight IST)
+{
+  const ex = require("../controllers/exportRequestController");
+  router.get("/export-requests/mine",          protectAdmin, ex.getMyExportRequest);
+  router.post("/export-requests",              protectAdmin, ex.createExportRequest);
+  router.get("/export-requests",               protectAdmin, ex.listExportRequests);
+  router.post("/export-requests/:id/approve",  protectAdmin, ex.approveExportRequest);
+  router.post("/export-requests/:id/reject",   protectAdmin, ex.rejectExportRequest);
+  router.post("/admin/export",                 protectAdmin, ex.exportLeads);
+}
+
 // ── Duplicate-check endpoints (must come BEFORE /:id wildcard) ───────────────
 router.get("/check-duplicate", protect, checkDuplicate);
 router.get("/admin/check-duplicate", protectAdmin, checkDuplicate);
