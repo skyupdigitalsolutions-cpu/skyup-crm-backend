@@ -65,6 +65,13 @@ const mobileCallLogSchema = new mongoose.Schema(
       type:    [recordingSchema],
       default: [],
     },
+    // Agent's remark / outcome for THIS call. Copied from the lead's
+    // callHistory by mobileCallLogController (linkRemarks) and by
+    // scripts/backfillCallRemarks.js. These fields were missing from the
+    // schema, so Mongoose's strict mode silently dropped every write and no
+    // call log ever stored a remark ("Remark pending" forever).
+    remark:  { type: String, default: null, maxlength: 500 },
+    outcome: { type: String, default: null },
   },
   { timestamps: true },
 );
