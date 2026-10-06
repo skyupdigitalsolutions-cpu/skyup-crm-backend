@@ -751,7 +751,7 @@ const adminCreateLeadsBulk = async (req, res) => {
 // ── Admin import CSV ──────────────────────────────────────────────────────────
 const adminImportCSV = async (req, res) => {
   try {
-    const companyId = req.admin?.company?._id || req.admin?.company;
+    const companyId = getCompanyId(req); // admin or super admin
     if (!companyId)
       return res.status(400).json({ message: "companyId is required." });
     const rows = req.body.leads;
@@ -760,9 +760,21 @@ const adminImportCSV = async (req, res) => {
     const cust = await getCust(companyId);
     if (adminDenied(req, res, cust, "canImportLeads", "lead import")) return;
     const lc = cust.workflows.leadCreation;
-    const importStrategy = cust.workflows.assignment.importStrategy || "round_robin";
+    // Per-import choice (assignMode) overrides the company default.
+    const { resolvePoolAdmins, IMPORT_MODES } = require("./leadAssignmentController");
+    const importStrategy = IMPORT_MODES.includes(req.body.assignMode)
+      ? req.body.assignMode
+      : (cust.workflows.assignment.importStrategy || "round_robin");
+    // Manual → shared pool: leads stay unassigned and every ticked admin sees
+    // them under "Unassigned" until one of them assigns them to an employee.
+    let poolAdmins = [];
+    if (importStrategy === "manual") {
+      const pool = await resolvePoolAdmins(req, companyId, req.body.poolAdmins);
+      if (pool.error) return res.status(400).json({ message: pool.error });
+      poolAdmins = pool.poolAdmins;
+    }
     const users = await User.find({ company: companyId }).select("_id").lean();
-    if (!users.length && importStrategy !== "unassigned")
+    if (!users.length && importStrategy !== "unassigned" && importStrategy !== "manual")
       return res
         .status(400)
         .json({ message: "No users found in this company." });
@@ -773,7 +785,7 @@ const adminImportCSV = async (req, res) => {
       const row = rows[i];
       try {
         const assignedUser =
-          importStrategy === "unassigned" ? null
+          importStrategy === "unassigned" || importStrategy === "manual" ? null
           : importStrategy === "least_loaded" ? await getNextUser(companyId, [], { purpose: "verify", cust })
           : users[i % users.length]._id;
         const cf = readCustomFields(cust, row, "admin", false);
@@ -887,7 +899,10 @@ const adminImportCSV = async (req, res) => {
             ),
           user: assignedUser,
           company: companyId,
-          assignedAdmin: req.admin?._id || null,
+          // Pool leads have no owning admin until claimed; otherwise the
+          // importing admin owns them (super admin → none, as before).
+          assignedAdmin: importStrategy === "manual" ? null : (req.admin?._id || null),
+          poolAdmins,
         };
         if (row.leadgenId) adminDoc.leadgenId = row.leadgenId;
 
@@ -908,7 +923,10 @@ const adminImportCSV = async (req, res) => {
       total: rows.length,
       savedCount: results.length,
       errorCount: errors.length,
-      message: `${results.length} leads imported with round-robin assignment.`,
+      assignMode: importStrategy,
+      message: importStrategy === "manual"
+        ? `${results.length} leads imported as unassigned for ${poolAdmins.length} admin${poolAdmins.length === 1 ? "" : "s"} to assign.`
+        : `${results.length} leads imported with ${importStrategy.replace("_", " ")} assignment.`,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
