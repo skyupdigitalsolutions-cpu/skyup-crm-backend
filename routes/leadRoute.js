@@ -52,10 +52,25 @@ const Lead = require("../models/Leads");
 const countCompanyLeads = async (req) => {
   const companyId =
     req.admin?.company?._id || req.admin?.company ||
+    req.superAdmin?.company?._id || req.superAdmin?.company ||
     req.user?.company?._id  || req.user?.company  || null;
   if (!companyId) return 0;
   return Lead.countDocuments({ company: companyId });
 };
+
+// ── Lead assignment: company default, shared admin pool, admin groups ───────
+// (protectAdmin accepts admin AND super_admin tokens.) Must come BEFORE /:id.
+{
+  const la = require("../controllers/leadAssignmentController");
+  router.get("/assignment/options",            protectAdmin, la.getAssignmentOptions);
+  router.put("/assignment/settings",           protectAdmin, la.updateAssignmentSettings);
+  router.post("/assignment/claim",             protectAdmin, la.claimPoolLeads);
+  router.get("/assignment/unassigned",         protectAdmin, la.listUnassigned);
+  router.get("/assignment/groups",             protectAdmin, la.listGroups);
+  router.post("/assignment/groups",            protectAdmin, la.createGroup);
+  router.put("/assignment/groups/:groupId",    protectAdmin, la.updateGroup);
+  router.delete("/assignment/groups/:groupId", protectAdmin, la.deleteGroup);
+}
 
 // ── Duplicate-check endpoints (must come BEFORE /:id wildcard) ───────────────
 router.get("/check-duplicate", protect, checkDuplicate);
@@ -88,6 +103,7 @@ router.patch("/admin/bulk-update-emails", protectAdmin, bulkUpdateEmails);
 router.patch("/admin/update-email/:id", protectAdmin, validateObjectId("id"), updateLeadEmail);
 router.post("/superadmin/create",      protectSuperAdmin, checkLimit("leads", countCompanyLeads), adminCreateLead);
 router.post("/superadmin/bulk-create", protectSuperAdmin, checkLimit("leads", countCompanyLeads), adminCreateLeadsBulk);
+router.post("/superadmin/import-csv",  protectSuperAdmin, checkLimit("leads", countCompanyLeads), adminImportCSV);
 router.post("/import-csv", protect, checkLimit("leads", countCompanyLeads), userImportCSV);
 router.post("/",           protect, checkLimit("leads", countCompanyLeads), createLead);
 
