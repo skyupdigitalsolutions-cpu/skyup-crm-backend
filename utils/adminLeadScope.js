@@ -74,6 +74,27 @@ async function getAdminReach(companyId, adminId) {
   return value;
 }
 
+// Admins whose EMPLOYEES the caller may see and manage: the caller plus every
+// admin sharing an AdminGroup with them ("full control" inside a group).
+// Use as  { createdBy: { $in: await getManageableAdminIds(req, companyId) } }.
+async function getManageableAdminIds(req, companyId) {
+  const adminId = resolveAdminId(req);
+  const cid = companyId || (req.admin && req.admin.company && (req.admin.company._id || req.admin.company));
+  if (!adminId || !cid) return adminId ? [adminId] : [];
+  const reach = await getAdminReach(cid, adminId);
+  return reach.adminIds;
+}
+
+// True when the caller may manage this employee (super admin: anyone in the
+// company; admin: employees of their own or a group mate's).
+async function canManageEmployee(req, employee, companyId) {
+  if (!employee) return false;
+  const role = resolveRole(req);
+  if (isSuperAdminRole(role)) return true;
+  const ids = await getManageableAdminIds(req, companyId);
+  return ids.some(function (id) { return String(id) === String(employee.createdBy); });
+}
+
 async function getAdminLeadScope(req, companyId) {
   const role = resolveRole(req);
   // ONLY a plain "admin" is restricted. super_admin sees everything; employees
@@ -127,4 +148,4 @@ function getAdminConfigScope(req) {
 
 module.exports = {
   clearAdminLeadScopeCache, getAdminLeadScope, mergeLeadScope, isSuperAdminRole, getAdminConfigScope, resolveAdminId,
-  getAdminReach };
+  getAdminReach, getManageableAdminIds, canManageEmployee };
