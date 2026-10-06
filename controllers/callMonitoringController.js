@@ -106,7 +106,11 @@ async function resolveScope(req, res) {
   }
 
   const userFilter = { company };
-  if (!isSuperAdmin(req.admin)) userFilter.createdBy = req.admin._id;
+  // Admin groups: group admins see each other's employees' calls too.
+  if (!isSuperAdmin(req.admin)) {
+    const { getManageableAdminIds } = require("../utils/adminLeadScope");
+    userFilter.createdBy = { $in: await getManageableAdminIds(req, company) };
+  }
 
   const users = await User.find(userFilter)
     .select("name email deviceModel appVersion platform lastLoginAt callLogSyncEnabled")
