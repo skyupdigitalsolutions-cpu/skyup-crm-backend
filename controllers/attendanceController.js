@@ -1,3 +1,4 @@
+const { getManageableAdminIds } = require("../utils/adminLeadScope");
 const Attendance    = require("../models/Attendance");
 const User          = require("../models/Users");
 const Company       = require("../models/Company");
@@ -697,7 +698,7 @@ const getCompanyAttendance = async (req, res, next) => {
     // Scope: super_admin sees all users; regular admin sees only users they created
     const userQuery = { company: companyId };
     if (req.admin.role !== "super_admin") {
-      userQuery.createdBy = req.admin._id;
+      userQuery.createdBy = { $in: await getManageableAdminIds(req) }; // own + admin-group employees
     }
 
     const users   = await User.find(userQuery).select("name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory").lean();
@@ -752,7 +753,7 @@ const getAttendanceReport = async (req, res, next) => {
     // Scope: super_admin sees all users; regular admin sees only their users
     let allowedUserIds = null;
     if (req.admin.role !== "super_admin") {
-      const scopedUsers = await User.find({ company: companyId, createdBy: req.admin._id }).select("_id").lean();
+      const scopedUsers = await User.find({ company: companyId, createdBy: { $in: await getManageableAdminIds(req) } }).select("_id").lean();
       allowedUserIds = scopedUsers.map(u => u._id);
     }
 
@@ -952,7 +953,7 @@ const exportAttendance = async (req, res, next) => {
     // Scope: super_admin sees all; regular admin sees only their users
     let exportAllowedIds = null;
     if (req.admin.role !== "super_admin") {
-      const scopedUsers = await User.find({ company: companyId, createdBy: req.admin._id }).select("_id").lean();
+      const scopedUsers = await User.find({ company: companyId, createdBy: { $in: await getManageableAdminIds(req) } }).select("_id").lean();
       exportAllowedIds = scopedUsers.map(u => u._id);
     }
 
@@ -1015,7 +1016,7 @@ const getCompanyUsers = async (req, res, next) => {
     // Scope: super_admin sees all users; regular admin sees only their own users
     const userQuery = { company: req.admin.company._id };
     if (req.admin.role !== "super_admin") {
-      userQuery.createdBy = req.admin._id;
+      userQuery.createdBy = { $in: await getManageableAdminIds(req) }; // own + admin-group employees
     }
     const users = await User.find(userQuery)
       .select("name email ipAddress appName appVersion platform deviceModel osVersion lastLoginAt loginHistory createdAt").lean();
@@ -1282,7 +1283,7 @@ const getClockLocationHistory = async (req, res, next) => {
 
     // Scope non-super-admins to their own users.
     if (req.admin.role !== "super_admin") {
-      const scoped = await User.find({ company: companyId, createdBy: req.admin._id }).select("_id").lean();
+      const scoped = await User.find({ company: companyId, createdBy: { $in: await getManageableAdminIds(req) } }).select("_id").lean();
       const allowed = scoped.map((u) => String(u._id));
       if (userId) {
         if (!allowed.includes(String(userId))) return res.json({ records: [], total: 0, page: 1, pages: 1 });
