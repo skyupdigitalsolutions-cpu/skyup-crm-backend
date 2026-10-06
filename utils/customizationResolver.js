@@ -468,7 +468,7 @@ function validateSection(section, value, current) {
         }
       }
       if (!["least_loaded", "round_robin", "manual"].includes(w.assignment.strategy)) w.assignment.strategy = "least_loaded";
-      if (!["round_robin", "least_loaded", "unassigned"].includes(w.assignment.importStrategy)) w.assignment.importStrategy = "round_robin";
+      if (!["round_robin", "least_loaded", "unassigned", "manual"].includes(w.assignment.importStrategy)) w.assignment.importStrategy = "round_robin";
       if (!["round_robin", "team_lead"].includes(w.notInterested.verifier)) w.notInterested.verifier = "round_robin";
       w.leadUpdate.defaultFollowUpHour = num(w.leadUpdate.defaultFollowUpHour, 9, 0, 23);
       w.leadUpdate.defaultFollowUpDays = num(w.leadUpdate.defaultFollowUpDays, 1, 0, 365);
