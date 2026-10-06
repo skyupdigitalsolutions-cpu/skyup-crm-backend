@@ -271,7 +271,7 @@ const DEFAULT_WORKFLOWS = {
   // Assignment of new / reassigned leads
   assignment: {
     strategy: "least_loaded",          // least_loaded | round_robin | manual
-    importStrategy: "round_robin",     // admin imports: round_robin | least_loaded | unassigned
+    importStrategy: "round_robin",     // admin imports: round_robin | least_loaded | unassigned | manual (shared admin pool)
   },
 
   notInterested: {
