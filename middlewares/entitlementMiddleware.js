@@ -31,6 +31,11 @@ function resolveCompanyId(req) {
   return (
     req.admin?.company?._id ||
     req.admin?.company      ||
+    // protectSuperAdmin sets req.superAdmin only (not req.admin) — without
+    // this, every super-admin route behind checkLimit failed with
+    // "Company context not found".
+    req.superAdmin?.company?._id ||
+    req.superAdmin?.company      ||
     req.user?.company?._id  ||
     req.user?.company       ||
     req.params?.companyId   ||
