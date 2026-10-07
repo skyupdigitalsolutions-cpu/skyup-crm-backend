@@ -272,6 +272,10 @@ const DEFAULT_WORKFLOWS = {
   assignment: {
     strategy: "least_loaded",          // least_loaded | round_robin | manual
     importStrategy: "round_robin",     // admin imports: round_robin | least_loaded | unassigned | manual (shared admin pool)
+    // New WhatsApp chats from unknown numbers (cold inbound via the WhatsApp
+    // API): false = keep them in the Communications inbox until someone saves
+    // them as a lead (no lead, so no nurture templates); true = auto-create.
+    whatsappAutoLead: false,
   },
 
   notInterested: {
