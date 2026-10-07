@@ -225,7 +225,6 @@ router.post("/admin/notify-hot", protectAdmin, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
-
 // ── Client Meeting Remarks ─────────────────────────────────────────────────────
 const { addMeetingRemark, getMeetingRemarks, sendMeetingWhatsApp, addWhatsAppScreenshot, getWhatsAppScreenshots } = require('../controllers/meetingRemarkController');
 // Employee routes
