@@ -321,7 +321,15 @@ const createCompanySuperAdmin = async (req, res) => {
       return res.status(400).json({ message: first?.message || "Please check the details and try again." });
     }
     if (error?.code === 11000) {
-      return res.status(400).json({ message: "An account with this email already exists. Use a different email." });
+      // Say which duplicate actually happened instead of always blaming the email.
+      const keys = Object.keys(error.keyPattern || error.keyValue || {});
+      if (keys.includes("email") || !keys.length) {
+        return res.status(400).json({ message: "An account with this email already exists. Use a different email." });
+      }
+      if (keys.includes("company") && keys.includes("role")) {
+        return res.status(409).json({ message: "The database still allows only one super admin per company. Restart the server once so it can remove that old rule, then try again." });
+      }
+      return res.status(400).json({ message: `Duplicate value for: ${keys.join(", ")}.` });
     }
     res.status(500).json({ message: error.message });
   }
