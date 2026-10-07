@@ -1,3 +1,4 @@
+const { getManageableAdminIds, canManageEmployee } = require("../utils/adminLeadScope");
 const axios   = require("axios");
 const crypto  = require("crypto");
 const Admin   = require("../models/Admin");
@@ -360,7 +361,8 @@ const getCompanyUsers = async (req, res) => {
     const companyId = req.admin.company._id;
     const filter = { company: companyId };
     const ownFilter = { company: companyId };
-    if (req.admin.role !== "super_admin") ownFilter.createdBy = req.admin._id;
+    // Admin groups: group admins see each other's employees too.
+    if (req.admin.role !== "super_admin") ownFilter.createdBy = { $in: await getManageableAdminIds(req, companyId) };
 
     // SECURITY FIX: plainPassword is deprecated — always excluded now.
     const userSelectFields = "-password -plainPassword";
@@ -478,7 +480,7 @@ const updateUserLanguages = async (req, res) => {
       if (v && !seen[v.toLowerCase()]) { seen[v.toLowerCase()] = true; clean.push(v); }
     }
     const query = { _id: req.params.id, company: companyId };
-    if (req.admin.role !== "super_admin") query.createdBy = req.admin._id;
+    if (req.admin.role !== "super_admin") query.createdBy = { $in: await getManageableAdminIds(req, companyId) };
     const user = await User.findOneAndUpdate(query, { languages: clean }, { new: true }).select("-password -plainPassword");
     if (!user) return res.status(404).json({ message: "User not found" });
     res.status(200).json({ _id: user._id, name: user.name, languages: user.languages });
@@ -499,9 +501,9 @@ const deleteCompanyUser = async (req, res) => {
     if (!existsAtAll) {
       return res.status(404).json({ message: "User not found." });
     }
-    if (req.admin.role !== "super_admin" && String(existsAtAll.createdBy) !== String(req.admin._id)) {
+    if (!(await canManageEmployee(req, existsAtAll, req.admin.company._id))) {
       return res.status(403).json({
-        message: "You can only delete employees you created yourself. Ask a super admin to remove this one.",
+        message: "You can only delete employees of your own team or your admin group. Ask a super admin to remove this one.",
       });
     }
     const user = existsAtAll;
@@ -1366,6 +1368,9 @@ const updateUserTelegram = async (req, res, next) => {
     const companyId          = req.admin?.company?._id || req.admin?.company;
     const user = await User.findOne({ _id: id, company: companyId });
     if (!user) return res.status(404).json({ message: 'Employee not found' });
+    if (!(await canManageEmployee(req, user, companyId))) {
+      return res.status(403).json({ message: "You can only manage employees of your own team or your admin group." });
+    }
     user.telegramChatId = telegramChatId ? String(telegramChatId).trim() : null;
     await user.save();
     res.json({ message: 'Telegram chat ID updated.', telegramChatId: user.telegramChatId });
@@ -1411,6 +1416,9 @@ const updateMeetingPermission = async (req, res, next) => {
     const { grant } = req.body;
     const user = await User.findOne({ _id: id, company: companyId });
     if (!user) return res.status(404).json({ message: 'Employee not found' });
+    if (!(await canManageEmployee(req, user, companyId))) {
+      return res.status(403).json({ message: "You can only manage employees of your own team or your admin group." });
+    }
     user.clientMeetingPermission          = Boolean(grant);
     user.clientMeetingPermissionGrantedBy = grant ? (req.admin?._id || null) : null;
     user.clientMeetingPermissionGrantedAt = grant ? new Date() : null;
@@ -1567,6 +1575,9 @@ const resetUserPassword = async (req, res, next) => {
     const companyId = req.admin.company?._id || req.admin.company;
     const target = await User.findOne({ _id: req.params.id, company: companyId });
     if (!target) return res.status(404).json({ message: "User not found" });
+    if (!(await canManageEmployee(req, target, companyId))) {
+      return res.status(403).json({ message: "You can only manage employees of your own team or your admin group." });
+    }
 
     const newPassword = generateSecurePassword({ email: target.email, name: target.name });
     target.password = newPassword; // pre-save hook hashes it — never stored plain
