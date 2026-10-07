@@ -178,6 +178,27 @@ const leadSchema = mongoose.Schema(
             uploadedAt: { type: Date, default: Date.now },
             userId:     { type: mongoose.Schema.Types.ObjectId, ref: "User" },
             userName:   { type: String, default: "" },
+            // Chat read from the image by AI (GPT-4o vision) — shown in the
+            // Lead Journey. Kept here, NOT copied into the official WhatsApp
+            // thread, so evidence never mixes with real messages.
+            chat: {
+              status:    { type: String, enum: ["pending", "done", "failed", "unavailable", null], default: null },
+              summary:   { type: String, default: "" },
+              sentiment: { type: String, default: "" },
+              keyTopics: { type: [String], default: [] },
+              messages: {
+                type: [new mongoose.Schema({
+                  direction:   { type: String, default: "" },  // inbound | outbound
+                  text:        { type: String, default: "" },
+                  time:        { type: String, default: "" },
+                  date:        { type: String, default: "" },
+                  messageType: { type: String, default: "text" },
+                }, { _id: false })],
+                default: [],
+              },
+              error:  { type: String, default: "" },
+              readAt: { type: Date, default: null },
+            },
           },
           { _id: true }
         ),
