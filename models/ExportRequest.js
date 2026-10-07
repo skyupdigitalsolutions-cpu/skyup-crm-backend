@@ -21,6 +21,7 @@ const exportRequestSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
 exportRequestSchema.index({ company: 1, admin: 1, status: 1 });
 exportRequestSchema.index({ company: 1, createdAt: -1 });
 
