@@ -665,11 +665,20 @@ async function processMSG91Payload(rawBody, opts = {}) {
 
         const weContactedFirst = !!(priorSendLog || priorOutboundMsg);
 
+        // Company setting: auto-create leads from new WhatsApp chats? Default
+        // is NO — the chat stays in the Communications inbox until someone
+        // uses "Save as lead". No lead means no nurture templates are sent.
+        const _custSvc = require("../services/customizationService");
+        const _cust    = await _custSvc.getCustomization(config.company);
+        const autoLead = _cust?.workflows?.assignment?.whatsappAutoLead === true;
+
         if (weContactedFirst) {
           // Reply to our template — not a new enquiry, skip lead creation
           console.log(`[WhatsApp] 📨 ${waPhone} replied to our outbound — not creating lead`);
+        } else if (!autoLead) {
+          console.log(`[WhatsApp] 💬 New enquiry from ${waPhone} — kept in the inbox until it's saved as a lead`);
         } else {
-          // Genuine cold inbound — create lead
+          // Genuine cold inbound — create lead (company has auto-create ON)
           const autoLeadName = isRealName(contactName)
             ? contactName.trim()
             : `Sir/Madam (${waPhone})`;
@@ -678,7 +687,7 @@ async function processMSG91Payload(rawBody, opts = {}) {
             name:          autoLeadName,
             mobile:        waPhone,
             source:        "WhatsApp",
-            status:        require("../services/customizationService").defaultStatusKey(await require("../services/customizationService").getCustomization(config.company)),
+            status:        _custSvc.defaultStatusKey(_cust),
             date:          new Date(),
             remark:        "Auto-created from inbound WhatsApp message",
             initialRemark: "Auto-created from inbound WhatsApp message",
