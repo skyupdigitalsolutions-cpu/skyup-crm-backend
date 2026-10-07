@@ -114,7 +114,7 @@ const claimPoolLeads = async (req, res) => {
     }
 
     const now = new Date();
-    const result = await Lead.updateMany(filter, {
+    const update = {
       $set: {
         user: employee._id,
         assignedAdmin: employee.createdBy || req.admin?._id || null,
@@ -131,10 +131,23 @@ const claimPoolLeads = async (req, res) => {
           note: `Assigned to ${employee.name} from the unassigned pool`,
         },
       },
-    });
+    };
 
-    const claimed = result.modifiedCount || 0;
-    const skipped = leadIds.length - claimed;
+    // One atomic "assign only if still unassigned" per lead. If two admins
+    // claim the same lead at the same moment, exactly one of them gets it.
+    // (A single updateMany is not reliably exclusive on every MongoDB-
+    // compatible backend; per-document findOneAndUpdate is.)
+    const { _id: _ids, ...rest } = filter;
+    let claimed = 0;
+    const ids = [...new Set(leadIds.map(String))];
+    for (let i = 0; i < ids.length; i += 25) {
+      const batch = ids.slice(i, i + 25);
+      const results = await Promise.all(batch.map((id) =>
+        Lead.findOneAndUpdate({ ...rest, _id: id }, update, { new: false }).lean()
+      ));
+      claimed += results.filter(Boolean).length;
+    }
+    const skipped = ids.length - claimed;
 
     const io = global._io;
     if (io && claimed > 0) {
