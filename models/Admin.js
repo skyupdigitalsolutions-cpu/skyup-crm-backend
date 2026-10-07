@@ -117,19 +117,35 @@ adminSchema.methods.matchPassword = async function (enteredPassword) {
 adminSchema.index({ email: 1 }, { unique: true });
 adminSchema.index({ company: 1 });
 
-// ── NEW: Enforce ONE super_admin per company ──────────────────────────────────
-adminSchema.index(
-  { company: 1, role: 1 },
-  {
-    unique: true,
-    partialFilterExpression: { role: "super_admin" },
-    name: "one_super_admin_per_company",
-  }
-);
+// ── Multiple super admins per company are allowed ────────────────────────────
+// An older version enforced ONE super_admin per company with a unique index
+// named "one_super_admin_per_company". That made the database reject a second
+// super admin (surfacing as "An account with this email already exists").
+// Removing the definition here does not remove it from an existing database,
+// so it is dropped once at startup below (no-op if it isn't there).
+const LEGACY_SUPER_ADMIN_INDEX = "one_super_admin_per_company";
 
 // Auth cache invalidation — any write to this collection refreshes the
 // cached copy used by the auth middleware (see utils/authCache.js).
 try { require("../utils/authCache").attachInvalidation(adminSchema, "admin"); } catch (_) {}
 
 const Admin = mongoose.model("Admin", adminSchema);
+
+async function dropLegacySuperAdminIndex() {
+  try {
+    const indexes = await Admin.collection.indexes();
+    if (indexes.some((i) => i.name === LEGACY_SUPER_ADMIN_INDEX)) {
+      await Admin.collection.dropIndex(LEGACY_SUPER_ADMIN_INDEX);
+      console.log(`[Admin] Dropped legacy index "${LEGACY_SUPER_ADMIN_INDEX}" — companies can now have several super admins.`);
+    }
+  } catch (e) {
+    // Collection may not exist yet on a fresh database — nothing to drop.
+    if (!/ns does not exist|ns not found/i.test(e.message)) {
+      console.warn(`[Admin] Could not check/drop legacy index "${LEGACY_SUPER_ADMIN_INDEX}":`, e.message);
+    }
+  }
+}
+if (mongoose.connection.readyState === 1) dropLegacySuperAdminIndex();
+else mongoose.connection.once("open", dropLegacySuperAdminIndex);
+
 module.exports = Admin;
