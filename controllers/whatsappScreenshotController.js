@@ -358,4 +358,5 @@ module.exports = {
   screenshotUpload,  // multer middleware
   extractScreenshot,
   importScreenshot,
+  extractFromVision, // reused by meetingRemarkController for lead screenshots
 };
