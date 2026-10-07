@@ -83,6 +83,42 @@ async function buildLeadTimeline(leadId, companyId) {
     });
   }
 
+  // ── 4b. Proposals sent (recorded on client meetings) ──────────────────────
+  // A meeting counts as "proposal sent" when it's flagged proposalSent or has
+  // a document tagged "proposal". Shown as its own journey event.
+  for (const mr of lead.meetingRemarks || []) {
+    const proposalDocs = (mr.documents || []).filter((d) => d && d.type === "proposal");
+    if (!mr.proposalSent && !proposalDocs.length) continue;
+    timeline.push({
+      type:         "PROPOSAL_SENT",
+      date:         mr.proposalSentAt || proposalDocs[0]?.uploadedAt || mr.metAt || lead.date,
+      referenceId:  String(mr._id || ""),
+      employeeName: mr.userName || "Unknown",
+      meetingType:  mr.meetingType || "",
+      note:         mr.additionalInfo || mr.remark || "",
+      documents:    proposalDocs.map((d) => ({ name: d.name || "Proposal", url: d.url })),
+    });
+  }
+
+  // ── 4c. WhatsApp screenshots (manual chat evidence, read by AI) ───────────
+  for (const ws of lead.whatsappScreenshots || []) {
+    const chat = ws.chat || {};
+    timeline.push({
+      type:         "WHATSAPP_SCREENSHOT",
+      date:         ws.uploadedAt || lead.date,
+      referenceId:  String(ws._id || ""),
+      employeeName: ws.userName || "Unknown",
+      url:          ws.url,
+      note:         ws.note || "",
+      chatStatus:   chat.status || null,
+      summary:      chat.summary || "",
+      sentiment:    chat.sentiment || "",
+      keyTopics:    chat.keyTopics || [],
+      messages:     chat.messages || [],
+      chatError:    chat.error || "",
+    });
+  }
+
   // ── 5. Template sends (embedded templateHistory) ──────────────────────────
   for (const th of lead.templateHistory || []) {
     timeline.push({
