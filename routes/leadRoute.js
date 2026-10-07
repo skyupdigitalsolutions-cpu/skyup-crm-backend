@@ -225,8 +225,9 @@ router.post("/admin/notify-hot", protectAdmin, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
 // ── Client Meeting Remarks ─────────────────────────────────────────────────────
-const { addMeetingRemark, getMeetingRemarks, sendMeetingWhatsApp, addWhatsAppScreenshot, getWhatsAppScreenshots } = require('../controllers/meetingRemarkController');
+const { addMeetingRemark, getMeetingRemarks, sendMeetingWhatsApp, addWhatsAppScreenshot, getWhatsAppScreenshots, readWhatsAppScreenshot } = require('../controllers/meetingRemarkController');
 // Employee routes
 router.post('/:id/meeting-remark',   protect, addMeetingRemark);
 router.get('/:id/meeting-remarks',   protect, getMeetingRemarks);
@@ -239,5 +240,7 @@ router.get('/admin/:id/meeting-remarks',   protectAdmin, getMeetingRemarks);
 router.post('/admin/:id/meeting-whatsapp', protectAdmin, sendMeetingWhatsApp);
 router.post('/admin/:id/whatsapp-screenshot', protectAdmin, addWhatsAppScreenshot);
 router.get('/admin/:id/whatsapp-screenshots', protectAdmin, getWhatsAppScreenshots);
+router.post('/:id/whatsapp-screenshots/:shotId/read',       protect,      readWhatsAppScreenshot);
+router.post('/admin/:id/whatsapp-screenshots/:shotId/read', protectAdmin, readWhatsAppScreenshot);
 
 module.exports = router;
