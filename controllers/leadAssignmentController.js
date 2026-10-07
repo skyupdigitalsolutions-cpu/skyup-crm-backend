@@ -45,6 +45,7 @@ const getAssignmentOptions = async (req, res) => {
     if (!companyId) return res.status(400).json({ message: "Company not found for this account." });
     const cust = await custSvc.getCustomization(companyId);
     const importStrategy = cust?.workflows?.assignment?.importStrategy || "round_robin";
+    const whatsappAutoLead = cust?.workflows?.assignment?.whatsappAutoLead === true;
 
     let admins, groups, employees;
     if (isSuper(req)) {
@@ -58,7 +59,7 @@ const getAssignmentOptions = async (req, res) => {
       employees = await User.find({ _id: { $in: reach.employeeIds }, isActive: { $ne: false } }).select("_id name email createdBy").sort({ name: 1 }).lean();
     }
 
-    res.json({ importStrategy, admins, groups, employees, isSuperAdmin: isSuper(req) });
+    res.json({ importStrategy, whatsappAutoLead, admins, groups, employees, isSuperAdmin: isSuper(req) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -69,17 +70,30 @@ const updateAssignmentSettings = async (req, res) => {
   try {
     if (!isSuper(req)) return res.status(403).json({ message: "Only a super admin can change this setting." });
     const companyId = companyOf(req);
-    const mode = String(req.body?.importStrategy || "");
-    if (!IMPORT_MODES.includes(mode)) {
-      return res.status(400).json({ message: "Choose round_robin, least_loaded, unassigned or manual." });
+    // Either setting may be sent on its own.
+    const patch = {};
+    if (req.body?.importStrategy !== undefined) {
+      const mode = String(req.body.importStrategy || "");
+      if (!IMPORT_MODES.includes(mode)) {
+        return res.status(400).json({ message: "Choose round_robin, least_loaded, unassigned or manual." });
+      }
+      patch.importStrategy = mode;
     }
+    if (req.body?.whatsappAutoLead !== undefined) {
+      if (typeof req.body.whatsappAutoLead !== "boolean") {
+        return res.status(400).json({ message: "whatsappAutoLead must be true or false." });
+      }
+      patch.whatsappAutoLead = req.body.whatsappAutoLead;
+    }
+    if (!Object.keys(patch).length) return res.status(400).json({ message: "Nothing to update." });
     const cust = await custSvc.getCustomizationFresh(companyId);
     const workflows = JSON.parse(JSON.stringify(cust.workflows || {}));
-    workflows.assignment = { ...(workflows.assignment || {}), importStrategy: mode };
+    workflows.assignment = { ...(workflows.assignment || {}), ...patch };
     const updated = await custSvc.updateSection(companyId, "workflows", workflows, {
       id: req.admin?._id, name: req.admin?.name, role: "super_admin",
     });
-    res.json({ success: true, importStrategy: updated?.workflows?.assignment?.importStrategy || mode });
+    const a = updated?.workflows?.assignment || {};
+    res.json({ success: true, importStrategy: a.importStrategy, whatsappAutoLead: a.whatsappAutoLead === true });
   } catch (err) {
     res.status(err?.name === "CustomizationError" ? 400 : 500).json({ message: err.message });
   }
