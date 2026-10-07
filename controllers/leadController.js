@@ -1486,6 +1486,12 @@ const MOBILE_LIST_PROJECTION = {
 // are intentionally excluded — the detail modal fetches them individually via
 // GET /lead/:id when the user opens a specific lead.
 const ADMIN_LIST_PROJECTION = {
+  // Only the proposal markers of each client meeting (not the full meeting
+  // history) — powers the Leads page "Proposal sent" filter and tag.
+  "meetingRemarks.proposalSent":   1,
+  "meetingRemarks.proposalSentAt": 1,
+  "meetingRemarks.metAt":          1,
+  "meetingRemarks.documents.type": 1,
   industry:          1,
   service:           1,
   services:          1,
