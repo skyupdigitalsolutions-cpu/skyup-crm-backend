@@ -48,6 +48,8 @@ const accessAuditLogSchema = new mongoose.Schema(
         "password_reset_requested", "password_reset", "password_reset_failed",
         // Added for Event 6 — Role Change Audit Logging (ISO Phase 4).
         "role_changed",
+        // Lead export approvals (controllers/exportRequestController.js).
+        "export_request", "export_approved", "export_rejected",
       ],
       index: true,
     },
