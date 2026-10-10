@@ -81,7 +81,7 @@ async function runFinanceFollowUpReminders() {
       let kind = null, id = null;
       if (inv.assignedTo) { kind = "user"; id = inv.assignedTo; }
       else if (inv.assignedAdmin) { kind = "admin"; id = inv.assignedAdmin; }
-      else if (inv.createdBy && inv.createdBy.id && ["admin", "super_admin"].includes(inv.createdBy.role)) { kind = "admin"; id = inv.createdBy.id; }
+      else if (inv.createdBy && inv.createdBy.id && ["admin", "super_admin", "finance_user"].includes(inv.createdBy.role)) { kind = "admin"; id = inv.createdBy.id; }
       if (!kind) continue;
 
       const key = `${kind}:${id}`;

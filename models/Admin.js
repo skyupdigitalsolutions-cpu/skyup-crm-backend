@@ -32,7 +32,7 @@ const adminSchema = mongoose.Schema(
     // ── UPDATED: "superadmin" renamed to "super_admin" ────────────────────────
     role: {
       type: String,
-      enum: ["super_admin", "admin", "marketing_user"],
+      enum: ["super_admin", "admin", "marketing_user", "finance_user"],
       default: "admin",
     },
 
@@ -76,6 +76,13 @@ const adminSchema = mongoose.Schema(
     // When true, this admin can log into the standalone Performance Marketing
     // Panel (/marketing/login). Set by super admin in Company Details.
     marketingAccess: { type: Boolean, default: false },
+
+    // ── Finance Panel access ──────────────────────────────────────────────────
+    // finance_user accounts can ONLY sign in to the standalone Finance Panel
+    // (/finance/login). Created / suspended by the company's super admin.
+    // Unlike marketingAccess this flag is the real on/off switch: a finance_user
+    // with financeAccess=false cannot sign in.
+    financeAccess: { type: Boolean, default: false },
 
     // ── Forgot-password OTP fields ────────────────────────────────────────────
     resetOtp:         { type: String, default: null },   // bcrypt-hashed OTP

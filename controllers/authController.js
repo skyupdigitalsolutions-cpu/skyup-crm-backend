@@ -238,6 +238,21 @@ const loginUnified = async (req, res) => {
         });
       }
 
+      // finance_user role = Finance-Panel-only account, cannot use main CRM
+      if (admin.role === "finance_user" || admin.financeAccess) {
+        logAuditEvent({
+          action: "login_failed", resourceType: "Auth", req,
+          actorId: admin._id, actorModel: "Admin", actorEmail: admin.email,
+          actorRole: admin.role, company: admin.company?._id, statusCode: 403,
+          metadata: { reason: "finance_only_account" },
+        });
+        return res.status(403).json({
+          message: "This account is for the Finance Panel. Please log in at skyupcrm.com/finance/login",
+          redirectTo: "/finance/login",
+          financeOnly: true,
+        });
+      }
+
       logAuditEvent({
         action: "login", resourceType: "Auth", req,
         actorId: admin._id, actorModel: "Admin", actorEmail: admin.email,

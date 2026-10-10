@@ -111,4 +111,18 @@ router.get("/marketing-users",              protectUnified, authorizeRoles("supe
 router.patch("/marketing-users/:id/toggle", protectUnified, authorizeRoles("super_admin"), companyIsolation, requireMarketingModule, toggleMarketingAccess);
 router.delete("/marketing-users/:id",       protectUnified, authorizeRoles("super_admin"), companyIsolation, requireMarketingModule, deleteMarketingUser);
 
+// ── Finance Panel credential management ───────────────────────────────────────
+// Finance-panel logins only for companies where the Developer enabled the module.
+async function requireFinanceModule(req, res, next) {
+  const { financeEnabled } = require("../middlewares/financeAuthMiddleware");
+  const companyId = req.callerCompany || (req.user && req.user.company) || (req.admin && req.admin.company);
+  if (await financeEnabled(companyId)) return next();
+  return res.status(403).json({ message: "Finance Dashboard is not enabled for your company." });
+}
+const financeUsers = require("../controllers/financeUserController");
+router.post  ("/finance-users",             protectUnified, authorizeRoles("super_admin"), companyIsolation, requireFinanceModule, financeUsers.createFinanceUser);
+router.get   ("/finance-users",             protectUnified, authorizeRoles("super_admin"), companyIsolation, requireFinanceModule, financeUsers.listFinanceUsers);
+router.patch ("/finance-users/:id/toggle",  protectUnified, authorizeRoles("super_admin"), companyIsolation, requireFinanceModule, financeUsers.toggleFinanceAccess);
+router.delete("/finance-users/:id",         protectUnified, authorizeRoles("super_admin"), companyIsolation, requireFinanceModule, financeUsers.deleteFinanceUser);
+
 module.exports = router;

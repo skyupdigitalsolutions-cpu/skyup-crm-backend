@@ -54,9 +54,10 @@ const getAdmins = async (req, res) => {
     // Never show marketing-panel-only users in the admin list — they are
     // managed in the Marketing Panel Access section of User Management.
     filter.role = filter.role
-      ? { $nin: ["super_admin", "marketing_user"] }
-      : { $nin: ["marketing_user"] };
+      ? { $nin: ["super_admin", "marketing_user", "finance_user"] }
+      : { $nin: ["marketing_user", "finance_user"] };
     filter.marketingAccess = { $ne: true };
+    filter.financeAccess   = { $ne: true };
     // SECURITY FIX: plainPassword is deprecated (see models/Admin.js) — always
     // excluded now, not just for non-super_admin. It's never written to
     // anymore, so returning it would only ever leak stale/legacy values.

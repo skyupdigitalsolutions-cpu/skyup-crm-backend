@@ -446,8 +446,10 @@ app.use('/api/google-ads-api',      googleAdsApiRoute);
 app.use('/',                        googleWebhookRoute);
 app.use('/api/daily-report',                                   dailyReportRoute);
 app.use('/api/developer/companies/:companyId/daily-report',    dailyReportRoute);
-app.use('/api/finance',                                         require('./routes/financeRoute'));            // Finance Dashboard (admin / employee)
-app.use('/api/developer/companies/:companyId/finance',          require('./routes/financeRoute'));            // Finance Dashboard (developer, per company)
+app.use('/api/finance',                                         require('./routes/financeRoute'));            // Finance — employee payment follow-ups only
+app.use('/api/finance-panel',                                   require('./routes/financePanelAuth'));        // Finance Panel — sign-in (/login, /me)
+app.use('/api/finance-panel',                                   require('./routes/financeInvoiceRoutes'));    // Finance Panel — invoices / payments / follow-ups
+app.use('/api/developer/companies/:companyId/finance',          require('./routes/financeInvoiceRoutes'));    // Finance (developer, per company)
 app.use('/api/website-config',      websiteConfigRoute);
 app.use('/api/chat',                chatRoutes);
 app.use('/api/email-campaign',      emailCampaignRoute);
