@@ -671,4 +671,54 @@ router.get("/reports/summary", protectMarketing, function (req, res) {
   }
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+// V2 — business-outcome marketing analytics (services/marketing/*)
+// One canonical dataset for every tab, ID-based ads↔CRM joins, comparisons,
+// Action Center, Data Health / reconciliation, evidence-based AI.
+// Common query: from, to (YYYY-MM-DD, IST), compare (previous|prev_month|
+// prev_7|prev_30|prev_90|custom|none), cmpFrom, cmpTo, channel, campaign,
+// salesperson, status, qualification, refresh=1
+// ═════════════════════════════════════════════════════════════════════════════
+const MA = require("../services/marketing/analyticsService");
+const { getAdminLeadScope } = require("../utils/adminLeadScope");
+
+function v2(handler) {
+  return async function (req, res) {
+    try {
+      const company   = req.admin.company._id || req.admin.company;
+      const leadScope = await getAdminLeadScope(req, company);
+      const query     = Object.assign({}, req.query);
+      Object.keys(query).forEach(function (k) { if (typeof query[k] !== "string") delete query[k]; });
+      const data = await handler({ company: company, query: query, leadScope: leadScope, refresh: query.refresh === "1", req: req });
+      res.json(data);
+    } catch (err) {
+      console.error("[marketing-v2]", req.path, err && err.message);
+      res.status(err.status || 500).json({ message: err.message || "Failed to build report." });
+    }
+  };
+}
+
+router.get("/v2/overview",    protectMarketing, v2(MA.overview));
+router.get("/v2/meta",        protectMarketing, v2(MA.meta));
+router.get("/v2/google",      protectMarketing, v2(MA.google));
+router.get("/v2/creatives",   protectMarketing, v2(MA.creatives));
+router.get("/v2/pipeline",    protectMarketing, v2(MA.pipeline));
+router.get("/v2/report",      protectMarketing, v2(MA.report));
+router.get("/v2/leads",       protectMarketing, v2(MA.leads));
+router.get("/v2/data-health", protectMarketing, v2(MA.dataHealth));
+router.get("/v2/filters",     protectMarketing, v2(MA.filters));
+router.get("/v2/dictionary",  protectMarketing, function (req, res) { res.json(MA.dictionary()); });
+router.post("/v2/ai-analysis", protectMarketing, v2(function (o) {
+  return MA.aiAnalysis(Object.assign({}, o, { query: Object.assign({}, o.query, o.req.body || {}) })).catch(function (e) {
+    if (e && e.code === "GROK_NOT_CONFIGURED") { const er = new Error("AI is not configured on the server (GROQ_API_KEY)."); er.status = 503; throw er; }
+    if (e && e.response && e.response.status === 429) { const er = new Error("AI is busy right now — try again in a minute."); er.status = 429; throw er; }
+    throw e;
+  });
+}));
+router.patch("/v2/leads/:id/outcome", protectMarketing, v2(function (o) {
+  return MA.updateLeadOutcome({ company: o.company, leadId: o.req.params.id, body: o.req.body || {}, leadScope: o.leadScope });
+}));
+router.get("/v2/settings", protectMarketing, v2(function (o) { return MA.getSettings(o.company); }));
+router.put("/v2/settings", protectMarketing, v2(function (o) { return MA.saveSettings(o.company, o.req.body || {}, o.req.admin._id); }));
+
 module.exports = router;

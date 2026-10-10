@@ -124,6 +124,11 @@ const receiveWebsiteWebhook = async (req, res) => {
         user:         assignedUserId,
         assignedAdmin: config.createdBy || null,
         company:      config.company,
+        // Marketing attribution: utm_* / gclid / fbclid / landing_page from the form.
+        attribution:  (function () {
+          try { return require("../utils/attribution").buildAttribution("Website", req.body); }
+          catch (e) { return { channel: "website" }; }
+        })(),
       });
     } catch (createErr) {
       if (createErr.code === 11000) {

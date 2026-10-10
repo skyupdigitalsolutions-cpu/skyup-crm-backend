@@ -116,7 +116,25 @@ const receiveWebhook = async (req, res) => {
     const assignedUserId = await getNextAssignedUser(config);
     const leadPayload = mapToLeadSchema(parsedFields, config, leadFormResponseUrn, assignedUserId);
 
-    const lead = await Lead.create(leadPayload);
+    let lead;
+    try {
+      lead = await Lead.create(leadPayload);
+    } catch (createErr) {
+      if (createErr && createErr.code === 11000) {
+        // Same phone already exists (or same LinkedIn response) — record the
+        // re-submission on the existing lead instead of creating a duplicate.
+        const existingId = createErr.duplicateLeadId;
+        if (existingId) {
+          await Lead.findByIdAndUpdate(existingId, { $push: { callHistory: {
+            userId: null, userName: "LinkedIn Webhook", outcome: "Duplicate Submission", calledAt: new Date(),
+            remark: `Duplicate LinkedIn lead submission from campaign "${config.campaignName}"`,
+          } } }).catch(() => {});
+        }
+        console.log(`[LinkedIn] ⏭ Duplicate lead skipped (${leadPayload.mobile || leadPayload.email})`);
+        return res.sendStatus(200);
+      }
+      throw createErr;
+    }
 
     console.log(`[LinkedIn] ✅ Lead created: ${lead.name} (${lead.mobile || lead.email}) from "${config.campaignName}"`);
 

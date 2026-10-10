@@ -114,17 +114,17 @@ const claimPoolLeads = async (req, res) => {
     const employee = await User.findOne({ _id: userId, company: companyId }).select("_id name createdBy").lean();
     if (!employee) return res.status(400).json({ message: "Choose an employee from your company." });
 
-    const filter = { _id: { $in: leadIds }, company: companyId, user: null };
+    let filter = { _id: { $in: leadIds }, company: companyId, user: null, mergedInto: null };
     if (!isSuper(req)) {
       const reach = await getAdminReach(companyId, req.admin._id);
       if (!reach.employeeIds.some((e) => String(e) === String(employee._id))) {
         return res.status(403).json({ message: "You can only assign to employees in your team or admin group." });
       }
-      // Only pool leads offered to this admin's group, or unassigned leads the group already owns.
-      filter.$or = [
-        { poolAdmins: { $in: reach.adminIds } },
-        { assignedAdmin: { $in: reach.adminIds } },
-      ];
+      // Exactly the leads this admin sees in the Unassigned list (same scope
+      // as listUnassigned) — pool leads offered to the group, leads the group
+      // owns, and unassigned campaign leads from configs they connected.
+      const scope = await getAdminLeadScope(req, companyId);
+      filter = mergeLeadScope(filter, scope);
     }
 
     const now = new Date();
@@ -151,13 +151,16 @@ const claimPoolLeads = async (req, res) => {
     // claim the same lead at the same moment, exactly one of them gets it.
     // (A single updateMany is not reliably exclusive on every MongoDB-
     // compatible backend; per-document findOneAndUpdate is.)
-    const { _id: _ids, ...rest } = filter;
     let claimed = 0;
     const ids = [...new Set(leadIds.map(String))];
+    // Per-lead filter = the scoped filter with _id narrowed to one lead.
+    const oneFilter = (id) => (filter.$and
+      ? { $and: [{ ...filter.$and[0], _id: id }, ...filter.$and.slice(1)] }
+      : { ...filter, _id: id });
     for (let i = 0; i < ids.length; i += 25) {
       const batch = ids.slice(i, i + 25);
       const results = await Promise.all(batch.map((id) =>
-        Lead.findOneAndUpdate({ ...rest, _id: id }, update, { new: false }).lean()
+        Lead.findOneAndUpdate(oneFilter(id), update, { new: false }).lean()
       ));
       claimed += results.filter(Boolean).length;
     }

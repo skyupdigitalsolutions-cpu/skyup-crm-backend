@@ -876,6 +876,12 @@ const adminImportCSV = async (req, res) => {
           name: row.name || "Unknown",
           mobile,
           primaryPhone: mobile,
+          // FIX (duplicate leads): insertOne bypasses the schema's pre-validate
+          // hook, so normalizedPhone was never set on admin Excel imports. Those
+          // leads were invisible to findLeadByPhone() and to the unique index,
+          // so the same number could later be re-imported or arrive again from
+          // Meta / Google / manual entry as a second lead.
+          normalizedPhone: normPrimary || null,
           secondaryPhone: normSecondary ? secondaryPhone : null,
           normalizedSecondaryPhone: normSecondary || null,
           email: row.email || "",

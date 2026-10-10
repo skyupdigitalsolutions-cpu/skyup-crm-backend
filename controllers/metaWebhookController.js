@@ -231,6 +231,25 @@ const receiveWebhook = async (req, res) => {
         // catch-all config. Prefer the webhook's form_id; fall back to the
         // config's own formId when the payload omitted it.
         leadPayload.formId = form_id || config.formId || "";
+        // Round robin found nobody → keep the lead with the admin who connected
+        // this campaign so it appears in THEIR "Unassigned" list for bulk assign.
+        if (!leadPayload.user && config.createdBy) leadPayload.assignedAdmin = config.createdBy;
+        // ── Marketing attribution (ID-based) ───────────────────────────────────
+        // ad_id / adgroup_id come straight from the webhook; the follow-up
+        // lookup only adds campaign_id + ad name. Fallback to the config's own
+        // synced Meta IDs. Never blocks lead capture.
+        try {
+          const { fetchMetaLeadAttribution } = require("../utils/attribution");
+          const metaIds = await fetchMetaLeadAttribution(leadgen_id, config.pageAccessToken, apiVersion, change.value);
+          leadPayload.attribution = Object.assign({
+            channel:           "meta",
+            platformAccountId: config.adAccountId || "",
+            metaCampaignId:    config.metaCampaignId || "",
+            metaAdsetId:       config.metaAdsetId || "",
+          }, metaIds);
+        } catch (attrErr) {
+          leadPayload.attribution = { channel: "meta", metaAdsetId: config.metaAdsetId || "", metaCampaignId: config.metaCampaignId || "" };
+        }
         // Optional: auto-detect preferred language from the lead form fields.
         try {
           const detectLang = require("../utils/detectLanguage");

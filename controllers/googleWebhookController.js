@@ -168,6 +168,17 @@ async function processGoogleLead(req) {
     // Lead.create fail silently. Always fall back to a sensible remark.
     if (!String(leadPayload.remark || "").trim()) leadPayload.remark = "Lead from Google Ads";
     if (!String(leadPayload.status || "").trim()) leadPayload.status = "New";
+    // Round robin found nobody → keep the lead with the campaign's admin so it
+    // appears in their "Unassigned" list for bulk assign.
+    if (!leadPayload.user && config.createdBy) leadPayload.assignedAdmin = config.createdBy;
+
+    // ── Marketing attribution (ID-based: gclid / campaign_id / adgroup_id) ──
+    try {
+      const { buildAttribution } = require("../utils/attribution");
+      const attr = buildAttribution("Google Ads", body, config.campaignId ? { googleCampaignId: String(config.campaignId) } : {});
+      if (!attr.channel || attr.channel === "organic") attr.channel = "google";
+      leadPayload.attribution = attr;
+    } catch (attrErr) { /* attribution is best-effort */ }
 
     // Website / custom forms send flat extra fields (company, solution,
     // requirement, budget, timeline …). Keep them on the lead's remark so the

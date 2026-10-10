@@ -676,6 +676,54 @@ const leadSchema = mongoose.Schema(
     // cached actionSummary. If the current signature differs, the summary is stale
     // and will be regenerated on the next request.
     actionSummarySignature: { type: String, default: "" },
+
+    // ── Marketing attribution (ID-based — NEVER join ads ↔ CRM by names) ──────
+    // Captured at lead creation by the Meta / Google / Website webhooks (see
+    // utils/attribution.js). Advertising objects are joined to leads through
+    // these platform IDs; campaign/adSetName strings stay for display only.
+    attribution: {
+      channel:            { type: String, default: "", trim: true },   // meta | google | linkedin | website | whatsapp | organic | other
+      platformAccountId:  { type: String, default: "", trim: true },   // Meta ad account / Google customer id
+      metaCampaignId:     { type: String, default: "", trim: true },
+      metaAdsetId:        { type: String, default: "", trim: true },
+      metaAdId:           { type: String, default: "", trim: true },
+      metaAdName:         { type: String, default: "", trim: true },
+      googleCampaignId:   { type: String, default: "", trim: true },
+      googleAdGroupId:    { type: String, default: "", trim: true },
+      googleAdId:         { type: String, default: "", trim: true },   // creative_id
+      keyword:            { type: String, default: "", trim: true },
+      searchTerm:         { type: String, default: "", trim: true },
+      utmSource:          { type: String, default: "", trim: true },
+      utmMedium:          { type: String, default: "", trim: true },
+      utmCampaign:        { type: String, default: "", trim: true },
+      utmContent:         { type: String, default: "", trim: true },
+      utmTerm:            { type: String, default: "", trim: true },
+      gclid:              { type: String, default: "", trim: true },
+      gbraid:             { type: String, default: "", trim: true },
+      wbraid:             { type: String, default: "", trim: true },
+      fbclid:             { type: String, default: "", trim: true },
+      fbc:                { type: String, default: "", trim: true },
+      fbp:                { type: String, default: "", trim: true },
+      landingPage:        { type: String, default: "", trim: true },
+      formName:           { type: String, default: "", trim: true },
+    },
+
+    // ── Lifecycle / revenue (marketing ↔ sales outcome) ──────────────────────
+    // All optional. When blank, the marketing dashboard DERIVES the stage from
+    // call history, meetings and status category (services/marketingAnalyticsService).
+    // An explicit lifecycleStage set here always wins over the derived one.
+    lifecycleStage: {
+      type: String, default: null, trim: true,
+      enum: [null, "new", "contact_attempted", "contacted", "qualified", "meeting", "proposal", "negotiation", "won", "lost"],
+    },
+    qualificationStatus: { type: String, enum: [null, "qualified", "unqualified"], default: null },
+    lostReason:          { type: String, default: "", trim: true },
+    firstContactAt:      { type: Date,   default: null },
+    opportunityCreatedAt:{ type: Date,   default: null },
+    proposalValue:       { type: Number, default: null },
+    wonAt:               { type: Date,   default: null },
+    dealValue:           { type: Number, default: null },
+    revenueReceived:     { type: Number, default: null },
   },
   { timestamps: true }
 );
@@ -803,6 +851,33 @@ leadSchema.pre('validate', async function () {
     // Explicitly nullify so the unique partial index ignores empty values
     this.normalizedSecondaryPhone = null;
   }
+
+  // ── DUPLICATE GUARD (every Mongoose create path) ───────────────────────────
+  // The two unique indexes only compare primary↔primary and secondary↔secondary.
+  // This closes the remaining gap — a number that is the PRIMARY of one lead and
+  // the SECONDARY of another — for every source that creates leads through
+  // Mongoose (Meta, Google, LinkedIn, Website, WhatsApp, manual, mobile app).
+  // It throws a duplicate-key-shaped error (code 11000) so every existing
+  // "already exists" handler treats it exactly like an index rejection.
+  if (this.isNew && this.company && !this.mergedInto) {
+    const nums = [this.normalizedPhone, this.normalizedSecondaryPhone].filter(Boolean);
+    if (nums.length) {
+      const existing = await this.constructor.findOne({
+        company: this.company,
+        _id: { $ne: this._id },
+        $or: [{ normalizedPhone: { $in: nums } }, { normalizedSecondaryPhone: { $in: nums } }],
+      }).select("_id name normalizedPhone normalizedSecondaryPhone").lean();
+      if (existing) {
+        const hit = nums.find((n) => n === existing.normalizedPhone || n === existing.normalizedSecondaryPhone) || nums[0];
+        const err = new Error(`Duplicate lead: ${hit} already belongs to "${existing.name}".`);
+        err.code = 11000;
+        err.keyPattern = { normalizedPhone: 1 };
+        err.keyValue = { company: this.company, normalizedPhone: hit };
+        err.duplicateLeadId = existing._id;
+        throw err;
+      }
+    }
+  }
 });
 
 // ── Pre-findOneAndUpdate / updateOne / updateMany hooks ───────────────────────
@@ -878,6 +953,8 @@ leadSchema.index({ company: 1, poolAdmins: 1, user: 1 }); // shared-pool "Unassi
 leadSchema.index({ company: 1, user: 1, updatedAt: -1 }); // Team Lead lead list
 leadSchema.index({ company: 1, 'scheduledCalls.done': 1, 'scheduledCalls.scheduledAt': 1 }); // follow-up alerts
 leadSchema.index({ company: 1, 'phoneRevealLog.userId': 1 }); // reveal audits per admin
+leadSchema.index({ company: 1, "attribution.metaAdsetId": 1 }, { sparse: true }); // marketing: ID-based Meta attribution
+leadSchema.index({ company: 1, "attribution.googleCampaignId": 1 }, { sparse: true }); // marketing: ID-based Google attribution
 
 const Lead = mongoose.model("Lead", leadSchema);
 module.exports = Lead;
