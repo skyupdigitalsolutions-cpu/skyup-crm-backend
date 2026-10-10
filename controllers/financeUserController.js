@@ -84,3 +84,32 @@ exports.deleteFinanceUser = async (req, res, next) => {
     res.json({ deleted: true });
   } catch (err) { next(err); }
 };
+
+// Super admin sets a new password for one of their finance users (e.g. they forgot
+// it and cannot receive the email). Existing sessions for that user are signed out.
+exports.resetFinancePassword = async (req, res, next) => {
+  try {
+    const companyId = req.companyId;
+    const password = req.body && req.body.password;
+    if (!password || typeof password !== "string") return res.status(400).json({ message: "Enter the new password." });
+    const admin = await Admin.findOne({ _id: req.params.id, company: companyId, role: "finance_user" });
+    if (!admin) return res.status(404).json({ message: "Finance user not found" });
+
+    admin.password = password;                    // hashed by the model's pre-save hook
+    admin.passwordChangedAt = new Date();
+    admin.resetOtp = null; admin.resetOtpExpiry = null; admin.resetOtpAttempts = 0;
+    try {
+      await admin.save();
+    } catch (e) {
+      if (e && (e.name === "ValidationError" || /password/i.test(e.message || ""))) {
+        return res.status(400).json({ message: e.message.replace(/^.*?:\s*/, "") });
+      }
+      throw e;
+    }
+    logAuditEvent(Object.assign({
+      action: "password_reset", resourceType: "Admin", req, company: companyId, resourceId: admin._id, statusCode: 200,
+      metadata: { targetEmail: admin.email, targetRole: "finance_user", resetBy: "super_admin" },   // never the password itself
+    }, actor(req)));
+    res.json({ reset: true });
+  } catch (err) { next(err); }
+};

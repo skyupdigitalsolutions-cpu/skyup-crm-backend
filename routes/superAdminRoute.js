@@ -123,6 +123,7 @@ const financeUsers = require("../controllers/financeUserController");
 router.post  ("/finance-users",             protectUnified, authorizeRoles("super_admin"), companyIsolation, requireFinanceModule, financeUsers.createFinanceUser);
 router.get   ("/finance-users",             protectUnified, authorizeRoles("super_admin"), companyIsolation, requireFinanceModule, financeUsers.listFinanceUsers);
 router.patch ("/finance-users/:id/toggle",  protectUnified, authorizeRoles("super_admin"), companyIsolation, requireFinanceModule, financeUsers.toggleFinanceAccess);
+router.patch ("/finance-users/:id/password", protectUnified, authorizeRoles("super_admin"), companyIsolation, requireFinanceModule, financeUsers.resetFinancePassword);
 router.delete("/finance-users/:id",         protectUnified, authorizeRoles("super_admin"), companyIsolation, requireFinanceModule, financeUsers.deleteFinanceUser);
 
 module.exports = router;

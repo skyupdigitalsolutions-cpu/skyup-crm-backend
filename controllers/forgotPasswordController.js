@@ -193,6 +193,7 @@ const verifyOtpAndReset = async (req, res) => {
     // OTP is valid — update password and clear OTP fields
     // Set password (the pre-save hook will hash it)
     doc.password      = newPassword;
+    if (kind === "admin") doc.passwordChangedAt = new Date();   // signs out older finance-panel sessions
     // SECURITY FIX: no longer storing a plaintext copy (see models/Admin.js /
     // models/Users.js) — the person resetting their own password already has
     // it, so there's nothing to "view" here anyway.

@@ -58,6 +58,11 @@ const protectFinance = async (req, res, next) => {
     const admin = await Admin.findById(decoded.id).populate("company").lean();
     if (!admin) return res.status(401).json({ message: "Account not found." });
 
+    // Password changed after this token was issued → force a fresh sign-in.
+    if (admin.passwordChangedAt && decoded.iat && decoded.iat < Math.floor(new Date(admin.passwordChangedAt).getTime() / 1000)) {
+      return res.status(401).json({ message: "Your password was changed. Please sign in again." });
+    }
+
     if (!hasFinanceAccess(admin)) {
       return res.status(403).json({ message: "Finance panel access not granted. Contact your super admin." });
     }

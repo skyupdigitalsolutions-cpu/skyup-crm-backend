@@ -115,6 +115,8 @@ async function sendPasswordResetOtp({ toEmail, toName, otp, role = "user" }) {
   const roleLabel =
     role === "super_admin" || role === "superadmin" ? "Super Admin"
     : role === "admin" ? "Admin"
+    : role === "marketing_user" ? "Marketing Panel"
+    : role === "finance_user" ? "Finance Panel"
     : "Employee";
 
   const html = `

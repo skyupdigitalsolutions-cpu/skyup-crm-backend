@@ -84,6 +84,11 @@ const adminSchema = mongoose.Schema(
     // with financeAccess=false cannot sign in.
     financeAccess: { type: Boolean, default: false },
 
+    // Set whenever the password is reset (forgot-password OTP, or a super admin
+    // resetting a finance user). The Finance Panel rejects tokens issued before
+    // this moment, so an old / stolen session dies as soon as the password changes.
+    passwordChangedAt: { type: Date, default: null },
+
     // ── Forgot-password OTP fields ────────────────────────────────────────────
     resetOtp:         { type: String, default: null },   // bcrypt-hashed OTP
     resetOtpExpiry:   { type: Date,   default: null },
