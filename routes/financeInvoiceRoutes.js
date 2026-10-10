@@ -13,9 +13,10 @@ const c = require("../controllers/financeController");
 
 router.use(protectFinanceOrDeveloper);
 
-router.get ("/settings",  c.getSettings);
-router.put ("/settings",  c.updateSettings);
+router.get ("/meta",      c.getMeta);          // client-source + service dropdown values
 router.get ("/assignees", c.listAssignees);
+router.get ("/clients",   c.listClients);      // existing clients (for "add a new service")
+router.get ("/clients/:clientId/invoices", c.clientInvoices);
 
 router.get ("/",    c.listInvoices);
 router.post("/",    c.createInvoice);

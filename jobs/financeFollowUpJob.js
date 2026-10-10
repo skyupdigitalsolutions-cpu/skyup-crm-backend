@@ -89,7 +89,7 @@ async function runFinanceFollowUpReminders() {
       const g = groups.get(key);
       g.items.push({
         invoiceId: inv._id,
-        invoiceNumber: inv.invoiceNumber,
+        invoiceNumber: inv.invoiceNumber || "no invoice no.",
         customerName: inv.customerName,
         balance: inv.balance,
         overdue: fin.todayKey(inv.nextFollowUpDate) < today,
@@ -131,6 +131,8 @@ async function runFinanceFollowUpReminders() {
 }
 
 function startFinanceFollowUpJob() {
+  // One-time clean-up of data/indexes from the first release (safe to repeat)
+  fin.migrateLegacy().catch(() => {});
   cron.schedule("*/15 * * * *", () => { runFinanceFollowUpReminders(); });
   console.log("[FinanceJob] ✅ Finance follow-up reminders started (every 15 min; sends from 9:30 AM IST)");
 }

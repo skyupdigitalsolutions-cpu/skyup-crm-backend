@@ -8,7 +8,6 @@
 
 const mongoose       = require("mongoose");
 const FinanceInvoice = require("../models/FinanceInvoice");
-const FinanceSettings = require("../models/FinanceSettings");
 const User           = require("../models/Users");
 const { istDayKey }  = require("../utils/istDate");
 const fin            = require("../services/financeService");
@@ -74,28 +73,14 @@ function pushRemark(inv, actor, text, kind = "remark") {
 
 const fmtDay = (d) => (d ? istDayKey(d) : "none");
 
-// ── Settings ─────────────────────────────────────────────────────────────────
-exports.getSettings = async (req, res) => {
+// ── Form options: client sources + service names from Customize CRM ─────────
+exports.getMeta = async (req, res) => {
   try {
     const cid = companyIdOf(req);
     if (!cid) return fail(res, 400, "Company context not found");
-    const s = await fin.getSettings(cid);
-    res.json({ success: true, settings: { invoicePrefix: s.invoicePrefix } });
-  } catch (e) { fail(res, 500, "Could not load settings"); }
-};
-
-exports.updateSettings = async (req, res) => {
-  try {
-    const cid = companyIdOf(req);
-    if (!cid) return fail(res, 400, "Company context not found");
-    const prefix = fin.cleanPrefix(req.body?.invoicePrefix);
-    const s = await FinanceSettings.findOneAndUpdate(
-      { company: cid },
-      { $set: { invoicePrefix: prefix } },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    ).lean();
-    res.json({ success: true, settings: { invoicePrefix: s.invoicePrefix } });
-  } catch (e) { fail(res, 500, "Could not save settings"); }
+    const o = await fin.listOptions(cid);
+    res.json({ success: true, sources: o.sources, services: o.services });
+  } catch (e) { fail(res, 500, "Could not load options"); }
 };
 
 // ── Employees for the "assign follow-up to" dropdown ─────────────────────────
@@ -117,6 +102,7 @@ function buildFilter(cid, q) {
   if (status === "cancelled") f.status = "cancelled";
   else f.status = "active";
 
+  if (status === "no_number") f.invoiceNumber = "";
   if (status === "unpaid" || status === "partial" || status === "paid") f.paymentStatus = status;
   if (status === "pending") f.paymentStatus = { $in: ["unpaid", "partial"] };
   if (status === "overdue") {
@@ -129,6 +115,8 @@ function buildFilter(cid, q) {
   }
 
   if (q.source === "lead" || q.source === "manual") f.source = q.source;
+  if (q.clientSource) f.clientSource = String(q.clientSource).slice(0, 60);
+  if (q.clientId && isId(q.clientId)) f.clientId = new mongoose.Types.ObjectId(q.clientId);
   if (q.assignedTo && isId(q.assignedTo)) f.assignedTo = new mongoose.Types.ObjectId(q.assignedTo);
   if (q.assignedTo === "none") f.assignedTo = null;
 
@@ -152,7 +140,7 @@ function buildFilter(cid, q) {
   const term = String(q.q || "").trim().slice(0, 80);
   if (term) {
     const rx = new RegExp(esc(term), "i");
-    f.$or = [{ invoiceNumber: rx }, { customerName: rx }, { businessName: rx }, { assignedToName: rx }];
+    f.$or = [{ invoiceNumber: rx }, { customerName: rx }, { businessName: rx }, { assignedToName: rx }, { service: rx }, { referredBy: rx }];
   }
   return f;
 }
@@ -184,6 +172,7 @@ async function computeSummary(cid) {
           { $lte: ["$nextFollowUpDate", endToday] },
         ] }, 1, 0] } },
         needsAmount: { $sum: { $cond: [{ $eq: ["$totalAmount", 0] }, 1, 0] } },
+        needsNumber: { $sum: { $cond: [{ $eq: ["$invoiceNumber", ""] }, 1, 0] } },
     } },
   ]);
   const cancelled = await FinanceInvoice.countDocuments({ company: base.company, status: "cancelled" });
@@ -191,7 +180,7 @@ async function computeSummary(cid) {
   return {
     count: r.count || 0, invoiced: r.invoiced || 0, collected: r.collected || 0, outstanding: r.outstanding || 0,
     paid: r.paid || 0, partial: r.partial || 0, unpaid: r.unpaid || 0,
-    overdue: r.overdue || 0, dueToday: r.dueToday || 0, needsAmount: r.needsAmount || 0, cancelled,
+    overdue: r.overdue || 0, dueToday: r.dueToday || 0, needsAmount: r.needsAmount || 0, needsNumber: r.needsNumber || 0, cancelled,
   };
 }
 
@@ -201,6 +190,7 @@ exports.listInvoices = async (req, res) => {
     if (!cid) return fail(res, 400, "Company context not found");
 
     // Pull any newly converted leads in before listing
+    await fin.migrateLegacy();
     await fin.syncConvertedLeads(cid);
 
     const page  = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -239,7 +229,47 @@ exports.getInvoice = async (req, res) => {
   } catch (e) { fail(res, 500, "Could not load invoice"); }
 };
 
+// ── Clients (a client can have many invoices / services) ─────────────────────
+exports.listClients = async (req, res) => {
+  try {
+    const cid = companyIdOf(req);
+    if (!cid) return fail(res, 400, "Company context not found");
+    const match = { company: new mongoose.Types.ObjectId(cid) };
+    const term = String(req.query.q || "").trim().slice(0, 80);
+    if (term) { const rx = new RegExp(esc(term), "i"); match.$or = [{ customerName: rx }, { businessName: rx }]; }
+    const rows = await FinanceInvoice.aggregate([
+      { $match: match },
+      { $sort: { createdAt: -1 } },
+      { $group: {
+          _id: { $ifNull: ["$clientId", "$_id"] },
+          customerName: { $first: "$customerName" }, businessName: { $first: "$businessName" },
+          clientSource: { $first: "$clientSource" }, referredBy: { $first: "$referredBy" },
+          assignedTo: { $first: "$assignedTo" }, assignedToName: { $first: "$assignedToName" },
+          invoices: { $sum: 1 },
+          outstanding: { $sum: { $cond: [{ $eq: ["$status", "active"] }, "$balance", 0] } },
+      } },
+      { $sort: { customerName: 1 } },
+      { $limit: 20 },
+    ]);
+    res.json({ success: true, clients: rows.map((r) => ({ clientId: r._id, ...r, _id: undefined })) });
+  } catch (e) { fail(res, 500, "Could not load clients"); }
+};
+
+exports.clientInvoices = async (req, res) => {
+  try {
+    const cid = companyIdOf(req);
+    if (!cid || !isId(req.params.clientId)) return fail(res, 400, "Invalid client");
+    const rows = await FinanceInvoice.find({ company: cid, clientId: req.params.clientId }).sort({ conversionDate: -1, _id: -1 }).limit(100).lean();
+    res.json({ success: true, invoices: rows.map((r) => fin.toDTO(r)) });
+  } catch (e) { fail(res, 500, "Could not load this client's invoices"); }
+};
+
 // ── Create (manual) ──────────────────────────────────────────────────────────
+// Two ways in:
+//   • new client       → customerName + clientSource (+ referredBy for a referral)
+//   • existing client  → clientId; the client's details are copied and this
+//                        becomes a NEW service invoice with its own number,
+//                        amount and payment history.
 exports.createInvoice = async (req, res) => {
   try {
     const cid = companyIdOf(req);
@@ -247,17 +277,39 @@ exports.createInvoice = async (req, res) => {
     const b = req.body || {};
     const actor = actorOf(req);
 
-    const customerName = String(b.customerName || "").trim();
-    if (!customerName) return fail(res, 400, "Customer name is required");
+    // Invoice numbers are always typed in — never generated.
+    const invoiceNumber = String(b.invoiceNumber || "").trim();
+    if (!invoiceNumber) return fail(res, 400, "Enter the invoice number.");
+    if (invoiceNumber.length > 40) return fail(res, 400, "Invoice number is too long");
+    if (await FinanceInvoice.exists({ company: cid, invoiceNumber })) return fail(res, 409, "That invoice number is already used. Choose a different one.");
 
-    const total = num(b.totalAmount);
-    if (!(total > 0)) return fail(res, 400, "Total amount must be greater than 0");
+    const sv = fin.cleanServices(b.services);
+    if (sv.error) return fail(res, 400, sv.error);
+
+    // ── who is the client ──
+    let client, base = null;
+    if (b.clientId) {
+      if (!isId(b.clientId)) return fail(res, 400, "Invalid client");
+      base = await FinanceInvoice.findOne({ company: cid, clientId: b.clientId }).sort({ createdAt: -1 }).lean();
+      if (!base) return fail(res, 404, "Client not found");
+      client = { clientId: base.clientId, lead: base.lead || null, customerName: base.customerName, businessName: base.businessName, clientSource: base.clientSource || "", referredBy: base.referredBy || "" };
+    } else {
+      const customerName = String(b.customerName || "").trim();
+      if (!customerName) return fail(res, 400, "Customer name is required");
+      if (!String(b.clientSource || "").trim()) return fail(res, 400, "Select where this client came from.");
+      const src = fin.cleanSource(b.clientSource, b.referredBy);
+      if (src.error) return fail(res, 400, src.error);
+      client = { clientId: new mongoose.Types.ObjectId(), lead: null, customerName, businessName: String(b.businessName || "").trim(), clientSource: src.clientSource, referredBy: src.referredBy };
+    }
 
     const planned = b.installmentsPlanned === undefined || b.installmentsPlanned === "" || b.installmentsPlanned === null
       ? null : Math.floor(Number(b.installmentsPlanned));
     if (planned !== null && !(planned >= 1 && planned <= 120)) return fail(res, 400, "Number of installments must be between 1 and 120");
 
-    const assignee = await resolveAssignee(cid, b.assignedTo);
+    // Follow-up owner: explicit choice, else the client's existing owner
+    let assignee;
+    if (b.assignedTo !== undefined && b.assignedTo !== "") assignee = await resolveAssignee(cid, b.assignedTo);
+    else assignee = { assignedTo: (base && base.assignedTo) || null, assignedToName: (base && base.assignedToName) || "" };
     if (assignee.error) return fail(res, 400, assignee.error);
 
     const fu = parseFollowUp(b.nextFollowUpDate === undefined ? null : b.nextFollowUpDate);
@@ -266,35 +318,33 @@ exports.createInvoice = async (req, res) => {
     const conversionDate = b.conversionDate ? fin.parseDay(b.conversionDate) : fin.parseDay(new Date());
     if (!conversionDate) return fail(res, 400, "Invalid conversion date");
 
-    let invoiceNumber = String(b.invoiceNumber || "").trim();
-    if (invoiceNumber.length > 40) return fail(res, 400, "Invoice number is too long");
-    if (!invoiceNumber) {
-      const s = await fin.getSettings(cid);
-      invoiceNumber = await fin.nextInvoiceNumber(cid, s.invoicePrefix);
-    }
-
     const inv = new FinanceInvoice({
       company: cid,
       source: "manual",
+      autoCreated: false,
+      lead: client.lead,
+      clientId: client.clientId,
       invoiceNumber,
-      customerName,
-      businessName: String(b.businessName || "").trim(),
-      service:      String(b.service || "").trim(),
-      description:  String(b.description || "").trim(),
+      customerName: client.customerName,
+      businessName: client.businessName,
+      clientSource: client.clientSource,
+      referredBy: client.referredBy,
+      services: sv.services,
+      description: String(b.description || "").trim(),
       assignedTo: assignee.assignedTo,
       assignedToName: assignee.assignedToName,
-      assignedAdmin: req.admin && !req.admin.isSuperAdmin ? req.admin._id : null,
+      assignedAdmin: (req.admin && !req.admin.isSuperAdmin ? req.admin._id : null) || (base && base.assignedAdmin) || null,
       createdBy: actor,
       conversionDate,
-      totalAmount: total,
       installmentsPlanned: planned,
       nextFollowUpDate: fu.date,
     });
+    inv.recalc();
 
     // Optional first payment taken at creation
     const first = num(b.initialPayment && b.initialPayment.amount);
     if (first > 0) {
-      if (first > total + 0.005) return fail(res, 400, "First payment is more than the total amount");
+      if (first > inv.totalAmount + 0.005) return fail(res, 400, "First payment is more than the total amount");
       inv.payments.push({
         amount: first,
         paidOn: (b.initialPayment.paidOn && fin.parseDay(b.initialPayment.paidOn)) || new Date(),
@@ -302,13 +352,13 @@ exports.createInvoice = async (req, res) => {
         reference: String(b.initialPayment.reference || "").trim(),
         recordedBy: actor.id, recordedByName: actor.name,
       });
+      inv.recalc();
     }
 
     const remark = String(b.remark || "").trim();
     if (remark) pushRemark(inv, actor, remark);
-    pushRemark(inv, actor, "Invoice created manually.", "system");
+    pushRemark(inv, actor, base ? "New service started for an existing client." : "Invoice created manually.", "system");
 
-    inv.recalc();
     await inv.save();
     res.status(201).json({ success: true, invoice: fin.toDTO(inv) });
   } catch (e) { sendDup(res, e, "Could not create invoice"); }
@@ -322,24 +372,44 @@ exports.updateInvoice = async (req, res) => {
     const b = req.body || {};
     const actor = actorOf(req);
     const changes = [];
+    const clientFields = {};   // shared by every invoice of this client
 
     if (b.customerName !== undefined) {
       const v = String(b.customerName).trim();
       if (!v) return fail(res, 400, "Customer name cannot be empty");
-      inv.customerName = v;
+      inv.customerName = v; clientFields.customerName = v;
     }
-    if (b.businessName !== undefined) inv.businessName = String(b.businessName).trim();
-    if (b.service      !== undefined) inv.service      = String(b.service).trim();
-    if (b.description  !== undefined) inv.description  = String(b.description).trim();
+    if (b.businessName !== undefined) { inv.businessName = String(b.businessName).trim(); clientFields.businessName = inv.businessName; }
+
+    if (b.clientSource !== undefined || b.referredBy !== undefined) {
+      const src = fin.cleanSource(b.clientSource !== undefined ? b.clientSource : inv.clientSource, b.referredBy !== undefined ? b.referredBy : inv.referredBy);
+      if (src.error) return fail(res, 400, src.error);
+      inv.clientSource = src.clientSource; inv.referredBy = src.referredBy;
+      clientFields.clientSource = src.clientSource; clientFields.referredBy = src.referredBy;
+    }
+
+    if (b.description !== undefined) inv.description = String(b.description).trim();
 
     if (b.invoiceNumber !== undefined) {
       const v = String(b.invoiceNumber).trim();
       if (!v) return fail(res, 400, "Invoice number cannot be empty");
       if (v.length > 40) return fail(res, 400, "Invoice number is too long");
-      if (v !== inv.invoiceNumber) { changes.push(`invoice number ${inv.invoiceNumber} → ${v}`); inv.invoiceNumber = v; }
+      if (v !== inv.invoiceNumber) {
+        if (await FinanceInvoice.exists({ company: cid, invoiceNumber: v, _id: { $ne: inv._id } })) return fail(res, 409, "That invoice number is already used. Choose a different one.");
+        changes.push(inv.invoiceNumber ? `invoice number ${inv.invoiceNumber} → ${v}` : `invoice number set to ${v}`);
+        inv.invoiceNumber = v;
+      }
     }
 
-    if (b.totalAmount !== undefined) {
+    if (b.services !== undefined) {
+      const sv = fin.cleanServices(b.services);
+      if (sv.error) return fail(res, 400, sv.error);
+      const sum = sv.services.reduce((t, x) => t + x.amount, 0);
+      if (sum + 0.005 < inv.paidAmount) return fail(res, 400, `Services total (₹${sum}) can't be lower than what's already paid (₹${inv.paidAmount}).`);
+      inv.services = sv.services;
+      changes.push("services updated");
+    } else if (b.totalAmount !== undefined) {
+      // Direct total only for invoices whose services carry no amounts yet
       const t = num(b.totalAmount);
       if (!(t >= 0)) return fail(res, 400, "Total amount must be a valid number");
       if (t + 0.005 < inv.paidAmount) return fail(res, 400, `Total can't be lower than what's already paid (₹${inv.paidAmount}).`);
@@ -375,6 +445,11 @@ exports.updateInvoice = async (req, res) => {
     if (changes.length) pushRemark(inv, actor, `Updated: ${changes.join("; ")}.`, "system");
     inv.recalc();
     await inv.save();
+
+    // Keep the client's other invoices consistent (name / business / source / referrer)
+    if (Object.keys(clientFields).length && inv.clientId) {
+      await FinanceInvoice.updateMany({ company: inv.company, clientId: inv.clientId, _id: { $ne: inv._id } }, { $set: clientFields });
+    }
     res.json({ success: true, invoice: fin.toDTO(inv) });
   } catch (e) { sendDup(res, e, "Could not update invoice"); }
 };

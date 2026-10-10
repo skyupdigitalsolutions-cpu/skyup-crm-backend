@@ -1,19 +1,18 @@
 // services/financeService.js — NEW FILE
 // ─────────────────────────────────────────────────────────────────────────────
 // Core logic for the Finance Dashboard:
-//   • per-company invoice numbering (INV-0001 …, prefix configurable)
-//   • syncConvertedLeads(): turns every "won" lead into an invoice record
+//   • syncConvertedLeads(): turns every "won" lead into ONE invoice record
+//     (no invoice number — finance types it in by hand; numbers are never generated)
+//   • service / client-source helpers shared by the controller
 //   • IST date helpers (follow-up dates are calendar days, India time — same
 //     convention as jobs/followUpReminderJob.js)
 // ─────────────────────────────────────────────────────────────────────────────
 "use strict";
 
 const mongoose        = require("mongoose");
-const Counter         = require("../models/Counter");
 const Lead            = require("../models/Leads");
 const User            = require("../models/Users");
 const FinanceInvoice  = require("../models/FinanceInvoice");
-const FinanceSettings = require("../models/FinanceSettings");
 const { istDayKey }   = require("../utils/istDate");
 
 // ── IST helpers ──────────────────────────────────────────────────────────────
@@ -35,46 +34,85 @@ function parseDay(input) {
 
 function endOfDay(key) { return new Date(`${key}T23:59:59.999+05:30`); }
 
-// ── Settings ─────────────────────────────────────────────────────────────────
-async function getSettings(companyId) {
-  let s = await FinanceSettings.findOne({ company: companyId }).lean();
-  if (!s) {
-    try {
-      s = (await FinanceSettings.create({ company: companyId })).toObject();
-    } catch (e) {
-      if (e.code === 11000) s = await FinanceSettings.findOne({ company: companyId }).lean();
-      else throw e;
-    }
-  }
-  return s;
-}
-
-function cleanPrefix(p) {
-  const v = String(p || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-  return v.slice(0, 10) || "INV";
-}
-
-// ── Invoice numbering ────────────────────────────────────────────────────────
-const counterId = (companyId) => `finance_invoice:${companyId}`;
-const pad = (n) => String(n).padStart(4, "0");
-
+// ── Services (several per invoice) ───────────────────────────────────────────
 /**
- * Atomically reserve the next invoice number for a company. Skips any number
- * already taken (e.g. one the admin typed in by hand), so it never collides.
+ * Validate / clean a services array from the UI.
+ * Returns { services } or { error }. Every line needs a name and an amount > 0
+ * (unless allowZero — used only for auto-created lead invoices).
  */
-async function nextInvoiceNumber(companyId, prefix) {
-  const p = cleanPrefix(prefix);
-  for (let i = 0; i < 25; i++) {
-    const doc = await Counter.findOneAndUpdate(
-      { _id: counterId(companyId) },
-      { $inc: { seq: 1 } },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    );
-    const candidate = `${p}-${pad(doc.seq)}`;
-    const taken = await FinanceInvoice.exists({ company: companyId, invoiceNumber: candidate });
-    if (!taken) return candidate;
+function cleanServices(input, { allowZero = false } = {}) {
+  if (!Array.isArray(input) || input.length === 0) return { error: "Add at least one service." };
+  if (input.length > 30) return { error: "Too many services on one invoice (max 30)." };
+  const out = [];
+  for (const row of input) {
+    const name = String((row && row.name) || "").trim();
+    const amount = Math.round(Number(row && row.amount) * 100) / 100;
+    if (!name) return { error: "Every service needs a name." };
+    if (name.length > 120) return { error: "A service name is too long." };
+    if (!Number.isFinite(amount) || amount < 0 || (!allowZero && amount <= 0)) {
+      return { error: `Enter an amount greater than 0 for "${name}".` };
+    }
+    out.push({ name, amount });
   }
-  return `${p}-${Date.now().toString().slice(-8)}`;
+  return { services: out };
+}
+
+const REFERRAL_RE = /refer/i;
+/** A referral source needs a "referred by" name; other sources must not carry one. */
+function cleanSource(source, referredBy) {
+  const clientSource = String(source || "").trim().slice(0, 60);
+  let ref = String(referredBy || "").trim().slice(0, 120);
+  if (REFERRAL_RE.test(clientSource)) {
+    if (!ref) return { error: "Enter who referred this client." };
+  } else {
+    ref = "";
+  }
+  return { clientSource, referredBy: ref };
+}
+
+/** Source + service dropdown values from the company's Customize CRM lists. */
+async function listOptions(companyId) {
+  let sources = [], services = [];
+  try {
+    const svc = require("./customizationService");
+    const cust = await svc.getCustomization(companyId);
+    sources  = (cust && cust.lists && cust.lists.sources)  || [];
+    services = (cust && cust.lists && cust.lists.services) || [];
+  } catch (e) { /* fall back to empty lists */ }
+  sources = sources.map(String).filter(Boolean);
+  if (!sources.some((x) => REFERRAL_RE.test(x))) sources.push("Referral");
+  return { sources, services: services.map(String).filter(Boolean) };
+}
+
+// ── One-time clean-up of data / indexes from the first release ───────────────
+// The first version numbered invoices automatically (unique index on number) and
+// allowed one invoice per lead (unique index on lead). Both rules are gone, so
+// drop those indexes and give old records a clientId.
+let _migration = null;
+function migrateLegacy() {
+  if (_migration) return _migration;
+  _migration = (async () => {
+    try {
+      const col = FinanceInvoice.collection;
+      let idx = [];
+      try { idx = await col.indexes(); } catch (e) { return; }   // collection not created yet
+      for (const i of idx) {
+        if (i.name === "company_1_invoiceNumber_1" || i.name === "company_1_lead_1") {
+          await col.dropIndex(i.name);
+          console.log(`[finance] dropped legacy index ${i.name}`);
+        }
+      }
+      await FinanceInvoice.updateMany(
+        { clientId: null },
+        [{ $set: { clientId: { $ifNull: ["$lead", "$_id"] }, autoCreated: { $eq: ["$source", "lead"] } } }]
+      );
+      await FinanceInvoice.syncIndexes().catch(() => {});
+    } catch (e) {
+      console.error("[finance] legacy migration failed:", e.message);
+      _migration = null; // allow a retry
+    }
+  })();
+  return _migration;
 }
 
 // ── Money / serialisation ────────────────────────────────────────────────────
@@ -121,6 +159,8 @@ async function _doSync(companyId) {
   if (!wonKeys.length) return { created: 0 };
 
   const cid = new mongoose.Types.ObjectId(String(companyId));
+  await migrateLegacy();
+  // A converted lead that already has ANY invoice is not re-created
   const alreadyInvoiced = await FinanceInvoice.distinct("lead", { company: cid, lead: { $ne: null } });
 
   const leads = await Lead.find({
@@ -130,7 +170,7 @@ async function _doSync(companyId) {
     isClosed: { $ne: true },
     _id:      { $nin: alreadyInvoiced },
   })
-    .select("name businessName service services user assignedAdmin wonAt dealValue createdAt updatedAt callHistory.outcome callHistory.calledAt meetingRemarks.outcome meetingRemarks.metAt")
+    .select("name businessName source service services user assignedAdmin wonAt dealValue createdAt updatedAt callHistory.outcome callHistory.calledAt meetingRemarks.outcome meetingRemarks.metAt")
     .limit(500)
     .lean();
 
@@ -141,30 +181,34 @@ async function _doSync(companyId) {
     .map((l) => ({ lead: l, when: deriveConversionDate(l, wonKeys) }))
     .sort((a, b) => a.when - b.when);
 
-  const settings = await getSettings(cid);
   const userIds  = [...new Set(prepared.map((p) => p.lead.user).filter(Boolean).map(String))];
   const users    = userIds.length ? await User.find({ _id: { $in: userIds } }).select("name").lean() : [];
   const userName = new Map(users.map((u) => [String(u._id), u.name]));
 
   let created = 0;
   for (const { lead, when } of prepared) {
-    const invoiceNumber = await nextInvoiceNumber(cid, settings.invoicePrefix);
     const total = Number(lead.dealValue) > 0 ? Number(lead.dealValue) : 0;
+    const names = (lead.services && lead.services.length ? lead.services : [lead.service]).map((n) => String(n || "").trim()).filter(Boolean);
+    // One service → it carries the deal value. Several → names only, amounts to be filled in.
+    const services = names.length === 1 ? [{ name: names[0], amount: total }] : names.map((name) => ({ name, amount: 0 }));
     const doc = new FinanceInvoice({
       company: cid,
       source: "lead",
+      autoCreated: true,
       lead: lead._id,
-      invoiceNumber,
+      clientId: lead._id,
+      invoiceNumber: "",                       // finance adds this by hand
       customerName: lead.name || "Unnamed lead",
       businessName: lead.businessName || "",
-      service: (lead.services && lead.services.length ? lead.services.join(", ") : lead.service) || "",
+      clientSource: String(lead.source || "").slice(0, 60),
+      services,
       assignedTo: lead.user || null,
       assignedToName: lead.user ? userName.get(String(lead.user)) || "" : "",
       assignedAdmin: lead.assignedAdmin || null,
       createdBy: { id: null, name: "Auto (lead converted)", role: "system" },
       conversionDate: when,
       totalAmount: total,
-      remarks: [{ text: "Invoice created automatically from converted lead.", kind: "system", byName: "System", byRole: "system" }],
+      remarks: [{ text: "Added automatically from a converted lead. Add the invoice number to complete it.", kind: "system", byName: "System", byRole: "system" }],
     });
     doc.recalc();
     try {
@@ -197,6 +241,6 @@ async function syncConvertedLeads(companyId, { force = false } = {}) {
 
 module.exports = {
   todayKey, parseDay, endOfDay,
-  getSettings, cleanPrefix, nextInvoiceNumber,
+  cleanServices, cleanSource, listOptions, migrateLegacy,
   toDTO, deriveConversionDate, syncConvertedLeads,
 };
