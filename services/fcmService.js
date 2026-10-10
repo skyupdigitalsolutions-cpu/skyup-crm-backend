@@ -865,6 +865,90 @@ async function sendScheduledCallReminder(recipient, lead, scheduledCall) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  sendPaymentFollowUpAlert(recipient, items)
+//  Finance Dashboard — tells the employee who owns a payment follow-up that
+//  one or more invoices are due today / overdue. One push per person per run,
+//  summarising everything (see jobs/financeFollowUpJob.js).
+//
+//  recipient: { _id, name, role, fcmToken }
+//  items:     [{ invoiceId, invoiceNumber, customerName, balance, overdue }]
+//
+//  Returns 'sent' | 'no_channel' | 'error' (same contract as
+//  sendScheduledCallReminder — 'error' is transient and worth retrying).
+// ─────────────────────────────────────────────────────────────────────────────
+async function sendPaymentFollowUpAlert(recipient, items) {
+  try {
+    if (!items || !items.length) return 'no_channel';
+    const messaging = getMessaging();
+    const overdueCount = items.filter(i => i.overdue).length;
+    const first = items[0];
+    const money = (n) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
+
+    const title = items.length === 1
+      ? `💰 Payment follow-up — ${first.customerName}`
+      : `💰 ${items.length} payment follow-ups today`;
+    const body = items.length === 1
+      ? `${first.invoiceNumber} · ${money(first.balance)} due${first.overdue ? ' (overdue)' : ''}`
+      : `${items.slice(0, 3).map(i => i.customerName).join(', ')}${items.length > 3 ? ` +${items.length - 3} more` : ''}${overdueCount ? ` · ${overdueCount} overdue` : ''}`;
+
+    const _io = global._io;
+    if (_io && recipient._id) {
+      const role = String(recipient.role || '').toLowerCase();
+      const room = role === 'super_admin' || role === 'superadmin'
+        ? `superadmin:${recipient._id}`
+        : role === 'user' || role === 'employee'
+          ? `agent:${recipient._id}`
+          : `admin:${recipient._id}`;
+      _io.to(room).emit('payment_followup_reminder', {
+        count: items.length,
+        overdue: overdueCount,
+        invoices: items.slice(0, 10).map(i => ({ id: String(i.invoiceId), invoiceNumber: i.invoiceNumber, customerName: i.customerName, balance: i.balance, overdue: !!i.overdue })),
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    if (!messaging || !recipient.fcmToken) {
+      console.warn(`[FCM] ⚠️ Payment follow-up for "${recipient.name}" not pushed — ${!messaging ? 'Firebase not configured' : 'no FCM token (app not logged in / notifications off)'}`);
+      return 'no_channel';
+    }
+    await messaging.send({
+      token: recipient.fcmToken,
+      notification: { title, body },
+      data: {
+        type: 'payment_followup_reminder',
+        count: String(items.length),
+        invoiceId: String(first.invoiceId || ''),
+        title, body,
+      },
+      android: {
+        priority: 'high',
+        notification: { channelId: 'new_lead_channel_v2', priority: 'max', defaultSound: true, defaultVibrateTimings: true },
+      },
+      apns: {
+        payload: { aps: { alert: { title, body }, sound: 'default', 'content-available': 1 } },
+        headers: { 'apns-priority': '10' },
+      },
+    });
+    console.log(`[FCM] ✅ Payment follow-up alert sent to "${recipient.name}" (${items.length} invoice(s))`);
+    return 'sent';
+  } catch (err) {
+    if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
+      const role = String(recipient.role || '').toLowerCase();
+      if (role === 'user' || role === 'employee') {
+        const UserModel = require('../models/Users');
+        await UserModel.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
+      } else {
+        const AdminModel = require('../models/Admin');
+        await AdminModel.findByIdAndUpdate(recipient._id, { $set: { fcmToken: null } }).catch(() => {});
+      }
+      return 'no_channel';
+    }
+    console.error(`[FCM] ❌ sendPaymentFollowUpAlert failed for "${recipient.name}":`, err.message);
+    return 'error';
+  }
+}
+
 module.exports = {
   sendNewLeadNotification,
   sendReassignedLeadNotification,
@@ -875,5 +959,6 @@ module.exports = {
   sendNoFollowUpAlert,
   sendWhatsAppInboundNotification,
   sendScheduledCallReminder,
+  sendPaymentFollowUpAlert,   // Finance Dashboard
   checkFCMHealth,
 };

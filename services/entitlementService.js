@@ -410,6 +410,10 @@ async function getCompanyEntitlements(companyId) {
     callOutcomesReport:  false,
     metaConversionSync:  false,
     leadIntelligence:    false,   // AI Lead Intelligence page — enabled per-company
+    // Finance Dashboard — converted-lead invoices, part-payments, payment
+    // follow-up reminders. OFF for everyone; the Developer switches it on per
+    // company (Companies → <company> → Features → Finance Dashboard).
+    financeDashboard:    false,
     // LinkedIn Lead Sync API campaigns — requires LinkedIn's own Marketing
     // Developer Platform approval externally before it can do anything
     // useful, so this stays a devOverride-only toggle (same as

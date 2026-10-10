@@ -101,6 +101,7 @@ const { startDailyReportJob }         = require('./jobs/dailyReportJob');
 const { startFollowUpPingJob }        = require('./jobs/followUpDailyPingJob');
 const { startLeadAIAnalysisJob }      = require('./jobs/leadAIAnalysisJob');
 const { startFestivalCampaignJob }    = require('./jobs/festivalCampaignJob'); // NEW — fires scheduled festival template blasts on their due date
+const { startFinanceFollowUpJob }      = require('./jobs/financeFollowUpJob');    // NEW — Finance Dashboard payment follow-up reminders
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute         = require('./routes/smsCampaign');
@@ -445,6 +446,8 @@ app.use('/api/google-ads-api',      googleAdsApiRoute);
 app.use('/',                        googleWebhookRoute);
 app.use('/api/daily-report',                                   dailyReportRoute);
 app.use('/api/developer/companies/:companyId/daily-report',    dailyReportRoute);
+app.use('/api/finance',                                         require('./routes/financeRoute'));            // Finance Dashboard (admin / employee)
+app.use('/api/developer/companies/:companyId/finance',          require('./routes/financeRoute'));            // Finance Dashboard (developer, per company)
 app.use('/api/website-config',      websiteConfigRoute);
 app.use('/api/chat',                chatRoutes);
 app.use('/api/email-campaign',      emailCampaignRoute);
@@ -668,6 +671,7 @@ connectDB().then(() => {
     startFollowUpPingJob();        // 9 AM: follow-up list · 4 PM: called vs not-called
     startLeadAIAnalysisJob();     // AI Lead Outcome Intelligence — processes pending analyses every 2 min
     startFestivalCampaignJob();   // Festival Campaigns — checks every 15 min (IST) for scheduled festive blasts due today
+    startFinanceFollowUpJob();    // Finance Dashboard — payment follow-up reminders (every 15 min, from 9:30 AM IST)
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();
