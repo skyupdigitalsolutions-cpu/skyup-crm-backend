@@ -35,14 +35,22 @@ const MAX_ENQUEUE_PER_TICK = 10;
 const QUEUE_HIGH_WATER    = 30;
 const MAX_AUTO_ATTEMPTS   = 3;
 
+// A company reaches these functions in several shapes: an id string, an ObjectId, or — for
+// admin / super-admin logins — the whole populated company object (req.admin.company).
+// Always reduce it to the plain id first: String(companyObject) is "[object Object]", which the
+// entitlement lookup rejects (see the same warning in services/entitlementService.js).
+const idOf = (v) => (v == null ? "" : String(v._id || v));
+
 // ── Is the feature on for this company? ──────────────────────────────────────
 async function isAutoAnalysisEnabled(companyId) {
+  const id = idOf(companyId);
+  if (!id) return false;
   try {
-    if (!companyId) return false;
     const { getCompanyEntitlements } = require("./entitlementService");
-    const ent = await getCompanyEntitlements(String(companyId));
+    const ent = await getCompanyEntitlements(id);
     return !!ent && ent.autoLeadAnalysis === true;
   } catch (e) {
+    console.warn(`[leadAuto] could not check the Auto AI Intelligence switch for company ${id}: ${e.message}`);
     return false;
   }
 }
@@ -74,6 +82,7 @@ async function leadActivityAt(leadId) {
 // right away (used when a person is looking at the lead) instead of waiting for the next tick.
 async function startAutoAnalysis(leadId, companyId, previous, { kick = false } = {}) {
   const jobs = require("../jobs/leadAIAnalysisJob");               // lazy: avoids load-order issues
+  companyId = idOf(companyId);
   await jobs.enqueueLeadAnalysis(leadId, companyId, "auto");
   const wasFailed = previous && previous.status === "failed";
   await LeadAIAnalysis.updateOne({ leadId }, wasFailed ? { $inc: { autoAttempts: 1 } } : { $set: { autoAttempts: 0 } })

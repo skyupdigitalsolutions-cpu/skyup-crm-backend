@@ -31,14 +31,22 @@ const STUCK_PENDING_MIN     = 10;    // a read still "pending" after this long i
 const RETRY_AFTER_MIN       = 30;    // wait this long before retrying a failed read
 const MAX_ATTEMPTS          = 3;     // give up on a screenshot after this many failed reads
 
+// A company reaches these functions in several shapes: an id string, an ObjectId, or — for
+// admin / super-admin logins — the whole populated company object (req.admin.company).
+// Always reduce it to the plain id first: String(companyObject) is "[object Object]", which the
+// entitlement lookup rejects (see the same warning in services/entitlementService.js).
+const idOf = (v) => (v == null ? "" : String(v._id || v));
+
 // ── Is the feature on for this company? ──────────────────────────────────────
 async function isAutoEnabled(companyId) {
+  const id = idOf(companyId);
+  if (!id) return false;
   try {
-    if (!companyId) return false;
     const { getCompanyEntitlements } = require("./entitlementService");
-    const ent = await getCompanyEntitlements(String(companyId));
+    const ent = await getCompanyEntitlements(id);
     return !!ent && ent.autoScreenshotAI === true;
   } catch (e) {
+    console.warn(`[screenshotAuto] could not check the Auto WhatsApp Screenshot AI switch for company ${id}: ${e.message}`);
     return false;
   }
 }
@@ -76,7 +84,7 @@ const unanalysedCriteria = () => ({ "chat.status": "done", "chat.analysisQueuedA
 // ── Queue the lead's AI analysis because of new screenshot data ──────────────
 async function queueAnalysis(leadId, companyId) {
   const { enqueueLeadAnalysis } = require("../jobs/leadAIAnalysisJob");   // lazy: avoids load-order issues
-  await enqueueLeadAnalysis(leadId, companyId, "screenshot");
+  await enqueueLeadAnalysis(leadId, idOf(companyId), "screenshot");
   // Remember it, so the sweep doesn't queue the same screenshots again
   await Lead.updateOne(
     { _id: leadId },
