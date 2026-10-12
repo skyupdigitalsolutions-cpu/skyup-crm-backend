@@ -88,6 +88,7 @@ function actionValue(actions, types) {
 }
 const LEAD_TYPES = ["lead", "onsite_conversion.lead_grouped", "leadgen_grouped", "offsite_conversion.fb_pixel_lead"];
 const LPV_TYPES  = ["landing_page_view", "omni_landing_page_view"];
+const MSG_TYPES  = ["onsite_conversion.messaging_conversation_started_7d", "messaging_conversation_started_7d"];   // click-to-message campaigns
 
 const INSIGHT_FIELDS = "spend,impressions,reach,frequency,clicks,inline_link_clicks,inline_link_click_ctr,ctr,cpm,actions";
 
@@ -107,11 +108,12 @@ function rowMetrics(row) {
     cpc: linkClicks > 0 ? r2(spend / linkClicks) : null,          // cost per LINK click
     lpv: actionValue(row.actions, LPV_TYPES),
     platformLeads: actionValue(row.actions, LEAD_TYPES),
+    msgConversations: actionValue(row.actions, MSG_TYPES),
   };
 }
 
 function emptyMetrics() {
-  return { spend: 0, impressions: 0, reach: 0, frequency: 0, clicks: 0, linkClicks: 0, ctr: 0, linkCtr: 0, cpm: 0, cpc: null, lpv: 0, platformLeads: 0 };
+  return { spend: 0, impressions: 0, reach: 0, frequency: 0, clicks: 0, linkClicks: 0, ctr: 0, linkCtr: 0, cpm: 0, cpc: null, lpv: 0, platformLeads: 0, msgConversations: 0 };
 }
 
 function addMetrics(a, b) {
@@ -122,6 +124,7 @@ function addMetrics(a, b) {
   a.linkClicks += b.linkClicks;
   a.lpv += b.lpv;
   a.platformLeads += b.platformLeads;
+  a.msgConversations += b.msgConversations || 0;
   return a;
 }
 function finalizeMetrics(m) {
@@ -324,4 +327,87 @@ async function getMetaAdsData({ company, configs, since, until, refresh }) {
   return data;
 }
 
-module.exports = { getMetaAdsData, emptyMetrics, addMetrics, finalizeMetrics, actId };
+// ── Light fetch for the Overview charts ──────────────────────────────────────
+// The full fetch above also pulls ad sets, ads, creatives and fatigue — far more than a chart needs.
+// This one makes four calls per account: per-campaign numbers, ACCOUNT-WIDE totals (so reach and
+// frequency are the true de-duplicated figures Ads Manager shows in its total row, not a sum of
+// campaigns), a daily trend, and the campaign list (status / objective). Cached separately.
+const chartCache = new Map();
+
+async function fetchAccountCharts(entry, since, until) {
+  const ver = entry.ver, token = entry.token, acct = entry.acct;
+  const base = "https://graph.facebook.com/" + ver + "/" + acct;
+  const tr = JSON.stringify({ since: since, until: until });
+  const out = { acct: acct, ok: true, error: null, tokenExpired: false, campaigns: [], totals: emptyMetrics(), trend: [] };
+  try {
+    const results = await Promise.all([
+      getAll(base + "/insights", { level: "campaign", fields: "campaign_id,campaign_name," + INSIGHT_FIELDS, time_range: tr, limit: 500, access_token: token }),
+      getAll(base + "/insights", { level: "account", fields: INSIGHT_FIELDS, time_range: tr, limit: 5, access_token: token }),
+      getAll(base + "/insights", { level: "account", fields: INSIGHT_FIELDS, time_range: tr, time_increment: 1, limit: 500, access_token: token }),
+      getAll(base + "/campaigns", { fields: "id,name,effective_status,objective", limit: 500, access_token: token }, 5).catch(function () { return []; }),
+    ]);
+    const campRows = results[0], acctRows = results[1], dayRows = results[2], allCampaigns = results[3];
+    const info = {};
+    allCampaigns.forEach(function (c) { info[String(c.id)] = { status: c.effective_status || "", objective: c.objective || "", name: c.name || "" }; });
+
+    out.campaigns = campRows.map(function (r) {
+      const st = info[String(r.campaign_id)] || {};
+      return { id: String(r.campaign_id), name: r.campaign_name || st.name || "", status: st.status || "", objective: st.objective || "", metrics: rowMetrics(r) };
+    });
+    out.totals = acctRows.length ? rowMetrics(acctRows[0]) : emptyMetrics();
+    out.trend = dayRows.map(function (r) {
+      const m = rowMetrics(r);
+      return { t: r.date_start, spend: m.spend, impressions: m.impressions, reach: m.reach, linkClicks: m.linkClicks, platformLeads: m.platformLeads, msgConversations: m.msgConversations };
+    });
+  } catch (e) {
+    const fe = fbError(e);
+    out.ok = false; out.error = fe.message; out.tokenExpired = fe.code === 190;
+  }
+  return out;
+}
+
+async function getMetaCampaignCharts({ company, configs, since, until, refresh }) {
+  const key = String(company) + "|" + since + "|" + until;
+  const hit = chartCache.get(key);
+  if (!refresh && hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.data;
+
+  const accounts = {};
+  (configs || []).forEach(function (c) {
+    const acct = actId(c.adAccountId);
+    if (!acct || !c.adsToken) return;
+    if (!accounts[acct] || (accounts[acct].tokenExpired && !c.tokenExpired)) {
+      accounts[acct] = { acct: acct, token: c.adsToken, ver: c.graphApiVersion || DEFAULT_VER, tokenExpired: !!c.tokenExpired };
+    }
+  });
+  const entries = Object.keys(accounts).map(function (k) { return accounts[k]; });
+
+  const data = { configured: entries.length > 0, fetchedAt: new Date().toISOString(), range: { since: since, until: until }, accounts: [], campaigns: [], totals: emptyMetrics(), trend: [], error: null, tokenExpired: false };
+  const results = await Promise.all(entries.map(function (e) { return fetchAccountCharts(e, since, until); }));
+  const trendMap = {};
+  results.forEach(function (r) {
+    data.accounts.push({ acct: r.acct, ok: r.ok, error: r.error, tokenExpired: r.tokenExpired, campaigns: r.campaigns.length });
+    if (!r.ok) { data.error = data.error || r.error; data.tokenExpired = data.tokenExpired || r.tokenExpired; return; }
+    r.campaigns.forEach(function (c) { c.account = r.acct; data.campaigns.push(c); });
+    addMetrics(data.totals, r.totals);                       // one account → exactly Ads Manager's total row
+    (r.trend || []).forEach(function (t) {
+      if (!trendMap[t.t]) trendMap[t.t] = { t: t.t, spend: 0, impressions: 0, reach: 0, linkClicks: 0, platformLeads: 0, msgConversations: 0 };
+      const x = trendMap[t.t];
+      x.spend = r2(x.spend + t.spend); x.impressions += t.impressions; x.reach += t.reach; x.linkClicks += t.linkClicks; x.platformLeads += t.platformLeads; x.msgConversations += t.msgConversations || 0;
+    });
+  });
+  data.trend = Object.keys(trendMap).sort().map(function (k) { return trendMap[k]; });
+  // Totals come straight from the account-level query (true unique reach + frequency); only a
+  // multi-account company has reach summed across accounts (an upper bound).
+  const only = results.filter(function (r) { return r.ok; });
+  if (only.length === 1) { data.totals = only[0].totals; }
+  else { finalizeMetrics(data.totals); }
+  data.multiAccount = only.length > 1;
+
+  if (data.configured && data.accounts.every(function (a) { return a.ok; })) {       // don't cache a failed fetch
+    chartCache.set(key, { at: Date.now(), data: data });
+    if (chartCache.size > 200) chartCache.delete(chartCache.keys().next().value);
+  }
+  return data;
+}
+
+module.exports = { getMetaAdsData, getMetaCampaignCharts, emptyMetrics, addMetrics, finalizeMetrics, actId };

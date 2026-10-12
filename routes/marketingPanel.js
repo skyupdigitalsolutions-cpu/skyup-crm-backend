@@ -700,6 +700,7 @@ function v2(handler) {
 
 router.get("/v2/overview",    protectMarketing, v2(MA.overview));
 router.get("/v2/meta",        protectMarketing, v2(MA.meta));
+router.get("/v2/meta-charts", protectMarketing, v2(MA.metaCharts));   // Overview charts: campaign table numbers + daily trend, any date range
 router.get("/v2/google",      protectMarketing, v2(MA.google));
 router.get("/v2/creatives",   protectMarketing, v2(MA.creatives));
 router.get("/v2/pipeline",    protectMarketing, v2(MA.pipeline));

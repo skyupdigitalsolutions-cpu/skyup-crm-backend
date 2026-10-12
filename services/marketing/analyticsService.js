@@ -15,7 +15,7 @@
 const mongoose = require("mongoose");
 const F = require("./leadFacts");
 const { DICTIONARY, DIAGNOSTIC_RULES, LOST_REASONS, STAGES } = require("./dictionary");
-const { getMetaAdsData } = require("./metaAdsFetcher");
+const { getMetaAdsData, getMetaCampaignCharts } = require("./metaAdsFetcher");
 const { getGoogleAdsData } = require("./googleAdsFetcher");
 
 const CTX_TTL_MS = 60 * 1000;
@@ -878,6 +878,86 @@ async function report({ company, query, leadScope, refresh }) {
   return { level: level, range: { from: ctx.range.since, to: ctx.range.until }, rows: rows, totals: Object.assign(t, ratios(t, rows.reduce(function (s, r) { return s + (r.spend || 0); }, 0))), sync: syncInfo(ctx) };
 }
 
+// ── Meta Ads performance charts (Overview) ───────────────────────────────────
+// The same numbers as Ads Manager's campaign table, plus a daily trend, for ANY date range.
+//   results / cost per result: what the campaign achieved — form leads, or messaging conversations when
+//   those outnumber leads (a click-to-message campaign). Custom conversions such as a "Qualified lead"
+//   event are not part of the data the CRM requests, so they aren't included.
+function chartMetrics(m) {
+  const spend = m.spend || 0, impressions = m.impressions || 0, reach = m.reach || 0;
+  const leads = m.platformLeads || 0, conv = m.msgConversations || 0;
+  const useConv = conv > leads;                       // a click-to-message campaign: conversations are its result
+  const results = useConv ? conv : leads;
+  return {
+    spend: r2(spend), impressions: impressions, reach: reach,
+    frequency: reach > 0 ? r2(impressions / reach) : (m.frequency || 0),
+    cpm: impressions > 0 ? r2((spend / impressions) * 1000) : 0,
+    linkCtr: impressions > 0 ? r2(((m.linkClicks || 0) / impressions) * 100) : 0,
+    linkClicks: m.linkClicks || 0,
+    leads: leads, cpl: leads > 0 ? r2(spend / leads) : null,
+    msgConversations: conv,
+    results: results, resultType: useConv ? "Messaging conversations" : leads > 0 ? "Leads" : "",
+    costPerResult: results > 0 ? r2(spend / results) : null,
+  };
+}
+
+function shapeMetaCharts(d, range) {
+  const campaigns = (d.campaigns || []).map(function (c) {
+    return Object.assign({ id: c.id, name: c.name, status: c.status, objective: c.objective }, chartMetrics(c.metrics || {}));
+  }).sort(function (a, b) { return b.spend - a.spend || b.impressions - a.impressions; });
+  const trend = (d.trend || []).map(function (t) {
+    const m = chartMetrics({ spend: t.spend, impressions: t.impressions, reach: t.reach, linkClicks: t.linkClicks, platformLeads: t.platformLeads, msgConversations: t.msgConversations });
+    // a day's reach is that day's unique people (not additive); frequency = that day's impressions per person
+    return Object.assign({ t: t.t }, m);
+  });
+  return {
+    configured: !!d.configured, error: d.error || null, tokenExpired: !!d.tokenExpired, multiAccount: !!d.multiAccount,
+    range: { from: range.since, to: range.until, days: range.days }, fetchedAt: d.fetchedAt || null,
+    totals: Object.assign({ campaigns: campaigns.length }, chartMetrics(d.totals || {})),
+    campaigns: campaigns, trend: trend,
+  };
+}
+
+async function metaCharts({ company, query, refresh }) {
+  const range = F.parseRange(query.from, query.to);
+  const today = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);   // IST
+  if (range.until > today) { range.until = today; range.days = Math.round((new Date(range.until + "T00:00:00Z") - new Date(range.since + "T00:00:00Z")) / 86400000) + 1; }
+  if (range.since > range.until) { const e = new Error("“From” must be on or before “To”."); e.status = 400; throw e; }
+  if (range.days > 400) { const e = new Error("Choose a range of 400 days or less."); e.status = 400; throw e; }
+  const MetaConfig = require("../../models/MetaConfig");
+  const configs = await MetaConfig.find({ company: company }).lean();
+  const d = await getMetaCampaignCharts({ company: company, configs: configs, since: range.since, until: range.until, refresh: refresh });
+  return shapeMetaCharts(d, range);
+}
+
+// ── Ad-level detail for one lead ─────────────────────────────────────────────
+// Which ad set and which AD a lead came from. Meta leads that arrive through a lead form carry the
+// ad set id and ad id; here those ids are turned into readable names using the Meta account data
+// for the selected date range. If an ad had no delivery in that range its name isn't in the data,
+// so we fall back to the names saved on the lead when it was created. Google only passes the ad
+// GROUP and keyword (not a single ad), so Google leads show those instead.
+function adNameIndex(ctx) {
+  const md = ctx.metaData || {}, gd = ctx.googleData || {};
+  const adset = {}, ad = {}, adGroup = {};
+  (md.adsets || []).forEach(function (a) { if (a && a.id) adset[a.id] = a.name || ""; });
+  (md.ads || []).forEach(function (a) { if (a && a.id) ad[a.id] = a.name || ""; });
+  (gd.adGroups || []).forEach(function (g) { if (g && g.id) adGroup[g.id] = g.name || ""; });
+  return { adset: adset, ad: ad, adGroup: adGroup };
+}
+
+function adDetail(f, nm) {
+  const m = f.meta || {}, g = f.google || {}, a = f.attribution || {};
+  const adId = m.adId || "";
+  const adSetId = m.adsetId || g.adGroupId || "";
+  const adSet = (m.adsetId && nm.adset[m.adsetId]) || (g.adGroupId && nm.adGroup[g.adGroupId]) || f.adSetName || "";
+  const adName = (adId && nm.ad[adId]) || (adId && a.metaAdName) || "";
+  return {
+    adSet: adSet, adSetId: adSetId, adName: adName, metaAdId: adId,
+    // how deep we can see: the exact ad, just the ad set / ad group, or nothing
+    adLevel: adId ? "ad" : (adSetId || adSet) ? "adset" : "none",
+  };
+}
+
 // Drill-down: "where did this number come from?"
 async function leads({ company, query, leadScope, refresh }) {
   const ctx = await getContext({ company: company, query: query, leadScope: leadScope, refresh: refresh });
@@ -910,17 +990,21 @@ async function leads({ company, query, leadScope, refresh }) {
   const names = await userNames(company);
   const limit = Math.min(1000, Number(q.limit) || 500);
   facts.sort(function (a, b) { return new Date(b.createdAt) - new Date(a.createdAt); });
+  const nm = adNameIndex(ctx);
+  const metaLeads = facts.filter(function (f) { return f.channel === "meta"; });
   return {
     total: facts.length, summary: agg(facts),
+    // how many Meta leads in this list we can trace to an exact ad (the rest have no ad id on record)
+    adCoverage: { metaLeads: metaLeads.length, withAd: metaLeads.filter(function (f) { return f.meta && f.meta.adId; }).length },
     leads: facts.slice(0, limit).map(function (f) {
-      return {
-        _id: f._id, name: f.name, mobile: f.mobile, channel: f.channel, source: f.source, campaign: f.campaignLabel, adSet: f.adSetName,
+      return Object.assign({
+        _id: f._id, name: f.name, mobile: f.mobile, channel: f.channel, source: f.source, campaign: f.campaignLabel,
         status: f.status, statusLabel: f.statusLabel, statusCategory: f.statusCategory, stage: f.stage, reached: f.reached,
         temperature: f.temperature, salesperson: f.user ? (names.map[f.user] || "Unknown") : "Unassigned",
         createdAt: f.createdAt, responseMin: f.responseMin, callCount: f.callCount, lastOutcome: f.lastOutcome,
         nextFollowUpAt: f.nextFollowUpAt, lostReason: f.lostReason, dealValue: f.dealValue, revenue: f.revenue, revenueType: f.revenueType,
-        attributionMethod: f.attributionMethod, metaAdId: f.meta ? f.meta.adId : "", keyword: f.google ? f.google.keyword : "",
-      };
+        attributionMethod: f.attributionMethod, keyword: f.google ? f.google.keyword : "",
+      }, adDetail(f, nm));
     }),
   };
 }
@@ -1080,4 +1164,6 @@ function clearCache() { ctxCache.clear(); aiCache.clear(); }
 module.exports = {
   overview, meta, google, creatives, pipeline, report, leads, dataHealth, aiAnalysis,
   updateLeadOutcome, dictionary, filters, getSettings, saveSettings, clearCache,
+  metaCharts,
+  adNameIndex, adDetail, shapeMetaCharts, chartMetrics,   // exported for tests
 };
