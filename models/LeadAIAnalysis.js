@@ -95,7 +95,11 @@ const leadAIAnalysisSchema = new mongoose.Schema(
     errorMessage:    { type: String, default: null },
 
     // Track what triggered this analysis
-    triggeredBy: { type: String, default: "manual" }, // manual | call | whatsapp | followup | meeting | stage_change
+    triggeredBy: { type: String, default: "manual" }, // manual | call | whatsapp | followup | meeting | stage_change | screenshot
+    // New evidence (e.g. a screenshot) arrived while an analysis was running → run once more afterwards.
+    rerunRequested: { type: Boolean, default: false },
+    // Automatic mode: how many times a FAILED analysis was retried by the sweep (stops at 3)
+    autoAttempts:   { type: Number, default: 0 },
   },
   { timestamps: true }
 );

@@ -20,12 +20,14 @@
 //     distinguishable from real WA messages in analytics
 // ─────────────────────────────────────────────────────────────────────────────
 
+const crypto               = require("crypto");
 const axios                = require("axios");
 const multer               = require("multer");
 const Lead                 = require("../models/Leads");
 const WhatsAppConversation = require("../models/WhatsAppConversation");
 const WhatsAppMessage      = require("../models/WhatsAppMessage");
 const { getCloudinaryForCompany, companyFolder } = require("../services/cloudinaryService");
+const { isAutoEnabled, queueAnalysis } = require("../services/screenshotAutoService");
 
 // ── Multer memory storage (we upload to Cloudinary manually for vision) ────────
 const memStorage = multer.memoryStorage();
@@ -245,6 +247,18 @@ const importScreenshot = async (req, res, next) => {
       .lean();
     if (!lead) return res.status(403).json({ success: false, message: "Lead not found or access denied" });
 
+    // The same screenshot must never be imported twice (more likely now that automatic
+    // mode removes the review step). Checked BEFORE uploading / reading, so it costs nothing.
+    const screenshotHash = crypto.createHash("sha256").update(req.file.buffer).digest("hex");
+    const existingConv = await WhatsAppConversation.findOne({ lead: leadId, company: companyId }).select("_id").lean();
+    if (existingConv && await WhatsAppMessage.exists({ conversation: existingConv._id, "metadata.screenshotHash": screenshotHash })) {
+      return res.json({
+        success: true, imported: 0, duplicate: true,
+        message: "This screenshot was already imported for this lead.",
+        conversationId: String(existingConv._id),
+      });
+    }
+
     // 1. Upload screenshot
     let imageUrl;
     try {
@@ -310,6 +324,7 @@ const importScreenshot = async (req, res, next) => {
           metadata: {
             source:       "screenshot_import",
             screenshotUrl: imageUrl,
+            screenshotHash,
             extractedAt:  new Date(now),
           },
           // Generate a unique waMessageId to prevent dedup conflicts
@@ -336,9 +351,17 @@ const importScreenshot = async (req, res, next) => {
       );
     }
 
+    // Automatic mode: queue the lead's AI analysis right away (no "Re-analyze" click needed)
+    let analysisQueued = false;
+    if (savedMessages.length > 0 && await isAutoEnabled(companyId)) {
+      await queueAnalysis(leadId, companyId);
+      analysisQueued = true;
+    }
+
     return res.json({
       success:           true,
       imported:          savedMessages.length,
+      analysisQueued,
       conversationId:    String(conversation._id),
       imageUrl,
       contactName:       extracted.contactName    || null,

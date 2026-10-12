@@ -414,6 +414,13 @@ async function getCompanyEntitlements(companyId) {
     // follow-up reminders. OFF for everyone; the Developer switches it on per
     // company (Companies → <company> → Features → Finance Dashboard).
     financeDashboard:    false,
+    // Auto WhatsApp Screenshot AI — screenshots are read, saved and AI-analysed with no
+    // manual clicks. OFF for everyone; the Developer switches it on per company.
+    autoScreenshotAI:    false,
+    // Auto AI Intelligence — leads are analysed automatically (when opened, and by a background
+    // sweep when there is new activity); nobody has to click Analyse / Re-analyse. OFF for
+    // everyone; the Developer switches it on per company.
+    autoLeadAnalysis:    false,
     // LinkedIn Lead Sync API campaigns — requires LinkedIn's own Marketing
     // Developer Platform approval externally before it can do anything
     // useful, so this stays a devOverride-only toggle (same as

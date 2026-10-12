@@ -117,9 +117,22 @@ const whatsAppMessageSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+
+    // Set on messages created from a chat screenshot (controllers/whatsappScreenshotController.js).
+    // NOTE: this field was missing from the schema, so Mongoose was silently dropping it and the
+    // AI analysis could not tell screenshot messages from real ones.
+    metadata: {
+      source:         { type: String, default: undefined },   // "screenshot_import"
+      screenshotUrl:  { type: String, default: undefined },
+      screenshotHash: { type: String, default: undefined },   // sha256 of the image — blocks importing the same screenshot twice
+      extractedAt:    { type: Date,   default: undefined },
+    },
   },
   { timestamps: true }
 );
+
+// Duplicate-screenshot check (sparse: ordinary messages have no hash)
+whatsAppMessageSchema.index({ conversation: 1, "metadata.screenshotHash": 1 }, { sparse: true });
 
 // Index for fast conversation history retrieval
 whatsAppMessageSchema.index({ conversation: 1, waTimestamp: 1 });

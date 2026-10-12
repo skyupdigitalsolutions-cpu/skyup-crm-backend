@@ -12,6 +12,7 @@ const { enqueueLeadAnalysis, runAnalysisBatch } = require("../jobs/leadAIAnalysi
 const { buildLeadTimeline }    = require("../services/ai/leadTimeline.service");
 const { calculateLeadMetrics } = require("../services/ai/leadMetrics.service");
 const { diagnoseLead }         = require("../services/ai/leadDiagnosis.service");
+const auto                     = require("../services/leadAutoAnalysisService");
 
 // ── Helper: resolve companyId from request (admin or user) ───────────────────
 function getCompanyId(req) {
@@ -43,6 +44,21 @@ const getAIAnalysis = async (req, res) => {
     const analysis = await LeadAIAnalysis.findOne({ leadId: req.params.leadId })
       .lean();
 
+    // ── Auto AI Intelligence (per-company switch) ─────────────────────────────
+    // Opening a lead with no analysis, or with new activity since the last one, starts the
+    // analysis by itself — no Analyse / Re-analyse click. The panel just shows "in progress".
+    const isAuto = await auto.isAutoAnalysisEnabled(companyId);
+    if (isAuto) {
+      const activityAt = await auto.leadActivityAt(req.params.leadId);
+      if (auto.analysisAction(analysis, activityAt, Date.now(), { minGapMs: auto.VIEW_MIN_GAP_MS }) === "analyse") {
+        await auto.startAutoAnalysis(req.params.leadId, companyId, analysis, { kick: true });
+        return res.json({
+          success: true, hasAnalysis: true, auto: true, autoStarted: true,
+          analysis: { ...(analysis || {}), status: "pending" },
+        });
+      }
+    }
+
     if (!analysis) {
       return res.status(404).json({
         success: false,
@@ -51,7 +67,7 @@ const getAIAnalysis = async (req, res) => {
       });
     }
 
-    return res.json({ success: true, hasAnalysis: true, analysis });
+    return res.json({ success: true, hasAnalysis: true, ...(isAuto ? { auto: true } : {}), analysis });
   } catch (err) {
     console.error("[leadAI:get]", err.message);
     return res.status(err.message.includes("access denied") ? 403 : 500).json({

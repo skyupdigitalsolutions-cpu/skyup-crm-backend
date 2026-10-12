@@ -62,9 +62,11 @@ async function enqueueLeadAnalysis(leadId, companyId, triggeredBy = "event") {
   try {
     const existing = await LeadAIAnalysis.findOne({ leadId }).lean();
 
-    // Don't overwrite if currently processing
+    // Don't overwrite if currently processing — but remember to run once more afterwards,
+    // otherwise new evidence (e.g. a screenshot read while this ran) would be missed.
     if (existing?.status === "processing") {
-      console.log(`[leadAIJob] Lead ${leadId} already processing — skipped enqueue`);
+      await LeadAIAnalysis.updateOne({ leadId }, { $set: { rerunRequested: true } });
+      console.log(`[leadAIJob] Lead ${leadId} already processing — will re-run once it finishes`);
       return;
     }
 
@@ -76,6 +78,7 @@ async function enqueueLeadAnalysis(leadId, companyId, triggeredBy = "event") {
           companyId,
           triggeredBy,
           status:          "pending",
+          rerunRequested:  false,
           analysisVersion: ANALYSIS_VERSION,
           generatedAt:     new Date(),
         },
@@ -138,6 +141,9 @@ async function processOneLead(analysis) {
       },
       { upsert: true }
     );
+
+    // New evidence arrived while this ran → queue one more pass
+    await LeadAIAnalysis.updateOne({ leadId, rerunRequested: true }, { $set: { status: "pending", rerunRequested: false } });
 
     console.log(`[leadAIJob] ✅ Analysis done for lead ${leadId} — health: ${diagnosis.leadHealth}, probability: ${diagnosis.conversionProbability}%`);
   } catch (err) {

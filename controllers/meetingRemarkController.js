@@ -530,60 +530,10 @@ const sendMeetingWhatsApp = async (req, res, next) => {
 // (personal number, outside the CRM's own WhatsApp integration). Body field:
 // `note` (optional, free text — e.g. "confirmed pricing over WA").
 // ── Read a lead screenshot's chat with AI (GPT-4o vision) ────────────────────
-// Stores { status, summary, sentiment, keyTopics, messages } on the screenshot.
-// Never throws: failures are recorded on the screenshot so the UI can retry.
-async function readScreenshotChat(leadId, shotId, imageUrl) {
-  // Update by array position, guarded so the element at that position must
-  // still be THIS screenshot (works on MongoDB and MongoDB-compatible stores).
-  const set = async (chat) => {
-    try {
-      const doc = await Lead.findOne({ _id: leadId }).select("whatsappScreenshots._id").lean();
-      const idx = (doc?.whatsappScreenshots || []).findIndex((s) => String(s._id) === String(shotId));
-      if (idx < 0) return;
-      await Lead.updateOne(
-        { _id: leadId, [`whatsappScreenshots.${idx}._id`]: shotId },
-        { $set: { [`whatsappScreenshots.${idx}.chat`]: chat } },
-      );
-    } catch (e) {
-      console.warn("[screenshot chat] save failed:", e.message);
-    }
-  };
-
-  if (!process.env.OPENAI_API_KEY) {
-    await set({ status: "unavailable", error: "Chat reading isn't set up on the server (OPENAI_API_KEY missing).", messages: [], keyTopics: [] });
-    return null;
-  }
-  try {
-    const { extractFromVision } = require("./whatsappScreenshotController");
-    const raw = await extractFromVision(imageUrl);
-    const clip = (v, n) => String(v ?? "").slice(0, n);
-    const chat = {
-      status:    "done",
-      summary:   clip(raw?.summary, 1000),
-      sentiment: clip(raw?.customerSentiment, 20).toUpperCase(),
-      keyTopics: (Array.isArray(raw?.keyTopics) ? raw.keyTopics : []).slice(0, 10).map((t) => clip(t, 60)),
-      messages:  (Array.isArray(raw?.messages) ? raw.messages : []).slice(0, 200).map((m) => ({
-        direction:   m?.direction === "outbound" ? "outbound" : "inbound",
-        text:        clip(m?.text, 2000),
-        time:        clip(m?.time, 20),
-        date:        clip(m?.date, 30),
-        messageType: clip(m?.messageType || "text", 20),
-      })),
-      error:  "",
-      readAt: new Date(),
-    };
-    if (!chat.messages.length && !chat.summary) {
-      chat.status = "failed";
-      chat.error = "No chat messages could be read from this image.";
-    }
-    await set(chat);
-    return chat;
-  } catch (err) {
-    const msg = err?.response?.data?.error?.message || err.message || "Reading failed";
-    await set({ status: "failed", error: String(msg).slice(0, 300), messages: [], keyTopics: [] });
-    return null;
-  }
-}
+// Moved to services/screenshotAutoService.js (shared with the automatic sweep).
+// Stores { status, summary, sentiment, keyTopics, messages } on the screenshot and
+// never throws: failures are recorded on the screenshot so the UI can retry.
+const { readScreenshotChat } = require("../services/screenshotAutoService");
 
 // POST /lead/:id/whatsapp-screenshots/:shotId/read   (+ /lead/admin/... )
 // Reads (or re-reads) one screenshot now and returns the result.
@@ -594,7 +544,7 @@ const readWhatsAppScreenshot = async (req, res) => {
     if (!lead) return res.status(404).json({ message: "Lead not found." });
     const shot = (lead.whatsappScreenshots || []).find((s) => String(s._id) === String(req.params.shotId));
     if (!shot) return res.status(404).json({ message: "Screenshot not found." });
-    await readScreenshotChat(lead._id, shot._id, shot.url);
+    await readScreenshotChat(lead._id, shot._id, shot.url, { companyId });
     const fresh = await Lead.findOne({ _id: lead._id }).select("whatsappScreenshots").lean();
     const updated = (fresh.whatsappScreenshots || []).find((s) => String(s._id) === String(shot._id));
     return res.json({ screenshot: updated });
@@ -639,7 +589,7 @@ const addWhatsAppScreenshot = (req, res, next) => {
       const saved = updated.whatsappScreenshots[updated.whatsappScreenshots.length - 1];
 
       // Read the chat in the background — the upload response doesn't wait.
-      if (process.env.OPENAI_API_KEY) readScreenshotChat(updated._id, saved._id, saved.url);
+      if (process.env.OPENAI_API_KEY) readScreenshotChat(updated._id, saved._id, saved.url, { companyId });
 
       return res.status(201).json({
         message: 'WhatsApp screenshot saved.',

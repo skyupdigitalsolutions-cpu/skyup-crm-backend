@@ -102,6 +102,8 @@ const { startFollowUpPingJob }        = require('./jobs/followUpDailyPingJob');
 const { startLeadAIAnalysisJob }      = require('./jobs/leadAIAnalysisJob');
 const { startFestivalCampaignJob }    = require('./jobs/festivalCampaignJob'); // NEW — fires scheduled festival template blasts on their due date
 const { startFinanceFollowUpJob }      = require('./jobs/financeFollowUpJob');    // NEW — Finance Dashboard payment follow-up reminders
+const { startScreenshotAutoJob }       = require('./jobs/screenshotAutoJob');     // NEW — auto-read WhatsApp screenshots + AI analysis
+const { startLeadAutoAnalysisJob }     = require('./jobs/leadAutoAnalysisJob');   // NEW — Auto AI Intelligence sweep
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute         = require('./routes/smsCampaign');
@@ -674,6 +676,8 @@ connectDB().then(() => {
     startLeadAIAnalysisJob();     // AI Lead Outcome Intelligence — processes pending analyses every 2 min
     startFestivalCampaignJob();   // Festival Campaigns — checks every 15 min (IST) for scheduled festive blasts due today
     startFinanceFollowUpJob();    // Finance Dashboard — payment follow-up reminders (every 15 min, from 9:30 AM IST)
+    startScreenshotAutoJob();     // Auto WhatsApp Screenshot AI — sweeps for unread screenshots (every 5 min)
+    startLeadAutoAnalysisJob();   // Auto AI Intelligence — queues analyses for new / changed leads (every 5 min)
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();

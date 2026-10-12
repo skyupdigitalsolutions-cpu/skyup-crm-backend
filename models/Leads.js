@@ -198,6 +198,10 @@ const leadSchema = mongoose.Schema(
               },
               error:  { type: String, default: "" },
               readAt: { type: Date, default: null },
+              // Bookkeeping for the automatic reader (services/screenshotAutoService.js)
+              attempts:         { type: Number, default: 0 },     // how many times reading was tried
+              lastTriedAt:      { type: Date,   default: null },
+              analysisQueuedAt: { type: Date,   default: null },  // when the lead's AI analysis was queued because of this screenshot
             },
           },
           { _id: true }
