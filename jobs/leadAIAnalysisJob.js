@@ -157,6 +157,19 @@ async function processOneLead(analysis) {
   }
 }
 
+// ── Run one lead's queued analysis immediately ───────────────────────────────
+// Used when fresh evidence just arrived (a screenshot was read) so the result shows up in
+// seconds instead of waiting for the next 2-minute tick. If another worker already holds the
+// lock, the cron tick simply picks it up — nothing is lost.
+async function processLeadNow(leadId) {
+  try {
+    const doc = await LeadAIAnalysis.findOne({ leadId, status: "pending" }).lean();
+    if (doc) await processOneLead(doc);
+  } catch (err) {
+    console.error("[leadAIJob] processLeadNow error:", err.message);
+  }
+}
+
 // ── Cron runner — every 2 minutes, pick up pending items ─────────────────────
 async function runAnalysisBatch() {
   try {
@@ -191,4 +204,5 @@ module.exports = {
   startLeadAIAnalysisJob,
   enqueueLeadAnalysis,
   runAnalysisBatch,
+  processLeadNow,
 };

@@ -82,9 +82,12 @@ function unreadCriteria(now = Date.now()) {
 const unanalysedCriteria = () => ({ "chat.status": "done", "chat.analysisQueuedAt": null });
 
 // ── Queue the lead's AI analysis because of new screenshot data ──────────────
-async function queueAnalysis(leadId, companyId) {
-  const { enqueueLeadAnalysis } = require("../jobs/leadAIAnalysisJob");   // lazy: avoids load-order issues
-  await enqueueLeadAnalysis(leadId, idOf(companyId), "screenshot");
+// opts.now — also start the analysis immediately (in the background) instead of waiting for the next
+// 2-minute tick, so the summary + analysis appear within seconds of the upload.
+async function queueAnalysis(leadId, companyId, opts = {}) {
+  const jobs = require("../jobs/leadAIAnalysisJob");                      // lazy: avoids load-order issues
+  await jobs.enqueueLeadAnalysis(leadId, idOf(companyId), "screenshot");
+  if (opts.now) setImmediate(() => jobs.processLeadNow(leadId));
   // Remember it, so the sweep doesn't queue the same screenshots again
   await Lead.updateOne(
     { _id: leadId },
@@ -152,7 +155,7 @@ async function readScreenshotChat(leadId, shotId, imageUrl, opts = {}) {
     }
     await set(chat);
     if (chat.status === "done" && opts.companyId && (await isAutoEnabled(opts.companyId))) {
-      await queueAnalysis(leadId, opts.companyId);
+      await queueAnalysis(leadId, opts.companyId, { now: true });
     }
     return chat;
   } catch (err) {
@@ -218,6 +221,6 @@ async function runAutoScreenshotBatch() {
 
 module.exports = {
   isAutoEnabled, readScreenshotChat, queueAnalysis, runAutoScreenshotBatch,
-  needsRead, unreadCriteria, unanalysedCriteria, claimScreenshot,
+  needsRead, unreadCriteria, unanalysedCriteria, claimScreenshot, enabledCompanyIds,
   MAX_READS_PER_TICK, MAX_ATTEMPTS,
 };

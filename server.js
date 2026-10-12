@@ -104,6 +104,7 @@ const { startFestivalCampaignJob }    = require('./jobs/festivalCampaignJob'); /
 const { startFinanceFollowUpJob }      = require('./jobs/financeFollowUpJob');    // NEW — Finance Dashboard payment follow-up reminders
 const { startScreenshotAutoJob }       = require('./jobs/screenshotAutoJob');     // NEW — auto-read WhatsApp screenshots + AI analysis
 const { startLeadAutoAnalysisJob }     = require('./jobs/leadAutoAnalysisJob');   // NEW — Auto AI Intelligence sweep
+const { startScreenshotRetentionJob }  = require('./jobs/screenshotRetentionJob');// NEW — delete WhatsApp screenshot images after 7 days
 
 // ── SMS Campaign Routes (MSG91) ───────────────────────────────────────────────
 const smsCampaignRoute         = require('./routes/smsCampaign');
@@ -678,6 +679,7 @@ connectDB().then(() => {
     startFinanceFollowUpJob();    // Finance Dashboard — payment follow-up reminders (every 15 min, from 9:30 AM IST)
     startScreenshotAutoJob();     // Auto WhatsApp Screenshot AI — sweeps for unread screenshots (every 5 min)
     startLeadAutoAnalysisJob();   // Auto AI Intelligence — queues analyses for new / changed leads (every 5 min)
+    startScreenshotRetentionJob();// Screenshot images deleted after 7 days (hourly)
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();

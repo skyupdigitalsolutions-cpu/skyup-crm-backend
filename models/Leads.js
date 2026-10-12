@@ -172,7 +172,11 @@ const leadSchema = mongoose.Schema(
       type: [
         new mongoose.Schema(
           {
-            url:        { type: String, required: true },
+            // Required while the image exists. After the 7-day clean-up (services/screenshotRetentionService.js)
+            // the image is deleted, `url` is cleared and `deletedAt` is set — the chat the AI read stays.
+            url:        { type: String, required: function () { return !this.deletedAt; } },
+            publicId:   { type: String, default: "" },        // Cloudinary public id (used to delete the image)
+            deletedAt:  { type: Date,   default: null },      // when the image was deleted (null = still stored)
             name:       { type: String, default: "" },
             note:       { type: String, default: "" },
             uploadedAt: { type: Date, default: Date.now },

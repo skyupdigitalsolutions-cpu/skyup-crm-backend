@@ -572,6 +572,7 @@ const addWhatsAppScreenshot = (req, res, next) => {
 
       const entry = {
         url:        req.file.path || req.file.secure_url,
+        publicId:   req.file.filename || '',      // Cloudinary public id — lets the 7-day clean-up delete the image
         name:       req.file.originalname || req.file.filename || 'Screenshot',
         note:       (req.body.note || '').trim(),
         uploadedAt: new Date(),

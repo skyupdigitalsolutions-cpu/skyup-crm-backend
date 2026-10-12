@@ -70,6 +70,10 @@ async function uploadScreenshotToCloudinary(buffer, mimetype, companyId) {
   });
 }
 
+// Auto mode ("Auto WhatsApp Screenshot AI"): the image is sent to the AI inline and is never stored
+// anywhere, so there is nothing left to delete. Everyone else keeps the Cloudinary upload.
+const toDataUrl = (file) => `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
+
 // ── GPT-4o Vision: extract WhatsApp chat messages from screenshot ─────────────
 const VISION_SYSTEM_PROMPT = `You are a WhatsApp chat screenshot reader for a CRM system.
 Extract ALL visible messages from the WhatsApp chat screenshot.
@@ -188,19 +192,22 @@ const extractScreenshot = async (req, res, next) => {
 
     if (!req.file) return res.status(400).json({ success: false, message: "No screenshot uploaded" });
 
-    // 1. Upload to Cloudinary
-    let imageUrl;
-    try {
-      imageUrl = await uploadScreenshotToCloudinary(req.file.buffer, req.file.mimetype, companyId);
-    } catch (err) {
-      console.error("[screenshotExtract] Cloudinary upload failed:", err.message);
-      return next(err);
+    // 1. Upload to Cloudinary (skipped in auto mode — the image is sent inline and never stored)
+    const inline = await isAutoEnabled(companyId);
+    let imageUrl = null;
+    if (!inline) {
+      try {
+        imageUrl = await uploadScreenshotToCloudinary(req.file.buffer, req.file.mimetype, companyId);
+      } catch (err) {
+        console.error("[screenshotExtract] Cloudinary upload failed:", err.message);
+        return next(err);
+      }
     }
 
     // 2. Run GPT-4o Vision
     let extracted;
     try {
-      extracted = await extractFromVision(imageUrl);
+      extracted = await extractFromVision(inline ? toDataUrl(req.file) : imageUrl);
     } catch (err) {
       console.error("[screenshotExtract] Vision extraction failed:", err.message);
       return next(err);
@@ -259,18 +266,21 @@ const importScreenshot = async (req, res, next) => {
       });
     }
 
-    // 1. Upload screenshot
-    let imageUrl;
-    try {
-      imageUrl = await uploadScreenshotToCloudinary(req.file.buffer, req.file.mimetype, companyId);
-    } catch (err) {
-      return next(err);
+    // 1. Upload screenshot (skipped in auto mode — the image is sent inline and never stored)
+    const auto = await isAutoEnabled(companyId);
+    let imageUrl = null;
+    if (!auto) {
+      try {
+        imageUrl = await uploadScreenshotToCloudinary(req.file.buffer, req.file.mimetype, companyId);
+      } catch (err) {
+        return next(err);
+      }
     }
 
     // 2. Extract via Vision
     let extracted;
     try {
-      extracted = await extractFromVision(imageUrl);
+      extracted = await extractFromVision(auto ? toDataUrl(req.file) : imageUrl);
     } catch (err) {
       return next(err);
     }
@@ -323,7 +333,7 @@ const importScreenshot = async (req, res, next) => {
           // Mark as screenshot import so it's filterable in analytics
           metadata: {
             source:       "screenshot_import",
-            screenshotUrl: imageUrl,
+            screenshotUrl: imageUrl || undefined,
             screenshotHash,
             extractedAt:  new Date(now),
           },
@@ -351,10 +361,10 @@ const importScreenshot = async (req, res, next) => {
       );
     }
 
-    // Automatic mode: queue the lead's AI analysis right away (no "Re-analyze" click needed)
+    // Automatic mode: queue the lead's AI analysis and start it straight away (no "Re-analyze" click)
     let analysisQueued = false;
-    if (savedMessages.length > 0 && await isAutoEnabled(companyId)) {
-      await queueAnalysis(leadId, companyId);
+    if (savedMessages.length > 0 && auto) {
+      await queueAnalysis(leadId, companyId, { now: true });
       analysisQueued = true;
     }
 

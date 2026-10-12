@@ -108,7 +108,8 @@ async function buildLeadTimeline(leadId, companyId) {
       date:         ws.uploadedAt || lead.date,
       referenceId:  String(ws._id || ""),
       employeeName: ws.userName || "Unknown",
-      url:          ws.url,
+      url:          ws.deletedAt ? "" : ws.url,
+      imageDeleted: !!ws.deletedAt,          // image removed after 7 days; the chat below was kept
       note:         ws.note || "",
       chatStatus:   chat.status || null,
       summary:      chat.summary || "",
