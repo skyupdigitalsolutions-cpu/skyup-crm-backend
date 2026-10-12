@@ -69,7 +69,7 @@ async function loadRawFacts(company, range, extraMatch, leadScope) {
   return Lead.aggregate([
     { $match: match },
     { $project: {
-      name: 1, mobile: 1, source: 1, campaign: 1, adSetName: 1, metaConfigId: 1, linkedinConfigId: 1, formId: 1,
+      name: 1, mobile: 1, source: 1, campaign: 1, adSetName: 1, metaConfigId: 1, linkedinConfigId: 1, formId: 1, leadgenId: 1,
       status: 1, temperature: 1, leadCategory: 1, user: 1, createdAt: 1, updatedAt: 1, isClosed: 1, closeReason: 1,
       lostReason: 1, lifecycleStage: 1, qualificationStatus: 1, dealValue: 1, revenueReceived: 1, proposalValue: 1,
       wonAt: 1, firstContactAt: 1, opportunityCreatedAt: 1, attribution: 1, industry: 1, service: 1, remark: 1,
@@ -86,7 +86,7 @@ async function loadRawFacts(company, range, extraMatch, leadScope) {
       docs:     { $ifNull: ["$documents", []] },
     } },
     { $project: {
-      name: 1, mobile: 1, source: 1, campaign: 1, adSetName: 1, metaConfigId: 1, linkedinConfigId: 1, formId: 1,
+      name: 1, mobile: 1, source: 1, campaign: 1, adSetName: 1, metaConfigId: 1, linkedinConfigId: 1, formId: 1, leadgenId: 1,
       status: 1, temperature: 1, leadCategory: 1, user: 1, createdAt: 1, updatedAt: 1, isClosed: 1, closeReason: 1,
       lostReason: 1, lifecycleStage: 1, qualificationStatus: 1, dealValue: 1, revenueReceived: 1, proposalValue: 1,
       wonAt: 1, firstContactAt: 1, opportunityCreatedAt: 1, attribution: 1, industry: 1, service: 1,
@@ -348,7 +348,7 @@ function classify(l, ctx) {
     lastActivityAt: lastActivityAt.length ? new Date(Math.max.apply(null, lastActivityAt)) : null,
     revenue: revenue, revenueType: revenueType, dealValue: l.dealValue == null ? null : l.dealValue,
     meta: meta, google: google, campaignKey: campaignKey, campaignLabel: campaignLabel, attributionMethod: method,
-    attribution: a, metaConfigId: l.metaConfigId ? String(l.metaConfigId) : null,
+    attribution: a, metaConfigId: l.metaConfigId ? String(l.metaConfigId) : null, leadgenId: l.leadgenId || "", formId: l.formId || "",
   };
 }
 

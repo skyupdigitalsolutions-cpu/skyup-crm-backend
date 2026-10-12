@@ -334,19 +334,32 @@ async function getMetaAdsData({ company, configs, since, until, refresh }) {
 // campaigns), a daily trend, and the campaign list (status / objective). Cached separately.
 const chartCache = new Map();
 
-async function fetchAccountCharts(entry, since, until) {
+// campaignIds (optional): narrow the totals, the daily trend and — for exactly one campaign — an ad set
+// breakdown to those campaigns. The filter is applied BY META, so unique reach and frequency are true for
+// just that selection. The per-campaign rows are always the full list (they feed the campaign picker).
+async function fetchAccountCharts(entry, since, until, campaignIds) {
   const ver = entry.ver, token = entry.token, acct = entry.acct;
   const base = "https://graph.facebook.com/" + ver + "/" + acct;
   const tr = JSON.stringify({ since: since, until: until });
-  const out = { acct: acct, ok: true, error: null, tokenExpired: false, campaigns: [], totals: emptyMetrics(), trend: [] };
+  const out = { acct: acct, ok: true, error: null, tokenExpired: false, campaigns: [], adsets: [], totals: emptyMetrics(), trend: [] };
+  const ids = campaignIds && campaignIds.length ? campaignIds : null;
+  const filt = ids ? JSON.stringify([{ field: "campaign.id", operator: "IN", value: ids }]) : null;
+  const withFilter = function (p) { return filt ? Object.assign({}, p, { filtering: filt }) : p; };
   try {
-    const results = await Promise.all([
+    const calls = [
       getAll(base + "/insights", { level: "campaign", fields: "campaign_id,campaign_name," + INSIGHT_FIELDS, time_range: tr, limit: 500, access_token: token }),
-      getAll(base + "/insights", { level: "account", fields: INSIGHT_FIELDS, time_range: tr, limit: 5, access_token: token }),
-      getAll(base + "/insights", { level: "account", fields: INSIGHT_FIELDS, time_range: tr, time_increment: 1, limit: 500, access_token: token }),
+      getAll(base + "/insights", withFilter({ level: "account", fields: INSIGHT_FIELDS, time_range: tr, limit: 5, access_token: token })),
+      getAll(base + "/insights", withFilter({ level: "account", fields: INSIGHT_FIELDS, time_range: tr, time_increment: 1, limit: 500, access_token: token })),
       getAll(base + "/campaigns", { fields: "id,name,effective_status,objective", limit: 500, access_token: token }, 5).catch(function () { return []; }),
-    ]);
-    const campRows = results[0], acctRows = results[1], dayRows = results[2], allCampaigns = results[3];
+    ];
+    if (ids && ids.length === 1) {
+      calls.push(getAll(base + "/insights", withFilter({ level: "adset", fields: "campaign_id,adset_id,adset_name," + INSIGHT_FIELDS, time_range: tr, limit: 500, access_token: token })));
+    }
+    const results = await Promise.all(calls);
+    const campRows = results[0], acctRows = results[1], dayRows = results[2], allCampaigns = results[3], adsetRows = results[4] || [];
+    out.adsets = adsetRows.map(function (r) {
+      return { id: String(r.adset_id), name: r.adset_name || "", campaignId: String(r.campaign_id || ""), status: "", metrics: rowMetrics(r) };
+    });
     const info = {};
     allCampaigns.forEach(function (c) { info[String(c.id)] = { status: c.effective_status || "", objective: c.objective || "", name: c.name || "" }; });
 
@@ -366,8 +379,9 @@ async function fetchAccountCharts(entry, since, until) {
   return out;
 }
 
-async function getMetaCampaignCharts({ company, configs, since, until, refresh }) {
-  const key = String(company) + "|" + since + "|" + until;
+async function getMetaCampaignCharts({ company, configs, since, until, refresh, campaignIds }) {
+  const ids = Array.isArray(campaignIds) ? Array.from(new Set(campaignIds.map(String))).sort() : [];
+  const key = String(company) + "|" + since + "|" + until + (ids.length ? "|" + ids.join(",") : "");
   const hit = chartCache.get(key);
   if (!refresh && hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.data;
 
@@ -381,13 +395,14 @@ async function getMetaCampaignCharts({ company, configs, since, until, refresh }
   });
   const entries = Object.keys(accounts).map(function (k) { return accounts[k]; });
 
-  const data = { configured: entries.length > 0, fetchedAt: new Date().toISOString(), range: { since: since, until: until }, accounts: [], campaigns: [], totals: emptyMetrics(), trend: [], error: null, tokenExpired: false };
-  const results = await Promise.all(entries.map(function (e) { return fetchAccountCharts(e, since, until); }));
+  const data = { configured: entries.length > 0, fetchedAt: new Date().toISOString(), range: { since: since, until: until }, accounts: [], campaigns: [], adsets: [], selected: ids, totals: emptyMetrics(), trend: [], error: null, tokenExpired: false };
+  const results = await Promise.all(entries.map(function (e) { return fetchAccountCharts(e, since, until, ids); }));
   const trendMap = {};
   results.forEach(function (r) {
     data.accounts.push({ acct: r.acct, ok: r.ok, error: r.error, tokenExpired: r.tokenExpired, campaigns: r.campaigns.length });
     if (!r.ok) { data.error = data.error || r.error; data.tokenExpired = data.tokenExpired || r.tokenExpired; return; }
     r.campaigns.forEach(function (c) { c.account = r.acct; data.campaigns.push(c); });
+    (r.adsets || []).forEach(function (a) { a.account = r.acct; data.adsets.push(a); });
     addMetrics(data.totals, r.totals);                       // one account → exactly Ads Manager's total row
     (r.trend || []).forEach(function (t) {
       if (!trendMap[t.t]) trendMap[t.t] = { t: t.t, spend: 0, impressions: 0, reach: 0, linkClicks: 0, platformLeads: 0, msgConversations: 0 };
@@ -410,4 +425,52 @@ async function getMetaCampaignCharts({ company, configs, since, until, refresh }
   return data;
 }
 
-module.exports = { getMetaAdsData, getMetaCampaignCharts, emptyMetrics, addMetrics, finalizeMetrics, actId };
+// ── Per-campaign DAILY numbers (the campaign-wise trend) ─────────────────────
+// One row per campaign per day. Heavier than the account-level trend (campaigns × days rows), so it is only
+// fetched when that view is opened, and cached separately. campaignIds (optional) narrows it, filtered by Meta.
+const campaignDailyCache = new Map();
+
+async function fetchAccountCampaignDaily(entry, since, until, ids) {
+  const base = "https://graph.facebook.com/" + entry.ver + "/" + entry.acct;
+  const params = { level: "campaign", fields: "campaign_id,campaign_name," + INSIGHT_FIELDS, time_range: JSON.stringify({ since: since, until: until }), time_increment: 1, limit: 500, access_token: entry.token };
+  if (ids && ids.length) params.filtering = JSON.stringify([{ field: "campaign.id", operator: "IN", value: ids }]);
+  const out = { acct: entry.acct, ok: true, error: null, tokenExpired: false, rows: [] };
+  try {
+    const rows = await getAll(base + "/insights", params, 100);           // up to ~50k rows
+    out.rows = rows.map(function (r) { return { id: String(r.campaign_id), name: r.campaign_name || "", t: r.date_start, metrics: rowMetrics(r) }; });
+  } catch (e) {
+    const fe = fbError(e);
+    out.ok = false; out.error = fe.message; out.tokenExpired = fe.code === 190;
+  }
+  return out;
+}
+
+async function getMetaCampaignDaily({ company, configs, since, until, refresh, campaignIds }) {
+  const ids = Array.isArray(campaignIds) ? Array.from(new Set(campaignIds.map(String))).sort() : [];
+  const key = String(company) + "|" + since + "|" + until + (ids.length ? "|" + ids.join(",") : "");
+  const hit = campaignDailyCache.get(key);
+  if (!refresh && hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.data;
+
+  const accounts = {};
+  (configs || []).forEach(function (c) {
+    const acct = actId(c.adAccountId);
+    if (!acct || !c.adsToken) return;
+    if (!accounts[acct] || (accounts[acct].tokenExpired && !c.tokenExpired)) {
+      accounts[acct] = { acct: acct, token: c.adsToken, ver: c.graphApiVersion || DEFAULT_VER, tokenExpired: !!c.tokenExpired };
+    }
+  });
+  const entries = Object.keys(accounts).map(function (k) { return accounts[k]; });
+  const data = { configured: entries.length > 0, fetchedAt: new Date().toISOString(), range: { since: since, until: until }, rows: [], error: null, tokenExpired: false };
+  const results = await Promise.all(entries.map(function (e) { return fetchAccountCampaignDaily(e, since, until, ids); }));
+  results.forEach(function (r) {
+    if (!r.ok) { data.error = data.error || r.error; data.tokenExpired = data.tokenExpired || r.tokenExpired; return; }
+    r.rows.forEach(function (row) { data.rows.push(row); });
+  });
+  if (data.configured && results.every(function (r) { return r.ok; })) {        // never cache a failed fetch
+    campaignDailyCache.set(key, { at: Date.now(), data: data });
+    if (campaignDailyCache.size > 100) campaignDailyCache.delete(campaignDailyCache.keys().next().value);
+  }
+  return data;
+}
+
+module.exports = { getMetaAdsData, getMetaCampaignCharts, getMetaCampaignDaily, emptyMetrics, addMetrics, finalizeMetrics, actId };

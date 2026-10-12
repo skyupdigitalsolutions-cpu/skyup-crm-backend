@@ -240,7 +240,8 @@ const receiveWebhook = async (req, res) => {
         // synced Meta IDs. Never blocks lead capture.
         try {
           const { fetchMetaLeadAttribution } = require("../utils/attribution");
-          const metaIds = await fetchMetaLeadAttribution(leadgen_id, config.pageAccessToken, apiVersion, change.value);
+          // Page token first, then the ads token (the page token usually lacks ads_read — see utils/attribution.js)
+          const metaIds = await fetchMetaLeadAttribution(leadgen_id, [config.pageAccessToken, config.adsToken], apiVersion, change.value);
           leadPayload.attribution = Object.assign({
             channel:           "meta",
             platformAccountId: config.adAccountId || "",

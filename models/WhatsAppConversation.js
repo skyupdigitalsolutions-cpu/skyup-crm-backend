@@ -84,6 +84,18 @@ const whatsAppConversationSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+    // Click-to-WhatsApp ad that started this conversation (Meta sends it on the first message as
+    // `referral`). sourceId is the ad's id. See services/adReferral.js.
+    adReferral: {
+      sourceId:   { type: String, default: undefined },
+      sourceType: { type: String, default: undefined },
+      sourceUrl:  { type: String, default: undefined },
+      headline:   { type: String, default: undefined },
+      body:       { type: String, default: undefined },
+      ctwaClid:   { type: String, default: undefined },
+      capturedAt: { type: Date,   default: undefined },
+    },
   },
   { timestamps: true }
 );

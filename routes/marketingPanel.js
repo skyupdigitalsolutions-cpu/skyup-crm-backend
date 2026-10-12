@@ -700,7 +700,19 @@ function v2(handler) {
 
 router.get("/v2/overview",    protectMarketing, v2(MA.overview));
 router.get("/v2/meta",        protectMarketing, v2(MA.meta));
-router.get("/v2/meta-charts", protectMarketing, v2(MA.metaCharts));   // Overview charts: campaign table numbers + daily trend, any date range
+router.get("/v2/meta-charts", protectMarketing, v2(MA.metaCharts));
+router.get("/v2/meta-campaign-trend", protectMarketing, v2(MA.metaCampaignTrend));   // campaign-wise daily trend: one line per campaign
+// Look up the ad for lead-form leads that were saved without one. Body: { ids?: [leadId, …] } (omit = the newest batch).
+router.post("/v2/backfill-ads", protectMarketing, async function (req, res) {
+  try {
+    const company = req.admin.company._id || req.admin.company;
+    const ids = req.body && Array.isArray(req.body.ids) ? req.body.ids.filter(function (x) { return typeof x === "string"; }).slice(0, 200) : [];
+    res.json(await MA.backfillAds({ company: company, ids: ids }));
+  } catch (err) {
+    console.error("[marketing-v2] backfill-ads", err && err.message);
+    res.status(err.status || 500).json({ message: err.message || "Couldn't look up ad details." });
+  }
+});   // Overview charts: campaign table numbers + daily trend, any date range
 router.get("/v2/google",      protectMarketing, v2(MA.google));
 router.get("/v2/creatives",   protectMarketing, v2(MA.creatives));
 router.get("/v2/pipeline",    protectMarketing, v2(MA.pipeline));

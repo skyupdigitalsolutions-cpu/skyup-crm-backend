@@ -15,7 +15,7 @@
 const mongoose = require("mongoose");
 const F = require("./leadFacts");
 const { DICTIONARY, DIAGNOSTIC_RULES, LOST_REASONS, STAGES } = require("./dictionary");
-const { getMetaAdsData, getMetaCampaignCharts } = require("./metaAdsFetcher");
+const { getMetaAdsData, getMetaCampaignCharts, getMetaCampaignDaily } = require("./metaAdsFetcher");
 const { getGoogleAdsData } = require("./googleAdsFetcher");
 
 const CTX_TTL_MS = 60 * 1000;
@@ -112,6 +112,32 @@ function metric(key, cur, prev, calc, extra) {
   return Object.assign({ key: key, label: d.label || key, value: cur, prev: prev == null ? null : prev, deltaPct: deltaPct, tone: tone, format: d.format || "num", calc: calc || "" }, extra || {});
 }
 
+// ── Click-to-WhatsApp ad ids ─────────────────────────────────────────────────
+// The ad id arrives with the customer's first WhatsApp message (see services/adReferral.js). It is kept on the
+// conversation; use it for any lead that has no ad id of its own, even if the lead was linked later.
+async function applyWhatsAppAdReferrals(company, raw) {
+  try {
+    const need = raw.filter(function (l) { return !(l.attribution && l.attribution.metaAdId); }).map(function (l) { return l._id; });
+    if (!need.length) return;
+    const WA = require("../../models/WhatsAppConversation");
+    const convs = await WA.find({ company: company, lead: { $in: need }, "adReferral.sourceId": { $exists: true, $ne: "" } }).select("lead adReferral.sourceId").lean();
+    if (!convs.length) return;
+    const byLead = {};
+    convs.forEach(function (c) { if (c.lead && !byLead[String(c.lead)]) byLead[String(c.lead)] = c.adReferral.sourceId; });
+    const GUESSED_CHANNELS = require("../adReferral").GUESSED_CHANNELS;
+    raw.forEach(function (l) {
+      const id = byLead[String(l._id)];
+      if (!id || (l.attribution && l.attribution.metaAdId)) return;
+      const a = Object.assign({}, l.attribution || {});
+      a.metaAdId = id;
+      // knowing the ad makes it a Meta lead: correct a STORED guess like "whatsapp" (a missing channel is inferred as Meta
+      // from the ad id itself; Google / website… are never overridden)
+      if (a.channel && GUESSED_CHANNELS.indexOf(a.channel) >= 0) a.channel = "meta";
+      l.attribution = a;
+    });
+  } catch (e) { /* attribution extras must never break a report */ }
+}
+
 // ── Context ──────────────────────────────────────────────────────────────────
 async function buildRangeContext({ company, range, leadScope, refresh, salesperson, withPlatform, includeGclid }) {
   const svc = require("../customizationService");
@@ -124,6 +150,7 @@ async function buildRangeContext({ company, range, leadScope, refresh, salespers
   const extraMatch = {};
   if (salesperson && mongoose.Types.ObjectId.isValid(salesperson)) extraMatch.user = new mongoose.Types.ObjectId(salesperson);
   const raw = await F.loadRawFacts(company, range, extraMatch, leadScope);
+  await applyWhatsAppAdReferrals(company, raw);
 
   let metaData = { configured: false, campaigns: [], adsets: [], ads: [], idleCampaigns: [], trend: [], fatigue: {}, totals: { spend: 0 }, accounts: [] };
   let googleData = { source: "none", campaigns: [], adGroups: [], keywords: [], searchTerms: [], ads: [], devices: [], locations: [], landingPages: [], trend: [], totals: { spend: 0 }, manualConfigs: [], gclidMap: {} };
@@ -901,33 +928,108 @@ function chartMetrics(m) {
   };
 }
 
+// A day with no delivery has no cost / CTR / frequency — null makes a gap in a line instead of a false drop to 0.
+function trendPoint(t, m) {
+  const p = Object.assign({ t: t }, m);
+  if (!p.impressions) { p.cpm = null; p.linkCtr = null; p.frequency = null; }
+  return p;
+}
+
 function shapeMetaCharts(d, range) {
+  const byDelivery = function (a, b) { return b.spend - a.spend || b.impressions - a.impressions; };
   const campaigns = (d.campaigns || []).map(function (c) {
     return Object.assign({ id: c.id, name: c.name, status: c.status, objective: c.objective }, chartMetrics(c.metrics || {}));
-  }).sort(function (a, b) { return b.spend - a.spend || b.impressions - a.impressions; });
+  }).sort(byDelivery);
+  // Ad sets of the ONE selected campaign (only fetched when exactly one campaign is chosen)
+  const adsets = (d.adsets || []).map(function (a) {
+    return Object.assign({ id: a.id, name: a.name, status: a.status || "", campaignId: a.campaignId }, chartMetrics(a.metrics || {}));
+  }).sort(byDelivery);
   const trend = (d.trend || []).map(function (t) {
     const m = chartMetrics({ spend: t.spend, impressions: t.impressions, reach: t.reach, linkClicks: t.linkClicks, platformLeads: t.platformLeads, msgConversations: t.msgConversations });
     // a day's reach is that day's unique people (not additive); frequency = that day's impressions per person
-    return Object.assign({ t: t.t }, m);
+    return trendPoint(t.t, m);
   });
   return {
     configured: !!d.configured, error: d.error || null, tokenExpired: !!d.tokenExpired, multiAccount: !!d.multiAccount,
     range: { from: range.since, to: range.until, days: range.days }, fetchedAt: d.fetchedAt || null,
+    // the picked campaigns (empty = all). totals + trend are for the selection; `campaigns` is always the full list
+    selected: Array.isArray(d.selected) ? d.selected : [],
     totals: Object.assign({ campaigns: campaigns.length }, chartMetrics(d.totals || {})),
-    campaigns: campaigns, trend: trend,
+    campaigns: campaigns, adsets: adsets, trend: trend,
   };
 }
 
-async function metaCharts({ company, query, refresh }) {
+// Ask Meta which ad each lead-form lead came from (see services/marketing/metaAdBackfill.js).
+async function backfillAds({ company, ids }) {
+  const r = await require("./metaAdBackfill").backfillMetaAds({ company: company, ids: ids });
+  if (r.updated) clearCache();                         // so the lead list shows the new ads straight away
+  return r;
+}
+
+// Shared by the chart endpoints: the date range (IST, ≤ 400 days, future clamped) and the optional campaign filter.
+function parseChartQuery(query) {
   const range = F.parseRange(query.from, query.to);
   const today = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);   // IST
   if (range.until > today) { range.until = today; range.days = Math.round((new Date(range.until + "T00:00:00Z") - new Date(range.since + "T00:00:00Z")) / 86400000) + 1; }
   if (range.since > range.until) { const e = new Error("“From” must be on or before “To”."); e.status = 400; throw e; }
   if (range.days > 400) { const e = new Error("Choose a range of 400 days or less."); e.status = 400; throw e; }
+  // Optional campaign filter: ?campaigns=ID1,ID2 (Meta campaign ids — digits only)
+  let campaignIds = [];
+  if (query.campaigns) {
+    campaignIds = String(query.campaigns).split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+    if (campaignIds.length > 50) { const e = new Error("Pick 50 campaigns or fewer."); e.status = 400; throw e; }
+    if (campaignIds.some(function (x) { return !/^\d{5,30}$/.test(x); })) { const e = new Error("That isn't a valid campaign."); e.status = 400; throw e; }
+  }
+  return { range: range, campaignIds: campaignIds };
+}
+
+async function metaCharts({ company, query, refresh }) {
+  const parsed = parseChartQuery(query);
   const MetaConfig = require("../../models/MetaConfig");
   const configs = await MetaConfig.find({ company: company }).lean();
-  const d = await getMetaCampaignCharts({ company: company, configs: configs, since: range.since, until: range.until, refresh: refresh });
-  return shapeMetaCharts(d, range);
+  const d = await getMetaCampaignCharts({ company: company, configs: configs, since: parsed.range.since, until: parsed.range.until, refresh: refresh, campaignIds: parsed.campaignIds });
+  return shapeMetaCharts(d, parsed.range);
+}
+
+// ── Campaign-wise daily trend: one line per campaign ─────────────────────────
+function daysBetween(since, until) {
+  const out = [];
+  for (let d = new Date(since + "T00:00:00Z"); d.getTime() <= new Date(until + "T00:00:00Z").getTime() && out.length < 410; d = new Date(d.getTime() + 86400000)) out.push(d.toISOString().slice(0, 10));
+  return out;
+}
+
+function notRunning(t) {
+  return { t: t, spend: null, impressions: null, reach: null, linkClicks: null, leads: null, cpl: null, cpm: null, linkCtr: null, frequency: null, msgConversations: null, results: null, costPerResult: null, resultType: "" };
+}
+
+function shapeCampaignTrend(d, range) {
+  const days = daysBetween(range.since, range.until);
+  const byCamp = {};
+  (d.rows || []).forEach(function (r) {
+    const c = byCamp[r.id] || (byCamp[r.id] = { id: r.id, name: r.name, byDay: {}, spend: 0 });
+    if (r.name) c.name = r.name;
+    c.byDay[r.t] = chartMetrics(r.metrics || {});
+    c.spend = r2(c.spend + (r.metrics && r.metrics.spend ? r.metrics.spend : 0));
+  });
+  const campaigns = Object.keys(byCamp).map(function (id) {
+    const c = byCamp[id];
+    // A day with no row means the campaign wasn't delivering (Meta omits those days). Leave it BLANK (null) rather than 0, so each
+    // line is drawn only while the campaign was live — otherwise every campaign would lie along the zero line outside its dates.
+    return { id: c.id, name: c.name, spend: c.spend, points: days.map(function (t) { return c.byDay[t] ? trendPoint(t, c.byDay[t]) : notRunning(t); }) };
+  }).sort(function (a, b) { return b.spend - a.spend; });
+  return {
+    configured: !!d.configured, error: d.error || null, tokenExpired: !!d.tokenExpired,
+    range: { from: range.since, to: range.until, days: range.days }, fetchedAt: d.fetchedAt || null,
+    days: days, campaigns: campaigns,
+  };
+}
+
+async function metaCampaignTrend({ company, query, refresh }) {
+  const parsed = parseChartQuery(query);
+  const MetaConfig = require("../../models/MetaConfig");
+  const configs = await MetaConfig.find({ company: company }).lean();
+  const d = await getMetaCampaignDaily({ company: company, configs: configs, since: parsed.range.since, until: parsed.range.until, refresh: refresh, campaignIds: parsed.campaignIds });
+  return shapeCampaignTrend(d, parsed.range);
 }
 
 // ── Ad-level detail for one lead ─────────────────────────────────────────────
@@ -945,6 +1047,17 @@ function adNameIndex(ctx) {
   return { adset: adset, ad: ad, adGroup: adGroup };
 }
 
+// Why a Meta lead has no ad on record — so the screen can say what to do about it.
+//   form        came from a Meta lead form (has its Meta lead id) → Meta can be asked which ad
+//   form_no_id  linked to a Meta form but its Meta lead id wasn't saved → can't be looked up
+//   manual      added by hand / imported / came via WhatsApp → Meta never sent ad details
+function adMissingReason(f) {
+  if (f.channel !== "meta" || (f.meta && f.meta.adId)) return "";
+  if (f.leadgenId) return "form";
+  if (f.formId || f.metaConfigId) return "form_no_id";
+  return "manual";
+}
+
 function adDetail(f, nm) {
   const m = f.meta || {}, g = f.google || {}, a = f.attribution || {};
   const adId = m.adId || "";
@@ -955,6 +1068,7 @@ function adDetail(f, nm) {
     adSet: adSet, adSetId: adSetId, adName: adName, metaAdId: adId,
     // how deep we can see: the exact ad, just the ad set / ad group, or nothing
     adLevel: adId ? "ad" : (adSetId || adSet) ? "adset" : "none",
+    adReason: adMissingReason(f), canFetch: adMissingReason(f) === "form",
   };
 }
 
@@ -995,7 +1109,11 @@ async function leads({ company, query, leadScope, refresh }) {
   return {
     total: facts.length, summary: agg(facts),
     // how many Meta leads in this list we can trace to an exact ad (the rest have no ad id on record)
-    adCoverage: { metaLeads: metaLeads.length, withAd: metaLeads.filter(function (f) { return f.meta && f.meta.adId; }).length },
+    adCoverage: {
+      metaLeads: metaLeads.length,
+      withAd: metaLeads.filter(function (f) { return f.meta && f.meta.adId; }).length,
+      fetchable: metaLeads.filter(function (f) { return adMissingReason(f) === "form"; }).length,   // Meta can still tell us the ad for these
+    },
     leads: facts.slice(0, limit).map(function (f) {
       return Object.assign({
         _id: f._id, name: f.name, mobile: f.mobile, channel: f.channel, source: f.source, campaign: f.campaignLabel,
@@ -1164,6 +1282,6 @@ function clearCache() { ctxCache.clear(); aiCache.clear(); }
 module.exports = {
   overview, meta, google, creatives, pipeline, report, leads, dataHealth, aiAnalysis,
   updateLeadOutcome, dictionary, filters, getSettings, saveSettings, clearCache,
-  metaCharts,
-  adNameIndex, adDetail, shapeMetaCharts, chartMetrics,   // exported for tests
+  metaCharts, metaCampaignTrend, backfillAds,
+  adNameIndex, adDetail, adMissingReason, applyWhatsAppAdReferrals, shapeMetaCharts, shapeCampaignTrend, chartMetrics,   // exported for tests
 };

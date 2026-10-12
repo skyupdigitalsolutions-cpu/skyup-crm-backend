@@ -95,29 +95,61 @@ function buildAttribution(source, body, extra) {
 }
 
 // ── Meta: best-effort ad / ad set / campaign IDs for a leadgen id ────────────
-// The leadgen webhook already carries ad_id + adgroup_id (= ad set id) in
-// change.value — those are used first and need no extra permission. This
-// follow-up GET only fills campaign_id / names and is wrapped so a missing
-// permission can never block lead capture.
-async function fetchMetaLeadAttribution(leadgenId, pageAccessToken, ver, changeValue) {
+// The leadgen webhook already carries ad_id + adgroup_id (= ad set id) in change.value — those are
+// used first. A follow-up GET on the lead fills in the campaign id and names, and is the ONLY source
+// for leads that arrive without webhook ids (e.g. fetched later by the backfill).
+//
+// Why several attempts: a Page access token usually does NOT have ads_read, and Meta rejects the
+// WHOLE request when any requested field needs a permission the token lacks. So we try each token we
+// have (page token, then ads token) and, per token, the full field list and then just the ids.
+// Nothing here ever throws; the reason for a failure is returned so it can be shown / logged.
+const LEAD_FIELD_SETS = [
+  "ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,form_id",
+  "ad_id,adset_id,campaign_id",
+];
+
+async function fetchMetaLeadAttributionVerbose(leadgenId, tokens, ver, changeValue) {
   const cv = changeValue || {};
-  const out = {};
+  const out = {}, extra = {};
+  let error = null;
   if (cv.ad_id)      out.metaAdId    = clean(cv.ad_id);
   if (cv.adgroup_id) out.metaAdsetId = clean(cv.adgroup_id);
-  if (!leadgenId || !pageAccessToken) return out;
-  try {
-    const { data } = await axios.get(
-      "https://graph.facebook.com/" + (ver || "v21.0") + "/" + leadgenId,
-      { params: { fields: "ad_id,ad_name,adset_id,campaign_id,form_id", access_token: pageAccessToken }, timeout: 8000 }
-    );
-    if (data) {
-      if (data.ad_id && !out.metaAdId)        out.metaAdId = clean(data.ad_id);
-      if (data.adset_id && !out.metaAdsetId)  out.metaAdsetId = clean(data.adset_id);
-      if (data.campaign_id)                   out.metaCampaignId = clean(data.campaign_id);
-      if (data.ad_name)                       out.metaAdName = clean(data.ad_name);
+  const haveAd = !!out.metaAdId;
+  const list = (Array.isArray(tokens) ? tokens : [tokens]).filter(Boolean);
+  if (!leadgenId) return { out: out, extra: extra, error: "no Meta lead id" };
+  if (!list.length) return { out: out, extra: extra, error: "no access token" };
+
+  for (let t = 0; t < list.length; t++) {
+    let answered = false;
+    for (let f = 0; f < LEAD_FIELD_SETS.length && !answered; f++) {
+      try {
+        const res = await axios.get("https://graph.facebook.com/" + (ver || "v21.0") + "/" + leadgenId,
+          { params: { fields: LEAD_FIELD_SETS[f], access_token: list[t] }, timeout: 7000 });
+        const d = res.data || {};
+        if (d.ad_id && !out.metaAdId)           out.metaAdId = clean(d.ad_id);
+        if (d.adset_id && !out.metaAdsetId)     out.metaAdsetId = clean(d.adset_id);
+        if (d.campaign_id)                      out.metaCampaignId = clean(d.campaign_id);
+        if (d.ad_name)                          out.metaAdName = clean(d.ad_name);
+        if (d.adset_name)                       extra.adSetName = clean(d.adset_name);
+        if (d.campaign_name)                    extra.campaignName = clean(d.campaign_name);
+        error = null; answered = true;
+      } catch (e) {
+        const fb = e && e.response && e.response.data && e.response.data.error;
+        error = (fb && fb.message) || (e && e.message) || "Meta request failed";
+        if (fb && fb.code === 190) break;               // token expired/invalid: a smaller field list won't help
+        if (haveAd) break;                               // ids already known from the webhook — don't spend more time
+      }
     }
-  } catch (e) { /* permission / network — IDs from change.value are enough */ }
-  return out;
+    if (out.metaAdId) return { out: out, extra: extra, error: null };
+  }
+  return { out: out, extra: extra, error: out.metaAdId ? null : error };
 }
 
-module.exports = { extractAttribution, inferChannel, buildAttribution, fetchMetaLeadAttribution };
+// Same result shape the webhooks have always used (just the ids). Pass one token or an array.
+async function fetchMetaLeadAttribution(leadgenId, tokens, ver, changeValue) {
+  const r = await fetchMetaLeadAttributionVerbose(leadgenId, tokens, ver, changeValue);
+  if (r.error && !r.out.metaAdId) console.warn("[metaAttribution] no ad details for lead " + leadgenId + ": " + r.error);
+  return r.out;
+}
+
+module.exports = { extractAttribution, inferChannel, buildAttribution, fetchMetaLeadAttribution, fetchMetaLeadAttributionVerbose };

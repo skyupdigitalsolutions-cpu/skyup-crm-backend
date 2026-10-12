@@ -164,6 +164,15 @@ async function handleInboundMessage(msg, value, config) {
     console.log(`🆕 New WA conversation: ${waPhone} → ${conversation._id}`);
   }
 
+  // ── Click-to-WhatsApp ad ──────────────────────────────────────────────────
+  // Meta adds `referral.source_id` (the ad's id) to the customer's first message. Keep it on the
+  // conversation, and on the lead once linked, so the Marketing panel can say which ad it came from.
+  try {
+    await require("../services/adReferral").recordAdReferral({ Lead, WhatsAppConversation }, conversation, msg.referral);
+  } catch (refErr) {
+    console.warn("[wa referral] could not record ad reference:", refErr.message);
+  }
+
   // ── Extract message content ───────────────────────────────────────────────
   let body        = "";
   let messageType = "unknown";
