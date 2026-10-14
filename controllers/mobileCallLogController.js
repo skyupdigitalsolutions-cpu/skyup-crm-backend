@@ -12,6 +12,27 @@ const Lead          = require('../models/Leads');
 const multer        = require('multer');
 const { normalizePhone } = require('../utils/normalizePhone');
 const { sendInterestedBlast } = require('../services/autoTemplateService');
+const {
+  parseLeadFilters, hasLeadFilters, dayBounds, leadFilterConditions, wasAssignedOnDay, groupStage, buildFilterTree,
+} = require('../utils/callDayFilters');                       // "newly assigned that day" + ad-level filters (Calls by Day)
+
+// Ids of the leads that satisfy the screen's lead filters (null = no lead filter active). Used to narrow the
+// day's call logs to calls on those leads. Employees only ever see their own leads.
+async function leadIdsForFilters({ isAdmin, company, selfId, filters, dayStart, dayEnd }) {
+  const conds = leadFilterConditions(filters, dayStart, dayEnd);
+  if (!conds.length) return null;
+  const q = { company, ...(isAdmin ? {} : { user: selfId }), $and: conds };
+  const rows = await Lead.find(q).select('_id').limit(5000).lean();
+  return rows.map((r) => r._id);
+}
+
+// The fields the Calls-by-Day cards need to show which campaign / ad a lead came from.
+const LEAD_AD_FIELDS = 'campaign adSetName attribution.metaAdId attribution.metaAdsetId attribution.metaAdName attribution.googleAdGroupId';
+const adSummary = (l) => ({
+  campaign: l.campaign || '',
+  adSet:    (l.adSetName || '') || ((l.attribution && (l.attribution.metaAdsetId || l.attribution.googleAdGroupId)) ? 'Ad set …' + String(l.attribution.metaAdsetId || l.attribution.googleAdGroupId).slice(-6) : ''),
+  ad:       (l.attribution && (l.attribution.metaAdName || (l.attribution.metaAdId ? 'Ad …' + String(l.attribution.metaAdId).slice(-6) : ''))) || '',
+});
 
 // ── Cloudinary storage ────────────────────────────────────────────────────────
 const cloudinary = require('cloudinary').v2;
@@ -361,6 +382,16 @@ const getCallLogs = async (req, res) => {
       filter.timestamp = { $gte: dayStartUTC, $lt: dayEndUTC };
     }
 
+    // ── Lead filters (newly assigned that day / campaign / ad set / ad) ───────
+    // Narrow the day's calls to calls on leads that match. Calls on numbers that aren't leads drop out while a
+    // lead filter is on (they can't match it).
+    const leadFilters = parseLeadFilters(req.query);
+    if (hasLeadFilters(leadFilters)) {
+      const { dayStart: fs, dayEnd: fe } = dayBounds(req.query.date, req.query.tzOffset);
+      const ids = await leadIdsForFilters({ isAdmin, company, selfId: (req.user && (req.user.userId || req.user._id)), filters: leadFilters, dayStart: fs, dayEnd: fe });
+      if (ids) filter.matchedLead = { $in: ids };
+    }
+
     // ── Incremental refresh: ?since=<ISO> ─────────────────────────────────────
     // Calls by Day polls every minute. Instead of re-downloading the whole day,
     // the app asks only for logs that are new/changed since its last fetch, or
@@ -383,7 +414,7 @@ const getCallLogs = async (req, res) => {
           ],
         };
         let dq = MobileCallLog.find(deltaFilter).sort({ timestamp: -1 }).limit(1000)
-          .populate('matchedLead', 'name mobile status scheduledCalls');
+          .populate('matchedLead', 'name mobile status scheduledCalls ' + LEAD_AD_FIELDS);
         if (isAdmin) dq = dq.populate('user', 'name email');
         const changed = await dq.lean();
         await fillMissingRemarks(changed);
@@ -399,7 +430,7 @@ const getCallLogs = async (req, res) => {
       //   • Remark status — done vs pending (remark from the MobileCallLog itself,
       //     but status from the lead)
       //   • Next follow-up date badge (scheduledCalls — filtered to pending entries)
-      .populate('matchedLead', 'name mobile status scheduledCalls');
+      .populate('matchedLead', 'name mobile status scheduledCalls ' + LEAD_AD_FIELDS);
     // Only populate user name/email for admin (company-wide view).
     // Employees already know every log here is their own.
     if (isAdmin) logsQuery = logsQuery.populate('user', 'name email');
@@ -964,12 +995,18 @@ const getUncalledLeads = async (req, res) => {
       uncalledFilter.$and = [{ $or: ors }];
     }
 
+    // Lead filters — newly assigned that day / campaign / ad set / ad (see utils/callDayFilters.js).
+    // Merged with the search clause above, never replacing it.
+    const leadFilters = parseLeadFilters(req.query);
+    const filterConds = leadFilterConditions(leadFilters, dayStart, dayEnd);
+    if (filterConds.length) uncalledFilter.$and = [...(uncalledFilter.$and || []), ...filterConds];
+
     const [leads, total] = await Promise.all([
       Lead.find(uncalledFilter)
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
-        .select('_id name mobile primaryPhone status remark initialRemark temperature Quality campaign source createdAt callHistory.calledAt scheduledCalls date user')
+        .select('_id name mobile primaryPhone status remark initialRemark temperature Quality campaign source createdAt callHistory.calledAt scheduledCalls date user activityTimeline.action activityTimeline.timestamp ' + LEAD_AD_FIELDS)
         .populate('user', 'name email')
         .lean(),
       Lead.countDocuments(uncalledFilter),
@@ -986,11 +1023,53 @@ const getUncalledLeads = async (req, res) => {
         .sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt)),
       // Days since created (so the agent knows how long this lead has been waiting)
       daysSinceAssigned: Math.floor((dayEnd - new Date(lead.createdAt)) / (24 * 60 * 60 * 1000)),
+      // Newly assigned on the selected day (created that day, or assigned / re-assigned that day)
+      assignedOnDay: wasAssignedOnDay(lead, dayStart, dayEnd),
+      ad: adSummary(lead),
+      activityTimeline: undefined,          // only needed to work out assignedOnDay — don't send the log to the phone
     }));
 
     res.json({ leads: annotated, total, page, pages: Math.ceil(total / limit) });
   } catch (error) {
     console.error('[getUncalledLeads]', error.message);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ── GET /api/call-logs/lead-filters ───────────────────────────────────────────
+// Options for the Calls-by-Day pickers: every campaign → ad set → ad among the leads this screen can show for
+// the selected day (the not-called leads + the leads called that day), each with a lead count, plus how many
+// leads were newly assigned that day. If ?assigned=day is on, the options narrow to those leads too.
+//   ?date=YYYY-MM-DD  ?tzOffset=330  [?assigned=day]
+const getLeadFilterOptions = async (req, res) => {
+  try {
+    const isAdmin = !!req.admin;
+    const company = req.callerCompany || req.user?.company;
+    if (!company) return res.status(400).json({ message: 'Company not resolved' });
+    const selfId = req.user && (req.user.userId || req.user._id);
+    const { dayStart, dayEnd } = dayBounds(req.query.date, req.query.tzOffset);
+    const owner = isAdmin ? {} : { user: selfId };
+    const assignedOnly = parseLeadFilters({ assigned: req.query.assigned });
+    const extra = leadFilterConditions({ assigned: assignedOnly.assigned }, dayStart, dayEnd);
+
+    const base = { company, isClosed: { $ne: true }, mergedInto: null, createdAt: { $lte: dayEnd }, ...owner };
+    const uncalled = { ...base, $nor: [{ 'callHistory.calledAt': { $gte: dayStart } }], ...(extra.length ? { $and: extra } : {}) };
+    const loggedIds = await MobileCallLog.distinct('matchedLead', {
+      ...(isAdmin ? { company } : { user: selfId }),
+      timestamp: { $gte: dayStart, $lte: dayEnd },
+      matchedLead: { $ne: null },
+    });
+    const called = { company, ...owner, _id: { $in: loggedIds }, ...(extra.length ? { $and: extra } : {}) };
+    const assignedAll = { ...base, $and: leadFilterConditions({ assigned: true }, dayStart, dayEnd) };
+
+    const [a, b, assignedCount] = await Promise.all([
+      Lead.aggregate([{ $match: uncalled }, groupStage()]),
+      loggedIds.length ? Lead.aggregate([{ $match: called }, groupStage()]) : Promise.resolve([]),
+      Lead.countDocuments(assignedAll),
+    ]);
+    res.json({ assignedCount, ...buildFilterTree([...a, ...b]) });
+  } catch (error) {
+    console.error('[getLeadFilterOptions]', error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -1095,5 +1174,5 @@ module.exports = {
   upload, syncCallLogs, getCallLogs, getTodayCallLogs,
   matchPhone, uploadRecording, getCompanyRecordings,
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
-  summarizeUnmatchedCall, getUncalledLeads,
+  summarizeUnmatchedCall, getUncalledLeads, getLeadFilterOptions,
 };

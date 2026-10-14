@@ -13,7 +13,7 @@ const {
   syncCallLogs, getCallLogs, getTodayCallLogs, matchPhone,
   uploadRecording, upload, getCompanyRecordings,
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
-  summarizeUnmatchedCall, getUncalledLeads,
+  summarizeUnmatchedCall, getUncalledLeads, getLeadFilterOptions,
   getMyCallHistory,
 } = require('../controllers/mobileCallLogController');
 const {
@@ -49,6 +49,7 @@ router.get('/monitoring/clients',        protectAny, withCache, getMonitoringCli
 // Leads assigned to this user that have NOT been called on/before the selected day.
 // Carry-forward: appears every day until the lead is actually called.
 router.get('/uncalled',     protectAny, getUncalledLeads);
+router.get('/lead-filters', protectAny, getLeadFilterOptions);   // Calls by Day: campaign → ad set → ad options + new-today count
 
 // ── Writes (clear the company's cached responses after success) ───────────────
 router.post('/sync',                protectAny, invalidateCache, syncCallLogs);

@@ -13,6 +13,7 @@ const Lead        = require('../models/Leads');
 const MobileCallLog = require('../models/MobileCallLog');
 const mongoose    = require('mongoose');
 const { mergeLeadScope } = require('../utils/adminLeadScope');
+const { collectAutoNotes, enrichFollowUp } = require('../utils/followUpRemarks');
 
 // IST timezone offset in milliseconds (+5:30)
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -36,6 +37,107 @@ function getISTDayBounds(dateInput) {
   const dayEnd    = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000 - 1); // UTC end
 
   return { dayStart, dayEnd };
+}
+
+// ── Follow-up queries + labels (shared by the daily report and the mobile Follow-ups screen) ─────────
+// Pending follow-ups = every lead's scheduledCalls entry that is not done. NOT date-filtered: it lists everything
+// still pending, whichever day it is scheduled for. `note` is what the employee wrote when they set the follow-up.
+// withRemarks: also fetch the lead's last few call-history remarks (the mobile Follow-ups screen shows what the employee wrote).
+function pendingFollowUpsQuery({ followUpMatch, leadScope, limit = 200, withRemarks = false }) {
+  return Lead.aggregate([
+    { $match: mergeLeadScope({ ...followUpMatch, 'scheduledCalls.done': false }, leadScope) },
+    { $unwind: '$scheduledCalls' },
+    { $match:  { 'scheduledCalls.done': false } },
+    {
+      $lookup: {
+        from:         'users',
+        localField:   'user',
+        foreignField: '_id',
+        as:           'userInfo',
+      },
+    },
+    {
+      $project: {
+        _id: 1, name: 1, mobile: 1, source: 1, status: 1, remark: 1,
+        scheduledAt:  '$scheduledCalls.scheduledAt',
+        note:         '$scheduledCalls.note',
+        type:         '$scheduledCalls.type',
+        assignedUser: { $arrayElemAt: ['$userInfo.name', 0] },
+        userId:       '$user',
+        ...(withRemarks ? {
+          recentRemarks: { $map: {
+            input: { $slice: [{ $ifNull: ['$callHistory', []] }, -12] },
+            as: 'h',
+            in: { remark: '$$h.remark', userName: '$$h.userName', calledAt: '$$h.calledAt' },
+          } },
+        } : {}),
+      },
+    },
+    { $sort: { scheduledAt: 1 } },
+    { $limit: limit },
+  ]);
+}
+
+// Leads 24h+ old (setting: alerts.noFollowUpDate.afterHours) that NEVER had a follow-up date. A live state
+// ("who is missing one right now"), so it is not tied to the viewed date.
+function missingFollowUpsQuery({ followUpMatch, leadScope, LOST, WON, afterHours = 24, limit = 200 }) {
+  return Lead.aggregate([
+    { $match: mergeLeadScope({
+        ...followUpMatch,
+        isClosed:   { $ne: true },
+        mergedInto: null,
+        status:     { $nin: [...LOST, ...WON] },
+        date:       { $lte: new Date(Date.now() - afterHours * 60 * 60 * 1000) },
+        'scheduledCalls.0': { $exists: false },
+      }, leadScope) },
+    {
+      $lookup: {
+        from:         'users',
+        localField:   'user',
+        foreignField: '_id',
+        as:           'userInfo',
+      },
+    },
+    {
+      $project: {
+        _id: 1, name: 1, mobile: 1, status: 1, date: 1,
+        assignedUser: { $arrayElemAt: ['$userInfo.name', 0] },
+        userId:       '$user',
+      },
+    },
+    { $sort: { date: 1 } },
+    { $limit: limit },
+  ]);
+}
+
+// overdue / due today / upcoming, with the label and colour the UI shows. `bounds` = the IST day to compare against.
+function labelFollowUps(rows, bounds = getISTDayBounds()) {
+  const todayStart = bounds.dayStart;
+  const todayEnd   = bounds.dayEnd;
+  return (rows || []).map(f => {
+    const dueDate = new Date(f.scheduledAt);
+    let urgency, daysLabel, dotColor;
+    if (dueDate < todayStart) {
+      const daysOver = Math.max(1, Math.floor((todayStart - dueDate) / 86400000));
+      urgency   = 'overdue';
+      daysLabel = daysOver === 1 ? '1 day overdue' : `${daysOver} days overdue`;
+      dotColor  = '#DC2626';
+    } else if (dueDate <= todayEnd) {
+      urgency   = 'today';
+      daysLabel = 'Due today';
+      dotColor  = '#D97706';
+    } else {
+      const daysAhead = Math.ceil((dueDate - todayEnd) / 86400000);
+      urgency   = 'upcoming';
+      daysLabel = daysAhead === 1 ? 'Due tomorrow' : `Due in ${daysAhead} days`;
+      dotColor  = '#2563EB';
+    }
+    return { ...f, urgency, daysLabel, dotColor };
+  }).sort((a, b) => {
+    const order = { overdue: 0, today: 1, upcoming: 2 };
+    if (order[a.urgency] !== order[b.urgency]) return order[a.urgency] - order[b.urgency];
+    return new Date(a.scheduledAt) - new Date(b.scheduledAt);
+  });
 }
 
 // ── getDailyReport ────────────────────────────────────────────────────────────
@@ -133,67 +235,10 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
       }},
     ]),
 
-    // Pending follow-ups
-    Lead.aggregate([
-      { $match: mergeLeadScope({ ...followUpMatch, 'scheduledCalls.done': false }, leadScope) },
-      { $unwind: '$scheduledCalls' },
-      { $match:  { 'scheduledCalls.done': false } },
-      {
-        $lookup: {
-          from:         'users',
-          localField:   'user',
-          foreignField: '_id',
-          as:           'userInfo',
-        },
-      },
-      {
-        $project: {
-          _id: 1, name: 1, mobile: 1, source: 1, status: 1, remark: 1,
-          scheduledAt:  '$scheduledCalls.scheduledAt',
-          note:         '$scheduledCalls.note',
-          type:         '$scheduledCalls.type',
-          assignedUser: { $arrayElemAt: ['$userInfo.name', 0] },
-        },
-      },
-      { $sort: { scheduledAt: 1 } },
-      { $limit: 200 },
-    ]),
-
-    // ── Missing follow-up date (24h+, never had a scheduledCalls entry) ────────
-    // BUG FIX: this used to be derived from `todayLeads` (leads created ON the
-    // viewed date) filtered to age >= 24h — which meant viewing "Today" (the
-    // page's default) always showed 0, since a lead created today can never be
-    // 24h old yet. Same fix as followUpMatch above: scope by company/user only,
-    // NOT by the viewed date, and query it live — this is a current STATE
-    // ("who's still missing a follow-up right now"), not a historical count
-    // for one day.
-    Lead.aggregate([
-      { $match: mergeLeadScope({
-          ...followUpMatch,
-          isClosed:   { $ne: true },
-          mergedInto: null,
-          status:     { $nin: [...LOST, ...WON] },
-          date:       { $lte: new Date(Date.now() - (cust.alerts?.noFollowUpDate?.afterHours || 24) * 60 * 60 * 1000) },
-          'scheduledCalls.0': { $exists: false },
-        }, leadScope) },
-      {
-        $lookup: {
-          from:         'users',
-          localField:   'user',
-          foreignField: '_id',
-          as:           'userInfo',
-        },
-      },
-      {
-        $project: {
-          _id: 1, name: 1, mobile: 1, status: 1, date: 1,
-          assignedUser: { $arrayElemAt: ['$userInfo.name', 0] },
-          userId:       '$user',
-        },
-      },
-      { $sort: { date: 1 } },
-      { $limit: 200 },
-    ]),
+    // Pending follow-ups + leads that never got a follow-up date — the SAME queries the mobile
+    // Follow-ups screen uses (see pendingFollowUpsQuery / missingFollowUpsQuery below), so the numbers match everywhere.
+    pendingFollowUpsQuery({ followUpMatch, leadScope }),
+    missingFollowUpsQuery({ followUpMatch, leadScope, LOST, WON, afterHours: cust.alerts?.noFollowUpDate?.afterHours || 24 }),
   ]);
 
   // ── Aggregate counts ──────────────────────────────────────────────────────
@@ -271,35 +316,8 @@ async function getDailyReport({ company, date, userId, campaign, status, exclude
     .map(([label, count]) => ({ label, count }))
     .sort((a, b) => b.count - a.count);
 
-  // ── Follow-up urgency labels ──────────────────────────────────────────────
-  const now = new Date();
-  const todayStart = getISTDayBounds().dayStart;
-  const todayEnd   = getISTDayBounds().dayEnd;
-
-  const followUps = followUpLeads.map(f => {
-    const dueDate = new Date(f.scheduledAt);
-    let urgency, daysLabel, dotColor;
-    if (dueDate < todayStart) {
-      const daysOver = Math.max(1, Math.floor((todayStart - dueDate) / 86400000));
-      urgency   = 'overdue';
-      daysLabel = daysOver === 1 ? '1 day overdue' : `${daysOver} days overdue`;
-      dotColor  = '#DC2626';
-    } else if (dueDate <= todayEnd) {
-      urgency   = 'today';
-      daysLabel = 'Due today';
-      dotColor  = '#D97706';
-    } else {
-      const daysAhead = Math.ceil((dueDate - todayEnd) / 86400000);
-      urgency   = 'upcoming';
-      daysLabel = daysAhead === 1 ? 'Due tomorrow' : `Due in ${daysAhead} days`;
-      dotColor  = '#2563EB';
-    }
-    return { ...f, urgency, daysLabel, dotColor };
-  }).sort((a, b) => {
-    const order = { overdue: 0, today: 1, upcoming: 2 };
-    if (order[a.urgency] !== order[b.urgency]) return order[a.urgency] - order[b.urgency];
-    return new Date(a.scheduledAt) - new Date(b.scheduledAt);
-  });
+  // ── Follow-up urgency labels (shared with the mobile Follow-ups screen) ───
+  const followUps = labelFollowUps(followUpLeads);
 
   // ── Missing follow-up date (24h+, NEVER had a scheduledCalls entry) ────────
   // Now a live, date-independent query (see missingFollowUpLeads above) —
@@ -696,4 +714,59 @@ function buildMongoMatchAgainstLeadAlias(filter, alias) {
   return rewriteObj(filter);
 }
 
-module.exports = { getDailyReport, getEmployeeReport, getCampaignReport, getDailyOutcomesReport, getISTDayBounds };
+// ── getFollowUpsReport ────────────────────────────────────────────────────────
+/**
+ * Just the follow-up lists — what the Daily Report's "Follow-ups" tab shows, without the rest of that report.
+ * Used by the mobile Follow-ups screen. Same queries and labels as getDailyReport, so the counts match.
+ *   followUps         every pending follow-up, with the employee's note, due date and urgency
+ *   missingFollowUps  leads 24h+ old that never had a follow-up date
+ *   employees         per-employee counts (for the employee filter / grouping)
+ */
+async function getFollowUpsReport({ company, userId, leadScope = {}, limit = 500 } = {}) {
+  if (!company) throw new Error('company is required');
+  const { cust, WON, LOST } = await statusBuckets(company);
+  const followUpMatch = { company: new mongoose.Types.ObjectId(company) };
+  if (userId) followUpMatch.user = new mongoose.Types.ObjectId(userId);
+
+  const [followUpRows, missingRows] = await Promise.all([
+    pendingFollowUpsQuery({ followUpMatch, leadScope, limit, withRemarks: true }),
+    missingFollowUpsQuery({ followUpMatch, leadScope, LOST, WON, afterHours: cust.alerts?.noFollowUpDate?.afterHours || 24, limit }),
+  ]);
+
+  // origin ('employee' | 'auto'), the employee's own remark, and the follow-up's note only when a person wrote it
+  const autoNotes = collectAutoNotes(cust);
+  const followUps = labelFollowUps(followUpRows).map(f => enrichFollowUp(f, autoNotes));
+  const missingFollowUps = missingRows.map(l => ({
+    _id:          l._id,
+    name:         l.name,
+    mobile:       l.mobile,
+    status:       l.status,
+    assignedUser: l.assignedUser || 'Unassigned',
+    userId:       l.userId || null,
+    createdAt:    l.date,
+    hoursSinceCreated: Math.floor((Date.now() - new Date(l.date).getTime()) / 3600000),
+  }));
+
+  const byEmp = new Map();
+  const slot = (id, name) => {
+    const key = String(id || 'unassigned');
+    if (!byEmp.has(key)) byEmp.set(key, { userId: id || null, name: name || 'Unassigned', overdue: 0, today: 0, upcoming: 0, missing: 0, total: 0 });
+    return byEmp.get(key);
+  };
+  for (const f of followUps)        { const e = slot(f.userId, f.assignedUser); e[f.urgency]++; e.total++; }
+  for (const m of missingFollowUps) { const e = slot(m.userId, m.assignedUser); e.missing++; e.total++; }
+  const employees = [...byEmp.values()].sort((a, b) => (b.overdue - a.overdue) || (b.today - a.today) || (b.total - a.total) || a.name.localeCompare(b.name));
+
+  const count = (u) => followUps.filter(f => f.urgency === u).length;
+  return {
+    generatedAt: new Date().toISOString(),
+    counts: {
+      overdue: count('overdue'), today: count('today'), upcoming: count('upcoming'), missing: missingFollowUps.length, total: followUps.length,
+      bySource: { employee: followUps.filter(f => f.origin === 'employee').length, auto: followUps.filter(f => f.origin === 'auto').length },
+    },
+    followUps, missingFollowUps, employees,
+    truncated: followUpRows.length >= limit || missingRows.length >= limit,
+  };
+}
+
+module.exports = { getDailyReport, getEmployeeReport, getCampaignReport, getDailyOutcomesReport, getISTDayBounds, getFollowUpsReport, labelFollowUps };

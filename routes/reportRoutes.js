@@ -12,6 +12,7 @@ const { protectAdmin }        = require('../middlewares/adminAuthMiddleware');
 const { requireFeature }      = require('../middlewares/entitlementMiddleware');
 const {
   dailyReport,
+  followUpsReport,
   employeeReport,
   campaignReport,
   nonConversionReport,
@@ -21,6 +22,7 @@ const {
 
 // Works for both admin and user tokens — controller resolves caller identity
 router.get('/daily',          protectAny,   dailyReport);
+router.get('/follow-ups',     protectAny,   followUpsReport);   // mobile Follow-ups screen: pending follow-ups + employee notes
 router.get('/lead-insights',  protectAny,   leadInsights);
 
 // Gated: only enabled for the one company it's rolled out to (see

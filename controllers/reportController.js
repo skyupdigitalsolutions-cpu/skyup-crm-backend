@@ -9,6 +9,7 @@
 
 const {
   getDailyReport,
+  getFollowUpsReport,
   getEmployeeReport,
   getCampaignReport,
   getDailyOutcomesReport,
@@ -59,6 +60,32 @@ const dailyReport = async (req, res, next) => {
     res.json({ success: true, ...report });
   } catch (err) {
     console.error('[reportController.dailyReport]', err.message);
+    next(err);
+  }
+};
+
+// ── GET /api/reports/follow-ups ───────────────────────────────────────────────
+// The Follow-ups tab of the Daily Report as its own light endpoint (used by the mobile app): every pending
+// follow-up with the employee's note, plus the leads that never got a follow-up date. Same scoping as dailyReport:
+// admins see every employee (optionally ?userId=), an employee sees only their own.
+const followUpsReport = async (req, res, next) => {
+  try {
+    const isAdmin = !!req.admin;
+    const company = req.callerCompany || req.admin?.company?._id || req.user?.company;
+    if (!company) return res.status(400).json({ message: 'Company not resolved from token' });
+    const userId = isAdmin ? (req.query.userId || null) : String((req.user.userId || req.user._id));
+
+    const leadScope = await getAdminLeadScope(req, company);
+    const report = await getFollowUpsReport({ company, userId, leadScope });
+
+    // Same phone masking as the daily report for non-superadmin admins
+    if (isAdmin && req.admin?.role !== 'superadmin') {
+      report.followUps = report.followUps.map(f => ({ ...f, mobile: maskPhone(f.mobile) }));
+      report.missingFollowUps = report.missingFollowUps.map(f => ({ ...f, mobile: maskPhone(f.mobile) }));
+    }
+    res.json({ success: true, ...report });
+  } catch (err) {
+    console.error('[reportController.followUpsReport]', err.message);
     next(err);
   }
 };
@@ -231,4 +258,4 @@ const dailyOutcomesReport = async (req, res, next) => {
   }
 };
 
-module.exports = { dailyReport, employeeReport, campaignReport, nonConversionReport, dailyOutcomesReport, leadInsights };
+module.exports = { dailyReport, followUpsReport, employeeReport, campaignReport, nonConversionReport, dailyOutcomesReport, leadInsights };
