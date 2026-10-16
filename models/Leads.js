@@ -32,6 +32,9 @@ const scheduledCallSchema = new mongoose.Schema(
     // so the 5-minute scan in runScheduledCallReminders() never re-notifies
     // for the same entry once it's been sent.
     reminderSentAt: { type: Date, default: null },
+    // How it was closed: "call-remark" (a call/remark was saved) or "mark-done" (the Mark done button), and by whom.
+    doneVia: { type: String, default: "" },
+    doneBy:  { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   },
   { _id: false }
 );

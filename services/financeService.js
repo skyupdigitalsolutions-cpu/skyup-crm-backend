@@ -102,9 +102,12 @@ function migrateLegacy() {
           console.log(`[finance] dropped legacy index ${i.name}`);
         }
       }
+      // A pipeline-style update (an ARRAY) needs { updatePipeline: true } in Mongoose 9, otherwise it throws
+      // "Cannot pass an array to query updates…" — which made this clean-up fail (and retry) every time.
       await FinanceInvoice.updateMany(
         { clientId: null },
-        [{ $set: { clientId: { $ifNull: ["$lead", "$_id"] }, autoCreated: { $eq: ["$source", "lead"] } } }]
+        [{ $set: { clientId: { $ifNull: ["$lead", "$_id"] }, autoCreated: { $eq: ["$source", "lead"] } } }],
+        { updatePipeline: true }
       );
       await FinanceInvoice.syncIndexes().catch(() => {});
     } catch (e) {

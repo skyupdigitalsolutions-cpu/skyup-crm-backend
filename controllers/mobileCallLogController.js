@@ -12,9 +12,14 @@ const Lead          = require('../models/Leads');
 const multer        = require('multer');
 const { normalizePhone } = require('../utils/normalizePhone');
 const { sendInterestedBlast } = require('../services/autoTemplateService');
+const mongoose = require('mongoose');
 const {
   parseLeadFilters, hasLeadFilters, dayBounds, leadFilterConditions, wasAssignedOnDay, groupStage, buildFilterTree,
 } = require('../utils/callDayFilters');                       // "newly assigned that day" + ad-level filters (Calls by Day)
+
+// An aggregation does NOT convert id strings to ObjectIds (normal queries do). protectAny gives employees a STRING
+// req.user.userId, so ids used inside $match must be converted by hand or the match silently finds nothing.
+const toObjectId = (v) => (v && mongoose.Types.ObjectId.isValid(String(v)) && String(v).length === 24 ? new mongoose.Types.ObjectId(String(v)) : v);
 
 // Ids of the leads that satisfy the screen's lead filters (null = no lead filter active). Used to narrow the
 // day's call logs to calls on those leads. Employees only ever see their own leads.
@@ -1044,9 +1049,9 @@ const getUncalledLeads = async (req, res) => {
 const getLeadFilterOptions = async (req, res) => {
   try {
     const isAdmin = !!req.admin;
-    const company = req.callerCompany || req.user?.company;
+    const company = toObjectId(req.callerCompany || req.user?.company);
     if (!company) return res.status(400).json({ message: 'Company not resolved' });
-    const selfId = req.user && (req.user.userId || req.user._id);
+    const selfId = toObjectId(req.user && (req.user._id || req.user.userId));      // ObjectId — it goes into an aggregation below
     const { dayStart, dayEnd } = dayBounds(req.query.date, req.query.tzOffset);
     const owner = isAdmin ? {} : { user: selfId };
     const assignedOnly = parseLeadFilters({ assigned: req.query.assigned });

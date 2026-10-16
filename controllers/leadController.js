@@ -25,6 +25,7 @@ const Company = require("../models/Company");
 const { normalizePhone } = require("../utils/normalizePhone");
 const { computeQuality } = require("../utils/qualityHelper");
 const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
+const { pickFollowUpsToClose, dayEndOf } = require("../utils/followUpClosing");
 const {
   sendNewLeadNotification,
   sendReassignedLeadNotification,
@@ -909,6 +910,10 @@ const adminImportCSV = async (req, res) => {
           // importing admin owns them (super admin → none, as before).
           assignedAdmin: importStrategy === "manual" ? null : (req.admin?._id || null),
           poolAdmins,
+          // insertOne bypasses Mongoose's timestamps. Without these, imported leads have NO createdAt: they never show in
+          // Calls by Day → "To call", the "Assigned today" filter or any newest-first list (createdAt is what those use).
+          createdAt: new Date(),
+          updatedAt: new Date(),
         };
         if (row.leadgenId) adminDoc.leadgenId = row.leadgenId;
 
@@ -1097,6 +1102,8 @@ const userImportCSV = async (req, res) => {
           // must be set here — otherwise these leads were invisible to the
           // duplicate-phone check forever after.
           normalizedPhone: normPrimary || null,
+          createdAt: new Date(),     // insertOne bypasses Mongoose timestamps — see the same note in the admin import above
+          updatedAt: new Date(),
           ...(owners[rr % owners.length] !== selfId ? {
             activityTimeline: [{
               action: "assigned", performedBy: req.user._id, role: "team_lead", timestamp: new Date(),
@@ -1638,6 +1645,56 @@ const getMyLeads = async (req, res) => {
   }
 };
 
+// ── PATCH /api/lead/:id/follow-up/done ────────────────────────────────────────
+// "Mark done" on a follow-up card. Body: { scheduledAt: <ISO of the follow-up>, type?: "follow-up" | "verification" }.
+// Follow-ups have no id of their own, so the one to close is the pending entry with that exact date (+ type).
+//   • an employee can close follow-ups only on THEIR OWN leads; an admin on any lead in their scope
+//   • idempotent: closing one that is already closed succeeds (a double-tap or a retry is harmless)
+//   • atomic ($elemMatch + positional $), so it can't clash with a simultaneous lead update
+const markFollowUpDone = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const companyId = getCompanyId(req);
+    if (!companyId) return res.status(400).json({ message: "Company not resolved" });
+
+    const raw = req.body && req.body.scheduledAt;
+    const at = new Date(typeof raw === "string" || typeof raw === "number" ? raw : NaN);
+    if (Number.isNaN(at.getTime())) return res.status(400).json({ message: "scheduledAt is required" });
+    const type = req.body.type === "verification" ? "verification" : req.body.type === "follow-up" ? "follow-up" : null;
+
+    // who can touch which lead
+    const scope = req.admin ? await getAdminLeadScope(req, companyId) : {};
+    const base = mergeLeadScope({ _id: id, company: companyId, ...(isEmployeeReq(req) ? { user: req.user._id } : {}) }, scope);
+
+    const elem = { scheduledAt: at, done: false, ...(type ? { type } : {}) };
+    const who = req.user?._id || req.admin?._id || null;
+    const updated = await Lead.findOneAndUpdate(
+      { ...base, scheduledCalls: { $elemMatch: elem } },
+      { $set: {
+          "scheduledCalls.$.done":    true,
+          "scheduledCalls.$.doneAt":  new Date(),
+          "scheduledCalls.$.doneVia": "mark-done",
+          "scheduledCalls.$.doneBy":  who,
+      } },
+      { new: true, projection: { scheduledCalls: 1 } }
+    );
+
+    if (!updated) {
+      // Nothing pending matched. Already closed (idempotent success), or not found / not theirs?
+      const lead = await Lead.findOne(base).select("scheduledCalls").lean();
+      if (!lead) return res.status(404).json({ message: "Lead not found" });      // also covers "not your lead" — no leaking
+      const was = (lead.scheduledCalls || []).some((sc) => sc && +new Date(sc.scheduledAt) === +at && (!type || sc.type === type));
+      if (was) return res.json({ success: true, alreadyDone: true, leadId: String(id), pending: (lead.scheduledCalls || []).filter((sc) => sc && !sc.done).length });
+      return res.status(404).json({ message: "That follow-up was not found" });
+    }
+    const pending = (updated.scheduledCalls || []).filter((sc) => sc && !sc.done).length;
+    res.json({ success: true, alreadyDone: false, leadId: String(id), pending });
+  } catch (error) {
+    console.error("[markFollowUpDone]", error.message);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const patchLead = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1799,25 +1856,24 @@ const patchLead = async (req, res) => {
     // FOLLOW-UP PING FIX: this used to run on EVERY patch, so changing just the
     // temperature or status right after setting a follow-up silently marked it
     // done and its reminder never fired. Now:
-    //   • a NEW follow-up is being set      → the old pending one is replaced
-    //   • a call/remark is being logged     → close the oldest one only if it is
-    //                                         already due (≤ 30 min from now)
-    //   • anything else (temperature, plain status change) → leave it pending
+    //   • a NEW follow-up is being set      → the oldest pending one is replaced
+    //   • a call/remark is being logged     → close EVERY follow-up due today or earlier
+    //                                         (rule + reasons: utils/followUpClosing.js)
+    //   • anything else (temperature, plain status change) → leave them pending
     if (lu.completeOldestPendingOnUpdate !== false) {
-      const pendingCalls = (lead.scheduledCalls || [])
-        .map((sc, idx) => ({ sc, idx }))
-        .filter(({ sc }) => sc && !sc.done)
-        .sort((a, b) => new Date(a.sc.scheduledAt) - new Date(b.sc.scheduledAt));
-
-      if (pendingCalls.length > 0) {
-        const { sc, idx } = pendingCalls[0];
-        const settingNew = !!pushOps.scheduledCalls;
-        const loggedCall = isGenuineCall || hasRemark;
-        const isDue = new Date(sc.scheduledAt).getTime() <= Date.now() + 30 * 60 * 1000;
-        if (settingNew || (loggedCall && isDue)) {
-          setOps[`scheduledCalls.${idx}.done`] = true;
-          setOps[`scheduledCalls.${idx}.doneAt`] = new Date();
-        }
+      const toClose = pickFollowUpsToClose({
+        scheduledCalls: lead.scheduledCalls,
+        settingNew:     !!pushOps.scheduledCalls,
+        loggedCall:     isGenuineCall || hasRemark,
+        now:            Date.now(),
+        dayEnd:         dayEndOf(custSvc.companyDayStart(cust)),
+      });
+      const closedAt = new Date();
+      for (const idx of toClose) {
+        setOps[`scheduledCalls.${idx}.done`]    = true;
+        setOps[`scheduledCalls.${idx}.doneAt`]  = closedAt;
+        setOps[`scheduledCalls.${idx}.doneVia`] = "call-remark";
+        setOps[`scheduledCalls.${idx}.doneBy`]  = req.user?._id || null;
       }
     }
 
@@ -3601,6 +3657,7 @@ const getLeadActionSummary = async (req, res) => {
 };
 
 module.exports = {
+  markFollowUpDone,
   getLead,
   getLeads,
   getLeadsByCampaign,

@@ -15,6 +15,7 @@ const {
   adminImportCSV,
   userImportCSV,
   updateLead,
+  markFollowUpDone,
   patchLead,
   patchLeadTemperature,
   markNotInterested,
@@ -132,6 +133,8 @@ router.post("/:id/reveal-email", protect, validateObjectId("id"), logEmailReveal
 router.post("/admin/:id/reveal-email", protectAdmin, validateObjectId("id"), logEmailReveal);
 
 router.patch("/:id/temperature", protectAdmin, validateObjectId("id"), patchLeadTemperature);
+// Mobile "Mark done" button on a follow-up (employees: their own leads; admins: their scope)
+router.patch("/:id/follow-up/done", protectAny, validateObjectId("id"), markFollowUpDone);
 router.patch("/:id", protect, validateObjectId("id"), markCallHandled("status"), patchLead);
 
 // ── PUT ───────────────────────────────────────────────────────────────────────

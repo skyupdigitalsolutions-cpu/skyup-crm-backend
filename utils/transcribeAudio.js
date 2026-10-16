@@ -30,7 +30,9 @@ const WHISPER_MODEL      = 'whisper-large-v3';
 const SARVAM_BASE_URL       = 'https://api.sarvam.ai';
 const SARVAM_MODEL          = process.env.SARVAM_STT_MODEL || 'saaras:v3';
 const SARVAM_NUM_SPEAKERS   = parseInt(process.env.SARVAM_NUM_SPEAKERS || '2', 10); // agent + customer, the common case for this CRM
-const SARVAM_POLL_INTERVAL_MS = 5000;   // Sarvam's own SDK default (poll_interval=5s)
+// Sarvam's own SDK default is 5 s. Adjustable from .env (SARVAM_POLL_INTERVAL_MS): a shorter interval trims up to a
+// few seconds off the wait once the job finishes; it does not make Sarvam itself faster.
+const SARVAM_POLL_INTERVAL_MS = Math.max(1000, parseInt(process.env.SARVAM_POLL_INTERVAL_MS || '5000', 10) || 5000);
 const SARVAM_POLL_TIMEOUT_MS  = 10 * 60 * 1000; // Sarvam's own SDK default (timeout=600s) — long calls can take a while to process
 // ── Sarvam's exact supported MIME subtypes (confirmed from their docs +
 // live error responses). NOTE: 3GP/3GPP is NOT in this list — very common
@@ -53,6 +55,9 @@ const ROMANIZE_MODEL     = process.env.ROMANIZE_MODEL || 'openai/gpt-oss-20b';
 // ─────────────────────────────────────────────────────────────────────────────
 // Utilities
 // ─────────────────────────────────────────────────────────────────────────────
+
+// [Timing] logs: seconds elapsed since t0, 1 decimal — shows WHERE a slow transcription spends its time.
+const secs = (t0) => ((Date.now() - t0) / 1000).toFixed(1);
 
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60).toString().padStart(2, '0');
@@ -97,6 +102,7 @@ async function romanizeTranscript(transcript) {
     return transcript;
   }
 
+  const tRom = Date.now();
   const systemPrompt = `You are a phonetic transliteration engine.
 Your ONLY job: convert any Devanagari, Kannada, Tamil, Telugu, Malayalam, Bengali, or other Indic script words into their Roman/Latin phonetic spelling.
 
@@ -131,6 +137,7 @@ STRICT RULES:
       console.warn('[Romanize] Empty response from Groq — returning original');
       return transcript;
     }
+    console.log(`[Timing] Romanize (Groq ${ROMANIZE_MODEL}): ${secs(tRom)} s`);
     console.log('[Romanize] Done. Sample:', romanized.slice(0, 150));
     return romanized;
   } catch (err) {
@@ -293,7 +300,9 @@ async function sarvamStartJob(apiKey, jobId) {
 
 async function sarvamPollStatus(apiKey, jobId) {
   const deadline = Date.now() + SARVAM_POLL_TIMEOUT_MS;
+  const tPoll = Date.now(); let polls = 0;
   while (Date.now() < deadline) {
+    polls += 1;
     const resp = await axios.get(
       `${SARVAM_BASE_URL}/speech-to-text/job/v1/${jobId}/status`,
       { headers: sarvamHeaders(apiKey) }
@@ -301,7 +310,10 @@ async function sarvamPollStatus(apiKey, jobId) {
     const status = resp.data;
     console.log(`[Sarvam] Job ${jobId} → ${status.job_state}`);
 
-    if (status.job_state === 'Completed' || status.job_state === 'PartiallyCompleted') return status;
+    if (status.job_state === 'Completed' || status.job_state === 'PartiallyCompleted') {
+      console.log(`[Timing] Sarvam job ${jobId} finished ${secs(tPoll)} s after it was started (${polls} status checks, every ${SARVAM_POLL_INTERVAL_MS / 1000} s)`);
+      return status;
+    }
     if (status.job_state === 'Failed') {
       throw new Error(`Sarvam job failed: ${status.error_message || 'unknown error'}`);
     }
@@ -325,6 +337,9 @@ async function sarvamDownloadTranscript(apiKey, jobId, outputFileName) {
 }
 
 async function runSarvam(audioInput) {
+  const tAll = Date.now(); let tMark = Date.now();
+  const lap = () => { const x = secs(tMark); tMark = Date.now(); return x; };
+  let tFetch = '?', tConvert = '?', tUpload = '?', tWait = '?', tResult = '?';
   const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
   if (!SARVAM_API_KEY) throw new Error('SARVAM_API_KEY is not set in your environment variables.');
 
@@ -340,12 +355,14 @@ async function runSarvam(audioInput) {
     fileName   = path.basename(audioInput);
   }
 
+  tFetch = lap();
   console.error(`[Sarvam][debug] resolved audioInput → fileName="${fileName}", size=${fileBuffer.length} bytes`);
 
   // FIX: transcode formats Sarvam doesn't accept (3GP being the one that
   // was hard-failing with 400 invalid_request_error) to WAV before upload.
   ({ fileBuffer, fileName } = await ensureSarvamCompatible(fileBuffer, fileName));
 
+  tConvert = lap();
   console.error(`[Sarvam][debug] after compatibility check → fileName="${fileName}", contentType="${guessAudioMime(fileName)}"`);
 
   let job, status, data;
@@ -358,17 +375,21 @@ async function runSarvam(audioInput) {
     console.log(`[Sarvam] Uploaded "${fileName}" (${fileBuffer.length} bytes)`);
 
     await sarvamStartJob(SARVAM_API_KEY, job.job_id);
+    tUpload = lap();
     status = await sarvamPollStatus(SARVAM_API_KEY, job.job_id);
+    tWait = lap();
 
     const outputFile = status.job_details?.[0]?.outputs?.[0]?.file_name;
     if (!outputFile) throw new Error('Sarvam job completed but returned no output file');
 
     data = await sarvamDownloadTranscript(SARVAM_API_KEY, job.job_id, outputFile);
+    tResult = lap();
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
     throw new Error(`Sarvam STT failed (${err.response?.status ?? 'network'}): ${detail}`);
   }
 
+  console.log(`[Timing] Sarvam ${SARVAM_MODEL}: fetch audio ${tFetch} s | convert ${tConvert} s | upload+start ${tUpload} s | Sarvam processing ${tWait} s | fetch result ${tResult} s | total ${secs(tAll)} s`);
   const entries = data?.diarized_transcript?.entries;
   if (!entries || entries.length === 0) {
     // Fall back to flat transcript if diarization returned nothing
@@ -434,6 +455,7 @@ async function runGroqWhisper(audioInput) {
   form.append('language', 'en');
 
   let data;
+  const tReq = Date.now();
   try {
     const resp = await axios.post(GROQ_STT_URL, form, {
       headers: { Authorization: `Bearer ${GROQ_API_KEY}`, ...form.getHeaders() },
@@ -460,6 +482,7 @@ async function runGroqWhisper(audioInput) {
     durationSec = segments.reduce((m, s) => Math.max(m, s.end || 0), 0);
   }
 
+  console.log(`[Timing] Groq ${WHISPER_MODEL}: ${secs(tReq)} s`);
   console.log(`[Groq] Transcript (first 100 chars): ${transcript.slice(0, 100)}`);
   console.log(`[Groq] Audio duration: ${durationSec.toFixed(1)}s`);
   return { text: transcript, durationSec };
@@ -471,12 +494,17 @@ async function runGroqWhisper(audioInput) {
 
 async function transcribeAudio(audioInput, audioLang = 'mixed') {
   const lang = (audioLang || 'mixed').toLowerCase();
+  const tTotal = Date.now();
   if (lang === 'english') {
-    console.log('[Transcription] Engine → Groq Whisper large-v3 (English, free)');
-    return runGroqWhisper(audioInput);
+    console.log(`[Transcription] Engine → Groq Whisper ${WHISPER_MODEL} (English, free)`);
+    const out = await runGroqWhisper(audioInput);
+    console.log(`[Timing] Transcription finished (Groq): ${secs(tTotal)} s for ${Math.round(out.durationSec || 0)} s of audio`);
+    return out;
   }
-  console.log('[Transcription] Engine → Sarvam AI Saaras v3 Batch (mixed/Indic, diarized)');
-  return runSarvam(audioInput);
+  console.log(`[Transcription] Engine → Sarvam AI ${SARVAM_MODEL} Batch (mixed/Indic, diarized)`);
+  const out = await runSarvam(audioInput);
+  console.log(`[Timing] Transcription finished (Sarvam, incl. romanize): ${secs(tTotal)} s for ${Math.round(out.durationSec || 0)} s of audio`);
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

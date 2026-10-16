@@ -24,6 +24,7 @@ async function callLLM(systemPrompt, userContent, maxTokens = 600) {
     throw new Error('OPENAI_API_KEY is not set. Add it to your environment variables.');
   }
 
+  const tLLM = Date.now();
   const { data } = await axios.post(
     OPENAI_API_URL,
     {
@@ -47,6 +48,7 @@ async function callLLM(systemPrompt, userContent, maxTokens = 600) {
     }
   );
 
+  console.log(`[Timing] Summary (OpenAI ${OPENAI_MODEL}): ${((Date.now() - tLLM) / 1000).toFixed(1)} s`);
   // OpenAI returns: { choices: [{ message: { content } }] }
   return (data.choices?.[0]?.message?.content || '').trim();
 }

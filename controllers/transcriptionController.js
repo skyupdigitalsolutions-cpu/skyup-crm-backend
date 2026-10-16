@@ -130,11 +130,14 @@ const transcribeMobileCall = async (req, res, next) => {
     await log.save({ validateBeforeSave: false });
 
     const contactName = log.name || 'the customer';
+    const tPipeline = Date.now();
     const { transcript, summary, durationSec } = await runPipeline(
       () => transcribeMobileRecording(recording.url, { audioLang }),
       contactName,
       withSummary,
     );
+
+    console.log(`[Timing] Transcription request done in ${((Date.now() - tPipeline) / 1000).toFixed(1)} s (transcript${summary ? ' + summary' : ' only'})`);
 
     // Compute minutes to bill from the measured audio length. Always at least 1
     // minute for any non-empty transcription, rounded UP to the next whole minute.

@@ -60,7 +60,7 @@ const toggleConfig = async (req, res, next) => {
     const config = await WebsiteConfig.findOneAndUpdate(
       { _id: req.params.id, company: req.admin.company, ...getAdminConfigScope(req) },
       [{ $set: { isActive: { $not: "$isActive" } } }],
-      { new: true }
+      { new: true, updatePipeline: true }   // an array update needs this option in Mongoose 9
     );
     if (!config) return res.status(404).json({ message: "Not found" });
     res.json({ data: config });

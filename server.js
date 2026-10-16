@@ -373,6 +373,9 @@ app.use(express.text({ type: "text/plain", limit: "5mb" }));
 // it mutates in place and never reassigns the read-only req.query getter.
 app.use(nosqlSanitize());
 
+// Request timing: logs slow requests + a 5-minute "where did the time go" summary (see middlewares/requestTiming.js)
+app.use(require('./middlewares/requestTiming'));
+
 app.use(generalLimiter);
 
 // ── Static file serving ───────────────────────────────────────────────────────
@@ -654,6 +657,14 @@ connectDB().then(() => {
     console.log(`🎁 Benefit API:       /api/benefits`);
     console.log(`🌐 Frontend served:   ${SERVE_FRONTEND ? 'YES (from dist/)' : 'NO (separate Render service)'}`);
     console.log(`🔒 CORS origins:      ${staticAllowedOrigins.length} static + *.skyupcrm.com / *.skyupdigitalsolutions.com + registered websites`);
+    // ── STAND-BY / MIGRATION SWITCH ─────────────────────────────────────────────
+    // DISABLE_BACKGROUND_JOBS=true starts the API WITHOUT any scheduled job (reminders, Meta sync, automatic
+    // WhatsApp/e-mail, AI analysis, daily reports …). Use it to boot a second copy of the backend for testing
+    // (e.g. while moving servers) without it duplicating what the live server sends. Leave it unset on the live server.
+    const JOBS_DISABLED = String(process.env.DISABLE_BACKGROUND_JOBS || '').toLowerCase() === 'true';
+    if (JOBS_DISABLED) {
+      console.log('⏸️  DISABLE_BACKGROUND_JOBS=true — API is up, but NO scheduled jobs run on this server.');
+    } else {
     startSubscriptionExpiryJob();
     startTrialExpiryJob();   // NEW — emails customers when their 7-day trial lapses
     startIdleJob();
@@ -680,6 +691,7 @@ connectDB().then(() => {
     startScreenshotAutoJob();     // Auto WhatsApp Screenshot AI — sweeps for unread screenshots (every 5 min)
     startLeadAutoAnalysisJob();   // Auto AI Intelligence — queues analyses for new / changed leads (every 5 min)
     startScreenshotRetentionJob();// Screenshot images deleted after 7 days (hourly)
+    }
     // MSG91 inbound: webhook-only mode — no polling needed
     const { checkFCMHealth } = require('./services/fcmService');
     checkFCMHealth();
