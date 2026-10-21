@@ -474,6 +474,7 @@ app.use('/api/whatsapp',            whatsappRoutes);
 app.use('/api/reports',             require('./routes/reportRoutes'));
 app.use('/api/nurture',             require('./routes/nurtureRoute'));
 app.use('/api/call-logs',           require('./routes/mobileCallLog'));
+app.use('/api/agent-push',          require('./routes/agentPushRoutes'));   // /agent web app: closed-app notifications (web push)
 app.use('/api/transcription',       require('./routes/transcription'));
 // Per-company CRM customization (statuses, outcomes, modules, workflows, …)
 // Team Lead hierarchy (admin team setup + Team Lead "My Team" APIs)
@@ -596,6 +597,8 @@ if (SERVE_FRONTEND) {
   });
 }
 
+// /agent web app: employee-room alerts also go out as web push (services/agentPushService.js)
+require("./services/agentPushService").attachToSocket(io);
 app.set("io", io);
 global._io = io;
 

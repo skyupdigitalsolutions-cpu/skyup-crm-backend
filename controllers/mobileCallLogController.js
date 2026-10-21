@@ -75,7 +75,7 @@ const allowedMimes = [
   // MP3
   'audio/mpeg', 'audio/mp3',
   // M4A / AAC (Samsung sends video/mp4 for .m4a files)
-  'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/x-aac', 'video/mp4',
+  'audio/mp4', 'audio/x-m4a', 'audio/m4a', 'audio/aac', 'audio/x-aac', 'video/mp4',
   // WAV
   'audio/wav', 'audio/x-wav', 'audio/wave',
   // AMR (narrow and wide band)
@@ -562,9 +562,249 @@ const matchPhone = async (req, res) => {
 };
 
 // ── POST /api/call-logs/recording ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// MANUAL RECORDING (source=manual) — for phones that cannot sync call logs, i.e. iPhones.
+// An iPhone saves a recorded call in the Notes app; the employee saves the audio to Files and attaches it to the
+// lead from the /agent web app. The Android app never sends source=manual, so its path below is unchanged.
+//
+// Why a separate path: the Android handler adds a recording to the LATEST call record for that phone number, whatever
+// time it is given. That is right for a synced call log, but manual recordings from different days would all pile
+// under one call. Here a recording joins an existing call only if it is within 10 minutes of the given call time;
+// otherwise it creates its own call record with that time.
+//
+// Rules: the lead is required; an employee can attach only to a lead assigned to them (an admin: any lead in the
+// company); the phone number is normalised to 10 digits; the call time must be sane (not in the future, not older
+// than 60 days) or it falls back to "now".
+// ─────────────────────────────────────────────────────────────────────────────
+const MANUAL_MATCH_WINDOW_MS = 10 * 60 * 1000;
+const MANUAL_MAX_AGE_MS      = 60 * 24 * 3600 * 1000;
+const MANUAL_MAX_DURATION    = 4 * 3600;
+
+// Android's sync stores the number exactly as the phone reported it (+91…, 0…, 10 digits), and its bulk upsert does
+// not run the model hook that fills normalizedPhone. So "calls to this number" must match both ways.
+const phoneMatch = (n10) => ({ $or: [{ normalizedPhone: n10 }, { phoneNumber: { $in: [n10, `91${n10}`, `+91${n10}`, `0${n10}`, `+91 ${n10}`] } }] });
+
+// The call a recording made at time `ts` belongs to: a call by this employee to this number whose span
+// [start − 10 min, start + duration + 10 min] contains `ts`. When several do, the one closest to `ts` wins.
+async function findCallForTime({ callerId, companyId, phone, ts }) {
+  const rows = await MobileCallLog.find({
+    user: callerId, company: companyId, ...phoneMatch(phone),
+    timestamp: { $gte: new Date(ts - MANUAL_MAX_DURATION * 1000 - MANUAL_MATCH_WINDOW_MS), $lte: new Date(ts + MANUAL_MATCH_WINDOW_MS) },
+  }).select('_id timestamp duration durationEstimated source').lean();
+  let best = null, bestGap = Infinity;
+  for (const r of rows) {
+    const start = new Date(r.timestamp).getTime();
+    const end   = start + (Number(r.duration) || 0) * 1000;
+    const gap   = ts < start ? start - ts : ts > end ? ts - end : 0;     // 0 when ts is inside the call
+    if (gap <= MANUAL_MATCH_WINDOW_MS && gap < bestGap) { best = r; bestGap = gap; }
+  }
+  return best;
+}
+
+const uploadManualRecording = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+    const { leadId, remark, fileKey } = req.body;
+    const callerId  = req.user.userId || req.user._id;
+    const companyId = req.user.companyId || req.user.company;
+
+    if (!leadId || !mongoose.Types.ObjectId.isValid(String(leadId))) {
+      return res.status(400).json({ message: 'Choose the lead this recording belongs to.' });
+    }
+    const phone = normalizePhone(req.body.phoneNumber);
+    if (!phone) return res.status(400).json({ message: 'This lead has no valid phone number, so the recording cannot be matched to a call.' });
+
+    // an employee may only attach to their own leads; an admin to any lead of the company
+    const lead = await Lead.findOne({ _id: leadId, company: companyId, ...(req.admin ? {} : { user: callerId }) });
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+    const now = Date.now();
+    let ts = parseInt(req.body.timestamp, 10);
+    if (!Number.isFinite(ts) || ts > now + 5 * 60000 || ts < now - MANUAL_MAX_AGE_MS) ts = now;
+    let dur = parseInt(req.body.duration, 10);
+    if (!Number.isFinite(dur) || dur < 0) dur = 0;
+    dur = Math.min(dur, MANUAL_MAX_DURATION);
+    const callType = ['incoming', 'outgoing'].includes(String(req.body.callType)) ? String(req.body.callType) : 'outgoing';
+    const fileUrl  = req.file.path || req.file.secure_url || req.file.url;
+    const note     = typeof remark === 'string' ? remark.trim().slice(0, 500) : '';   // MobileCallLog.remark maxlength is 500
+
+    if (fileKey) {                                  // same duplicate protection as the Android upload
+      const existing = await MobileCallLog.findOne({ user: callerId, company: companyId, 'recordings.fileKey': fileKey, ...phoneMatch(phone) });
+      if (existing) {
+        const dup = existing.recordings.find((r) => r.fileKey === fileKey);
+        return res.json({ message: 'Already uploaded', duplicate: true, log: existing, recording: dup });
+      }
+    }
+
+    const newRecording = { url: fileUrl, name: req.file.originalname, size: req.file.size, uploadedAt: new Date(), fileKey: fileKey || null };
+
+    // 1) a call already on record (synced from Android, or logged by the /agent app on iPhone) → add the recording to it.
+    //    A recording's real length replaces an estimated call length.
+    let updated = null;
+    const call = await findCallForTime({ callerId, companyId, phone, ts });
+    if (call) {
+      const $set = { matchedLead: lead._id, ...(note ? { remark: note } : {}) };
+      if (dur > 0 && (call.durationEstimated || (Number(call.duration) || 0) < dur)) { $set.duration = dur; $set.durationEstimated = false; }
+      updated = await MobileCallLog.findOneAndUpdate({ _id: call._id }, { $push: { recordings: newRecording }, $set }, { new: true });
+    }
+
+    // 2) no call on record → this recording becomes its own call record at the given time.
+    if (!updated) {
+      const doc = {
+        user: callerId, company: companyId, phoneNumber: phone, callType, timestamp: new Date(ts), duration: dur,
+        name: lead.name || '', matchedLead: lead._id, recordings: [newRecording], source: 'manual',
+        ...(note ? { remark: note } : {}),
+      };
+      try { updated = await MobileCallLog.create(doc); }
+      catch (e) {
+        if (!(e && e.code === 11000)) throw e;     // an identical call record already exists (same second): add to it
+        updated = await MobileCallLog.findOneAndUpdate(
+          { user: callerId, phoneNumber: phone, timestamp: new Date(ts), callType },
+          { $push: { recordings: newRecording }, $set: { matchedLead: lead._id, ...(note ? { remark: note } : {}) } },
+          { new: true },
+        );
+      }
+    }
+
+    // link the recording to the lead's own call history: the entry for this call if there is one (the remark saved
+    // after the call), otherwise a new entry so the lead's timeline shows the recording.
+    try {
+      const fresh = await Lead.findById(lead._id);
+      if (fresh) {
+        const start = new Date(updated.timestamp || ts).getTime();
+        const refs  = [start, start + (Number(updated.duration) || 0) * 1000, ts];
+        let idx = -1, minDiff = Infinity;
+        (fresh.callHistory || []).forEach((h, i) => {
+          if (h.recordingUrl) return;                // never overwrite another call's recording
+          const t = new Date(h.calledAt).getTime();
+          const diff = Math.min(...refs.map((r) => Math.abs(t - r)));
+          if (diff < minDiff && diff < MANUAL_MATCH_WINDOW_MS) { minDiff = diff; idx = i; }
+        });
+        if (idx >= 0) {
+          if (note) fresh.callHistory[idx].remark = note;
+          fresh.callHistory[idx].recordingUrl  = fileUrl;
+          fresh.callHistory[idx].recordingName = req.file.originalname;
+        } else {
+          fresh.callHistory.push({
+            userId: callerId, userName: req.user.name || '', remark: note, outcome: '',
+            calledAt: new Date(start), recordingUrl: fileUrl, recordingName: req.file.originalname,
+            calledNumber: phone, numberType: 'Primary',
+          });
+        }
+        fresh.markModified('callHistory');
+        await fresh.save();
+      }
+    } catch (e) { console.error('manual recording: lead callHistory update error:', e.message); }
+
+    return res.json({ message: 'Recording uploaded', log: updated });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/call-logs/app-call — CALL LOG FOR iPHONE
+//
+// iOS gives no app (native or web) access to the phone's call history, so an iPhone can never "sync" its call log the
+// way the Android app does. What the /agent web app CAN know is the calls it starts itself: the employee taps Call on
+// a lead, the dialer opens, and when they come back the app knows which lead was called, when the call was placed
+// and how long they were away. This endpoint turns that into a normal call-log record, so iPhone calls show up in
+// Calls by Day, Call Monitoring, daily reports and talk time just like Android calls.
+//
+// Called twice per call (both are safe to repeat — the record is keyed by employee + number + dial time):
+//   1. when the employee returns to the app      → { leadId, dialedAt, returnedAt }
+//   2. when they save the after-call remark      → + { answered, outcome, remark }   (answered=false sets duration 0)
+//
+// The duration is the time spent away from the app (ringing + talking), so it is stored with durationEstimated=true.
+// Attaching the call recording later replaces it with the recording's real length.
+// Not captured: incoming calls, and calls dialled outside the app — iOS does not expose them.
+// ─────────────────────────────────────────────────────────────────────────────
+const APP_CALL_MAX_AGE_MS = 24 * 3600 * 1000;
+
+const logAppCall = async (req, res) => {
+  try {
+    const callerId  = req.user.userId || req.user._id;
+    const companyId = req.user.companyId || req.user.company;
+    const { leadId } = req.body || {};
+    if (!leadId || !mongoose.Types.ObjectId.isValid(String(leadId))) return res.status(400).json({ message: 'leadId is required' });
+
+    const lead = await Lead.findOne({ _id: leadId, company: companyId, ...(req.admin ? {} : { user: callerId }) })
+      .select('_id name mobile primaryPhone secondaryPhone normalizedPhone normalizedSecondaryPhone').lean();
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+    // same switches as the Android sync
+    const Company = require('../models/Company');
+    const company = await Company.findById(companyId).select('callLogSyncEnabled').lean();
+    if (company && company.callLogSyncEnabled === false) return res.status(403).json({ message: 'Call logging is disabled for your company.', code: 'call_log_sync_disabled' });
+    if (req.user.callLogSyncEnabled === false) return res.status(403).json({ message: 'Call logging is disabled for your account.', code: 'call_log_sync_disabled_user' });
+
+    // the number comes from the lead, never trusted from the phone; the secondary number only if it really is the lead's
+    const primary   = lead.normalizedPhone || normalizePhone(lead.primaryPhone || lead.mobile || '');
+    const secondary = lead.normalizedSecondaryPhone || (lead.secondaryPhone ? normalizePhone(lead.secondaryPhone) : null);
+    const asked     = req.body.phoneNumber ? normalizePhone(req.body.phoneNumber) : null;
+    const phone     = asked && secondary && asked === secondary ? secondary : primary;
+    if (!phone) return res.status(400).json({ message: 'This lead has no valid phone number.' });
+
+    const now = Date.now();
+    const dialedAt = parseInt(req.body.dialedAt, 10);
+    if (!Number.isFinite(dialedAt) || dialedAt > now + 5 * 60000 || dialedAt < now - APP_CALL_MAX_AGE_MS) {
+      return res.status(400).json({ message: 'Invalid call time.' });
+    }
+    const returnedAt = parseInt(req.body.returnedAt, 10);
+    const awaySec = Number.isFinite(returnedAt) && returnedAt > dialedAt
+      ? Math.min(Math.round((returnedAt - dialedAt) / 1000), MANUAL_MAX_DURATION) : 0;
+    const answered = req.body.answered === false || req.body.answered === 'false' ? false
+      : req.body.answered === true || req.body.answered === 'true' ? true : null;
+    const duration = answered === false ? 0 : awaySec;
+    const remark  = typeof req.body.remark === 'string' ? req.body.remark.trim().slice(0, 500) : '';
+    const outcome = typeof req.body.outcome === 'string' ? req.body.outcome.trim().slice(0, 100) : '';
+
+    // a phone that ALSO syncs its real call log (Android) already has this call — keep the real record only
+    const synced = await MobileCallLog.findOne({
+      user: callerId, company: companyId, source: null, ...phoneMatch(phone),
+      timestamp: { $gte: new Date(dialedAt - MANUAL_MATCH_WINDOW_MS), $lte: new Date(dialedAt + MANUAL_MATCH_WINDOW_MS) },
+    }).select('_id').lean();
+    if (synced) return res.json({ message: 'Already synced from the phone', skipped: true });
+
+    const key = { user: callerId, phoneNumber: phone, timestamp: new Date(dialedAt), callType: 'outgoing' };
+    const apply = async (existing) => {
+      const $set = { matchedLead: lead._id, ...(remark ? { remark } : {}), ...(outcome ? { outcome } : {}) };
+      // Only an app-made duration may change — never a phone-reported one or a recording's real length.
+      // Requests can arrive out of order (the phone retries ones that failed offline), so a request without an
+      // outcome never undoes a "didn't answer" (0) that a remark already set.
+      const appMade = existing.source === 'agent-web' && !(existing.recordings || []).length;
+      if (appMade || existing.durationEstimated) {
+        if (answered === false) { $set.duration = 0; $set.durationEstimated = false; }
+        else if (awaySec > 0 && (existing.durationEstimated || answered === true)) { $set.duration = awaySec; $set.durationEstimated = true; }
+      }
+      return MobileCallLog.findOneAndUpdate({ _id: existing._id }, { $set }, { new: true });
+    };
+
+    const existing = await MobileCallLog.findOne(key);
+    let log;
+    if (existing) log = await apply(existing);
+    else {
+      try {
+        log = await MobileCallLog.create({
+          ...key, company: companyId, duration, durationEstimated: duration > 0, name: lead.name || '',
+          matchedLead: lead._id, source: 'agent-web', ...(remark ? { remark } : {}), ...(outcome ? { outcome } : {}),
+        });
+      } catch (e) {
+        if (!(e && e.code === 11000)) throw e;      // the other request for this call got there first
+        log = await apply(await MobileCallLog.findOne(key));
+      }
+    }
+    return res.json({ message: 'Call logged', log });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
 const uploadRecording = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+    // Phones that cannot sync call logs (iPhone) attach recordings by hand from the /agent web app — see uploadManualRecording.
+    if (String((req.body && req.body.source) || '').toLowerCase() === 'manual') return uploadManualRecording(req, res);
     const { phoneNumber, timestamp, remark, leadId, fileKey } = req.body;
     const fileUrl = req.file.path || req.file.secure_url || req.file.url;
     const ts = timestamp ? new Date(parseInt(timestamp)) : null;
@@ -1177,7 +1417,7 @@ const getMyCallHistory = async (req, res) => {
 module.exports = {
   getMyCallHistory,
   upload, syncCallLogs, getCallLogs, getTodayCallLogs,
-  matchPhone, uploadRecording, getCompanyRecordings,
+  matchPhone, uploadRecording, logAppCall, getCompanyRecordings,
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
   summarizeUnmatchedCall, getUncalledLeads, getLeadFilterOptions,
 };

@@ -14,7 +14,7 @@ const {
   uploadRecording, upload, getCompanyRecordings,
   getCompanyAllLogs, getCallLogsForLead, saveRemark,
   summarizeUnmatchedCall, getUncalledLeads, getLeadFilterOptions,
-  getMyCallHistory,
+  getMyCallHistory, logAppCall,
 } = require('../controllers/mobileCallLogController');
 const {
   getMonitoringSummary, getMonitoringHistory, getNeverAttended, getMonitoringClients,
@@ -54,6 +54,7 @@ router.get('/lead-filters', protectAny, getLeadFilterOptions);   // Calls by Day
 // ── Writes (clear the company's cached responses after success) ───────────────
 router.post('/sync',                protectAny, invalidateCache, syncCallLogs);
 router.post('/recording',           protectAny, invalidateCache, recordingUpload, uploadRecording);
+router.post('/app-call',            protectAny, invalidateCache, logAppCall);   // iPhone: calls dialled from the /agent web app
 router.post('/remark',              protectAny, invalidateCache, saveRemark);
 router.post('/summarize-unmatched', protectAny, summarizeUnmatchedCall); // AI summary for non-lead calls
 

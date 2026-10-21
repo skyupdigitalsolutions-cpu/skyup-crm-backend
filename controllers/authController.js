@@ -181,6 +181,11 @@ const loginUnified = async (req, res) => {
     // token — see the doc comment on generateToken() for why this is safe.
     const isMobileLogin = !!req.body.platform;
     const tokenExpiry   = isMobileLogin ? "30d" : "24h";
+    // The /agent installable web app (employees) keeps people signed in until they log out, so it asks for the same
+    // 30-day token as the mobile app and renews it while in use (POST /auth/refresh). It sends client="agent-pwa"
+    // instead of `platform`, because `platform` is saved onto the employee's device record. The marker is honoured
+    // for EMPLOYEE logins only: an admin signing in through /agent still gets the normal 24h token.
+    const isAgentPwa = req.body.client === "agent-pwa";
 
     // 1) Check Developer
     const dev = await Developer.findOne({ email });
@@ -303,7 +308,7 @@ const loginUnified = async (req, res) => {
         createdBy: user.createdBy,
         isTeamLead: !!user.isTeamLead,
         teamLead:   user.teamLead || null,
-        token: generateToken(user._id, user.role || "employee", tokenExpiry),
+        token: generateToken(user._id, user.role || "employee", isAgentPwa ? "30d" : tokenExpiry),
         companyKey: await _getCompanyKey(user.company._id),
       });
     }
@@ -376,6 +381,22 @@ const loginUnified = async (req, res) => {
   }
 };
 
+// ── Refresh (sliding session for employees) ───────────────────────────────────
+// The /agent web app calls this when it is opened and when it returns to the foreground, so a session that is in use
+// never reaches its 30-day expiry. `protect` has already verified the CURRENT token (signature, expiry, not
+// blacklisted, employee role, user still exists, company state) — this only issues a fresh one. Admin tokens are
+// rejected by `protect` (403), so an admin can never extend a session this way. Logout blacklists the token in use.
+const REFRESH_EXPIRY = "30d";
+const refreshSession = async (req, res) => {
+  try {
+    const user = req.user;
+    if (!user || !user._id) return res.status(401).json({ message: "User not found" });
+    res.json({ token: generateToken(user._id, user.role || "employee", REFRESH_EXPIRY), expiresIn: REFRESH_EXPIRY });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // ── Logout ─────────────────────────────────────────────────────────────────────
 const logout = async (req, res) => {
   try {
@@ -441,4 +462,4 @@ const updateMyTelegram = async (req, res, next) => {
   }
 };
 
-module.exports = { register, login, loginUnified, logout, updateDevice, updateMyTelegram };
+module.exports = { register, login, loginUnified, logout, refreshSession, updateDevice, updateMyTelegram };

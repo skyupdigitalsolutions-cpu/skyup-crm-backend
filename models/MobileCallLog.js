@@ -72,6 +72,15 @@ const mobileCallLogSchema = new mongoose.Schema(
     // call log ever stored a remark ("Remark pending" forever).
     remark:  { type: String, default: null, maxlength: 500 },
     outcome: { type: String, default: null },
+
+    // Where this record came from. null = the Android app's call-log sync (all older records).
+    //   'agent-web'  — a call dialled from the /agent web app on an iPhone (iOS gives apps no call log,
+    //                  so the web app records the calls it starts itself) — see logAppCall in the controller.
+    //   'manual'     — created by a hand-attached recording (iPhone) with no matching call.
+    source: { type: String, default: null },
+    // true when `duration` is the time the employee spent away from the app during the call (iPhone),
+    // not a duration reported by the phone. Replaced by the real length when a recording is attached.
+    durationEstimated: { type: Boolean, default: false },
   },
   { timestamps: true },
 );

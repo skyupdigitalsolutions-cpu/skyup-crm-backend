@@ -1,7 +1,7 @@
 // routes/authRoutes.js — UPDATED (added /login unified endpoint + forgot-password OTP flow)
 const express = require("express");
 const router  = express.Router();
-const { register, login, loginUnified, logout, updateDevice, updateMyTelegram } = require("../controllers/authController");
+const { register, login, loginUnified, logout, refreshSession, updateDevice, updateMyTelegram } = require("../controllers/authController");
 const { requestOtp, verifyOtpAndReset } = require("../controllers/forgotPasswordController");
 const { authLimiter, ipFloodLimiter } = require("../middlewares/rateLimiter");
 const { protect }      = require("../middlewares/authMiddleware");
@@ -17,6 +17,7 @@ router.post("/forgot-password/reset",   ipFloodLimiter, authLimiter, verifyOtpAn
 router.post("/register",       ipFloodLimiter, authLimiter, register);
 router.post("/user-login",     ipFloodLimiter, authLimiter, login);        // employee-only login
 router.post("/logout",         protect,     logout);        // blacklists the JWT in Redis
+router.post("/refresh",        protect,     refreshSession); // employees: fresh 30-day token (sliding session for /agent)
 router.patch("/update-device", protect,     updateDevice);  // mobile device info update
 
 // ── Employee self-service: update own Telegram chat ID ───────────────────────
