@@ -23,6 +23,7 @@ const mongoose = require("mongoose");
 const { readPagination, sendList, applyPage } = require("../utils/paginate");
 const Company = require("../models/Company");
 const { normalizePhone } = require("../utils/normalizePhone");
+const { parseImportDate } = require("../utils/parseImportDate");
 const { computeQuality } = require("../utils/qualityHelper");
 const { getAdminLeadScope, mergeLeadScope } = require("../utils/adminLeadScope");
 const { pickFollowUpsToClose, dayEndOf } = require("../utils/followUpClosing");
@@ -765,7 +766,7 @@ const adminImportCSV = async (req, res) => {
     const { resolvePoolAdmins, IMPORT_MODES } = require("./leadAssignmentController");
     const importStrategy = IMPORT_MODES.includes(req.body.assignMode)
       ? req.body.assignMode
-      : (cust.workflows.assignment.importStrategy || "round_robin");
+      : (cust.workflows.assignment.importStrategy || "manual");   // default: a shared Unassigned pool until the company changes it, so a bulk upload never auto-fans out before review
     // Manual → shared pool: leads stay unassigned and every ticked admin sees
     // them under "Unassigned" until one of them assigns them to an employee.
     let poolAdmins = [];
@@ -890,7 +891,7 @@ const adminImportCSV = async (req, res) => {
           campaign: row.campaign || null,
           importedViaCsv: true,
           status: resolveStatusKey(cust, row.status),
-          date: row.date ? new Date(row.date) : new Date(),
+          date: parseImportDate(row.date) || new Date(),
           remark: row.remark || row.notes || lc.defaultImportRemark || "Imported via Excel",
           customFields: cf.values,
           temperature:
@@ -912,7 +913,8 @@ const adminImportCSV = async (req, res) => {
           poolAdmins,
           // insertOne bypasses Mongoose's timestamps. Without these, imported leads have NO createdAt: they never show in
           // Calls by Day → "To call", the "Assigned today" filter or any newest-first list (createdAt is what those use).
-          createdAt: new Date(),
+          // Use the file's own date (parsed above) so imported leads sort/filter by when they were really created.
+          createdAt: parseImportDate(row.date) || new Date(),
           updatedAt: new Date(),
         };
         if (row.leadgenId) adminDoc.leadgenId = row.leadgenId;
@@ -1082,7 +1084,7 @@ const userImportCSV = async (req, res) => {
           campaign: row.campaign || null,
           importedViaCsv: true,
           status: resolveStatusKey(cust, row.status),
-          date: row.date ? new Date(row.date) : new Date(),
+          date: parseImportDate(row.date) || new Date(),
           remark: row.remark || row.notes || lc.defaultImportRemark || "Imported via Excel",
           customFields: cf.values,
           temperature:
@@ -1102,7 +1104,7 @@ const userImportCSV = async (req, res) => {
           // must be set here — otherwise these leads were invisible to the
           // duplicate-phone check forever after.
           normalizedPhone: normPrimary || null,
-          createdAt: new Date(),     // insertOne bypasses Mongoose timestamps — see the same note in the admin import above
+          createdAt: parseImportDate(row.date) || new Date(),   // the file's own date, like the admin import above
           updatedAt: new Date(),
           ...(owners[rr % owners.length] !== selfId ? {
             activityTimeline: [{

@@ -14,12 +14,13 @@ const agentPushSubscriptionSchema = new mongoose.Schema(
       p256dh: { type: String, required: true },
       auth:   { type: String, required: true },
     },
-    // What this phone wants pushed (set in the app: Profile → Alerts). Remote clock-in replies always go out.
+    // The employee's Profile → Alerts choices for THIS phone (sent by the app, see src/agent/alertPrefs.js).
+    // Missing = everything on, so subscriptions made before this field existed keep working unchanged.
     prefs: {
-      newLeads:        { type: Boolean, default: true },   // new / reassigned / imported leads
-      followUps:       { type: Boolean, default: true },   // call-back reminder before a follow-up
-      followUpLeadMin: { type: Number,  default: 10, min: 5, max: 15 },   // how many minutes before
-      followUpSummary: { type: Boolean, default: true },   // overdue / due-today / no-follow-up-date summaries
+      newLeads:        { type: Boolean, default: true },
+      followUps:       { type: Boolean, default: true },
+      followUpLeadMin: { type: Number, enum: [5, 10, 15], default: 10 },
+      followUpSummary: { type: Boolean, default: true },
     },
     userAgent:  { type: String, default: '' },
     lastSeenAt: { type: Date, default: Date.now },

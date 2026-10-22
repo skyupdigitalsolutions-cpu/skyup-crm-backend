@@ -52,14 +52,6 @@ const MAX_SUBS_PER_USER = 5;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const minutesUntil = (at) => Math.round((new Date(at).getTime() - Date.now()) / 60000);
 
-// Which setting (subscription prefs) controls each event. Events not listed always go out.
-const CATEGORY = {
-  new_lead_assigned: 'newLeads',
-  scheduled_call_reminder: 'followUps',
-  follow_up_alert: 'followUpSummary',
-  no_followup_alert: 'followUpSummary',
-};
-
 const BUILDERS = {
   new_lead_assigned: (p = {}) => {
     const count = Number(p.count) || 1;
@@ -111,24 +103,63 @@ const BUILDERS = {
   },
 };
 
+// ── Alert settings (Profile → Alerts in the app). Same names and defaults as src/agent/alertPrefs.js. ───────────────
+const LEAD_TIMES = [5, 10, 15];
+const DEFAULT_PREFS = { newLeads: true, followUps: true, followUpLeadMin: 10, followUpSummary: true };
+const MAX_PUSH_DELAY_MS = 15 * 60000;       // the server announces a call-back at most 15 min before it
+
+/** Only known keys with the right type; anything else falls back to the default. Never throws. */
+function normalizePrefs(p) {
+  const src = p && typeof p === 'object' ? p : {};
+  const out = { ...DEFAULT_PREFS };
+  for (const k of ['newLeads', 'followUps', 'followUpSummary']) if (typeof src[k] === 'boolean') out[k] = src[k];
+  if (LEAD_TIMES.includes(Number(src.followUpLeadMin))) out.followUpLeadMin = Number(src.followUpLeadMin);
+  return out;
+}
+
+/**
+ * Should this alert go to a phone with these settings, and how long to hold it back?
+ *   new lead / reassigned      → "New leads"
+ *   call-back reminder         → "Follow-up reminders"; held back until `followUpLeadMin` minutes before the call
+ *                                (the server announces it up to 15 min early, the employee may want 5 or 10)
+ *   follow-ups due today       → "Follow-up reminders"
+ *   overdue / no follow-up set → "Overdue follow-ups"
+ *   remote clock-in reply      → always (the employee is waiting for it)
+ */
+function decideForEvent(prefs, event, payload, now = Date.now()) {
+  const p = prefs || DEFAULT_PREFS;
+  switch (event) {
+    case 'new_lead_assigned': return { send: p.newLeads, delayMs: 0 };
+    case 'scheduled_call_reminder': {
+      if (!p.followUps) return { send: false, delayMs: 0 };
+      const at = new Date(payload && payload.scheduledAt).getTime();
+      if (!Number.isFinite(at)) return { send: true, delayMs: 0 };
+      const delay = at - now - p.followUpLeadMin * 60000;
+      return { send: true, delayMs: Math.min(Math.max(delay, 0), MAX_PUSH_DELAY_MS) };
+    }
+    case 'follow_up_alert': return { send: payload && payload.type === 'overdue' ? p.followUpSummary : p.followUps, delayMs: 0 };
+    case 'no_followup_alert': return { send: p.followUpSummary, delayMs: 0 };
+    default: return { send: true, delayMs: 0 };
+  }
+}
+
 const safeUrl = (u) => (typeof u === 'string' && u.startsWith('/agent') ? u : '/agent');
 
-/** Push one notification to every subscribed phone of this employee (that has `category` switched on).
- *  Returns how many got it. Never throws. */
-async function sendToUser(userId, note, category, subsIn) {
+/**
+ * Push one notification to every subscribed phone of this employee. Returns how many got it right now. Never throws.
+ * opts.decide(prefs) → { send, delayMs } lets each phone's own alert settings skip the alert or hold it back;
+ * opts.rebuild() builds the text again at the moment a held-back alert is finally sent (so "in 15 min" is not stale).
+ */
+async function sendToUser(userId, note, opts = {}) {
   if (!configured || !userId || !note) return 0;
-  let subs = subsIn;
-  if (!subs) {
-    try { subs = await AgentPushSubscription.find({ user: userId }).lean(); } catch (e) { console.error('[AgentPush] lookup failed:', e.message); return 0; }
-  }
-  if (category) subs = subs.filter((s) => !s.prefs || s.prefs[category] !== false);
+  let subs;
+  try { subs = await AgentPushSubscription.find({ user: userId }).lean(); } catch (e) { console.error('[AgentPush] lookup failed:', e.message); return 0; }
   if (!subs.length) return 0;
-  const body = JSON.stringify({ title: note.title, body: note.body || '', url: safeUrl(note.url), tag: note.tag || undefined });
-  let sent = 0;
-  await Promise.all(subs.map(async (s) => {
+  const bodyOf = (n) => JSON.stringify({ title: n.title, body: n.body || '', url: safeUrl(n.url), tag: n.tag || undefined });
+  const sendOne = async (s, n) => {
     try {
-      await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, body, { TTL: note.ttl || 3600, urgency: 'high' });
-      sent++;
+      await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, bodyOf(n), { TTL: n.ttl || 3600, urgency: 'high' });
+      return true;
     } catch (e) {
       const code = e && e.statusCode;
       if (code === 404 || code === 410) {
@@ -137,39 +168,38 @@ async function sendToUser(userId, note, category, subsIn) {
       } else {
         console.error(`[AgentPush] send failed (${code || 'network'}) for user ${userId}:`, (e && (e.body || e.message)) || e);
       }
+      return false;
     }
+  };
+  let sent = 0;
+  await Promise.all(subs.map(async (s) => {
+    let d = { send: true, delayMs: 0 };
+    if (typeof opts.decide === 'function') { try { d = opts.decide(normalizePrefs(s.prefs)) || d; } catch { /* send as usual */ } }
+    if (!d.send) return;
+    if (d.delayMs > 0) {                       // hold back until the employee's chosen lead time (at most 15 min)
+      const t = setTimeout(() => {
+        let n = note;
+        if (typeof opts.rebuild === 'function') { try { n = opts.rebuild() || note; } catch { /* use the first text */ } }
+        sendOne(s, n).catch(() => {});
+      }, d.delayMs);
+      if (t.unref) t.unref();
+      return;
+    }
+    if (await sendOne(s, note)) sent++;
   }));
   return sent;
 }
 
 /** Push the alert for a socket event, if it is one the /agent app shows. */
-async function pushForEvent(userId, event, payload) {
+function pushForEvent(userId, event, payload) {
   const build = BUILDERS[event];
   if (!configured || !build) return;
-  const category = CATEGORY[event];
-  if (event !== 'scheduled_call_reminder') {
-    let note;
-    try { note = build(payload); } catch { return; }
-    sendToUser(userId, note, category).catch(() => {});
-    return;
-  }
-  // Call-back reminder: the alert job announces it up to 15 minutes early. Each phone chose how early it wants it
-  // (5 / 10 / 15 min, Profile → Alerts), so hold it until then. The text is built at send time ("in 5 min").
-  let subs;
-  try { subs = (await AgentPushSubscription.find({ user: userId }).lean()).filter((s) => !s.prefs || s.prefs.followUps !== false); }
-  catch { return; }
-  const at = new Date(payload && payload.scheduledAt).getTime();
-  const groups = new Map();
-  for (const s of subs) {
-    const lead = Math.min(15, Math.max(5, Number(s.prefs && s.prefs.followUpLeadMin) || 10));
-    const wait = Number.isFinite(at) ? Math.max(0, at - lead * 60000 - Date.now()) : 0;
-    if (!groups.has(wait)) groups.set(wait, []);
-    groups.get(wait).push(s);
-  }
-  for (const [wait, group] of groups) {
-    const fire = () => { let note; try { note = build(payload); } catch { return; } sendToUser(userId, note, null, group).catch(() => {}); };
-    if (wait > 0) { const t = setTimeout(fire, Math.min(wait, 15 * 60000)); if (t.unref) t.unref(); } else fire();
-  }
+  let note;
+  try { note = build(payload); } catch { return; }
+  sendToUser(userId, note, {
+    decide: (prefs) => decideForEvent(prefs, event, payload),
+    rebuild: () => build(payload),
+  }).catch(() => {});
 }
 
 /** Wrap io.to()/io.in() so employee-room emits also go out as web push. Call once, right after creating io. */
@@ -194,21 +224,13 @@ function attachToSocket(io) {
   if (typeof io.in === 'function') io.in = wrap(io.in);
 }
 
-/** Only known settings, with safe values. */
-function cleanPrefs(p) {
-  if (!p || typeof p !== 'object') return null;
-  const out = {};
-  for (const k of ['newLeads', 'followUps', 'followUpSummary']) if (typeof p[k] === 'boolean') out[`prefs.${k}`] = p[k];
-  const m = Number(p.followUpLeadMin);
-  if ([5, 10, 15].includes(m)) out['prefs.followUpLeadMin'] = m;
-  return Object.keys(out).length ? out : null;
-}
-
 /** Save (or move to this employee) a phone's subscription. */
 async function saveSubscription({ userId, companyId, endpoint, keys, userAgent, prefs }) {
+  const set = { user: userId, company: companyId || null, keys: { p256dh: keys.p256dh, auth: keys.auth }, userAgent: String(userAgent || '').slice(0, 300), lastSeenAt: new Date() };
+  if (prefs && typeof prefs === 'object') set.prefs = normalizePrefs(prefs);       // not sent → keep the settings already saved
   const doc = await AgentPushSubscription.findOneAndUpdate(
     { endpoint },
-    { $set: { user: userId, company: companyId || null, keys: { p256dh: keys.p256dh, auth: keys.auth }, userAgent: String(userAgent || '').slice(0, 300), lastSeenAt: new Date(), ...(cleanPrefs(prefs) || {}) } },
+    { $set: set },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
   // keep only the most recent few per employee
@@ -221,18 +243,28 @@ async function removeSubscription({ userId, endpoint }) {
   return AgentPushSubscription.deleteOne({ user: userId, endpoint });
 }
 
-/** Update this phone's notification settings. Returns false when the phone isn't subscribed. */
-async function savePrefs({ userId, endpoint, prefs }) {
-  const set = cleanPrefs(prefs);
-  if (!set) return true;
-  const r = await AgentPushSubscription.updateOne({ user: userId, endpoint }, { $set: set });
-  return r.matchedCount > 0;
+/** Save the alert settings for one of THIS employee's phones. Returns the saved settings, or null if that phone is not subscribed. */
+async function updatePrefs({ userId, endpoint, prefs }) {
+  const clean = normalizePrefs(prefs);
+  const doc = await AgentPushSubscription.findOneAndUpdate({ user: userId, endpoint }, { $set: { prefs: clean, lastSeenAt: new Date() } }, { new: true });
+  return doc ? clean : null;
 }
 
-/** "Send test notification" button: push to this phone only (or every phone of the employee when no endpoint). */
+/** "Send test notification": one push to one of THIS employee's phones. → { sent: 1 | 0, reason? } */
 async function sendTest({ userId, endpoint }) {
-  const subs = await AgentPushSubscription.find({ user: userId, ...(endpoint ? { endpoint } : {}) }).lean();
-  return sendToUser(userId, { title: 'Test notification', body: 'Notifications are working on this phone.', url: '/agent/profile', tag: 'test', ttl: 300 }, null, subs);
+  if (!configured) return { sent: 0, reason: 'off' };
+  const sub = await AgentPushSubscription.findOne({ user: userId, endpoint }).lean();
+  if (!sub) return { sent: 0, reason: 'unknown' };
+  const body = JSON.stringify({ title: 'SkyUp CRM test', body: 'Phone notifications are working on this phone.', url: '/agent/profile', tag: 'push-test' });
+  try {
+    await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, body, { TTL: 300, urgency: 'high' });
+    return { sent: 1 };
+  } catch (e) {
+    const code = e && e.statusCode;
+    if (code === 404 || code === 410) { await AgentPushSubscription.deleteOne({ _id: sub._id }).catch(() => {}); return { sent: 0, reason: 'gone' }; }
+    console.error(`[AgentPush] test send failed (${code || 'network'}):`, (e && (e.body || e.message)) || e);
+    return { sent: 0, reason: 'error' };
+  }
 }
 
-module.exports = { isConfigured, publicKey, sendToUser, pushForEvent, attachToSocket, saveSubscription, removeSubscription, savePrefs, sendTest, BUILDERS, CATEGORY };
+module.exports = { isConfigured, publicKey, sendToUser, pushForEvent, attachToSocket, saveSubscription, removeSubscription, updatePrefs, sendTest, normalizePrefs, decideForEvent, DEFAULT_PREFS, BUILDERS };
