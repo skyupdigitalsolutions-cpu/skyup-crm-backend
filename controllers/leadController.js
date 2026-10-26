@@ -387,6 +387,35 @@ const getDistinctCampaigns = async (req, res) => {
 };
 
 // ── User creates a lead manually ──────────────────────────────────────────────
+// ── Filter options for the apps (custom fields marked "Use as filter" in the developer panel) ───────────────────
+// Each returned filter: { key, label, type, values[] }. Select fields use their own options; text fields use the
+// distinct values that occur in this company's leads (capped). The web and mobile lead lists render one dropdown each.
+const getFilterOptions = async (req, res) => {
+  try {
+    const companyId = getCompanyId(req);
+    if (!companyId) return res.status(400).json({ message: "companyId is required." });
+    const cust = await getCust(companyId);
+    const fields = custSvc.filterableFields ? custSvc.filterableFields(cust) : [];
+    if (!fields.length) return res.json({ filters: [] });
+    let base = { company: companyId };
+    try { const scope = await getAdminLeadScope(req, companyId); base = mergeLeadScope({ company: companyId }, scope); } catch { /* employee / no scope */ }
+    const out = [];
+    for (const f of fields) {
+      let values = [];
+      if ((f.type === "select" || f.type === "multiselect") && f.options.length) {
+        values = f.options;
+      } else {
+        const raw = await Lead.distinct(`customFields.${f.key}`, { ...base, [`customFields.${f.key}`]: { $nin: [null, ""] } }).catch(() => []);
+        values = raw.filter((v) => v !== null && v !== undefined && String(v).trim() !== "").map(String).slice(0, 100).sort((a, b) => a.localeCompare(b));
+      }
+      out.push({ key: f.key, label: f.label, type: f.type, values });
+    }
+    res.json({ filters: out });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const createLead = async (req, res) => {
   try {
     const companyId    = getCompanyId(req);
@@ -3659,6 +3688,7 @@ const getLeadActionSummary = async (req, res) => {
 };
 
 module.exports = {
+  getFilterOptions,
   markFollowUpDone,
   getLead,
   getLeads,

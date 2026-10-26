@@ -40,6 +40,7 @@ const {
   swapPhones,
   mergeLead,
   getLeadActionSummary,
+  getFilterOptions,
 } = require("../controllers/leadController");
 
 const { protect, protectAny } = require("../middlewares/authMiddleware");
@@ -90,6 +91,7 @@ router.get("/admin/check-duplicate", protectAdmin, checkDuplicate);
 
 // ── Follow-up alert notification endpoints ────────────────────────────────────
 router.get("/follow-up-alerts", protect, getFollowUpAlerts);
+router.get("/filter-options", protect, getFilterOptions);   // custom-field filters configured per company
 router.get("/admin/follow-up-alerts", protectAdmin, getFollowUpAlerts);
 // Bell fetch-on-open: current pending no-action + follow-up notifications.
 router.get("/admin/pending-notifications", protectAdmin, getPendingNotifications);

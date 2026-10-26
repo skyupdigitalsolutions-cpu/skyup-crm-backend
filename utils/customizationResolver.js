@@ -298,6 +298,7 @@ function normaliseCustomFields(items, { strict = false } = {}) {
       required: bool(raw.required, false),
       active: bool(raw.active, true),
       showInList: bool(raw.showInList, false),
+      filterable: bool(raw.filterable, false),   // "Use as filter" — shows this field as a filter in the apps
       showInForm: bool(raw.showInForm, true),
       employeeVisible: bool(raw.employeeVisible, true),
       employeeEditable: bool(raw.employeeEditable, true),
@@ -647,6 +648,13 @@ function tzOffsetMinutes(tz, date) {
 }
 
 /** Date for "N days from today at HH:00" in the company's timezone. */
+/** Custom fields marked "Use as filter" — the apps render one filter dropdown per entry. Capped at 6. */
+function filterableFields(c = {}) {
+  const fields = Array.isArray(c?.customFields) ? c.customFields : [];
+  return fields.filter((f) => f && f.active && f.filterable).slice(0, 6)
+    .map((f) => ({ key: f.key, label: f.label, type: f.type, options: Array.isArray(f.options) ? f.options : [] }));
+}
+
 function companyDateAt(c, daysAhead = 1, hour = 9, minute = 0) {
   const tz = c?.general?.timezone || "Asia/Kolkata";
   const now = new Date();
@@ -789,6 +797,7 @@ module.exports = {
   buildScheduledFollowUps,
   companyClock,
   companyDateAt,
+  filterableFields,
   companyDayStart,
   tzOffsetMinutes,
   hhmmToMinutes,
