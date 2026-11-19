@@ -117,6 +117,12 @@ router.post("/employee-bulk-send", protect, requireFeature("whatsappBlast"), emp
 // their own employee-blast sends (scoped inside the controller).
 router.get("/send-log", protectAny, getSendLogReport);
 
+// ─── Daily inbox report (received + sent chats), JSON or ?format=csv ─────────
+// protectAny — admin/super_admin get the whole company; employees get only
+// conversations assigned to them (scoped inside the controller).
+const { getInboxReport } = require("../controllers/whatsappInboxReportController");
+router.get("/reports/inbox", protectAny, getInboxReport);
+
 // Cached generic template body (unsubstituted) — used by the "View" modal on
 // template-sent timeline entries recorded before content tracking existed.
 router.get("/template-body", protectAny, getTemplateBody);
