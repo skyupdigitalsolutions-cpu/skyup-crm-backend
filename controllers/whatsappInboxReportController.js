@@ -76,6 +76,14 @@ function fmtPhone(raw) {
   return `+ ${d}`;
 }
 
+// Same rule as the CRM's maskPhone(): only super admins see full numbers.
+// 919876543289 → +91••••••••89
+function maskPhone(raw) {
+  const d = String(raw || "").replace(/\D/g, "");
+  if (d.length < 4) return d ? "••••" : "";
+  return `+${d.slice(0, 2)}${"•".repeat(d.length - 4)}${d.slice(-2)}`;
+}
+
 function csvCell(v, { raw = false } = {}) {
   let s = v == null ? "" : String(v);
   // Block spreadsheet formula injection from customer-typed text.
@@ -87,6 +95,9 @@ const getInboxReport = async (req, res, next) => {
   try {
     const { companyId, userId, role } = callerCtx(req);
     if (!companyId) return res.status(400).json({ error: "No company context" });
+
+    const showFullPhone = role === "super_admin" || role === "superadmin";
+    const phoneOf = c => (showFullPhone ? fmtPhone(c?.waPhone) : maskPhone(c?.waPhone));
 
     const tz = await companyTimezone(companyId);
     const from = DATE_RE.test(req.query.from || "") ? req.query.from : getTodayInTimezone(tz);
@@ -181,7 +192,7 @@ const getInboxReport = async (req, res, next) => {
       convRows.push({
         conversationId: key,
         contact: contactOf(c),
-        phone: c?.waPhone || "",
+        phone: phoneOf(c),
         assignedAgent: c?.assignedAgent?.name || "",
         received: inbound,
         sent: outbound,
@@ -209,7 +220,7 @@ const getInboxReport = async (req, res, next) => {
     const lines = [header.map(v => csvCell(v)).join(",")];
     for (const [key, msgs] of groups) {
       const c = convById.get(key);
-      const phoneCell = csvCell(fmtPhone(c?.waPhone), { raw: true });
+      const phoneCell = csvCell(phoneOf(c), { raw: true });
       for (const m of msgs) {
         const { day, time } = fmtInTz(m.waTimestamp, tz);
         lines.push([
