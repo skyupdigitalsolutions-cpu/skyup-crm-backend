@@ -877,6 +877,33 @@ async function sendScheduledCallReminder(recipient, lead, scheduledCall) {
 //  Returns 'sent' | 'no_channel' | 'error' (same contract as
 //  sendScheduledCallReminder — 'error' is transient and worth retrying).
 // ─────────────────────────────────────────────────────────────────────────────
+async function sendToolRenewalAlert(recipient, tools) {
+  try {
+    if (!tools || !tools.length) return 'no_channel';
+    const messaging = getMessaging();
+    const money = (n) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
+    const first = tools[0];
+    const title = tools.length === 1 ? `🔔 Subscription renewal — ${first.name}` : `🔔 ${tools.length} subscriptions renewing soon`;
+    const body = tools.length === 1
+      ? `${first.name} renews ${first.when}${first.cost ? ` · ${money(first.cost)}` : ''}`
+      : `${tools.slice(0, 3).map(t => t.name).join(', ')}${tools.length > 3 ? ` +${tools.length - 3} more` : ''}`;
+    const _io = global._io;
+    if (_io && recipient._id) {
+      const role = String(recipient.role || '').toLowerCase();
+      const room = role === 'super_admin' || role === 'superadmin' ? `superadmin:${recipient._id}`
+        : role === 'user' || role === 'employee' ? `agent:${recipient._id}` : `admin:${recipient._id}`;
+      _io.to(room).emit('tool_renewal_reminder', { count: tools.length, tools: tools.slice(0, 10), timestamp: new Date().toISOString() });
+    }
+    if (!messaging || !recipient.fcmToken) return 'no_channel';
+    await messaging.send({
+      token: recipient.fcmToken,
+      notification: { title, body },
+      data: { type: 'tool_renewal_reminder', count: String(tools.length) },
+    });
+    return 'push';
+  } catch (e) { console.warn('[FCM] tool renewal alert failed:', e && e.message); return 'error'; }
+}
+
 async function sendPaymentFollowUpAlert(recipient, items) {
   try {
     if (!items || !items.length) return 'no_channel';
@@ -960,5 +987,6 @@ module.exports = {
   sendWhatsAppInboundNotification,
   sendScheduledCallReminder,
   sendPaymentFollowUpAlert,   // Finance Dashboard
+  sendToolRenewalAlert,       // Finance Dashboard — subscription renewal reminders
   checkFCMHealth,
 };

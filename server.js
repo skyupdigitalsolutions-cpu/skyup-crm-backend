@@ -101,7 +101,8 @@ const { startDailyReportJob }         = require('./jobs/dailyReportJob');
 const { startFollowUpPingJob }        = require('./jobs/followUpDailyPingJob');
 const { startLeadAIAnalysisJob }      = require('./jobs/leadAIAnalysisJob');
 const { startFestivalCampaignJob }    = require('./jobs/festivalCampaignJob'); // NEW — fires scheduled festival template blasts on their due date
-const { startFinanceFollowUpJob }      = require('./jobs/financeFollowUpJob');    // NEW — Finance Dashboard payment follow-up reminders
+const { startFinanceFollowUpJob }      = require('./jobs/financeFollowUpJob');
+const { startToolRenewalJob }          = require('./jobs/toolRenewalJob');          // Finance Dashboard — subscription renewal reminders    // NEW — Finance Dashboard payment follow-up reminders
 const { startScreenshotAutoJob }       = require('./jobs/screenshotAutoJob');     // NEW — auto-read WhatsApp screenshots + AI analysis
 const { startLeadAutoAnalysisJob }     = require('./jobs/leadAutoAnalysisJob');   // NEW — Auto AI Intelligence sweep
 const { startScreenshotRetentionJob }  = require('./jobs/screenshotRetentionJob');// NEW — delete WhatsApp screenshot images after 7 days
@@ -455,7 +456,9 @@ app.use('/api/developer/companies/:companyId/daily-report',    dailyReportRoute)
 app.use('/api/finance',                                         require('./routes/financeRoute'));            // Finance — employee payment follow-ups only
 app.use('/api/finance-panel',                                   require('./routes/financePanelAuth'));        // Finance Panel — sign-in (/login, /me)
 app.use('/api/finance-panel',                                   require('./routes/financeInvoiceRoutes'));    // Finance Panel — invoices / payments / follow-ups
-app.use('/api/developer/companies/:companyId/finance',          require('./routes/financeInvoiceRoutes'));    // Finance (developer, per company)
+app.use('/api/developer/companies/:companyId/finance',          require('./routes/financeInvoiceRoutes'));
+app.use('/api/finance-panel/hr',                                require('./routes/financeHrRoutes'));    // Finance HR: employees, salary, tools, notes
+app.use('/api/developer/companies/:companyId/finance/hr',       require('./routes/financeHrRoutes'));    // Finance HR (developer, per company)
 app.use('/api/website-config',      websiteConfigRoute);
 app.use('/api/chat',                chatRoutes);
 app.use('/api/email-campaign',      emailCampaignRoute);
@@ -690,6 +693,7 @@ connectDB().then(() => {
     startFollowUpPingJob();        // 9 AM: follow-up list · 4 PM: called vs not-called
     startLeadAIAnalysisJob();     // AI Lead Outcome Intelligence — processes pending analyses every 2 min
     startFestivalCampaignJob();   // Festival Campaigns — checks every 15 min (IST) for scheduled festive blasts due today
+    startToolRenewalJob();        // Finance Dashboard — subscription renewal reminders
     startFinanceFollowUpJob();    // Finance Dashboard — payment follow-up reminders (every 15 min, from 9:30 AM IST)
     startScreenshotAutoJob();     // Auto WhatsApp Screenshot AI — sweeps for unread screenshots (every 5 min)
     startLeadAutoAnalysisJob();   // Auto AI Intelligence — queues analyses for new / changed leads (every 5 min)
