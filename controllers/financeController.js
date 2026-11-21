@@ -8,6 +8,19 @@
 
 const mongoose       = require("mongoose");
 const FinanceInvoice = require("../models/FinanceInvoice");
+
+// ── Keep the lead's revenueReceived in sync with real money collected ─────────────
+// Marketing ROAS reads lead.revenueReceived. We set it to the total actually PAID across that lead's active invoices,
+// so ROAS reflects money received (not a manually-typed deal value). Called after any invoice payment change.
+const Lead = require("../models/Leads");
+async function syncLeadRevenueFromInvoices(leadId) {
+  try {
+    if (!leadId) return;
+    const invs = await FinanceInvoice.find({ lead: leadId, status: { $ne: "cancelled" } }).select("paidAmount").lean();
+    const received = invs.reduce((sum, i) => sum + (Number(i.paidAmount) || 0), 0);
+    await Lead.updateOne({ _id: leadId }, { $set: { revenueReceived: Math.round(received * 100) / 100 } });
+  } catch (e) { /* best-effort; never block the invoice save */ }
+}
 const User           = require("../models/Users");
 const { istDayKey }  = require("../utils/istDate");
 const fin            = require("../services/financeService");
@@ -360,6 +373,7 @@ exports.createInvoice = async (req, res) => {
     pushRemark(inv, actor, base ? "New service started for an existing client." : "Invoice created manually.", "system");
 
     await inv.save();
+    if (inv.lead) await syncLeadRevenueFromInvoices(inv.lead);
     res.status(201).json({ success: true, invoice: fin.toDTO(inv) });
   } catch (e) { sendDup(res, e, "Could not create invoice"); }
 };
@@ -445,6 +459,7 @@ exports.updateInvoice = async (req, res) => {
     if (changes.length) pushRemark(inv, actor, `Updated: ${changes.join("; ")}.`, "system");
     inv.recalc();
     await inv.save();
+    if (inv.lead) await syncLeadRevenueFromInvoices(inv.lead);
 
     // Keep the client's other invoices consistent (name / business / source / referrer)
     if (Object.keys(clientFields).length && inv.clientId) {
@@ -489,6 +504,7 @@ exports.addPayment = async (req, res) => {
       if (fmtDay(fu.date) !== fmtDay(inv.nextFollowUpDate)) { inv.nextFollowUpDate = fu.date; inv.followUpReminderDay = null; }
     }
     await inv.save();
+    if (inv.lead) await syncLeadRevenueFromInvoices(inv.lead);
     res.status(201).json({ success: true, invoice: fin.toDTO(inv) });
   } catch (e) { fail(res, 500, "Could not record payment"); }
 };
@@ -516,6 +532,7 @@ exports.updatePayment = async (req, res) => {
     inv.recalc();
     pushRemark(inv, actor, `A payment entry was edited (now ₹${p.amount}).`, "system");
     await inv.save();
+    if (inv.lead) await syncLeadRevenueFromInvoices(inv.lead);
     res.json({ success: true, invoice: fin.toDTO(inv) });
   } catch (e) { fail(res, 500, "Could not update payment"); }
 };
@@ -530,6 +547,7 @@ exports.deletePayment = async (req, res) => {
     inv.recalc();
     pushRemark(inv, actorOf(req), `A payment entry of ₹${amt} was removed.`, "system");
     await inv.save();
+    if (inv.lead) await syncLeadRevenueFromInvoices(inv.lead);
     res.json({ success: true, invoice: fin.toDTO(inv) });
   } catch (e) { fail(res, 500, "Could not remove payment"); }
 };
@@ -555,6 +573,7 @@ async function applyFollowUp(inv, req, res) {
     pushRemark(inv, actor, note ? `${head} — ${note}` : head, "followup");
   }
   await inv.save();
+    if (inv.lead) await syncLeadRevenueFromInvoices(inv.lead);
   return inv;
 }
 
@@ -574,6 +593,7 @@ exports.addRemark = async (req, res) => {
     if (text.length > 1000) return fail(res, 400, "Remark is too long (max 1000 characters)");
     pushRemark(inv, actorOf(req), text);
     await inv.save();
+    if (inv.lead) await syncLeadRevenueFromInvoices(inv.lead);
     res.status(201).json({ success: true, invoice: fin.toDTO(inv) });
   } catch (e) { fail(res, 500, "Could not save remark"); }
 };
@@ -589,6 +609,7 @@ exports.cancelInvoice = async (req, res) => {
     inv.nextFollowUpDate = null;
     pushRemark(inv, actorOf(req), `Invoice cancelled${inv.cancelReason ? `: ${inv.cancelReason}` : "."}`, "system");
     await inv.save();
+    if (inv.lead) await syncLeadRevenueFromInvoices(inv.lead);
     res.json({ success: true, invoice: fin.toDTO(inv) });
   } catch (e) { fail(res, 500, "Could not cancel invoice"); }
 };
@@ -600,6 +621,7 @@ exports.reopenInvoice = async (req, res) => {
     inv.status = "active"; inv.cancelledAt = null; inv.cancelReason = "";
     pushRemark(inv, actorOf(req), "Invoice reopened.", "system");
     await inv.save();
+    if (inv.lead) await syncLeadRevenueFromInvoices(inv.lead);
     res.json({ success: true, invoice: fin.toDTO(inv) });
   } catch (e) { fail(res, 500, "Could not reopen invoice"); }
 };
@@ -656,6 +678,7 @@ exports.myRemark = async (req, res) => {
     if (text.length > 1000) return fail(res, 400, "Remark is too long (max 1000 characters)");
     pushRemark(inv, actorOf(req), text);
     await inv.save();
+    if (inv.lead) await syncLeadRevenueFromInvoices(inv.lead);
     res.status(201).json({ success: true, invoice: fin.toDTO(inv) });
   } catch (e) { fail(res, 500, "Could not save remark"); }
 };

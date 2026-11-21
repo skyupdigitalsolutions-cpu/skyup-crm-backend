@@ -145,19 +145,22 @@ async function getSourcePerformanceReport({
     mergedInto: null,
     isClosed: { $ne: true },
     createdAt: { $gte: fromD, $lte: toD },
-  }).select("campaign status").lean();
+  }).select("campaign status dealValue revenueReceived").lean();
 
   // 2. Aggregate by campaign label.
   const byCampaign = new Map(); // label -> { leads, converted, statusBreakdown }
   const bump = (label) => {
     const key = label && String(label).trim() ? String(label).trim() : "(untagged)";
-    if (!byCampaign.has(key)) byCampaign.set(key, { leads: 0, converted: 0, statusBreakdown: {} });
+    if (!byCampaign.has(key)) byCampaign.set(key, { leads: 0, converted: 0, revenue: 0, statusBreakdown: {} });
     return byCampaign.get(key);
   };
   for (const l of leads) {
     const row = bump(l.campaign);
     row.leads += 1;
     if (isConverted(l.status)) row.converted += 1;
+    // Revenue for ROAS: realised revenue (revenueReceived) if present, else the deal value. Counts for any lead
+    // that carries a value, not only "converted" ones, so partial/booked revenue is reflected too.
+    row.revenue += num(l.revenueReceived) || num(l.dealValue) || 0;
     const st = String(l.status || "Unknown").trim() || "Unknown";
     row.statusBreakdown[st] = (row.statusBreakdown[st] || 0) + 1;
   }
@@ -177,12 +180,12 @@ async function getSourcePerformanceReport({
     if (label) configByName.set(label, c);
     // Ensure a card exists even with zero leads in the period.
     if (label && !byCampaign.has(label)) {
-      byCampaign.set(label, { leads: 0, converted: 0, statusBreakdown: {} });
+      byCampaign.set(label, { leads: 0, converted: 0, revenue: 0, statusBreakdown: {} });
     }
   }
 
   // 4. Build per-campaign cards + totals.
-  const totals = { leads: 0, converted: 0, cost: 0, impressions: 0, clicks: 0, campaigns: 0 };
+  const totals = { leads: 0, converted: 0, revenue: 0, cost: 0, impressions: 0, clicks: 0, campaigns: 0 };
   const campaigns = [];
 
   for (const [label, agg] of byCampaign.entries()) {
@@ -201,6 +204,9 @@ async function getSourcePerformanceReport({
     const convRate          = agg.leads > 0 ? round2((agg.converted / agg.leads) * 100) : null;
     const costPerLead       = hasCost && agg.leads > 0     ? round2(cost / agg.leads)     : null;
     const costPerConversion = hasCost && agg.converted > 0 ? round2(cost / agg.converted) : null;
+    // ROAS = revenue earned ÷ ad spend. Only meaningful when spend is recorded.
+    const revenue           = round2(agg.revenue || 0);
+    const roas              = hasCost && cost > 0 ? round2(revenue / cost) : null;
 
     const issues = detectIssues({
       active,
@@ -213,6 +219,7 @@ async function getSourcePerformanceReport({
 
     totals.leads       += agg.leads;
     totals.converted   += agg.converted;
+    totals.revenue     += revenue;
     totals.cost        += cost;
     totals.impressions += impressions;
     totals.clicks      += clicks;
@@ -233,6 +240,8 @@ async function getSourcePerformanceReport({
       leads:             agg.leads,
       converted:         agg.converted,
       conversionRatePct: convRate,
+      revenue,
+      roas,
       costPerLead,
       costPerConversion,
       statusBreakdown:   agg.statusBreakdown,
@@ -246,6 +255,7 @@ async function getSourcePerformanceReport({
   const overallConvRate = totals.leads > 0 ? round2((totals.converted / totals.leads) * 100) : null;
   const overallCPL      = withCost && totals.cost > 0 && totals.leads > 0     ? round2(totals.cost / totals.leads)     : null;
   const overallCPConv   = withCost && totals.cost > 0 && totals.converted > 0 ? round2(totals.cost / totals.converted) : null;
+  const overallRoas     = withCost && totals.cost > 0 ? round2(totals.revenue / totals.cost) : null;
   const overallCPC      = withCost && totals.clicks > 0 && totals.cost > 0        ? round2(totals.cost / totals.clicks)                 : null;
   const overallCTR      = withCost && totals.impressions > 0 && totals.clicks > 0 ? round2((totals.clicks / totals.impressions) * 100)  : null;
   const overallCPM      = withCost && totals.impressions > 0 && totals.cost > 0   ? round2((totals.cost / totals.impressions) * 1000)   : null;
@@ -257,6 +267,8 @@ async function getSourcePerformanceReport({
     totals: {
       leads:             totals.leads,
       converted:         totals.converted,
+    revenue:           round2(totals.revenue),
+    roas:              overallRoas,
       conversionRatePct: overallConvRate,
       campaigns:         totals.campaigns,
       cost:              withCost ? round2(totals.cost) : null,
