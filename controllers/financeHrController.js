@@ -122,9 +122,16 @@ async function createTool(req, res) {
   const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
   const a = actorOf(req); const b = req.body || {};
   if (!b.name || !b.name.trim()) return fail(res, 400, "Tool / service name is required.");
+  // Per-seat (team) subscriptions: total cost = seats × per-seat price. Flat: use the entered cost.
+  const pricingType = b.pricingType === "per_seat" ? "per_seat" : "flat";
+  const seats = pricingType === "per_seat" ? (Number(b.seats) || 0) : 0;
+  const perSeatCost = pricingType === "per_seat" ? (Number(b.perSeatCost) || 0) : 0;
+  const computedCost = pricingType === "per_seat" ? seats * perSeatCost : (Number(b.cost) || 0);
   const t = await FinanceTool.create({
-    company, name: b.name.trim(), category: b.category, cost: b.cost || 0, currency: b.currency || "INR",
-    billingCycle: b.billingCycle || "monthly", reason: b.reason, takenBy: b.takenBy, usedBy: b.usedBy,
+    company, name: b.name.trim(), category: b.category, cost: computedCost, currency: b.currency || "INR",
+    pricingType, seats, perSeatCost, seatAssignees: Array.isArray(b.seatAssignees) ? b.seatAssignees.filter((x) => x && String(x).trim()) : [],
+    billingCycle: b.billingCycle || "monthly", reason: b.reason, description: b.description, takenBy: b.takenBy, usedBy: b.usedBy,
+    projects: Array.isArray(b.projects) ? b.projects.filter((pr) => pr && pr.name && pr.name.trim()) : [],
     startDate: b.startDate || null, renewalDate: b.renewalDate || null, reminderDays: b.reminderDays ?? 7,
     autoRenews: b.autoRenews !== false, note: b.note, createdBy: a.id, createdByName: a.name,
   });
@@ -132,8 +139,16 @@ async function createTool(req, res) {
 }
 async function updateTool(req, res) {
   const company = companyIdOf(req); const b = req.body || {};
-  const allowed = ["name","category","cost","currency","billingCycle","reason","takenBy","usedBy","startDate","renewalDate","reminderDays","autoRenews","note","active"];
+  const allowed = ["name","category","cost","currency","billingCycle","reason","description","projects","takenBy","usedBy","startDate","renewalDate","reminderDays","autoRenews","note","active","pricingType","seats","perSeatCost","seatAssignees"];
   const set = {}; for (const k of allowed) if (k in b) set[k] = b[k];
+  // Recompute cost for per-seat subscriptions so cost always = seats × perSeatCost.
+  const pt = set.pricingType || undefined;
+  if (pt === "per_seat" || (pt === undefined && (set.seats !== undefined || set.perSeatCost !== undefined))) {
+    const existing = await FinanceTool.findOne({ _id: req.params.id, company }).select("seats perSeatCost pricingType").lean();
+    const seats = set.seats !== undefined ? Number(set.seats) || 0 : (existing?.seats || 0);
+    const per = set.perSeatCost !== undefined ? Number(set.perSeatCost) || 0 : (existing?.perSeatCost || 0);
+    if ((pt || existing?.pricingType) === "per_seat") set.cost = seats * per;
+  }
   const t = await FinanceTool.findOneAndUpdate({ _id: req.params.id, company }, { $set: set }, { new: true }).lean();
   if (!t) return fail(res, 404, "Tool not found."); ok(res, { tool: t });
 }
