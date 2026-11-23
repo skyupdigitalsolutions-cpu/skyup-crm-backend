@@ -18,6 +18,9 @@ router.get ("/assignees", c.listAssignees);
 router.get ("/clients",   c.listClients);      // existing clients (for "add a new service")
 router.get ("/clients/:clientId/invoices", c.clientInvoices);
 
+router.get ("/settings", c.getSettings);      // invoice "from" block (GSTIN, bank, terms…)
+router.put ("/settings", c.updateSettings);   // must stay above "/:id"
+
 router.get ("/",    c.listInvoices);
 router.post("/",    c.createInvoice);
 router.get ("/:id", c.getInvoice);

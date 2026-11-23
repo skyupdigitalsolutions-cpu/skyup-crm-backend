@@ -28,6 +28,8 @@ async function requireFinance(req, res, next) {
 }
 
 router.get ("/my/followups",    protect, requireFinance, c.myFollowUps);
+router.get ("/my/invoices",     protect, requireFinance, c.myInvoices);        // all my invoices, paid included
+router.get ("/my/:id/document", protect, requireFinance, c.myInvoiceDocument); // data for the downloadable invoice
 router.put ("/my/:id/followup", protect, requireFinance, c.myFollowUp);
 router.post("/my/:id/remarks",  protect, requireFinance, c.myRemark);
 

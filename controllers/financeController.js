@@ -197,6 +197,71 @@ async function computeSummary(cid) {
   };
 }
 
+// ── Invoice "from" details (FinanceSettings, falling back to the company) ────
+const SELLER_FIELDS = ["legalName", "gstin", "address", "phone", "email", "bankDetails", "terms", "signatory"];
+
+async function sellerFor(companyId) {
+  const FinanceSettings = require("../models/FinanceSettings");
+  const Company = require("../models/Company");
+  const [st, co] = await Promise.all([
+    FinanceSettings.findOne({ company: companyId }).lean(),
+    Company.findById(companyId).select("name brandName headerName address phone email logo brandLogoUrl headerLogoUrl website").lean(),
+  ]);
+  const s = st || {};
+  return {
+    name:        s.legalName || co?.brandName || co?.headerName || co?.name || "",
+    gstin:       s.gstin || "",
+    address:     s.address || co?.address || "",
+    phone:       s.phone || co?.phone || "",
+    email:       s.email || co?.email || "",
+    website:     co?.website || "",
+    logo:        co?.headerLogoUrl || co?.brandLogoUrl || co?.logo || "",
+    bankDetails: s.bankDetails || "",
+    terms:       s.terms || "",
+    signatory:   s.signatory || "",
+  };
+}
+
+// GET/PUT /settings — finance team edits the invoice "from" block.
+exports.getSettings = async (req, res) => {
+  try {
+    const cid = companyIdOf(req);
+    if (!cid) return fail(res, 400, "Company context not found");
+    const FinanceSettings = require("../models/FinanceSettings");
+    const st = (await FinanceSettings.findOne({ company: cid }).lean()) || {};
+    const settings = {};
+    for (const k of SELLER_FIELDS) settings[k] = st[k] || "";
+    res.json({ success: true, settings, preview: await sellerFor(cid) });
+  } catch (e) { fail(res, 500, "Could not load invoice settings"); }
+};
+
+exports.updateSettings = async (req, res) => {
+  try {
+    const cid = companyIdOf(req);
+    if (!cid) return fail(res, 400, "Company context not found");
+    const FinanceSettings = require("../models/FinanceSettings");
+    const b = req.body || {};
+    const $set = {};
+    for (const k of SELLER_FIELDS) if (b[k] !== undefined) $set[k] = String(b[k] ?? "").trim();
+    if ($set.gstin) $set.gstin = $set.gstin.toUpperCase();
+    const st = await FinanceSettings.findOneAndUpdate(
+      { company: cid }, { $set, $setOnInsert: { company: cid } },
+      { new: true, upsert: true, runValidators: true }
+    ).lean();
+    const settings = {};
+    for (const k of SELLER_FIELDS) settings[k] = st[k] || "";
+    res.json({ success: true, settings, preview: await sellerFor(cid) });
+  } catch (e) { fail(res, 500, e?.name === "ValidationError" ? "One of the fields is too long." : "Could not save invoice settings"); }
+};
+
+async function quotationInfoFor(inv) {
+  if (!inv.quotation) return null;
+  const Quotation = require("../models/Quotation");
+  return Quotation.findOne({ _id: inv.quotation, company: inv.company })
+    .select("number title status source fileUrl fileName lineItems currency oneTimeSubtotal recurringSubtotal discountAmount discountedBy gstPercent gstAmount grandTotal handledBy createdAt")
+    .lean();
+}
+
 exports.listInvoices = async (req, res) => {
   try {
     const cid = companyIdOf(req);
@@ -240,14 +305,9 @@ exports.getInvoice = async (req, res) => {
     const inv = await loadInvoice(req, res); if (!inv) return;
     const dto = fin.toDTO(inv);
     // Finance logins can't call /api/quotations, so send the linked quotation
-    // along (same company only).
-    if (inv.quotation) {
-      const Quotation = require("../models/Quotation");
-      dto.quotationInfo = await Quotation.findOne({ _id: inv.quotation, company: inv.company })
-        .select("number title status source fileUrl fileName lineItems currency oneTimeSubtotal recurringSubtotal discountAmount discountedBy gstPercent gstAmount grandTotal handledBy createdAt")
-        .lean();
-    }
-    res.json({ success: true, invoice: dto });
+    // along (same company only), plus the "from" block for the download.
+    dto.quotationInfo = await quotationInfoFor(inv);
+    res.json({ success: true, invoice: dto, seller: await sellerFor(inv.company) });
   } catch (e) { fail(res, 500, "Could not load invoice"); }
 };
 
@@ -663,6 +723,38 @@ exports.myFollowUps = async (req, res) => {
       },
     });
   } catch (e) { fail(res, 500, "Could not load your follow-ups"); }
+};
+
+// GET /finance/my/invoices — every active invoice assigned to the employee,
+// paid ones included (so they can re-send a receipt-style copy).
+exports.myInvoices = async (req, res) => {
+  try {
+    const cid = companyIdOf(req);
+    const uid = req.user && (req.user._id || req.user.id);
+    if (!cid || !uid) return fail(res, 400, "Company context not found");
+    const rows = await FinanceInvoice.find({
+      company: new mongoose.Types.ObjectId(cid),
+      assignedTo: new mongoose.Types.ObjectId(String(uid)),
+      status: "active",
+    }).sort({ conversionDate: -1 }).limit(500).lean();
+    const now = new Date();
+    res.json({ success: true, invoices: rows.map((r) => fin.toDTO(r, now)) });
+  } catch (e) { fail(res, 500, "Could not load your invoices"); }
+};
+
+// GET /finance/my/:id/document — everything needed to print the invoice.
+// Only once finance has given it a number: a client must never receive a
+// numberless invoice.
+exports.myInvoiceDocument = async (req, res) => {
+  try {
+    const inv = await loadMine(req, res); if (!inv) return;
+    if (inv.status === "cancelled") return fail(res, 409, "This invoice is cancelled.");
+    if (!inv.invoiceNumber) return fail(res, 409, "Finance hasn't added the invoice number yet. Ask them to add it, then download.");
+    if (!(Number(inv.totalAmount) > 0)) return fail(res, 409, "This invoice has no amount yet. Ask finance to complete it.");
+    const dto = fin.toDTO(inv);
+    dto.quotationInfo = await quotationInfoFor(inv);
+    res.json({ success: true, invoice: dto, seller: await sellerFor(inv.company) });
+  } catch (e) { fail(res, 500, "Could not prepare the invoice"); }
 };
 
 // Employee may only touch invoices assigned to them
