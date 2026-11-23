@@ -9,6 +9,7 @@ const { nextQuotationNumber } = require("../services/quotationNumberService");
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v || ""));
 const companyIdOf = (req) =>
   req.user?.companyId || req.user?.company?._id || req.user?.company ||
+  req.callerCompany ||
   req.admin?.company?._id || req.admin?.company ||
   (req.developer && isId(req.params?.companyId) ? req.params.companyId : null) || null;
 const actorOf = (req) => ({
@@ -16,6 +17,27 @@ const actorOf = (req) => ({
   name: req.user?.name || req.admin?.name || "User",
 });
 const fail = (res, c, m) => res.status(c).json({ success: false, message: m });
+
+// Employees (protectAny sets req.user, no req.admin) only see quotations on
+// leads assigned to them, or ones they created. Admins see the whole company.
+const isEmployee = (req) => !req.admin && !!req.user;
+const uidOf = (req) => req.user?._id || req.user?.id || null;
+
+// Lead must be in the caller's company — and, for employees, assigned to them.
+async function canUseLead(req, company, leadId) {
+  if (!isId(leadId)) return true;   // no lead link → nothing to check
+  const filter = { _id: leadId, company };
+  if (isEmployee(req)) filter.user = uidOf(req);
+  return !!(await Lead.exists(filter));
+}
+
+async function canUseQuotation(req, company, q) {
+  if (!isEmployee(req)) return true;
+  const uid = String(uidOf(req));
+  if (q.createdBy && String(q.createdBy) === uid) return true;
+  if (q.handledByUser && String(q.handledByUser) === uid) return true;
+  return q.lead ? canUseLead(req, company, q.lead) : false;
+}
 
 // Build the client snapshot + optional lead link from the request.
 function clientFrom(b) {
@@ -31,6 +53,7 @@ async function createQuotation(req, res) {
   try {
     const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
     const a = actorOf(req); const b = req.body || {};
+    if (!(await canUseLead(req, company, b.leadId))) return fail(res, 403, "You can't create a quotation for this lead.");
     const { number, seq, year } = await nextQuotationNumber(company, { prefix: b.prefix || "SKY" });
     const q = new Quotation({
       company, number, seq, year, source: "created",
@@ -60,6 +83,7 @@ async function uploadQuotation(req, res) {
     const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
     const a = actorOf(req); const b = req.body || {};
     if (!b.fileUrl) return fail(res, 400, "fileUrl is required for an uploaded quotation.");
+    if (!(await canUseLead(req, company, b.leadId))) return fail(res, 403, "You can't create a quotation for this lead.");
     const { number, seq, year } = await nextQuotationNumber(company, { prefix: b.prefix || "SKY" });
     const q = await Quotation.create({
       company, number, seq, year, source: "uploaded",
@@ -82,7 +106,12 @@ async function listQuotations(req, res) {
   try {
     const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
     const q = { company };
-    if (isId(req.query.leadId)) q.lead = req.query.leadId;
+    if (isId(req.query.leadId)) {
+      if (!(await canUseLead(req, company, req.query.leadId))) return fail(res, 403, "You don't have access to this lead.");
+      q.lead = req.query.leadId;
+    } else if (isEmployee(req)) {
+      q.$or = [{ createdBy: uidOf(req) }, { handledByUser: uidOf(req) }];
+    }
     const items = await Quotation.find(q).sort({ createdAt: -1 }).limit(500).lean();
     res.json({ success: true, quotations: items });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -92,7 +121,7 @@ async function getQuotation(req, res) {
   try {
     const company = companyIdOf(req);
     const q = await Quotation.findOne({ _id: req.params.id, company }).lean();
-    if (!q) return fail(res, 404, "Quotation not found.");
+    if (!q || !(await canUseQuotation(req, company, q))) return fail(res, 404, "Quotation not found.");
     res.json({ success: true, quotation: q });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 }
@@ -102,7 +131,7 @@ async function updateQuotation(req, res) {
   try {
     const company = companyIdOf(req); const b = req.body || {};
     const q = await Quotation.findOne({ _id: req.params.id, company });
-    if (!q) return fail(res, 404, "Quotation not found.");
+    if (!q || !(await canUseQuotation(req, company, q))) return fail(res, 404, "Quotation not found.");
     const fields = ["title", "lineItems", "optedServices", "currency", "discountType", "discountValue", "discountedBy",
       "gstPercent", "handledBy", "remark", "status", "clientName", "clientEmail", "clientPhone", "clientCompany", "clientGSTIN", "clientAddress"];
     for (const k of fields) if (k in b) q[k] = b[k];
@@ -115,6 +144,8 @@ async function updateQuotation(req, res) {
 async function deleteQuotation(req, res) {
   try {
     const company = companyIdOf(req);
+    const existing = await Quotation.findOne({ _id: req.params.id, company }).select("createdBy handledByUser lead").lean();
+    if (!existing || !(await canUseQuotation(req, company, existing))) return fail(res, 404, "Quotation not found.");
     const r = await Quotation.deleteOne({ _id: req.params.id, company });
     if (!r.deletedCount) return fail(res, 404, "Quotation not found.");
     res.json({ success: true, deleted: true });   // number is retired, never reused
