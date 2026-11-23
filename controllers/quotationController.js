@@ -84,6 +84,76 @@ function clientFrom(b) {
   };
 }
 
+// ── Letterhead / print settings (per company) ────────────────────────────────
+const QuotationSettings = require("../models/QuotationSettings");
+const SETTINGS_PUBLIC = "letterheadUrl letterheadName marginTopMm marginBottomMm marginSideMm hideBuiltInHeader updatedAt updatedByName";
+const isAdminCaller = (req) => !!req.admin;   // protectAny: admins / super admins set req.admin
+
+const settingsDTO = (st) => ({
+  letterheadUrl: st?.letterheadUrl || "", letterheadName: st?.letterheadName || "",
+  marginTopMm: st?.marginTopMm ?? 40, marginBottomMm: st?.marginBottomMm ?? 25, marginSideMm: st?.marginSideMm ?? 15,
+  hideBuiltInHeader: st?.hideBuiltInHeader ?? true,
+  updatedAt: st?.updatedAt || null, updatedByName: st?.updatedByName || "",
+});
+
+// GET /api/quotations/settings — everyone (employees need it to print).
+async function getSettings(req, res) {
+  try {
+    const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
+    const st = await QuotationSettings.findOne({ company }).select(SETTINGS_PUBLIC).lean();
+    res.json({ success: true, settings: settingsDTO(st), canEdit: isAdminCaller(req) });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+}
+
+// PUT /api/quotations/settings — admins: margins / header toggle / remove letterhead.
+async function updateSettings(req, res) {
+  try {
+    if (!isAdminCaller(req)) return fail(res, 403, "Only admins can change the quotation letterhead.");
+    const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
+    const b = req.body || {};
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, Math.round(Number(v))));
+    const $set = { updatedByName: actorOf(req).name };
+    if (b.marginTopMm !== undefined && Number.isFinite(Number(b.marginTopMm)))       $set.marginTopMm    = clamp(b.marginTopMm, 0, 150);
+    if (b.marginBottomMm !== undefined && Number.isFinite(Number(b.marginBottomMm))) $set.marginBottomMm = clamp(b.marginBottomMm, 0, 150);
+    if (b.marginSideMm !== undefined && Number.isFinite(Number(b.marginSideMm)))     $set.marginSideMm   = clamp(b.marginSideMm, 5, 60);
+    if (b.hideBuiltInHeader !== undefined) $set.hideBuiltInHeader = !!b.hideBuiltInHeader;
+    if (b.removeLetterhead) { $set.letterheadUrl = ""; $set.letterheadName = ""; }
+    const st = await QuotationSettings.findOneAndUpdate({ company }, { $set, $setOnInsert: { company } }, { new: true, upsert: true }).lean();
+    res.json({ success: true, settings: settingsDTO(st) });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+}
+
+// POST /api/quotations/settings/letterhead — admins: upload the letterhead image.
+async function uploadLetterhead(req, res) {
+  try {
+    if (!isAdminCaller(req)) return fail(res, 403, "Only admins can change the quotation letterhead.");
+    const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
+    if (!req.file) return fail(res, 400, "Choose the letterhead image (PNG, JPG or WEBP).");
+    const { config } = await resolveCompanyConfig(company);
+    const folder = await companyFolder(company, "letterheads");
+    let up;
+    try {
+      up = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { ...config, folder, public_id: `letterhead_${Date.now()}`, resource_type: "image", overwrite: false },
+          (err, result) => (err ? reject(err) : resolve(result)),
+        );
+        stream.end(req.file.buffer);
+      });
+    } catch (e) {
+      console.error("[letterhead upload] cloudinary:", e.message);
+      return fail(res, 502, "Couldn't store the letterhead. Try again.");
+    }
+    const st = await QuotationSettings.findOneAndUpdate(
+      { company },
+      { $set: { letterheadUrl: up.secure_url, letterheadName: req.file.originalname || "letterhead", updatedByName: actorOf(req).name },
+        $setOnInsert: { company } },
+      { new: true, upsert: true }
+    ).lean();
+    res.json({ success: true, settings: settingsDTO(st), size: { width: up.width, height: up.height } });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+}
+
 // POST /api/quotations  — create a BUILT quotation (line items), assigns the next number.
 async function createQuotation(req, res) {
   try {
@@ -208,4 +278,5 @@ async function deleteQuotation(req, res) {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 }
 
-module.exports = { createQuotation, uploadQuotation, listQuotations, getQuotation, updateQuotation, deleteQuotation };
+module.exports = { createQuotation, uploadQuotation, listQuotations, getQuotation, updateQuotation, deleteQuotation,
+  getSettings, updateSettings, uploadLetterhead };

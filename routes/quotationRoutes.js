@@ -25,7 +25,27 @@ const acceptFile = (req, res, next) =>
     res.status(400).json({ success: false, message });
   });
 
+// Letterhead image only (printed behind every quotation page).
+const letterheadFile = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) =>
+    /\.(png|jpe?g|webp)$/i.test(file.originalname || "")
+      ? cb(null, true)
+      : cb(new Error("Upload the letterhead as a PNG, JPG or WEBP image. A PDF letterhead can be exported as an image first.")),
+}).single("file");
+const acceptLetterhead = (req, res, next) =>
+  letterheadFile(req, res, (err) => {
+    if (!err) return next();
+    res.status(400).json({ success: false, message: err.code === "LIMIT_FILE_SIZE" ? "The image is larger than 5 MB." : err.message });
+  });
+
 router.use(protectAny);
+// settings routes must stay above "/:id"
+router.get("/settings", c.getSettings);
+router.put("/settings", c.updateSettings);
+router.post("/settings/letterhead", acceptLetterhead, c.uploadLetterhead);
+
 router.get("/", c.listQuotations);
 router.post("/", c.createQuotation);
 router.post("/upload", acceptFile, c.uploadQuotation);
