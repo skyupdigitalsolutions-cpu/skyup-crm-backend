@@ -1215,10 +1215,22 @@ const getUncalledLeads = async (req, res) => {
     //   ]
     // The second condition absorbs the first (empty array matches $not $elemMatch),
     // so we just need the second condition:
+    // ── Hold back leads scheduled for a LATER day ────────────────────────────────
+    // A lead with a follow-up date AFTER the selected day is scheduled for later and must NOT appear in this day's
+    // to-call list. It should surface on its follow-up date (and stay as overdue once that date passes).
+    // A lead with no follow-up date, or one due on/before the selected day, stays callable.
+    //   followUpDate:  the lead-level next follow-up
+    //   scheduledCalls: pending (not done) scheduled calls — use the earliest pending one
     const uncalledFilter = {
       ...baseFilter,
-      $nor: [
-        { 'callHistory.calledAt': { $gte: dayStart } }
+      // Not scheduled for a LATER day, AND not already called on/after this day. Kept as separate $nor groups under
+      // $and so the two conditions can't collide on the same key.
+      $and: [
+        { $nor: [
+          { followUpDate: { $gt: dayEnd } },
+          { scheduledCalls: { $elemMatch: { done: { $ne: true }, scheduledAt: { $gt: dayEnd } } } },
+        ] },
+        { $nor: [ { 'callHistory.calledAt': { $gte: dayStart } } ] },
       ],
     };
 
@@ -1237,7 +1249,7 @@ const getUncalledLeads = async (req, res) => {
         ors.push({ mobile: { $regex: digits } });
         ors.push({ primaryPhone: { $regex: digits } });
       }
-      uncalledFilter.$and = [{ $or: ors }];
+      uncalledFilter.$and = [...(uncalledFilter.$and || []), { $or: ors }];   // keep the core conditions (not-called, not-scheduled-later)
     }
 
     // Lead filters — newly assigned that day / campaign / ad set / ad (see utils/callDayFilters.js).
@@ -1267,7 +1279,14 @@ const getUncalledLeads = async (req, res) => {
         .map(sc => ({ scheduledAt: sc.scheduledAt, type: sc.type, note: sc.note }))
         .sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt)),
       // Days since created (so the agent knows how long this lead has been waiting)
-      daysSinceAssigned: Math.floor((dayEnd - new Date(lead.createdAt)) / (24 * 60 * 60 * 1000)),
+      // Whole CALENDAR days between the lead's creation date and the selected day (both at local midnight), so a lead
+      // created any time today reads 0 ("Assigned today") and one created yesterday reads 1 — not inflated by hours.
+      daysSinceAssigned: (() => {
+        const created = new Date(lead.createdAt);
+        const cDay = new Date(created.getFullYear(), created.getMonth(), created.getDate());
+        const sDay = new Date(dayStart.getFullYear(), dayStart.getMonth(), dayStart.getDate());
+        return Math.max(0, Math.round((sDay - cDay) / (24 * 60 * 60 * 1000)));
+      })(),
       // Newly assigned on the selected day (created that day, or assigned / re-assigned that day)
       assignedOnDay: wasAssignedOnDay(lead, dayStart, dayEnd),
       ad: adSummary(lead),

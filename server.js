@@ -442,6 +442,7 @@ app.use('/api/terms',               require('./routes/termsRoute'));
 // Mounted at the router level so every current and future lead/report endpoint
 // is logged automatically — see middlewares/accessAudit.js.
 app.use('/api/lead',                leadAIRoute);                                         // AI routes FIRST — avoids /:id catch-all in leadRoute swallowing /ai-report
+app.use('/api/quotations', require('./routes/quotationRoutes'));   // Quotation maker (web app)
 app.use('/api/lead',                auditAccess({ resourceType: 'Lead' }), leadRoute);
 app.use('/api/project',             projectRoute);
 app.use('/api/attendance',          attendanceRoute);
