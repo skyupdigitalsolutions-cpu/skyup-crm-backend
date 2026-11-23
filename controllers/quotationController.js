@@ -5,6 +5,42 @@ const mongoose = require("mongoose");
 const Quotation = require("../models/Quotation");
 const Lead = require("../models/Leads");
 const { nextQuotationNumber } = require("../services/quotationNumberService");
+const fin = require("../services/financeService");
+
+// Keep the lead's finance invoice in step with its quotation. Never blocks or
+// fails the quotation request itself.
+async function syncFinance(company, q) {
+  try { await fin.applyQuotationToInvoice(company, q); }
+  catch (e) { console.error("[quotation→finance]", e.message); }
+}
+const cloudinary = require("cloudinary").v2;
+const { resolveCompanyConfig, companyFolder } = require("../services/cloudinaryService");
+
+// Stream an uploaded quotation file to the company's Cloudinary (its own
+// account if configured, else the platform one) under <root>/<company>/quotations.
+// Credentials go per call so concurrent tenants never share the global config.
+async function uploadQuotationFile(company, file) {
+  const { config } = await resolveCompanyConfig(company);
+  const folder = await companyFolder(company, "quotations");
+  const name = String(file.originalname || "quotation");
+  const isPdf = /\.pdf$/i.test(name);
+  const base = name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60) || "quotation";
+  const public_id = `${Date.now()}_${base}${isPdf ? ".pdf" : ""}`;   // raw files keep their extension
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { ...config, folder, public_id, resource_type: isPdf ? "raw" : "image", overwrite: false },
+      (err, result) => (err ? reject(err) : resolve(result)),
+    );
+    stream.end(file.buffer);
+  });
+}
+
+// Multipart fields arrive as strings; arrays may come JSON-encoded.
+const asArray = (v) => {
+  if (Array.isArray(v)) return v;
+  if (typeof v === "string" && v.trim().startsWith("[")) { try { const a = JSON.parse(v); return Array.isArray(a) ? a : []; } catch { return []; } }
+  return v ? [String(v)] : [];
+};
 
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v || ""));
 const companyIdOf = (req) =>
@@ -69,6 +105,7 @@ async function createQuotation(req, res) {
     });
     q.recalc();
     await q.save();
+    await syncFinance(company, q);
     res.json({ success: true, quotation: q.toObject() });
   } catch (e) {
     if (e && e.code === 11000) return fail(res, 409, "Quotation number collision, please retry.");
@@ -82,18 +119,36 @@ async function uploadQuotation(req, res) {
   try {
     const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
     const a = actorOf(req); const b = req.body || {};
-    if (!b.fileUrl) return fail(res, 400, "fileUrl is required for an uploaded quotation.");
+    if (!req.file && !/^https:\/\//i.test(String(b.fileUrl || ""))) return fail(res, 400, "Choose a PDF or image to upload.");
+    // Check access BEFORE uploading so a refused request leaves no orphan file.
     if (!(await canUseLead(req, company, b.leadId))) return fail(res, 403, "You can't create a quotation for this lead.");
+
+    let fileUrl = b.fileUrl, fileName = b.fileName || "quotation.pdf";
+    if (req.file) {
+      try {
+        const up = await uploadQuotationFile(company, req.file);
+        fileUrl = up.secure_url;
+        fileName = req.file.originalname || fileName;
+      } catch (e) {
+        console.error("[quotation upload] cloudinary:", e.message);
+        return fail(res, 502, "Couldn't store the file. Try again.");
+      }
+    }
+
+    const amount = Math.max(0, Number(b.amount) || 0);
     const { number, seq, year } = await nextQuotationNumber(company, { prefix: b.prefix || "SKY" });
     const q = await Quotation.create({
       company, number, seq, year, source: "uploaded",
-      fileUrl: b.fileUrl, fileName: b.fileName || "quotation.pdf",
+      fileUrl, fileName,
       ...clientFrom(b),
-      title: b.title || "", optedServices: Array.isArray(b.optedServices) ? b.optedServices : [],
+      grandTotal: amount,   // total typed by the user; the file itself is the source of truth
+      currency: b.currency || "INR",
+      title: b.title || "", optedServices: asArray(b.optedServices),
       discountedBy: b.discountedBy || "", handledBy: b.handledBy || a.name, handledByUser: a.id,
       remark: b.remark || "", status: b.status || "sent",
       createdBy: a.id, createdByName: a.name,
     });
+    await syncFinance(company, q);
     res.json({ success: true, quotation: q.toObject() });
   } catch (e) {
     if (e && e.code === 11000) return fail(res, 409, "Quotation number collision, please retry.");
@@ -135,8 +190,9 @@ async function updateQuotation(req, res) {
     const fields = ["title", "lineItems", "optedServices", "currency", "discountType", "discountValue", "discountedBy",
       "gstPercent", "handledBy", "remark", "status", "clientName", "clientEmail", "clientPhone", "clientCompany", "clientGSTIN", "clientAddress"];
     for (const k of fields) if (k in b) q[k] = b[k];
-    q.recalc();
+    if (q.source !== "uploaded") q.recalc();   // uploaded: keep the typed total
     await q.save();
+    await syncFinance(company, q);
     res.json({ success: true, quotation: q.toObject() });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 }

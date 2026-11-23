@@ -74,6 +74,16 @@ const financeInvoiceSchema = new mongoose.Schema(
     // Snapshot of who the invoice is for (kept even if the lead is edited later)
     customerName: { type: String, required: true, trim: true },
     businessName: { type: String, default: "", trim: true },
+    clientGSTIN:   { type: String, default: "", trim: true, maxlength: 20 },
+    clientAddress: { type: String, default: "", trim: true, maxlength: 300 },
+
+    // The CRM quotation this invoice's amounts came from (see financeService
+    // .servicesFromQuotation). quotationAccepted=false means it was taken from a
+    // sent/draft quotation as a provisional figure and may be replaced when one
+    // is accepted.
+    quotation:         { type: mongoose.Schema.Types.ObjectId, ref: "Quotation", default: null },
+    quotationNumber:   { type: String, default: "" },
+    quotationAccepted: { type: Boolean, default: false },
     // Where the client came from (e.g. Google Ads, Referral) and, for a
     // referral, who referred them.
     clientSource: { type: String, default: "", trim: true, maxlength: 60 },

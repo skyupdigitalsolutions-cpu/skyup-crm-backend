@@ -238,7 +238,16 @@ exports.listInvoices = async (req, res) => {
 exports.getInvoice = async (req, res) => {
   try {
     const inv = await loadInvoice(req, res); if (!inv) return;
-    res.json({ success: true, invoice: fin.toDTO(inv) });
+    const dto = fin.toDTO(inv);
+    // Finance logins can't call /api/quotations, so send the linked quotation
+    // along (same company only).
+    if (inv.quotation) {
+      const Quotation = require("../models/Quotation");
+      dto.quotationInfo = await Quotation.findOne({ _id: inv.quotation, company: inv.company })
+        .select("number title status source fileUrl fileName lineItems currency oneTimeSubtotal recurringSubtotal discountAmount discountedBy gstPercent gstAmount grandTotal handledBy createdAt")
+        .lean();
+    }
+    res.json({ success: true, invoice: dto });
   } catch (e) { fail(res, 500, "Could not load invoice"); }
 };
 
@@ -394,6 +403,8 @@ exports.updateInvoice = async (req, res) => {
       inv.customerName = v; clientFields.customerName = v;
     }
     if (b.businessName !== undefined) { inv.businessName = String(b.businessName).trim(); clientFields.businessName = inv.businessName; }
+    if (b.clientGSTIN !== undefined)   { inv.clientGSTIN   = String(b.clientGSTIN).trim().toUpperCase().slice(0, 20);  clientFields.clientGSTIN   = inv.clientGSTIN; }
+    if (b.clientAddress !== undefined) { inv.clientAddress = String(b.clientAddress).trim().slice(0, 300);             clientFields.clientAddress = inv.clientAddress; }
 
     if (b.clientSource !== undefined || b.referredBy !== undefined) {
       const src = fin.cleanSource(b.clientSource !== undefined ? b.clientSource : inv.clientSource, b.referredBy !== undefined ? b.referredBy : inv.referredBy);

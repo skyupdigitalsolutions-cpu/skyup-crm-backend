@@ -150,6 +150,100 @@ function deriveConversionDate(lead, wonKeys) {
   return best || new Date(lead.updatedAt || lead.createdAt || Date.now());
 }
 
+// ── Quotation → invoice ──────────────────────────────────────────────────────
+// Invoice total = sum of its service lines (FinanceInvoice.recalc), so the
+// quotation is turned into lines that add up exactly to its grand total:
+// one line per one-time item (after any discount, spread proportionally),
+// plus a GST line. Recurring items are NOT invoiced here — they're noted.
+const _r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const _inr = (n) => "₹" + _r2(n).toLocaleString("en-IN");
+
+function servicesFromQuotation(q) {
+  const total = _r2(q.grandTotal);
+  const items = Array.isArray(q.lineItems) ? q.lineItems : [];
+  if (q.source === "uploaded" || !items.length) {
+    return total > 0 ? [{ name: String(q.title || `As per quotation ${q.number}`).slice(0, 120), amount: total }] : [];
+  }
+  const oneTime = items.filter((li) => (li.billing || "one_time") === "one_time" && Number(li.lineTotal) > 0);
+  if (!oneTime.length) return [];
+  const sub = oneTime.reduce((t, li) => t + Number(li.lineTotal), 0);
+  const factor = sub > 0 ? Math.max(0, sub - (Number(q.discountAmount) || 0)) / sub : 1;
+  const lines = oneTime.map((li) => ({ name: String(li.description || "Item").slice(0, 120), amount: _r2(li.lineTotal * factor) }));
+  if (Number(q.gstAmount) > 0) lines.push({ name: `GST (${q.gstPercent}%)`, amount: _r2(q.gstAmount) });
+  const diff = _r2(total - lines.reduce((t, l) => t + l.amount, 0));   // rounding → first line
+  if (diff && lines.length) lines[0].amount = _r2(lines[0].amount + diff);
+  return lines;
+}
+
+function quotationNote(q, prefix) {
+  const parts = [`${prefix} quotation ${q.number}${q.status ? ` (${q.status})` : ""}.`];
+  if (Number(q.discountAmount) > 0) parts.push(`Line amounts are after its ${_inr(q.discountAmount)} discount.`);
+  if (Number(q.recurringSubtotal) > 0) parts.push(`Recurring charges of ${_inr(q.recurringSubtotal)} per period are not in this invoice.`);
+  return parts.join(" ");
+}
+
+// Best quotation per lead: newest accepted, else newest sent/draft (provisional).
+async function bestQuotationsForLeads(companyId, leadIds) {
+  if (!leadIds.length) return new Map();
+  const Quotation = require("../models/Quotation");
+  const rows = await Quotation.find({ company: companyId, lead: { $in: leadIds }, status: { $ne: "rejected" } })
+    .sort({ createdAt: -1 }).lean();
+  const best = new Map();
+  for (const q of rows) {
+    const k = String(q.lead);
+    const cur = best.get(k);
+    if (!cur || (q.status === "accepted" && cur.status !== "accepted")) best.set(k, q);
+  }
+  return best;
+}
+
+/**
+ * A quotation was created/updated. If its lead already has an auto-created
+ * finance invoice, bring the invoice in line — but never overwrite work
+ * finance has done: invoices with payments, or with amounts typed in by hand,
+ * only get a remark.
+ */
+async function applyQuotationToInvoice(companyId, q) {
+  if (!q || !q.lead) return { applied: false, reason: "no-lead" };
+  const cid = new mongoose.Types.ObjectId(String(companyId));
+  const inv = await FinanceInvoice.findOne({ company: cid, lead: q.lead, autoCreated: true });
+  if (!inv) return { applied: false, reason: "no-invoice" };   // made on conversion instead
+  if (inv.status === "cancelled") return { applied: false, reason: "cancelled" };
+
+  const linkedHere = inv.quotation && String(inv.quotation) === String(q._id);
+  const accepted = q.status === "accepted";
+  if (!accepted && !linkedHere) return { applied: false, reason: "not-accepted" };
+
+  const remarkOnce = (text) => {
+    if (!(inv.remarks || []).some((r) => r.text === text)) inv.remarks.push({ text, kind: "system", byName: "System", byRole: "system" });
+  };
+
+  let reason = "";
+  if ((inv.payments || []).length) reason = "payments are already recorded";
+  else if (q.status === "rejected") reason = "it was rejected";
+  else if (inv.quotation && !linkedHere && inv.quotationAccepted) reason = `quotation ${inv.quotationNumber} was already accepted`;
+  else if (!inv.quotation && Number(inv.totalAmount) > 0) reason = "amounts were already entered";
+
+  if (reason) {
+    remarkOnce(`Quotation ${q.number} (${q.status}, ${_inr(q.grandTotal)}) was not applied because ${reason}. Check the amounts.`);
+    await inv.save();
+    return { applied: false, reason };
+  }
+
+  inv.services = servicesFromQuotation(q);
+  if (!inv.services.length) inv.totalAmount = 0;
+  inv.quotation = q._id;
+  inv.quotationNumber = q.number;
+  inv.quotationAccepted = accepted;
+  if (!inv.businessName && q.clientCompany) inv.businessName = q.clientCompany;
+  if (!inv.clientGSTIN && q.clientGSTIN) inv.clientGSTIN = q.clientGSTIN;
+  if (!inv.clientAddress && q.clientAddress) inv.clientAddress = q.clientAddress;
+  remarkOnce(quotationNote(q, "Amounts updated from"));
+  inv.recalc();
+  await inv.save();
+  return { applied: true };
+}
+
 // ── Sync converted leads → invoices ──────────────────────────────────────────
 const _running = new Map();   // companyId → Promise (de-dupe concurrent runs)
 const _lastRun = new Map();   // companyId → timestamp
@@ -184,16 +278,24 @@ async function _doSync(companyId) {
     .map((l) => ({ lead: l, when: deriveConversionDate(l, wonKeys) }))
     .sort((a, b) => a.when - b.when);
 
+  const quotes = await bestQuotationsForLeads(cid, prepared.map((p) => p.lead._id));
+
   const userIds  = [...new Set(prepared.map((p) => p.lead.user).filter(Boolean).map(String))];
   const users    = userIds.length ? await User.find({ _id: { $in: userIds } }).select("name").lean() : [];
   const userName = new Map(users.map((u) => [String(u._id), u.name]));
 
   let created = 0;
   for (const { lead, when } of prepared) {
-    const total = Number(lead.dealValue) > 0 ? Number(lead.dealValue) : 0;
+    const q = quotes.get(String(lead._id)) || null;
+    let total = Number(lead.dealValue) > 0 ? Number(lead.dealValue) : 0;
     const names = (lead.services && lead.services.length ? lead.services : [lead.service]).map((n) => String(n || "").trim()).filter(Boolean);
     // One service → it carries the deal value. Several → names only, amounts to be filled in.
-    const services = names.length === 1 ? [{ name: names[0], amount: total }] : names.map((name) => ({ name, amount: 0 }));
+    let services = names.length === 1 ? [{ name: names[0], amount: total }] : names.map((name) => ({ name, amount: 0 }));
+    // A quotation beats dealValue: its items and total are what was actually offered.
+    if (q) {
+      const qs = servicesFromQuotation(q);
+      if (qs.length) { services = qs; total = _r2(q.grandTotal); }
+    }
     const doc = new FinanceInvoice({
       company: cid,
       source: "lead",
@@ -202,7 +304,12 @@ async function _doSync(companyId) {
       clientId: lead._id,
       invoiceNumber: "",                       // finance adds this by hand
       customerName: lead.name || "Unnamed lead",
-      businessName: lead.businessName || "",
+      businessName: lead.businessName || q?.clientCompany || "",
+      clientGSTIN:   q?.clientGSTIN || "",
+      clientAddress: q?.clientAddress || "",
+      quotation:         q ? q._id : null,
+      quotationNumber:   q ? q.number : "",
+      quotationAccepted: q ? q.status === "accepted" : false,
       clientSource: String(lead.source || "").slice(0, 60),
       services,
       assignedTo: lead.user || null,
@@ -211,7 +318,10 @@ async function _doSync(companyId) {
       createdBy: { id: null, name: "Auto (lead converted)", role: "system" },
       conversionDate: when,
       totalAmount: total,
-      remarks: [{ text: "Added automatically from a converted lead. Add the invoice number to complete it.", kind: "system", byName: "System", byRole: "system" }],
+      remarks: [
+        { text: "Added automatically from a converted lead. Add the invoice number to complete it.", kind: "system", byName: "System", byRole: "system" },
+        ...(q ? [{ text: quotationNote(q, q.status === "accepted" ? "Amounts taken from" : "Provisional amounts taken from"), kind: "system", byName: "System", byRole: "system" }] : []),
+      ],
     });
     doc.recalc();
     try {
@@ -246,4 +356,5 @@ module.exports = {
   todayKey, parseDay, endOfDay,
   cleanServices, cleanSource, listOptions, migrateLegacy,
   toDTO, deriveConversionDate, syncConvertedLeads,
+  servicesFromQuotation, applyQuotationToInvoice,
 };
