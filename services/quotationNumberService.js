@@ -4,7 +4,8 @@
 const Counter = require("../models/Counter");
 
 async function nextQuotationNumber(companyId, { prefix = "SKY", year } = {}) {
-  const y = year || new Date().getFullYear();
+  // Year in India time, so 1 Jan 00:00–05:30 IST doesn't get last year's number.
+  const y = year || Number(new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric" }).format(new Date()));
   const key = `quotation:${String(companyId)}:${y}`;
   // Atomic increment — concurrent requests never collide or skip.
   const doc = await Counter.findOneAndUpdate(

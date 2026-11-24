@@ -159,6 +159,8 @@ const _r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const _inr = (n) => "₹" + _r2(n).toLocaleString("en-IN");
 
 function servicesFromQuotation(q) {
+  // A rate card (totals turned off) quotes unit prices, not an amount to bill.
+  if (q.showTotals === false) return [];
   const total = _r2(q.grandTotal);
   const items = Array.isArray(q.lineItems) ? q.lineItems : [];
   if (q.source === "uploaded" || !items.length) {

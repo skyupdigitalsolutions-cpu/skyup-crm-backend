@@ -43,8 +43,10 @@ const acceptLetterhead = (req, res, next) =>
 router.use(protectAny);
 // settings routes must stay above "/:id"
 router.get("/settings", c.getSettings);
+router.get("/lead/:leadId/prefill", c.leadPrefill);   // client details for a new quotation
 router.put("/settings", c.updateSettings);
-router.post("/settings/letterhead", acceptLetterhead, c.uploadLetterhead);
+router.post("/settings/letterhead", acceptLetterhead, c.uploadLetterhead);           // kind = letterhead
+router.post("/settings/image/:kind", acceptLetterhead, c.uploadLetterhead);          // kind = letterhead | stamp
 
 router.get("/", c.listQuotations);
 router.post("/", c.createQuotation);
