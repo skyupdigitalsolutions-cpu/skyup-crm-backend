@@ -44,6 +44,13 @@ router.use(protectAny);
 // settings routes must stay above "/:id"
 router.get("/settings", c.getSettings);
 router.get("/lead/:leadId/prefill", c.leadPrefill);   // client details for a new quotation
+router.get("/match-lead", c.matchLead);                // find the lead from typed client details
+
+// content templates — must stay above "/:id"
+router.get("/templates", c.listTemplates);
+router.post("/templates", c.saveTemplate);
+router.put("/templates/:id", c.renameTemplate);
+router.delete("/templates/:id", c.deleteTemplate);
 router.put("/settings", c.updateSettings);
 router.post("/settings/letterhead", acceptLetterhead, c.uploadLetterhead);           // kind = letterhead
 router.post("/settings/image/:kind", acceptLetterhead, c.uploadLetterhead);          // kind = letterhead | stamp

@@ -128,6 +128,7 @@ const quotationSchema = new mongoose.Schema({
   coverPage:       { type: Boolean, default: false },
   coverSubtitle:   { type: String, default: "", trim: true, maxlength: 300 },
   showTotals:      { type: Boolean, default: true },   // off for rate-card quotations
+  designId:        { type: mongoose.Schema.Types.ObjectId, default: null },   // null = the Standard design
 
   createdBy:   { type: mongoose.Schema.Types.ObjectId, default: null },
   createdByName:{ type: String, default: "" },

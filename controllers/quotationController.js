@@ -109,6 +109,7 @@ function contentFrom(b) {
     if (k in b) out[k] = str(b[k], max);
   }
   for (const [k, max] of [["introduction", 8000], ["aboutUs", 5000], ["coverSubtitle", 300]]) if (k in b) out[k] = str(b[k], max);
+  if ("designId" in b) out.designId = isId(b.designId) ? b.designId : null;
   if ("coverPage" in b)  out.coverPage = !!b.coverPage;
   if ("showTotals" in b) out.showTotals = b.showTotals !== false;
   if ("highlights" in b) out.highlights = arr(b.highlights, 4).map((h) => ({ label: str(h?.label, 40), value: str(h?.value, 40), note: str(h?.note, 60) })).filter((h) => h.label);
@@ -123,6 +124,22 @@ function contentFrom(b) {
   }
   if ("validUntil" in b) { const d = b.validUntil ? new Date(b.validUntil) : null; out.validUntil = d && !isNaN(d) ? d : null; }
   return out;
+}
+
+const STATUSES = ["draft", "sent", "accepted", "rejected"];
+const cleanStatus = (v, dflt) => (STATUSES.includes(v) ? v : dflt);
+
+// Validate the whole quotation BEFORE taking a number, so a quotation that
+// can't be saved never uses one up (the sequence only gets gaps from deletes).
+// Returns a readable message for the person, or "" when it's fine.
+async function validationProblem(doc) {
+  try { await doc.validate(); return ""; }
+  catch (e) {
+    const first = e?.errors && Object.values(e.errors)[0];
+    if (first?.kind === "maxlength") return `"${first.path}" is too long.`;
+    if (first?.kind === "enum") return `"${first.value}" isn't a valid ${first.path}.`;
+    return first?.message || "Some details aren't valid.";
+  }
 }
 
 const cleanPrefix = (p) => String(p || "").toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 12) || "SKY";
@@ -157,6 +174,25 @@ function cleanSections(list) {
   return out;   // missing keys are filled with defaults by the frontend, in default position
 }
 
+// One design's look, cleaned with the same rules as the top-level (Standard) one.
+const httpsUrl = (v) => (/^https:\/\//i.test(String(v || "")) ? String(v).slice(0, 600) : "");
+function cleanLook(l = {}) {
+  const clamp = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Math.round(Number(v)))) : d);
+  return {
+    documentTitle: str(l.documentTitle, 40) || "Quotation",
+    layoutStyle: LAYOUTS.includes(l.layoutStyle) ? l.layoutStyle : "classic",
+    accentColor: /^#[0-9a-fA-F]{6}$/.test(String(l.accentColor || "")) ? l.accentColor : "#1F3A8A",
+    fontFamily: FONTS.includes(l.fontFamily) ? l.fontFamily : "arial",
+    columns: cleanColumns(l.columns), sections: cleanSections(l.sections),
+    letterheadUrl: httpsUrl(l.letterheadUrl), letterheadName: str(l.letterheadName, 120),
+    marginTopMm: clamp(l.marginTopMm, 0, 150, 40), marginBottomMm: clamp(l.marginBottomMm, 0, 150, 25), marginSideMm: clamp(l.marginSideMm, 5, 60, 15),
+    hideBuiltInHeader: l.hideBuiltInHeader !== false,
+    stampUrl: httpsUrl(l.stampUrl), signatoryName: str(l.signatoryName, 80), signatoryTitle: str(l.signatoryTitle, 80),
+    showFooterBar: l.showFooterBar !== false, numberedHeadings: !!l.numberedHeadings, clientSignature: l.clientSignature !== false,
+    showGstSuffix: !!l.showGstSuffix, coverPageDefault: !!l.coverPageDefault,
+  };
+}
+
 const settingsDTO = (st) => ({
   letterheadUrl: st?.letterheadUrl || "", letterheadName: st?.letterheadName || "",
   marginTopMm: st?.marginTopMm ?? 40, marginBottomMm: st?.marginBottomMm ?? 25, marginSideMm: st?.marginSideMm ?? 15,
@@ -172,6 +208,8 @@ const settingsDTO = (st) => ({
   defaultAboutUs: st?.defaultAboutUs || "", bankDetails: st?.bankDetails || "", qrUrl: st?.qrUrl || "", qrCaption: st?.qrCaption || "",
   showFooterBar: st?.showFooterBar ?? true, numberedHeadings: st?.numberedHeadings ?? false, clientSignature: st?.clientSignature ?? true,
   showGstSuffix: st?.showGstSuffix ?? false, coverPageDefault: st?.coverPageDefault ?? false,
+  standardDesignName: st?.standardDesignName || "Standard",
+  designs: (st?.designs || []).map((d) => ({ _id: d._id, name: d.name, look: cleanLook(d.look || {}) })),
   catalog: (st?.catalog || []).map((c) => ({ _id: c._id, name: c.name, details: c.details || "", unitPrice: c.unitPrice || 0, billing: c.billing || "one_time",
     module: c.module || "", category: c.category || "", note: c.note || "" })),
   updatedAt: st?.updatedAt || null, updatedByName: st?.updatedByName || "",
@@ -223,6 +261,12 @@ async function updateSettings(req, res) {
     if (b.accentColor !== undefined && /^#[0-9a-fA-F]{6}$/.test(String(b.accentColor))) $set.accentColor = String(b.accentColor);
     if (b.columns !== undefined)  $set.columns = cleanColumns(b.columns);
     if (b.sections !== undefined) $set.sections = cleanSections(b.sections);
+    if (b.standardDesignName !== undefined) $set.standardDesignName = str(b.standardDesignName, 40) || "Standard";
+    if (b.designs !== undefined) {
+      $set.designs = arr(b.designs, 10)
+        .map((d) => ({ ...(isId(d?._id) ? { _id: d._id } : {}), name: str(d?.name, 40), look: cleanLook(d?.look || {}) }))
+        .filter((d) => d.name);
+    }
     if (b.catalog !== undefined) {
       $set.catalog = arr(b.catalog, 200).map((c) => ({
         name: str(c?.name, 300), details: str(c?.details, 3000), unitPrice: num(c?.unitPrice),
@@ -242,6 +286,9 @@ async function uploadLetterhead(req, res) {
     const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
     const kind = ["stamp", "qr"].includes(req.params.kind) ? req.params.kind : "letterhead";
     if (!req.file) return fail(res, 400, `Choose the ${{ stamp: "signature / stamp", qr: "payment QR" }[kind] || "letterhead"} image (PNG, JPG or WEBP).`);
+    const designId = isId(req.query?.design) ? String(req.query.design) : null;
+    if (designId && kind === "qr") return fail(res, 400, "The payment QR is shared by all designs.");
+    if (designId && !(await QuotationSettings.exists({ company, "designs._id": designId }))) return fail(res, 404, "Design not found — save it first.");
     const { config } = await resolveCompanyConfig(company);
     const folder = await companyFolder(company, "letterheads");
     let up;
@@ -257,6 +304,15 @@ async function uploadLetterhead(req, res) {
       console.error(`[${kind} upload] cloudinary:`, e.message);
       return fail(res, 502, "Couldn't store the image. Try again.");
     }
+    if (designId) {   // this design's own letterhead / stamp
+      const field = kind === "stamp" ? "stampUrl" : "letterheadUrl";
+      const st = await QuotationSettings.findOneAndUpdate(
+        { company, "designs._id": designId },
+        { $set: { [`designs.$.look.${field}`]: up.secure_url, ...(kind === "letterhead" ? { "designs.$.look.letterheadName": req.file.originalname || "letterhead" } : {}), updatedByName: actorOf(req).name } },
+        { new: true }
+      ).lean();
+      return res.json({ success: true, settings: settingsDTO(st), size: { width: up.width, height: up.height } });
+    }
     const st = await QuotationSettings.findOneAndUpdate(
       { company },
       { $set: kind === "stamp" ? { stampUrl: up.secure_url, updatedByName: actorOf(req).name }
@@ -266,6 +322,121 @@ async function uploadLetterhead(req, res) {
       { new: true, upsert: true }
     ).lean();
     res.json({ success: true, settings: settingsDTO(st), size: { width: up.width, height: up.height } });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+}
+
+// ── Content templates: GET/POST /templates, PUT/DELETE /templates/:id ───────
+// Everyone can list and use them; admins create, rename, overwrite and delete.
+const QuotationTemplate = require("../models/QuotationTemplate");
+const TEMPLATE_KEYS = ["lineItems", "optionalItems", "timeline", "paymentSchedule", "customBlocks", "scopeOfWork", "serviceInfo", "suggestions",
+  "terms", "paymentTerms", "introduction", "aboutUs", "highlights", "customTables", "coverPage", "coverSubtitle", "showTotals", "designId"];
+function templateContentFrom(b = {}) {
+  const src = {};
+  for (const k of TEMPLATE_KEYS) if (k in b) src[k] = b[k];
+  const c = contentFrom(src);
+  if ("title" in b) c.title = str(b.title, 300);
+  if ("remark" in b) c.remark = str(b.remark, 3000);
+  if ("currency" in b) c.currency = str(b.currency, 3).toUpperCase();
+  if ("discountType" in b) c.discountType = ["none", "percent", "amount"].includes(b.discountType) ? b.discountType : "none";
+  if ("discountValue" in b) c.discountValue = num(b.discountValue);
+  if ("gstPercent" in b) c.gstPercent = num(b.gstPercent, 0, 100);
+  return c;   // never any client details, lead, number, status or dates
+}
+async function listTemplates(req, res) {
+  try {
+    const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
+    const list = await QuotationTemplate.find({ company }).sort({ name: 1 }).lean();
+    res.json({ success: true, templates: list.map((t) => ({ _id: t._id, name: t.name, description: t.description, content: t.content, updatedAt: t.updatedAt, updatedByName: t.updatedByName || t.createdByName })), canEdit: isAdminCaller(req) });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+}
+async function saveTemplate(req, res) {
+  try {
+    if (!isAdminCaller(req)) return fail(res, 403, "Only admins can save templates.");
+    const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
+    const b = req.body || {};
+    const name = str(b.name, 80); if (!name) return fail(res, 400, "Give the template a name.");
+    const content = templateContentFrom(b.content || {});
+    if (!(content.lineItems || []).length) return fail(res, 400, "A template needs at least one item.");
+    const who = actorOf(req).name;
+    const id = req.params?.id;
+    if (id) {
+      if (!isId(id)) return fail(res, 400, "Invalid template.");
+      const t = await QuotationTemplate.findOneAndUpdate({ _id: id, company },
+        { $set: { name, description: str(b.description, 300), ...(b.content ? { content } : {}), updatedByName: who } }, { new: true }).lean();
+      if (!t) return fail(res, 404, "Template not found.");
+      return res.json({ success: true, template: t });
+    }
+    const t = await QuotationTemplate.create({ company, name, description: str(b.description, 300), content, createdByName: who, updatedByName: who });
+    res.json({ success: true, template: t.toObject() });
+  } catch (e) {
+    if (e && e.code === 11000) return fail(res, 409, "A template with this name already exists — pick it to overwrite, or choose another name.");
+    res.status(500).json({ success: false, message: e.message });
+  }
+}
+async function renameTemplate(req, res) {
+  try {
+    if (!isAdminCaller(req)) return fail(res, 403, "Only admins can change templates.");
+    const company = companyIdOf(req);
+    if (!isId(req.params.id)) return fail(res, 400, "Invalid template.");
+    const b = req.body || {};
+    const $set = { updatedByName: actorOf(req).name };
+    if (b.name !== undefined) { $set.name = str(b.name, 80); if (!$set.name) return fail(res, 400, "Give the template a name."); }
+    if (b.description !== undefined) $set.description = str(b.description, 300);
+    if (b.content !== undefined) {
+      $set.content = templateContentFrom(b.content);
+      if (!($set.content.lineItems || []).length) return fail(res, 400, "A template needs at least one item.");
+    }
+    const t = await QuotationTemplate.findOneAndUpdate({ _id: req.params.id, company }, { $set }, { new: true }).lean();
+    if (!t) return fail(res, 404, "Template not found.");
+    res.json({ success: true, template: t });
+  } catch (e) {
+    if (e && e.code === 11000) return fail(res, 409, "A template with this name already exists.");
+    res.status(500).json({ success: false, message: e.message });
+  }
+}
+async function deleteTemplate(req, res) {
+  try {
+    if (!isAdminCaller(req)) return fail(res, 403, "Only admins can delete templates.");
+    const company = companyIdOf(req);
+    if (!isId(req.params.id)) return fail(res, 400, "Invalid template.");
+    const r = await QuotationTemplate.deleteOne({ _id: req.params.id, company });
+    if (!r.deletedCount) return fail(res, 404, "Template not found.");
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+}
+
+// ── GET /api/quotations/match-lead?phone=&email=&name=&company= ─────────────
+// Finds the lead a quotation belongs to from the client details typed on it.
+// Phone → normalizedPhone / normalizedSecondaryPhone (same 10-digit rule the
+// CRM uses for duplicate checks); email → exact (case-insensitive); name /
+// company → contains. Employees only ever see leads assigned to them.
+const { normalizePhone } = require("../utils/normalizePhone");
+const escRx = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const maskTail = (p) => { const d = String(p || "").replace(/\D/g, ""); return d.length >= 4 ? `••••••${d.slice(-4)}` : ""; };
+async function matchLead(req, res) {
+  try {
+    const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
+    const scope = { company };
+    if (isEmployee(req)) scope.user = uidOf(req);
+    const phone = normalizePhone(req.query.phone);
+    const email = String(req.query.email || "").trim().toLowerCase();
+    const name = String(req.query.name || "").trim();
+    const biz = String(req.query.company || "").trim();
+    const found = new Map();
+    const add = (list, match, strength) => list.forEach((l) => {
+      const k = String(l._id);
+      if (!found.has(k) || found.get(k).strength < strength) found.set(k, { lead: l, match, strength });
+    });
+    const sel = "name businessName email primaryPhone mobile status user createdAt";
+    if (phone) add(await Lead.find({ ...scope, $or: [{ normalizedPhone: phone }, { normalizedSecondaryPhone: phone }] }).select(sel).limit(5).lean(), "phone", 3);
+    if (/^\S+@\S+\.\S+$/.test(email)) add(await Lead.find({ ...scope, email: new RegExp(`^${escRx(email)}$`, "i") }).select(sel).limit(5).lean(), "email", 3);
+    if (biz.length >= 3) add(await Lead.find({ ...scope, businessName: new RegExp(escRx(biz), "i") }).select(sel).limit(5).lean(), "company", 1);
+    if (name.length >= 3) add(await Lead.find({ ...scope, name: new RegExp(escRx(name), "i") }).select(sel).sort({ createdAt: -1 }).limit(8).lean(), "name", 1);
+    const leads = [...found.values()].sort((a, b) => b.strength - a.strength).slice(0, 8).map(({ lead: l, match, strength }) => ({
+      _id: l._id, id: String(l._id), name: l.name, businessName: l.businessName || "", status: l.status,
+      phoneHint: maskTail(l.primaryPhone || l.mobile), email: l.email || "", match, exact: strength >= 3,
+    }));
+    res.json({ success: true, leads });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 }
 
@@ -280,6 +451,7 @@ const pickCustom = (cf, re) => {
   }
   return "";
 };
+const usableContact = (v) => { const t = String(v || "").trim(); return t && !t.startsWith("enc:") ? t : ""; };
 async function leadPrefill(req, res) {
   try {
     const company = companyIdOf(req); if (!company) return fail(res, 400, "Company not resolved.");
@@ -289,7 +461,7 @@ async function leadPrefill(req, res) {
 
     const FinanceInvoice = require("../models/FinanceInvoice");
     const [lead, lastQ, inv] = await Promise.all([
-      Lead.findOne({ _id: leadId, company }).select("name email businessName service services industry customFields").lean(),
+      Lead.findOne({ _id: leadId, company }).select("name email businessName service services industry customFields primaryPhone mobile").lean(),
       Quotation.findOne({ company, lead: leadId, source: "created" }).sort({ createdAt: -1 })
         .select("number clientName clientCompany clientPhone clientEmail clientGSTIN clientAddress").lean(),
       FinanceInvoice.findOne({ company, lead: leadId }).sort({ createdAt: -1 }).select("customerName businessName clientGSTIN clientAddress invoiceNumber").lean(),
@@ -313,16 +485,17 @@ async function leadPrefill(req, res) {
       clientGSTIN:   take("clientGSTIN",   [lastQ?.clientGSTIN, qSrc], [inv?.clientGSTIN, iSrc], [pickCustom(cf, /gst/i), "lead custom field"]),
       clientAddress: take("clientAddress", [lastQ?.clientAddress, qSrc], [inv?.clientAddress, iSrc],
                                            [pickCustom(cf, /address|city|location|area/i), "lead custom field"]),
-      // Contact details only when someone already typed them on a quotation:
-      // the lead's own phone / email are masked for most roles in the CRM.
-      clientPhone:   take("clientPhone",   [lastQ?.clientPhone, qSrc]),
-      clientEmail:   take("clientEmail",   [lastQ?.clientEmail, qSrc]),
+      // The lead's own phone / email come first (the browser logs the reveal,
+      // like the 👁 button on the Leads page); an older quotation's is a fallback.
+      clientPhone:   take("clientPhone",   [usableContact(lead.primaryPhone || lead.mobile), "lead"], [lastQ?.clientPhone, qSrc]),
+      clientEmail:   take("clientEmail",   [usableContact(lead.email), "lead"], [lastQ?.clientEmail, qSrc]),
     };
     res.json({
       success: true, details, from,
       services: [...new Set([...(lead.services || []), lead.service].filter(Boolean))],
       industry: lead.industry || "",
       lastQuotation: lastQ ? lastQ.number : null,
+      lead: { _id: lead._id, id: String(lead._id), name: lead.name, businessName: lead.businessName || "" },
     });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 }
@@ -335,9 +508,8 @@ async function createQuotation(req, res) {
     if (!(await canUseLead(req, company, b.leadId))) return fail(res, 403, "You can't create a quotation for this lead.");
     // The prefix comes from the company's settings, never from the request.
     const st = await QuotationSettings.findOne({ company }).select("numberPrefix currency").lean();
-    const { number, seq, year } = await nextQuotationNumber(company, { prefix: cleanPrefix(st?.numberPrefix) });
     const q = new Quotation({
-      company, number, seq, year, source: "created",
+      company, number: "PENDING", seq: 0, year: 0, source: "created",   // real number assigned below
       ...clientFrom(b),
       ...contentFrom({ lineItems: [], ...b }),
       title: str(b.title, 300),
@@ -346,10 +518,13 @@ async function createQuotation(req, res) {
       discountType: ["none", "percent", "amount"].includes(b.discountType) ? b.discountType : "none", discountValue: Number(b.discountValue) || 0, discountedBy: b.discountedBy || "",
       gstPercent: Number(b.gstPercent) || 0,
       handledBy: b.handledBy || a.name, handledByUser: a.id,
-      remark: b.remark || "", status: b.status || "draft",
+      remark: b.remark || "", status: cleanStatus(b.status, "draft"),
       createdBy: a.id, createdByName: a.name,
     });
     q.recalc();
+    const problem = await validationProblem(q);
+    if (problem) return fail(res, 400, problem);
+    Object.assign(q, await nextQuotationNumber(company, { prefix: cleanPrefix(st?.numberPrefix) }));
     await q.save();
     await syncFinance(company, q);
     res.json({ success: true, quotation: q.toObject() });
@@ -383,18 +558,21 @@ async function uploadQuotation(req, res) {
 
     const amount = Math.max(0, Number(b.amount) || 0);
     const stU = await QuotationSettings.findOne({ company }).select("numberPrefix").lean();
-    const { number, seq, year } = await nextQuotationNumber(company, { prefix: cleanPrefix(stU?.numberPrefix) });
-    const q = await Quotation.create({
-      company, number, seq, year, source: "uploaded",
+    const q = new Quotation({
+      company, number: "PENDING", seq: 0, year: 0, source: "uploaded",   // real number assigned below
       fileUrl, fileName,
       ...clientFrom(b),
       grandTotal: amount,   // total typed by the user; the file itself is the source of truth
       currency: b.currency || "INR",
       title: b.title || "", optedServices: asArray(b.optedServices),
       discountedBy: b.discountedBy || "", handledBy: b.handledBy || a.name, handledByUser: a.id,
-      remark: b.remark || "", status: b.status || "sent",
+      remark: b.remark || "", status: cleanStatus(b.status, "sent"),
       createdBy: a.id, createdByName: a.name,
     });
+    const problem = await validationProblem(q);
+    if (problem) return fail(res, 400, problem);
+    Object.assign(q, await nextQuotationNumber(company, { prefix: cleanPrefix(stU?.numberPrefix) }));
+    await q.save();
     await syncFinance(company, q);
     res.json({ success: true, quotation: q.toObject() });
   } catch (e) {
@@ -412,10 +590,25 @@ async function listQuotations(req, res) {
       if (!(await canUseLead(req, company, req.query.leadId))) return fail(res, 403, "You don't have access to this lead.");
       q.lead = req.query.leadId;
     } else if (isEmployee(req)) {
-      q.$or = [{ createdBy: uidOf(req) }, { handledByUser: uidOf(req) }];
+      // Their own quotations, plus any quotation on a lead assigned to them.
+      const myLeads = await Lead.find({ company, user: uidOf(req) }).distinct("_id");
+      q.$or = [{ createdBy: uidOf(req) }, { handledByUser: uidOf(req) }, { lead: { $in: myLeads } }];
     }
-    const items = await Quotation.find(q).sort({ createdAt: -1 }).limit(500).lean();
-    res.json({ success: true, quotations: items });
+    if (["draft", "sent", "accepted", "rejected"].includes(req.query.status)) q.status = req.query.status;
+    if (req.query.linked === "no") q.lead = null;
+    if (req.query.from || req.query.to) {
+      q.createdAt = {};
+      if (req.query.from) q.createdAt.$gte = new Date(req.query.from);
+      if (req.query.to) { const t = new Date(req.query.to); t.setHours(23, 59, 59, 999); q.createdAt.$lte = t; }
+    }
+    if (req.query.search) {
+      const rx = new RegExp(String(req.query.search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&").slice(0, 60), "i");
+      const searchOr = [{ number: rx }, { clientName: rx }, { clientCompany: rx }, { title: rx }, { clientEmail: rx }];
+      q.$and = [...(q.$and || []), { $or: searchOr }];
+    }
+    const items = await Quotation.find(q).sort({ createdAt: -1 }).limit(500)
+      .populate("lead", "name businessName status").lean();
+    res.json({ success: true, quotations: items.map((x) => ({ ...x, lead: x.lead?._id || x.lead || null, leadInfo: x.lead?._id ? { name: x.lead.name, businessName: x.lead.businessName || "", status: x.lead.status } : null })) });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 }
 
@@ -438,6 +631,11 @@ async function updateQuotation(req, res) {
       "gstPercent", "handledBy", "remark", "status", "clientName", "clientEmail", "clientPhone", "clientCompany", "clientGSTIN", "clientAddress"];
     for (const k of fields) if (k in b) q[k] = b[k];
     Object.assign(q, contentFrom(b));
+    if ("leadId" in b) {   // link to a lead, change it, or unlink (null)
+      if (b.leadId && !isId(b.leadId)) return fail(res, 400, "Invalid lead.");
+      if (b.leadId && !(await canUseLead(req, company, b.leadId))) return fail(res, 403, "You can't link this quotation to that lead.");
+      q.lead = b.leadId || null;
+    }
     if (q.source !== "uploaded") q.recalc();   // uploaded: keep the typed total
     await q.save();
     await syncFinance(company, q);
@@ -457,4 +655,5 @@ async function deleteQuotation(req, res) {
 }
 
 module.exports = { createQuotation, uploadQuotation, listQuotations, getQuotation, updateQuotation, deleteQuotation,
-  getSettings, updateSettings, uploadLetterhead, leadPrefill };
+  getSettings, updateSettings, uploadLetterhead, leadPrefill, matchLead,
+  listTemplates, saveTemplate, renameTemplate, deleteTemplate };

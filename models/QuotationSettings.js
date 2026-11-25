@@ -70,6 +70,17 @@ const quotationSettingsSchema = new mongoose.Schema(
       default: [],
     },
 
+    // ── extra designs (the top-level look above is the "Standard" design) ─
+    // Each: { name, look: { documentTitle, layoutStyle, accentColor, fontFamily,
+    // columns, sections, letterheadUrl, margins…, stampUrl, signatory…, options } }
+    // — cleaned in the controller. Company details, defaults and saved services
+    // are shared by every design.
+    standardDesignName: { type: String, default: "Standard", trim: true, maxlength: 40 },
+    designs: {
+      type: [{ name: { type: String, required: true, trim: true, maxlength: 40 }, look: { type: mongoose.Schema.Types.Mixed, default: {} } }],
+      default: [],
+    },
+
     updatedByName: { type: String, default: "" },
   },
   { timestamps: true }

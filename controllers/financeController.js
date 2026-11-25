@@ -222,6 +222,8 @@ async function sellerFor(companyId) {
   };
 }
 
+exports.sellerFor = sellerFor;
+
 // GET/PUT /settings — finance team edits the invoice "from" block.
 exports.getSettings = async (req, res) => {
   try {
